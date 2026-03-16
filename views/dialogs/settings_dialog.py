@@ -133,13 +133,11 @@ def _save_hw(data: dict):
 
 def _get_system_printers() -> list[str]:
     printers = ["(None)"]
-    # Windows specific check
     try:
         import win32print
         for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS):
             printers.append(p[2])
     except Exception:
-        # Fallback to PySide generic check
         try:
             from PySide6.QtPrintSupport import QPrinterInfo
             for p in QPrinterInfo.availablePrinters():
@@ -201,7 +199,7 @@ class _Base(QDialog):
         QTimer.singleShot(5000, lambda: self._sl.setText("") if self._sl else None)
 
 # =============================================================================
-# Section Dialogs (Companies, Groups, Warehouses, etc.)
+# Section Dialogs
 # =============================================================================
 
 class CompanyDialog(_Base):
@@ -615,11 +613,26 @@ class HardwareDialog(_Base):
         lay.addStretch(); self._status(lay)
 
     def _save(self):
-        data = {"main_printer": self._main_printer.currentText(), "orders": {}}
-        for chk, name in zip(self._order_checks, _ORDER_STATIONS):
-            data["orders"][name] = {"active": chk.isChecked()}
-        _save_hw(data)
-        self._msg("Hardware settings saved.")
+        try:
+            data = {"main_printer": self._main_printer.currentText(), "orders": {}}
+            for chk, name in zip(self._order_checks, _ORDER_STATIONS):
+                data["orders"][name] = {"active": chk.isChecked()}
+            
+            _save_hw(data)
+            
+            # Show popup
+            QMessageBox.information(
+                self, 
+                "Settings Saved", 
+                "Hardware settings have been updated successfully.",
+                QMessageBox.Ok
+            )
+            
+            # Close the page
+            self.accept()
+            
+        except Exception as e:
+            self._msg(f"Error saving: {str(e)}", error=True)
 
 # =============================================================================
 # SettingsDialog — Main Menu
