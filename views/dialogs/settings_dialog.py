@@ -565,21 +565,24 @@ class UsersDialog(_Base):
 # =============================================================================
 # HardwareDialog — Hardware Settings
 # =============================================================================
+# =============================================================================
+# HardwareDialog — Hardware Settings (Updated: Clean Row-Based Layout)
+# =============================================================================
 class HardwareDialog(_Base):
     TITLE = "Hardware Settings"
-    W, H = 520, 420
+    W, H = 520, 480 
 
     def _build(self, lay):
         hw = _load_hw()
+        self._system_printers = _get_system_printers()
         
-        # Printer Row
+        # --- Main Receipt Printer ---
         pr_row = QHBoxLayout(); pr_row.setSpacing(12)
-        pr_lbl = QLabel("Main Receipt Printer")
+        pr_lbl = QLabel("Primary Receipt Printer")
         pr_lbl.setStyleSheet(f"color:{DARK_TEXT};font-size:13px;font-weight:bold;background:transparent;")
         
         self._main_printer = _combo(); self._main_printer.setFixedWidth(240)
-        printers = _get_system_printers()
-        for p in printers: self._main_printer.addItem(p)
+        for p in self._system_printers: self._main_printer.addItem(p)
         
         idx = self._main_printer.findText(hw.get("main_printer", "(None)"))
         self._main_printer.setCurrentIndex(idx if idx >= 0 else 0)
@@ -587,53 +590,73 @@ class HardwareDialog(_Base):
         pr_row.addWidget(pr_lbl); pr_row.addStretch(); pr_row.addWidget(self._main_printer)
         lay.addLayout(pr_row); lay.addSpacing(10); lay.addWidget(_hr()); lay.addSpacing(10)
 
-        # Order Stations
-        ord_lbl = QLabel("Active Order Stations")
+        # --- Order Stations ---
+        ord_lbl = QLabel("Assign Station Printers")
         ord_lbl.setStyleSheet(f"font-size:13px;font-weight:bold;color:{NAVY};background:transparent;")
         lay.addWidget(ord_lbl); lay.addSpacing(10)
 
         order_cfg = hw.get("orders", {})
-        self._order_checks = []
-        chk_style = f"""
-            QCheckBox {{ font-size:13px; color:{DARK_TEXT}; background:transparent; padding:4px; }}
-            QCheckBox::indicator {{ width:18px; height:18px; border:1px solid {BORDER}; background:{WHITE}; }}
-            QCheckBox::indicator:checked {{ background:{ACCENT}; border-color:{ACCENT}; }}
-        """
+        self._station_widgets = [] 
 
         for name in _ORDER_STATIONS:
+            cfg = order_cfg.get(name, {})
             row = QHBoxLayout()
-            lbl = QLabel(name); lbl.setStyleSheet(f"font-size:13px;color:{DARK_TEXT};")
-            chk = QCheckBox(); chk.setStyleSheet(chk_style)
-            chk.setChecked(order_cfg.get(name, {}).get("active", False))
             
-            row.addWidget(lbl); row.addStretch(); row.addWidget(chk)
+            # Simple Station Name (Removed checkbox tick)
+            lbl = QLabel(name)
+            lbl.setStyleSheet(f"font-size:13px; color:{DARK_TEXT}; font-weight:bold; background:transparent;")
+            
+            # Printer Dropdown (Removed "Printer:" label)
+            st_printer = _combo()
+            st_printer.setFixedWidth(260)
+            for p in self._system_printers: st_printer.addItem(p)
+            
+            # Set saved printer
+            saved_st_p = cfg.get("printer", "(None)")
+            p_idx = st_printer.findText(saved_st_p)
+            st_printer.setCurrentIndex(p_idx if p_idx >= 0 else 0)
+            
+            # Logic: If printer is "(None)", station is effectively inactive
+            row.addWidget(lbl)
+            row.addStretch()
+            row.addWidget(st_printer)
+            
             lay.addLayout(row)
-            self._order_checks.append(chk)
+            # Store widgets for the save function
+            self._station_widgets.append((st_printer, name))
         
         lay.addStretch(); self._status(lay)
 
     def _save(self):
         try:
-            data = {"main_printer": self._main_printer.currentText(), "orders": {}}
-            for chk, name in zip(self._order_checks, _ORDER_STATIONS):
-                data["orders"][name] = {"active": chk.isChecked()}
+            data = {
+                "main_printer": self._main_printer.currentText(),
+                "orders": {}
+            }
+            
+            # Save data for each station
+            for combo, name in self._station_widgets:
+                p_name = combo.currentText()
+                data["orders"][name] = {
+                    "active": p_name != "(None)", # Auto-active if a printer is chosen
+                    "printer": p_name
+                }
             
             _save_hw(data)
             
-            # Show popup
+            # Success Popup
             QMessageBox.information(
                 self, 
                 "Settings Saved", 
-                "Hardware settings have been updated successfully.",
+                "Hardware and Station assignments have been saved.",
                 QMessageBox.Ok
             )
             
-            # Close the page
+            # Close page
             self.accept()
             
         except Exception as e:
             self._msg(f"Error saving: {str(e)}", error=True)
-
 # =============================================================================
 # SettingsDialog — Main Menu
 # =============================================================================

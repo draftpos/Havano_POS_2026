@@ -1,23 +1,29 @@
 {
-  "main_printer": "OneNote (Desktop)",
+  "main_printer": "Microsoft XPS Document Writer",
   "orders": {
     "Order 1": {
-      "active": true
+      "active": false,
+      "printer": "(None)"
     },
     "Order 2": {
-      "active": true
+      "active": false,
+      "printer": "(None)"
     },
     "Order 3": {
-      "active": true
+      "active": false,
+      "printer": "(None)"
     },
     "Order 4": {
-      "active": true
+      "active": false,
+      "printer": "(None)"
     },
     "Order 5": {
-      "active": true
+      "active": false,
+      "printer": "(None)"
     },
     "Order 6": {
-      "active": true
+      "active": false,
+      "printer": "(None)"
     }
   }
 }
