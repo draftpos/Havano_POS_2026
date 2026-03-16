@@ -1,0 +1,23 @@
+{
+  "main_printer": "OneNote (Desktop)",
+  "orders": {
+    "Order 1": {
+      "active": true
+    },
+    "Order 2": {
+      "active": true
+    },
+    "Order 3": {
+      "active": true
+    },
+    "Order 4": {
+      "active": true
+    },
+    "Order 5": {
+      "active": true
+    },
+    "Order 6": {
+      "active": true
+    }
+  }
+}

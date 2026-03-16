@@ -1,0 +1,28 @@
+# Virtual environments
+my/
+venv/
+env/
+.venv/
+
+# SQL Server installer (VERY IMPORTANT)
+SQLServer2019-DEV-x64-ENU/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large files & Installers
+*.iso
+*.exe
+*.msi
+
+# Databases and environment
+*.db
+*.sqlite3
+.env
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
