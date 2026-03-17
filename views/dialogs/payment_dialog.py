@@ -487,20 +487,20 @@ class PaymentDialog(QDialog):
         total_frame = QFrame()
         total_frame.setFixedHeight(68)
         total_frame.setStyleSheet(
-            f"QFrame {{ background:#000; border:2px solid {ACCENT}; border-radius:6px; }}"
+            f"QFrame {{ background:#000; border:2px solid {WHITE}; border-radius:6px; }}"
         )
         tfl = QVBoxLayout(total_frame)
         tfl.setContentsMargins(10, 4, 10, 4)
         tfl.setSpacing(1)
         cap1 = QLabel("TOTAL TO PAY")
         cap1.setStyleSheet(
-            f"color:{ACCENT}; font-size:9px; font-weight:bold; "
+            f"color:{WHITE}; font-size:9px; font-weight:bold; "
             f"letter-spacing:1px; background:transparent;"
         )
         cap1.setAlignment(Qt.AlignRight)
         self._total_display = QLabel(f"{self.total:.2f}")
         self._total_display.setStyleSheet(
-            "color:#00ff44; font-size:24px; font-weight:bold;"
+            "color:#ffffff; font-size:24px; font-weight:bold;"
             " font-family:'Courier New',monospace; background:transparent;"
         )
         self._total_display.setAlignment(Qt.AlignRight | Qt.AlignVCenter)

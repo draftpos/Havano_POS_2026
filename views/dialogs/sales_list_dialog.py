@@ -30,22 +30,23 @@ DANGER_H  = "#cc2828"
 ROW_ALT   = "#edf3fb"
 
 # ── table column definitions ──────────────────────────────────────────────────
-# (header, sale_dict_key, width, alignment, stretch)
 _COLUMNS = [
     ("Invoice No.",  "number",        100, Qt.AlignCenter,                  False),
     ("Date",         "date",          100, Qt.AlignCenter,                  False),
     ("Time",         "time",           75, Qt.AlignCenter,                  False),
     ("Cashier",      "user",           90, Qt.AlignCenter,                  False),
-    ("Customer",     "customer_name",  0,  Qt.AlignLeft | Qt.AlignVCenter,  True),
-    ("Company",      "company_name",   0,  Qt.AlignLeft | Qt.AlignVCenter,  True),
-    ("Method",       "method",         85, Qt.AlignCenter,                  False),
-    ("Currency",     "currency",       75, Qt.AlignCenter,                  False),
-    ("Items",        "total_items",    60, Qt.AlignCenter,                  False),
-    ("Amount $",     "amount",        105, Qt.AlignRight | Qt.AlignVCenter, False),
-    ("Tendered $",   "tendered",      105, Qt.AlignRight | Qt.AlignVCenter, False),
-    ("Change $",     "change_amount", 105, Qt.AlignRight | Qt.AlignVCenter, False),
+    ("Customer",     "customer_name",   0, Qt.AlignLeft | Qt.AlignVCenter,  True),
+    ("Company",      "company_name",    0, Qt.AlignLeft | Qt.AlignVCenter,  True),
+    ("Method",       "method",          85, Qt.AlignCenter,                 False),
+    ("Currency",     "currency",        75, Qt.AlignCenter,                 False),
+    ("Items",        "total_items",     60, Qt.AlignCenter,                 False),
+    ("Amount $",     "amount",         105, Qt.AlignRight | Qt.AlignVCenter, False),
+    ("Tendered $",   "tendered",       105, Qt.AlignRight | Qt.AlignVCenter, False),
+    ("Change $",     "change_amount",  105, Qt.AlignRight | Qt.AlignVCenter, False),
 ]
 
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _hr():
     ln = QFrame()
@@ -101,24 +102,32 @@ def _build_toolbar(title: str, left_widget=None, right_widgets=None) -> QWidget:
     return toolbar
 
 
-def _info_field(label: str, value: str, label_color=None, value_size=15) -> QVBoxLayout:
-    """Reusable label+value column for header strips."""
+def _field_col(label: str, value: str, value_size: int = 14) -> QVBoxLayout:
+    """A stacked label+value column used in the header strip."""
     col = QVBoxLayout()
-    col.setSpacing(4)
+    col.setSpacing(3)
     lbl = QLabel(label)
     lbl.setStyleSheet(
-        f"color: {label_color or MUTED}; font-size: 10px; font-weight: bold; "
-        f"letter-spacing: 1px; background: transparent;"
+        f"color: {MUTED}; font-size: 10px; font-weight: bold; "
+        f"letter-spacing: 0.8px; background: transparent;"
     )
-    val = QLabel(value)
+    val = QLabel(value or "—")
     val.setStyleSheet(
         f"color: {DARK_TEXT}; font-size: {value_size}px; "
         f"font-weight: bold; background: transparent;"
     )
-    val.setWordWrap(True)
+    val.setWordWrap(False)
     col.addWidget(lbl)
     col.addWidget(val)
     return col
+
+
+def _card(radius: int = 10) -> QWidget:
+    w = QWidget()
+    w.setStyleSheet(
+        f"background-color: {WHITE}; border: 1px solid {BORDER}; border-radius: {radius}px;"
+    )
+    return w
 
 
 # =============================================================================
@@ -139,34 +148,31 @@ class SalesListPage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── toolbar ───────────────────────────────────────────────────────────
+        # toolbar
         self.print_btn  = _toolbar_btn("🖨  Print (F3)",  NAVY_2, NAVY_3)
         self.delete_btn = _toolbar_btn("🗑  Delete (F4)", DANGER, DANGER_H)
         close_btn       = _toolbar_btn("✕  Close (Esc)",  DANGER, DANGER_H)
-
         self.print_btn.setEnabled(False)
-        self.delete_btn.setEnabled(False)
+        # self.delete_btn.setEnabled(False)
+        self.delete_btn.setVisible(False)
         self.print_btn.clicked.connect(self._on_print)
         self.delete_btn.clicked.connect(self._on_delete)
         close_btn.clicked.connect(self.on_close)
-
         root.addWidget(_build_toolbar(
             "🧾  Sales List",
             right_widgets=[self.print_btn, self.delete_btn, close_btn],
         ))
 
-        # ── body ──────────────────────────────────────────────────────────────
         body = QWidget()
         body.setStyleSheet(f"background-color: {OFF_WHITE};")
         bl = QVBoxLayout(body)
         bl.setContentsMargins(32, 20, 32, 20)
         bl.setSpacing(12)
 
-        hint = QLabel("Double-click or press Enter on a row to view the full invoice")
+        hint = QLabel("Double-click or press Enter on a row to view the invoice")
         hint.setStyleSheet(f"color: {MUTED}; font-size: 12px; background: transparent;")
         bl.addWidget(hint)
 
-        # ── table ─────────────────────────────────────────────────────────────
         self.table = QTableWidget()
         self.table.setColumnCount(len(_COLUMNS))
         self.table.setHorizontalHeaderLabels([c[0] for c in _COLUMNS])
@@ -205,14 +211,12 @@ class SalesListPage(QWidget):
         self.table.selectionModel().selectionChanged.connect(self._on_selection)
         bl.addWidget(self.table, 1)
 
-        # ── summary bar ───────────────────────────────────────────────────────
+        # summary bar
         summary = QWidget()
         summary.setFixedHeight(44)
-        summary.setStyleSheet(f"""
-            background-color: {WHITE};
-            border: 1px solid {BORDER};
-            border-radius: 8px;
-        """)
+        summary.setStyleSheet(
+            f"background-color: {WHITE}; border: 1px solid {BORDER}; border-radius: 8px;"
+        )
         sl = QHBoxLayout(summary)
         sl.setContentsMargins(20, 0, 20, 0)
         sl.setSpacing(32)
@@ -237,33 +241,25 @@ class SalesListPage(QWidget):
         bl.addWidget(summary)
         root.addWidget(body)
 
-    # ── data ──────────────────────────────────────────────────────────────────
     def _load_data(self):
         self._all_sales = get_all_sales()
         self._render_table(self._all_sales)
 
     def _render_table(self, sales: list[dict]):
-        BLANK_ROWS = 6
-        self.table.setRowCount(len(sales) + BLANK_ROWS)
-
-        total    = 0.0
-        tendered = 0.0
-        change   = 0.0
-
+        self.table.setRowCount(len(sales) + 6)
+        total = tendered = change = 0.0
         for r, sale in enumerate(sales):
             self.table.setRowHeight(r, 38)
             self._fill_row(r, sale)
             total    += sale.get("amount",        0.0)
             tendered += sale.get("tendered",      0.0)
             change   += sale.get("change_amount", 0.0)
-
         for r in range(len(sales), self.table.rowCount()):
             self.table.setRowHeight(r, 38)
             for c in range(len(_COLUMNS)):
-                item = QTableWidgetItem("")
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                self.table.setItem(r, c, item)
-
+                it = QTableWidgetItem("")
+                it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(r, c, it)
         self.count_lbl.setText(f"Sales: {len(sales)}")
         self.total_lbl.setText(f"Total: ${total:.2f}")
         self.tendered_lbl.setText(f"Tendered: ${tendered:.2f}")
@@ -275,27 +271,25 @@ class SalesListPage(QWidget):
             if key in ("amount", "tendered", "change_amount"):
                 text = f"{float(raw):.2f}" if raw != "" else "0.00"
             elif key == "total_items":
-                val  = float(raw) if raw != "" else 0
-                text = str(int(val)) if val == int(val) else f"{val:.2f}"
+                v = float(raw) if raw != "" else 0
+                text = str(int(v)) if v == int(v) else f"{v:.2f}"
             else:
                 text = str(raw) if raw is not None else ""
-
-            item = QTableWidgetItem(text)
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            item.setTextAlignment(align)
+            it = QTableWidgetItem(text)
+            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+            it.setTextAlignment(align)
             if c == 0:
-                item.setData(Qt.UserRole, sale["id"])
-            self.table.setItem(row, c, item)
+                it.setData(Qt.UserRole, sale["id"])
+            self.table.setItem(row, c, it)
 
-    # ── selection ─────────────────────────────────────────────────────────────
     def _get_selected_sale(self) -> dict | None:
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return None
-        item = self.table.item(rows[0].row(), 0)
-        if not item or not item.text().strip():
+        it = self.table.item(rows[0].row(), 0)
+        if not it or not it.text().strip():
             return None
-        sale_id = item.data(Qt.UserRole)
+        sale_id = it.data(Qt.UserRole)
         return next((s for s in self._all_sales if s["id"] == sale_id), None)
 
     def _on_selection(self):
@@ -307,17 +301,12 @@ class SalesListPage(QWidget):
         sale = self._get_selected_sale()
         if not sale:
             return
-        items = get_sale_items(sale["id"])
-        self.on_view_invoice(sale, items)
+        self.on_view_invoice(sale, get_sale_items(sale["id"]))
 
-    # ── actions ───────────────────────────────────────────────────────────────
     def _on_print(self):
         sale = self._get_selected_sale()
-        if not sale:
-            return
-        self._msg("Print",
-                  f"Print Sale #{sale['number']}\n\n"
-                  f"TODO: utils/printer.py → print_receipt(sale_id={sale['id']})")
+        if sale:
+            self._msg("Print", f"Print Sale #{sale['number']}\n\nTODO: utils/printer.py")
 
     def _on_delete(self):
         sale = self._get_selected_sale()
@@ -358,18 +347,19 @@ class SalesListPage(QWidget):
         m.exec()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_F3:
+        k = event.key()
+        if k == Qt.Key_F3:
             self._on_print()
-        elif event.key() == Qt.Key_F4:
+        elif k == Qt.Key_F4:
             self._on_delete()
-        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+        elif k in (Qt.Key_Return, Qt.Key_Enter):
             self._on_open_invoice()
         else:
             super().keyPressEvent(event)
 
 
 # =============================================================================
-# PAGE 2 — INVOICE DETAIL
+# PAGE 2 — INVOICE DETAIL  (clean minimal)
 # =============================================================================
 class SalesInvoicePage(QWidget):
 
@@ -381,6 +371,7 @@ class SalesInvoicePage(QWidget):
         self.company = None
         self._build_ui()
 
+    # ── static shell ──────────────────────────────────────────────────────────
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -410,20 +401,20 @@ class SalesInvoicePage(QWidget):
         toolbar.layout().insertWidget(1, self._toolbar_title)
         root.addWidget(toolbar)
 
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setStyleSheet("border: none; background: transparent;")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("border: none; background: transparent;")
 
         self.body = QWidget()
         self.body.setStyleSheet(f"background-color: {OFF_WHITE};")
         self.body_layout = QVBoxLayout(self.body)
-        self.body_layout.setContentsMargins(60, 32, 60, 48)
-        self.body_layout.setSpacing(20)
+        self.body_layout.setContentsMargins(80, 36, 80, 56)
+        self.body_layout.setSpacing(16)
 
-        self.scroll.setWidget(self.body)
-        root.addWidget(self.scroll)
+        scroll.setWidget(self.body)
+        root.addWidget(scroll)
 
-    # ── load ──────────────────────────────────────────────────────────────────
+    # ── load & refresh ────────────────────────────────────────────────────────
     def load(self, sale: dict, items: list[dict], company: dict | None = None):
         self.sale  = sale
         self.items = items
@@ -431,10 +422,9 @@ class SalesInvoicePage(QWidget):
             self.company = company
         elif sale.get("company_name"):
             self.company = {
-                "name":        sale["company_name"],
-                "currency":    sale.get("currency", "USD"),
-                "abbreviation": "",
-                "country":     "",
+                "name":     sale["company_name"],
+                "currency": sale.get("currency", "USD"),
+                "country":  "",
             }
         else:
             self.company = self._load_default_company()
@@ -444,210 +434,234 @@ class SalesInvoicePage(QWidget):
     def _load_default_company() -> dict | None:
         try:
             from models.company import get_all_companies
-            companies = get_all_companies()
-            return companies[0] if companies else None
+            c = get_all_companies()
+            return c[0] if c else None
         except Exception:
             return None
 
-    # ── refresh ───────────────────────────────────────────────────────────────
     def _refresh(self):
+        # clear body
         while self.body_layout.count():
             child = self.body_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
-            elif child.layout():
-                # clean nested layouts
-                while child.layout().count():
-                    sub = child.layout().takeAt(0)
-                    if sub.widget():
-                        sub.widget().deleteLater()
 
-        sale    = self.sale
-        items   = self.items
-        company = self.company
-
-        currency = sale.get("currency") or (
-            company.get("currency") or company.get("default_currency") or "USD"
-            if company else "USD"
+        sale     = self.sale
+        items    = self.items
+        company  = self.company
+        currency = (
+            sale.get("currency")
+            or (company.get("currency") or company.get("default_currency") if company else None)
+            or "USD"
         )
         co_name  = (
             sale.get("company_name")
             or (company.get("name") if company else None)
             or "Havano POS"
         )
-        co_abbr    = company.get("abbreviation", "") if company else ""
-        co_country = company.get("country", "")      if company else ""
+        co_country = company.get("country", "") if company else ""
 
-        self._toolbar_title.setText(f"Invoice  —  #{sale['number']}")
+        self._toolbar_title.setText(f"Invoice  #{sale['number']}")
 
-        # ── COMPANY HEADER ────────────────────────────────────────────────────
-        company_card = QWidget()
-        company_card.setStyleSheet(
-            f"background-color: {NAVY}; border-radius: 10px;"
-        )
-        cc_layout = QHBoxLayout(company_card)
-        cc_layout.setContentsMargins(32, 24, 32, 24)
-        cc_layout.setSpacing(0)
-
-        # left — name + subtitle
-        name_col = QVBoxLayout()
-        name_col.setSpacing(4)
-
-        name_lbl = QLabel(co_name)
-        name_lbl.setStyleSheet(
-            f"color: {WHITE}; font-size: 24px; font-weight: bold; background: transparent;"
-        )
-        sub_lbl = QLabel("S A L E S   I N V O I C E")
-        sub_lbl.setStyleSheet(
-            f"color: {LIGHT}; font-size: 12px; letter-spacing: 3px; background: transparent;"
-        )
-        name_col.addWidget(name_lbl)
-        name_col.addWidget(sub_lbl)
-        cc_layout.addLayout(name_col, 1)
-
-        # right — company details grid
-        details_grid = QWidget()
-        details_grid.setStyleSheet("background: transparent;")
-        dg = QHBoxLayout(details_grid)
-        dg.setSpacing(24)
-        dg.setContentsMargins(0, 0, 0, 0)
-
-        for lbl_txt, val_txt in [
-            ("ABBREVIATION", co_abbr   or "—"),
-            ("COUNTRY",      co_country or "—"),
-            ("CURRENCY",     currency),
-        ]:
-            col = QVBoxLayout()
-            col.setSpacing(3)
-            l = QLabel(lbl_txt)
-            l.setStyleSheet(
-                f"color: {MID if False else '#8fa8c8'}; font-size: 9px; "
-                f"font-weight: bold; letter-spacing: 1px; background: transparent;"
-            )
-            v = QLabel(val_txt)
-            v.setStyleSheet(
-                f"color: {WHITE}; font-size: 13px; font-weight: bold; background: transparent;"
-            )
-            col.addWidget(l)
-            col.addWidget(v)
-            dg.addLayout(col)
-
-        cc_layout.addWidget(details_grid)
-        self.body_layout.addWidget(company_card)
-
-        # ── SALE HEADER STRIP — two rows of fields ────────────────────────────
+        # ── 1. INVOICE HEADER CARD ────────────────────────────────────────────
+        # Navy left stripe + white right content
         header_card = QWidget()
         header_card.setStyleSheet(
-            f"background-color: {WHITE}; border: 1px solid {BORDER}; border-radius: 10px;"
+            f"background-color: {WHITE}; border: 1px solid {BORDER}; "
+            f"border-radius: 10px;"
         )
-        hc_layout = QVBoxLayout(header_card)
-        hc_layout.setContentsMargins(28, 16, 28, 16)
-        hc_layout.setSpacing(12)
+        hc = QHBoxLayout(header_card)
+        hc.setContentsMargins(0, 0, 0, 0)
+        hc.setSpacing(0)
 
-        # row 1 — invoice/date/time/cashier/method/payment
-        row1 = QHBoxLayout()
-        row1.setSpacing(0)
+        # navy accent strip
+        stripe = QWidget()
+        stripe.setFixedWidth(8)
+        stripe.setStyleSheet(
+            f"background-color: {NAVY}; border-top-left-radius: 10px; "
+            f"border-bottom-left-radius: 10px;"
+        )
+        hc.addWidget(stripe)
 
-        row1_fields = [
-            ("INVOICE NO.",  str(sale["number"])),
-            ("DATE",         sale["date"]),
-            ("TIME",         sale["time"]),
-            ("CASHIER",      str(sale["user"])),
-            ("METHOD",       str(sale.get("method", "—"))),
-            ("CURRENCY",     currency),
+        # content
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        cl = QHBoxLayout(content)
+        cl.setContentsMargins(24, 20, 24, 20)
+        cl.setSpacing(0)
+
+        # company block
+        co_col = QVBoxLayout()
+        co_col.setSpacing(3)
+        co_name_lbl = QLabel(co_name)
+        co_name_lbl.setStyleSheet(
+            f"color: {NAVY}; font-size: 20px; font-weight: bold; background: transparent;"
+        )
+        co_sub_lbl = QLabel(
+            "  ·  ".join(filter(None, [co_country, currency]))
+        )
+        co_sub_lbl.setStyleSheet(
+            f"color: {MUTED}; font-size: 12px; background: transparent;"
+        )
+        inv_tag = QLabel("SALES INVOICE")
+        inv_tag.setStyleSheet(f"""
+            color: {WHITE}; background: {ACCENT};
+            font-size: 10px; font-weight: bold; letter-spacing: 1px;
+            border-radius: 4px; padding: 2px 8px;
+        """)
+        inv_tag.setFixedHeight(22)
+        inv_tag.setAlignment(Qt.AlignCenter)
+
+        co_col.addWidget(co_name_lbl)
+        co_col.addWidget(co_sub_lbl)
+        co_col.addSpacing(6)
+        co_col.addWidget(inv_tag)
+        co_col.addStretch()
+        cl.addLayout(co_col, 1)
+
+        cl.addSpacing(32)
+        cl.addWidget(_vr())
+        cl.addSpacing(32)
+
+        # invoice meta block — 2 columns side by side
+        meta_left  = QVBoxLayout(); meta_left.setSpacing(10)
+        meta_right = QVBoxLayout(); meta_right.setSpacing(10)
+
+        left_pairs = [
+            ("Invoice No.",  str(sale["number"])),
+            ("Date",         sale["date"]),
+            ("Time",         sale["time"]),
         ]
-        for i, (label, value) in enumerate(row1_fields):
-            row1.addLayout(_info_field(label, value))
-            if i < len(row1_fields) - 1:
-                row1.addSpacing(20)
-                row1.addWidget(_vr())
-                row1.addSpacing(20)
-
-        hc_layout.addLayout(row1)
-        hc_layout.addWidget(_hr())
-
-        # row 2 — customer + contact + invoice_no string + kot + receipt_type
-        row2 = QHBoxLayout()
-        row2.setSpacing(0)
-
-        cust_name    = sale.get("customer_name")    or "Walk-in"
-        cust_contact = sale.get("customer_contact") or "—"
-        invoice_no   = sale.get("invoice_no")       or "—"
-        kot          = sale.get("kot")              or "—"
-        receipt_type = sale.get("receipt_type")     or "—"
-
-        row2_fields = [
-            ("CUSTOMER",      cust_name),
-            ("CONTACT",       cust_contact),
-            ("INVOICE REF.",  invoice_no),
-            ("KOT",           kot),
-            ("RECEIPT TYPE",  receipt_type),
+        right_pairs = [
+            ("Cashier",  str(sale["user"])),
+            ("Method",   str(sale.get("method", "—"))),
+            ("Currency", currency),
         ]
-        for i, (label, value) in enumerate(row2_fields):
-            row2.addLayout(_info_field(label, value, value_size=13))
-            if i < len(row2_fields) - 1:
-                row2.addSpacing(20)
-                row2.addWidget(_vr())
-                row2.addSpacing(20)
 
-        hc_layout.addLayout(row2)
+        def _kv(k, v, large=False):
+            w = QWidget(); w.setStyleSheet("background: transparent;")
+            l = QVBoxLayout(w); l.setContentsMargins(0,0,0,0); l.setSpacing(2)
+            kl = QLabel(k)
+            kl.setStyleSheet(
+                f"color: {MUTED}; font-size: 10px; font-weight: bold; "
+                f"letter-spacing: 0.5px; background: transparent;"
+            )
+            vl = QLabel(v or "—")
+            vl.setStyleSheet(
+                f"color: {DARK_TEXT}; font-size: {'14' if large else '13'}px; "
+                f"font-weight: bold; background: transparent;"
+            )
+            l.addWidget(kl); l.addWidget(vl)
+            return w
+
+        for k, v in left_pairs:
+            meta_left.addWidget(_kv(k, v, large=(k == "Invoice No.")))
+        for k, v in right_pairs:
+            meta_right.addWidget(_kv(k, v))
+
+        meta_row = QHBoxLayout(); meta_row.setSpacing(32)
+        meta_row.addLayout(meta_left)
+        meta_row.addLayout(meta_right)
+        cl.addLayout(meta_row)
+
+        hc.addWidget(content, 1)
         self.body_layout.addWidget(header_card)
 
-        # ── ITEMS TABLE ───────────────────────────────────────────────────────
-        items_lbl = QLabel("Items")
+        # ── 2. CUSTOMER CARD ──────────────────────────────────────────────────
+        cust_name    = sale.get("customer_name")    or ""
+        cust_contact = sale.get("customer_contact") or ""
+
+        if cust_name or cust_contact:
+            cust_card = _card()
+            cc = QHBoxLayout(cust_card)
+            cc.setContentsMargins(24, 16, 24, 16)
+            cc.setSpacing(0)
+
+            cust_icon = QLabel("👤")
+            cust_icon.setStyleSheet("font-size: 20px; background: transparent;")
+            cust_icon.setFixedWidth(36)
+            cc.addWidget(cust_icon)
+
+            cust_info = QVBoxLayout(); cust_info.setSpacing(2)
+            name_lbl = QLabel(cust_name or "Walk-in")
+            name_lbl.setStyleSheet(
+                f"color: {DARK_TEXT}; font-size: 15px; font-weight: bold; background: transparent;"
+            )
+            cust_info.addWidget(name_lbl)
+            if cust_contact:
+                contact_lbl = QLabel(cust_contact)
+                contact_lbl.setStyleSheet(
+                    f"color: {MUTED}; font-size: 12px; background: transparent;"
+                )
+                cust_info.addWidget(contact_lbl)
+            cc.addLayout(cust_info)
+            cc.addStretch()
+
+            # customer tag
+            tag = QLabel("CUSTOMER")
+            tag.setStyleSheet(
+                f"color: {MUTED}; font-size: 10px; font-weight: bold; "
+                f"letter-spacing: 1px; background: transparent;"
+            )
+            tag.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            cc.addWidget(tag)
+
+            self.body_layout.addWidget(cust_card)
+
+        # ── 3. ITEMS TABLE ────────────────────────────────────────────────────
+        items_lbl = QLabel("Line Items")
         items_lbl.setStyleSheet(
-            f"color: {DARK_TEXT}; font-size: 14px; font-weight: bold; background: transparent;"
+            f"color: {MUTED}; font-size: 11px; font-weight: bold; "
+            f"letter-spacing: 1px; background: transparent;"
         )
         self.body_layout.addWidget(items_lbl)
 
         tbl = QTableWidget()
         tbl.setColumnCount(5)
         tbl.setHorizontalHeaderLabels([
-            "#", "Product",
-            f"Unit Price ({currency})",
-            "Qty",
-            f"Total ({currency})",
+            "#", "Product", f"Unit Price", "Qty", f"Total"
         ])
         tbl.verticalHeader().setVisible(False)
         tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
         tbl.setSelectionMode(QAbstractItemView.NoSelection)
         tbl.setAlternatingRowColors(True)
-        tbl.setShowGrid(True)
+        tbl.setShowGrid(False)
 
         hh = tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed);  tbl.setColumnWidth(0, 50)
+        hh.setSectionResizeMode(0, QHeaderView.Fixed);  tbl.setColumnWidth(0, 44)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed);  tbl.setColumnWidth(2, 160)
-        hh.setSectionResizeMode(3, QHeaderView.Fixed);  tbl.setColumnWidth(3, 80)
-        hh.setSectionResizeMode(4, QHeaderView.Fixed);  tbl.setColumnWidth(4, 160)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed);  tbl.setColumnWidth(2, 130)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed);  tbl.setColumnWidth(3, 70)
+        hh.setSectionResizeMode(4, QHeaderView.Fixed);  tbl.setColumnWidth(4, 130)
 
         tbl.setStyleSheet(f"""
             QTableWidget {{
                 background-color: {WHITE}; color: {DARK_TEXT};
-                border: 1px solid {BORDER}; gridline-color: {LIGHT};
-                font-size: 13px; outline: none; border-radius: 8px;
+                border: 1px solid {BORDER};
+                font-size: 13px; outline: none;
+                border-radius: 8px;
             }}
-            QTableWidget::item           {{ padding: 10px; }}
+            QTableWidget::item           {{ padding: 10px 12px; border-bottom: 1px solid {LIGHT}; }}
             QTableWidget::item:alternate {{ background-color: {ROW_ALT}; }}
             QHeaderView::section {{
-                background-color: {NAVY}; color: {WHITE};
-                padding: 12px; border: none;
-                border-right: 1px solid {NAVY_2};
-                font-size: 12px; font-weight: bold;
+                background-color: {OFF_WHITE}; color: {MUTED};
+                padding: 10px 12px; border: none;
+                border-bottom: 2px solid {BORDER};
+                font-size: 11px; font-weight: bold; letter-spacing: 0.5px;
             }}
         """)
 
         tbl.setRowCount(len(items))
         for r, item in enumerate(items):
-            tbl.setRowHeight(r, 40)
+            tbl.setRowHeight(r, 42)
             line_total = item["price"] * item["qty"]
             qty_str    = str(int(item["qty"])) if item["qty"] == int(item["qty"]) else str(item["qty"])
             cells = [
                 (str(r + 1),               Qt.AlignCenter),
                 (str(item["product_name"]), Qt.AlignLeft  | Qt.AlignVCenter),
-                (f"{item['price']:.2f}",   Qt.AlignRight | Qt.AlignVCenter),
+                (f"{currency} {item['price']:.2f}", Qt.AlignRight | Qt.AlignVCenter),
                 (qty_str,                  Qt.AlignCenter),
-                (f"{line_total:.2f}",      Qt.AlignRight | Qt.AlignVCenter),
+                (f"{currency} {line_total:.2f}", Qt.AlignRight | Qt.AlignVCenter),
             ]
             for c, (text, align) in enumerate(cells):
                 cell = QTableWidgetItem(text)
@@ -655,96 +669,33 @@ class SalesInvoicePage(QWidget):
                 cell.setTextAlignment(align)
                 tbl.setItem(r, c, cell)
 
-        tbl.setFixedHeight(min(44 + len(items) * 40 + 4, 420))
+        tbl.setFixedHeight(min(46 + len(items) * 42 + 2, 440))
         self.body_layout.addWidget(tbl)
 
-        # ── TOTALS + SALE SUMMARY side by side ────────────────────────────────
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(16)
-
-        # left — sale metadata card
-        meta_card = QWidget()
-        meta_card.setStyleSheet(
-            f"background-color: {WHITE}; border: 1px solid {BORDER}; border-radius: 10px;"
-        )
-        mc = QVBoxLayout(meta_card)
-        mc.setContentsMargins(24, 16, 24, 16)
-        mc.setSpacing(10)
-
-        meta_title = QLabel("Sale Info")
-        meta_title.setStyleSheet(
-            f"color: {MUTED}; font-size: 11px; font-weight: bold; "
-            f"letter-spacing: 1px; background: transparent;"
-        )
-        mc.addWidget(meta_title)
-        mc.addWidget(_hr())
-
-        cashier_name = sale.get("cashier_name") or str(sale.get("user", "—"))
-        synced       = "✓ Synced" if sale.get("synced") else "⏳ Not synced"
-        total_items  = sale.get("total_items", 0)
-        items_str    = str(int(total_items)) if float(total_items) == int(float(total_items)) else str(total_items)
-
-        for lbl_txt, val_txt in [
-            ("Cashier",       cashier_name),
-            ("Total Items",   items_str),
-            ("Receipt Type",  sale.get("receipt_type") or "—"),
-            ("KOT",           sale.get("kot") or "—"),
-            ("Sync Status",   synced),
-        ]:
-            row_w = QWidget(); row_w.setStyleSheet("background: transparent;")
-            rl = QHBoxLayout(row_w); rl.setContentsMargins(0, 0, 0, 0)
-            l = QLabel(lbl_txt)
-            l.setStyleSheet(f"color: {MUTED}; font-size: 12px; background: transparent;")
-            v = QLabel(val_txt)
-            v.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            v.setStyleSheet(f"color: {DARK_TEXT}; font-size: 12px; font-weight: bold; background: transparent;")
-            rl.addWidget(l); rl.addStretch(); rl.addWidget(v)
-            mc.addWidget(row_w)
-
-        mc.addStretch()
-        bottom_row.addWidget(meta_card, 1)
-
-        # right — totals card
-        totals_card = QWidget()
-        totals_card.setStyleSheet(
-            f"background-color: {WHITE}; border: 1px solid {BORDER}; border-radius: 10px;"
-        )
-        totals_card.setFixedWidth(380)
-
-        tc = QVBoxLayout(totals_card)
-        tc.setContentsMargins(28, 20, 28, 20)
-        tc.setSpacing(10)
-
-        totals_title = QLabel("Totals")
-        totals_title.setStyleSheet(
-            f"color: {MUTED}; font-size: 11px; font-weight: bold; "
-            f"letter-spacing: 1px; background: transparent;"
-        )
-        tc.addWidget(totals_title)
-        tc.addWidget(_hr())
-
+        # ── 4. TOTALS ─────────────────────────────────────────────────────────
         subtotal = sum(i["price"] * i["qty"] for i in items)
         discount = max(subtotal - sale["amount"], 0.0)
         tax      = float(sale.get("total_vat")     or 0.0)
         tendered = sale["tendered"]
         change   = float(sale.get("change_amount") or max(tendered - sale["amount"], 0.0))
 
-        total_rows = [
-            ("Subtotal",  f"{currency}  {subtotal:.2f}",        False),
-            ("Discount",  f"- {currency}  {discount:.2f}",      False),
-            ("Tax",       f"{currency}  {tax:.2f}",             False),
-            ("divider",   "",                                    False),
-            ("Total",     f"{currency}  {sale['amount']:.2f}",  True),
-            ("Tendered",  f"{currency}  {tendered:.2f}",        False),
-            ("Change",    f"{currency}  {change:.2f}",          False),
-        ]
+        totals_row = QHBoxLayout()
+        totals_row.addStretch()
 
-        for label, value, bold in total_rows:
-            if label == "divider":
-                tc.addWidget(_hr())
-                continue
+        totals_card = _card()
+        totals_card.setFixedWidth(360)
+        tc = QVBoxLayout(totals_card)
+        tc.setContentsMargins(24, 20, 24, 20)
+        tc.setSpacing(0)
+
+        def _total_row(label, value, bold=False, top_border=False):
             rw = QWidget(); rw.setStyleSheet("background: transparent;")
-            rl = QHBoxLayout(rw); rl.setContentsMargins(0, 0, 0, 0)
+            if top_border:
+                rw.setStyleSheet(
+                    f"background: transparent; border-top: 2px solid {BORDER};"
+                )
+            rl = QHBoxLayout(rw)
+            rl.setContentsMargins(0, 10 if top_border else 6, 0, 6)
             fs  = "15px" if bold else "13px"
             fw  = "bold" if bold else "normal"
             col = DARK_TEXT if bold else MUTED
@@ -758,10 +709,21 @@ class SalesInvoicePage(QWidget):
                 f"color: {col}; font-size: {fs}; font-weight: {fw}; background: transparent;"
             )
             rl.addWidget(lbl); rl.addStretch(); rl.addWidget(val)
-            tc.addWidget(rw)
+            return rw
 
-        bottom_row.addWidget(totals_card)
-        self.body_layout.addLayout(bottom_row)
+        tc.addWidget(_total_row("Subtotal",  f"{currency} {subtotal:.2f}"))
+        if discount > 0:
+            tc.addWidget(_total_row("Discount",  f"− {currency} {discount:.2f}"))
+        if tax > 0:
+            tc.addWidget(_total_row("Tax",       f"{currency} {tax:.2f}"))
+        tc.addWidget(_total_row(
+            "Total", f"{currency} {sale['amount']:.2f}", bold=True, top_border=True
+        ))
+        tc.addWidget(_total_row("Tendered",  f"{currency} {tendered:.2f}"))
+        tc.addWidget(_total_row("Change",    f"{currency} {change:.2f}"))
+
+        totals_row.addWidget(totals_card)
+        self.body_layout.addLayout(totals_row)
         self.body_layout.addStretch()
 
     # ── print ─────────────────────────────────────────────────────────────────
@@ -803,7 +765,6 @@ class SalesListDialog(QMainWindow):
     Usage:
         dlg = SalesListDialog(self)
         dlg.show()
-        # optionally pass company:
         dlg = SalesListDialog(self, company=accepted_company)
     """
 
@@ -822,8 +783,8 @@ class SalesListDialog(QMainWindow):
         )
         self.invoice_page = SalesInvoicePage(on_back=self._go_to_list)
 
-        self.stack.addWidget(self.list_page)     # index 0
-        self.stack.addWidget(self.invoice_page)  # index 1
+        self.stack.addWidget(self.list_page)
+        self.stack.addWidget(self.invoice_page)
         self.stack.setCurrentIndex(0)
 
     def _go_to_invoice(self, sale: dict, items: list[dict]):

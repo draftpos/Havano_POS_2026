@@ -314,3 +314,21 @@ def _get_shift_rows(shift_id: int, cur) -> list[dict]:
         r["total"]       = total
         r["variance"]    = total - counted
     return rows
+
+
+def get_shift_reports(date_from=None, date_to=None) -> list[dict]:
+    """Retrieves shift history for reporting purposes."""
+    conn = get_connection(); cur = conn.cursor()
+    query = "SELECT * FROM shift_reports"
+    params = []
+    
+    if date_from and date_to:
+        query += " WHERE CAST(created_at AS DATE) BETWEEN ? AND ?"
+        params = [date_from, date_to]
+    
+    query += " ORDER BY id DESC"
+    
+    cur.execute(query, params)
+    rows = fetchall_dicts(cur)
+    conn.close()
+    return rows

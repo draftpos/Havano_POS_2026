@@ -1969,7 +1969,7 @@ class POSView(QWidget):
         layout.setContentsMargins(10, 0, 10, 0)
         layout.setSpacing(6)
 
-        logo = QLabel("Havano POS")
+        logo = QLabel("Havano POS System")
         logo.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {WHITE}; background: transparent;")
         date_lbl = QLabel(QDate.currentDate().toString("dd/MM/yyyy"))
         date_lbl.setStyleSheet(f"font-size: 12px; color: {MID}; background: transparent;")

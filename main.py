@@ -16,7 +16,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon("assets/erp.jpg"))
+    app.setWindowIcon(QIcon("assets/havano-logo.jpeg"))
 
     app.setStyleSheet("""
         QMainWindow { background-color: #1e1e2e; }
