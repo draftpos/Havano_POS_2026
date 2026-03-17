@@ -122,25 +122,26 @@ def get_today_total_by_method() -> dict:
 # =============================================================================
 
 def create_sale(
-    items:            list[dict],
-    total:            float,
-    tendered:         float,
-    method:           str   = "Cash",
-    cashier_id:       int   = None,
-    cashier_name:     str   = "",
-    customer_name:    str   = "",
-    customer_contact: str   = "",
-    company_name:     str   = "",        # ← new
-    kot:              str   = "",
-    currency:         str   = "USD",
-    subtotal:         float = None,
-    total_vat:        float = 0.0,
-    discount_amount:  float = 0.0,
-    receipt_type:     str   = "Invoice",
-    footer:           str   = "",
-    change_amount:    float = None,
+    items:             list[dict],
+    total:             float,
+    tendered:          float,
+    method:            str   = "Cash",
+    cashier_id:        int   = None,
+    cashier_name:      str   = "",
+    customer_name:     str   = "",
+    customer_contact:  str   = "",
+    company_name:      str   = "",
+    kot:               str   = "",
+    currency:          str   = "USD",
+    subtotal:          float = None,
+    total_vat:         float = 0.0,
+    discount_amount:   float = 0.0,
+    receipt_type:      str   = "Invoice",
+    footer:            str   = "",
+    change_amount:     float = None,
 ) -> dict:
     from datetime import date
+    from models.product import get_product_by_id, adjust_stock # Ensure imports are here
 
     seq           = get_next_invoice_number()
     invoice_no    = _format_invoice_no(seq)
@@ -170,7 +171,7 @@ def create_sale(
         seq, invoice_no, invoice_date,
         float(total), float(tendered), method, cashier_id,
         cashier_name, customer_name, customer_contact,
-        company_name,                                    # ← new
+        company_name,
         kot, currency,
         float(effective_sub), float(total_vat), float(discount_amount),
         receipt_type, footer, 0,
@@ -180,6 +181,7 @@ def create_sale(
     sale_id = int(cur.fetchone()[0])
 
     for item in items:
+        # 1. Save the Sale Item entry
         cur.execute("""
             INSERT INTO sale_items (
                 sale_id, part_no, product_name, qty, price,
@@ -201,14 +203,24 @@ def create_sale(
             item.get("remarks",        ""),
         ))
 
+        # 2. Requirement 6: Handle UOM Conversion Factor for Stock Deduction
         product_id = item.get("product_id")
         if product_id:
-            adjust_stock(product_id, -int(item.get("qty", 1)))
+            # Fetch the actual product to get its specific conversion factor
+            prod_data = get_product_by_id(product_id)
+            # Default to 1.0 if not set
+            factor = float(prod_data.get("conversion_factor", 1.0) or 1.0)
+            
+            # Actual units to remove = Quantity Sold * Conversion Factor
+            # Example: 2 Boxes * 12 units/box = 24 units removed from stock
+            total_units_to_remove = float(item.get("qty", 1)) * factor
+            
+            # Pass as negative to adjust_stock to decrease inventory
+            adjust_stock(product_id, -total_units_to_remove)
 
     conn.commit()
     conn.close()
     return get_sale_by_id(sale_id)
-
 
 def get_unsynced_sales() -> list[dict]:
     conn = get_connection()
@@ -408,3 +420,34 @@ def _item_to_dict(row: dict) -> dict:
         "tax_amount":   float(row["tax_amount"] or 0),
         "remarks":      row["remarks"]      or "",
     }
+
+
+def create_credit_note(original_sale_id: int, items_to_return: list[dict]) -> bool:
+    """
+    Requirement 2: Processes a return.
+    1. Adjusts stock (adds items back).
+    2. Marks items as returned in the DB.
+    """
+    from models.product import adjust_stock
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    try:
+        for item in items_to_return:
+            # 1. Add the quantity back to inventory
+            if item.get("product_id"):
+                adjust_stock(item["product_id"], float(item["qty"]))
+            
+            # 2. Record the credit note entry
+            cur.execute("""
+                INSERT INTO credit_notes (original_sale_id, part_no, qty, reason, created_at)
+                VALUES (?, ?, ?, ?, GETDATE())
+            """, (original_sale_id, item["part_no"], item["qty"], item.get("reason", "Customer Return")))
+            
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()

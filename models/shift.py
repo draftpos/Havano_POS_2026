@@ -1,9 +1,8 @@
 # =============================================================================
-# models/shift.py  —  SQL Server version
+# models/shift.py  —  SQL Server version (Updated for Variance & Account Payments)
 # =============================================================================
 
 from database.db import get_connection, fetchall_dicts, fetchone_dict
-
 
 # =============================================================================
 # READ
@@ -56,54 +55,6 @@ def get_last_shift() -> dict | None:
     return row
 
 
-def get_shift_by_id(shift_id: int) -> dict | None:
-    conn = get_connection()
-    cur  = conn.cursor()
-    cur.execute("""
-        SELECT s.id, s.shift_number, s.station, s.cashier_id, s.date,
-               s.start_time, s.end_time, s.door_counter, s.customers, s.notes,
-               COALESCE(u.username, '') AS username
-        FROM shifts s
-        LEFT JOIN users u ON u.id = s.cashier_id
-        WHERE s.id = ?
-    """, (shift_id,))
-    row = fetchone_dict(cur)
-    if not row:
-        conn.close()
-        return None
-    row["rows"]    = _get_shift_rows(shift_id, cur)
-    row["is_open"] = row["end_time"] is None
-    conn.close()
-    return row
-
-
-def get_all_shifts() -> list[dict]:
-    """Return all shifts newest first."""
-    conn = get_connection()
-    cur  = conn.cursor()
-    cur.execute("""
-        SELECT s.id, s.shift_number, s.station, s.cashier_id, s.date,
-               s.start_time, s.end_time, s.door_counter, s.customers, s.notes,
-               COALESCE(u.username, '') AS username
-        FROM shifts s
-        LEFT JOIN users u ON u.id = s.cashier_id
-        ORDER BY s.id DESC
-    """)
-    rows = fetchall_dicts(cur)
-    conn.close()
-    for r in rows:
-        r["is_open"] = r["end_time"] is None
-    return rows
-
-
-def get_shift_rows(shift_id: int) -> list[dict]:
-    conn = get_connection()
-    cur  = conn.cursor()
-    result = _get_shift_rows(shift_id, cur)
-    conn.close()
-    return result
-
-
 def get_next_shift_number() -> int:
     conn = get_connection()
     cur  = conn.cursor()
@@ -114,7 +65,10 @@ def get_next_shift_number() -> int:
 
 
 def get_income_by_method(date_str: str = None) -> dict:
-    """Return sales income grouped by payment method for a given date."""
+    """
+    Requirement 4 & 3: Returns combined income (Sales + Account Payments)
+    grouped by payment method for the shift report.
+    """
     METHOD_MAP = {
         "Cash":   "CASH",
         "Card":   "C / CARD",
@@ -123,26 +77,42 @@ def get_income_by_method(date_str: str = None) -> dict:
     }
     conn = get_connection()
     cur  = conn.cursor()
-    if date_str:
-        cur.execute("""
-            SELECT method, COALESCE(SUM(total), 0)
-            FROM sales
-            WHERE CAST(created_at AS DATE) = ?
-            GROUP BY method
-        """, (date_str,))
-    else:
-        cur.execute("""
-            SELECT method, COALESCE(SUM(total), 0)
-            FROM sales
-            WHERE CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
-            GROUP BY method
-        """)
-    rows = cur.fetchall()
+    
+    # 1. Query Sales Totals
+    sales_query = """
+        SELECT method, COALESCE(SUM(total), 0)
+        FROM sales
+        WHERE CAST(created_at AS DATE) = {}
+        GROUP BY method
+    """
+    date_filter = "?" if date_str else "CAST(GETDATE() AS DATE)"
+    params = (date_str,) if date_str else ()
+    
+    cur.execute(sales_query.format(date_filter), params)
+    sales_rows = cur.fetchall()
+
+    # 2. Query Account Payment Totals (Requirement 3)
+    payments_query = """
+        SELECT method, COALESCE(SUM(amount), 0)
+        FROM customer_payments
+        WHERE CAST(created_at AS DATE) = {}
+        GROUP BY method
+    """
+    cur.execute(payments_query.format(date_filter), params)
+    payment_rows = cur.fetchall()
     conn.close()
+
     result = {}
-    for method, total in rows:
+    # Combine Sales
+    for method, total in sales_rows:
         mapped = METHOD_MAP.get(method, method.upper())
-        result[mapped] = float(total)
+        result[mapped] = result.get(mapped, 0.0) + float(total)
+    
+    # Combine Account Payments
+    for method, total in payment_rows:
+        mapped = METHOD_MAP.get(method, method.upper())
+        result[mapped] = result.get(mapped, 0.0) + float(total)
+
     return result
 
 
@@ -158,7 +128,6 @@ def start_shift(station: int, shift_number: int, cashier_id: int,
 
     conn = get_connection()
     cur  = conn.cursor()
-
     cur.execute("""
         INSERT INTO shifts (shift_number, station, cashier_id, date, start_time)
         OUTPUT INSERTED.id
@@ -181,6 +150,7 @@ def start_shift(station: int, shift_number: int, cashier_id: int,
 
 def end_shift(shift_id: int, counted_values: dict,
               door_counter: int = 0, customers: int = 0) -> dict | None:
+    """Requirement 4: Finalizes the shift and saves actual counted amounts."""
     from datetime import datetime
     end_time = datetime.now().strftime("%H:%M:%S")
 
@@ -203,20 +173,8 @@ def end_shift(shift_id: int, counted_values: dict,
     return get_shift_by_id(shift_id)
 
 
-def save_shift_floats(shift_id: int, opening_floats: dict) -> bool:
-    conn = get_connection()
-    cur  = conn.cursor()
-    for method, start_float in opening_floats.items():
-        cur.execute("""
-            UPDATE shift_rows SET start_float = ?
-            WHERE shift_id = ? AND method = ?
-        """, (float(start_float), shift_id, method))
-    conn.commit()
-    conn.close()
-    return True
-
-
 def refresh_income(shift_id: int) -> dict:
+    """Updates the expected income in the shift rows based on latest DB records."""
     income_by_method = get_income_by_method()
     conn = get_connection()
     cur  = conn.cursor()
@@ -233,29 +191,16 @@ def refresh_income(shift_id: int) -> dict:
     return income_by_method
 
 
-def delete_shift(shift_id: int) -> bool:
-    conn = get_connection()
-    cur  = conn.cursor()
-    cur.execute("DELETE FROM shifts WHERE id = ?", (shift_id,))
-    affected = cur.rowcount
-    conn.commit()
-    conn.close()
-    return affected > 0
-
-
 # =============================================================================
-# MIGRATION  —  run once to create tables in SQL Server
+# MIGRATION
 # =============================================================================
 
 def migrate():
-    """Create shifts and shift_rows tables if they don't exist."""
     conn = get_connection()
     cur  = conn.cursor()
-
+    # Master Shifts Table
     cur.execute("""
-        IF NOT EXISTS (
-            SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'shifts'
-        )
+        IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'shifts')
         CREATE TABLE shifts (
             id           INT           IDENTITY(1,1) PRIMARY KEY,
             shift_number INT           NOT NULL DEFAULT 1,
@@ -270,26 +215,20 @@ def migrate():
             created_at   DATETIME2     NOT NULL DEFAULT SYSDATETIME()
         )
     """)
-
+    # Detail rows per payment method (for Variance calculation)
     cur.execute("""
-        IF NOT EXISTS (
-            SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'shift_rows'
-        )
+        IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'shift_rows')
         CREATE TABLE shift_rows (
             id           INT           IDENTITY(1,1) PRIMARY KEY,
-            shift_id     INT           NOT NULL
-                             REFERENCES shifts(id) ON DELETE CASCADE,
+            shift_id     INT           NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
             method       NVARCHAR(50)  NOT NULL,
             start_float  DECIMAL(12,2) NOT NULL DEFAULT 0,
             income       DECIMAL(12,2) NOT NULL DEFAULT 0,
             counted      DECIMAL(12,2) NOT NULL DEFAULT 0
         )
     """)
-
     conn.commit()
     conn.close()
-    print("[shift] ✅  Tables ready.")
-
 
 # =============================================================================
 # PRIVATE
@@ -312,23 +251,49 @@ def _get_shift_rows(shift_id: int, cur) -> list[dict]:
         r["income"]      = income
         r["counted"]     = counted
         r["total"]       = total
-        r["variance"]    = total - counted
+        r["variance"]    = total - counted  # Calculation for Requirement 4
     return rows
 
+def get_shift_by_id(shift_id: int) -> dict | None:
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT s.id, s.shift_number, s.station, s.cashier_id, s.date,
+               s.start_time, s.end_time, s.door_counter, s.customers, s.notes,
+               COALESCE(u.username, '') AS username
+        FROM shifts s
+        LEFT JOIN users u ON u.id = s.cashier_id
+        WHERE s.id = ?
+    """, (shift_id,))
+    row = fetchone_dict(cur)
+    if not row:
+        conn.close()
+        return None
+    row["rows"]    = _get_shift_rows(shift_id, cur)
+    row["is_open"] = row["end_time"] is None
+    conn.close()
+    return row
 
 def get_shift_reports(date_from=None, date_to=None) -> list[dict]:
-    """Retrieves shift history for reporting purposes."""
+    """Retrieves shift history for Requirement 5 (X-Report)."""
     conn = get_connection(); cur = conn.cursor()
-    query = "SELECT * FROM shift_reports"
+    query = """
+        SELECT s.id, s.shift_number as shift_no, s.created_at, 
+               u.username as cashier_name,
+               (SELECT SUM(start_float + income) FROM shift_rows WHERE shift_id = s.id) as expected_amount,
+               (SELECT SUM(counted) FROM shift_rows WHERE shift_id = s.id) as actual_amount
+        FROM shifts s
+        LEFT JOIN users u ON u.id = s.cashier_id
+    """
     params = []
-    
     if date_from and date_to:
-        query += " WHERE CAST(created_at AS DATE) BETWEEN ? AND ?"
+        query += " WHERE CAST(s.created_at AS DATE) BETWEEN ? AND ?"
         params = [date_from, date_to]
     
-    query += " ORDER BY id DESC"
-    
+    query += " ORDER BY s.id DESC"
     cur.execute(query, params)
     rows = fetchall_dicts(cur)
+    for r in rows:
+        r['variance'] = float(r['actual_amount'] or 0) - float(r['expected_amount'] or 0)
     conn.close()
     return rows

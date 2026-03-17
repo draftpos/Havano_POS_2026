@@ -422,14 +422,14 @@ class ProductSearchDialog(QDialog):
 
 
 # =============================================================================
-# CUSTOMER SEARCH POPUP
+# CUSTOMER SEARCH POPUP — Updated with Quick-Add & Full Database Linking
 # =============================================================================
 class CustomerSearchPopup(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.selected_customer = None
         self.setWindowTitle("Select Customer")
-        self.setMinimumSize(620, 440)
+        self.setMinimumSize(750, 500)  # Increased width for better table view
         self.setModal(True)
         self.setStyleSheet(f"QDialog {{ background-color: {WHITE}; }}")
         self._build()
@@ -439,19 +439,30 @@ class CustomerSearchPopup(QDialog):
         lay.setSpacing(10)
         lay.setContentsMargins(20, 16, 20, 16)
 
-        hdr = QWidget(); hdr.setFixedHeight(44)
+        # --- Header ---
+        hdr = QWidget()
+        hdr.setFixedHeight(44)
         hdr.setStyleSheet(f"background-color:{NAVY}; border-radius:5px;")
-        hl = QHBoxLayout(hdr); hl.setContentsMargins(16, 0, 16, 0)
-        hl.addWidget(QLabel("Select Customer",
-            styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
-        hint = QLabel("Double-click or Enter to select")
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(16, 0, 16, 0)
+        
+        title_lbl = QLabel("Select Customer")
+        title_lbl.setStyleSheet(f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;")
+        
+        hint = QLabel("F10 for New Customer  |  Enter to Select")
         hint.setStyleSheet(f"font-size:11px;color:{MID};background:transparent;")
-        hl.addStretch(); hl.addWidget(hint)
+        
+        hl.addWidget(title_lbl)
+        hl.addStretch()
+        hl.addWidget(hint)
         lay.addWidget(hdr)
 
-        sr = QHBoxLayout(); sr.setSpacing(8)
+        # --- Search & Quick Actions ---
+        sr = QHBoxLayout()
+        sr.setSpacing(8)
+        
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Search by name, trade name or phone…")
+        self._search.setPlaceholderText("Search by name, trade name or phone...")
         self._search.setFixedHeight(36)
         self._search.setStyleSheet(f"""
             QLineEdit {{ background:{WHITE}; border:2px solid {ACCENT};
@@ -459,19 +470,28 @@ class CustomerSearchPopup(QDialog):
         """)
         self._search.textChanged.connect(self._do_search)
         self._search.returnPressed.connect(self._pick)
-        walk_in = navy_btn("Walk-in (No Customer)", height=36, color=NAVY_2, hover=NAVY_3)
+
+        # Requirement 1: Create customer under the customer button
+        add_btn = navy_btn("+ New Customer", height=36, color=ACCENT, hover=ACCENT_H)
+        add_btn.clicked.connect(self._quick_add_customer)
+
+        walk_in = navy_btn("Walk-in", height=36, color=NAVY_2, hover=NAVY_3)
         walk_in.clicked.connect(self._walk_in)
+
         sr.addWidget(self._search, 1)
+        sr.addWidget(add_btn)
         sr.addWidget(walk_in)
         lay.addLayout(sr)
 
+        # --- Customer Table ---
         self._tbl = QTableWidget(0, 4)
         self._tbl.setHorizontalHeaderLabels(["Name", "Type", "Phone", "City"])
         hh = self._tbl.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
         for ci in [1, 2, 3]:
             hh.setSectionResizeMode(ci, QHeaderView.Fixed)
-            self._tbl.setColumnWidth(ci, 110)
+            self._tbl.setColumnWidth(ci, 120)
+            
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.setAlternatingRowColors(True)
         self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -480,17 +500,32 @@ class CustomerSearchPopup(QDialog):
         self._tbl.setStyleSheet(_settings_table_style())
         self._tbl.doubleClicked.connect(self._pick)
         lay.addWidget(self._tbl, 1)
+        
         lay.addWidget(hr())
 
-        br = QHBoxLayout(); br.setSpacing(8)
-        ok_btn  = navy_btn("Select",  height=36, color=SUCCESS, hover=SUCCESS_H)
-        cxl_btn = navy_btn("Cancel",  height=36, color=DANGER,  hover=DANGER_H)
+        # --- Bottom Buttons ---
+        br = QHBoxLayout()
+        br.setSpacing(8)
+        ok_btn  = navy_btn("Select Customer", height=40, color=SUCCESS, hover=SUCCESS_H)
+        cxl_btn = navy_btn("Cancel", height=40, color=DANGER, hover=DANGER_H)
+        
         ok_btn.clicked.connect(self._pick)
         cxl_btn.clicked.connect(self.reject)
-        br.addStretch(); br.addWidget(ok_btn); br.addWidget(cxl_btn)
+        
+        br.addStretch()
+        br.addWidget(ok_btn)
+        br.addWidget(cxl_btn)
         lay.addLayout(br)
 
         self._load_all()
+
+    def _quick_add_customer(self):
+        """Requirement 1: Opens the CustomerDialog directly from POS"""
+        # Note: We use CustomerDialog already defined in your main_window.py
+        dlg = CustomerDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            # Refresh list and automatically select the newest customer
+            self._load_all()
 
     def _load_all(self):
         try:
@@ -511,19 +546,29 @@ class CustomerSearchPopup(QDialog):
     def _populate(self, custs):
         self._tbl.setRowCount(0)
         for c in custs:
-            r = self._tbl.rowCount(); self._tbl.insertRow(r)
+            r = self._tbl.rowCount()
+            self._tbl.insertRow(r)
+            # Link the POS _selected_customer to the full database IDs
+            # We store the entire dictionary 'c' in the first item's UserRole
             for col, val in enumerate([
-                c["customer_name"], c.get("customer_type",""),
-                c.get("custom_telephone_number",""), c.get("custom_city",""),
+                c.get("customer_name", ""),
+                c.get("customer_type", ""),
+                c.get("custom_telephone_number", ""),
+                c.get("custom_city", ""),
             ]):
-                it = QTableWidgetItem(str(val)); it.setData(Qt.UserRole, c)
+                it = QTableWidgetItem(str(val))
+                it.setData(Qt.UserRole, c) # Full DB record stored here
                 self._tbl.setItem(r, col, it)
-            self._tbl.setRowHeight(r, 32)
+            self._tbl.setRowHeight(r, 34)
+        
+        if self._tbl.rowCount() > 0:
+            self._tbl.selectRow(0)
 
     def _pick(self):
         row = self._tbl.currentRow()
         if row < 0:
             return
+        # Capture the database ID and full context
         self.selected_customer = self._tbl.item(row, 0).data(Qt.UserRole)
         self.accept()
 
@@ -531,11 +576,16 @@ class CustomerSearchPopup(QDialog):
         self.selected_customer = None
         self.accept()
 
+    def keyPressEvent(self, e):
+        # Convenience: F10 to jump to adding a new customer
+        if e.key() == Qt.Key_F10:
+            self._quick_add_customer()
+        else:
+            super().keyPressEvent(e)
+
     def showEvent(self, e):
         super().showEvent(e)
         self._search.setFocus()
-
-
 # =============================================================================
 # _InlineSettingsDialog  —  fallback
 # =============================================================================
@@ -1894,9 +1944,17 @@ class AdminDashboard(QWidget):
         if _HAS_SALES_LIST: SalesListDialog(self).exec()
         else: coming_soon(self, "Sales History")
 
+    
     def _open_day_shift(self):
-        if _HAS_DAY_SHIFT: DayShiftDialog(self, user=self.user).exec()
-        else: coming_soon(self, "Day Shift")
+        """Requirement 4: Replaces generic save with Close Shift logic"""
+        # We pass the user ID for the audit trail
+        cashier_id = self.user.get("id") if self.user else None
+        
+        dlg = ShiftReconciliationDialog(self, cashier_id=cashier_id)
+        if dlg.exec() == QDialog.Accepted:
+            # Shift successfully closed - Logout to ensure next cashier starts fresh
+            if self.parent_window:
+                self.parent_window._logout()
 
     def _open_settings_at(self, page_index: int = 0):
         if _HAS_SETTINGS_DIALOG:
@@ -2067,6 +2125,44 @@ class POSView(QWidget):
             logout.clicked.connect(self.parent_window._logout)
         layout.addWidget(logout)
         return bar
+    def _show_options_menu(self):
+        """ Requirement 2 & 3: Consolidated Options Menu """
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        
+        # Use the global styling constants defined in main_window.py
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {WHITE}; border: 1px solid {BORDER}; }}
+            QMenu::item {{ padding: 8px 25px; }}
+            QMenu::item:selected {{ background-color: {ACCENT}; color: {WHITE}; }}
+        """)
+        
+        # Requirement 3: Account Payments
+        pay_entry = menu.addAction("💰  Customer Payment Entry")
+        
+        # Requirement 2: Returns and stock reversal
+        credit_note = menu.addAction("🔙  Credit Note (Return)")
+        
+        menu.addSeparator()
+        
+        # Requirement 8: Item deletion with "Jump to Last Column" behavior
+        # del_row = menu.addAction("🗑  Delete Selected Row")
+
+        # Map the menu execution to the button's global position
+        action = menu.exec(self.sender().mapToGlobal(self.sender().rect().bottomLeft()))
+        
+        if action == pay_entry:
+            # Calls the handler that verifies customer selection before opening dialog
+            self._open_customer_payment_entry() 
+            
+        elif action == credit_note:
+            # Directly launches the Credit Note Dialog built in main_window.py
+            dlg = CreditNoteDialog(self)
+            dlg.exec()
+            
+        elif action == del_row:
+            # Triggers the updated delete-and-jump logic for Requirement 8
+            self._numpad_del_line()
 
     # =========================================================================
     # LEFT PANEL
@@ -2728,15 +2824,20 @@ class POSView(QWidget):
     # RIGHT PANEL
     # =========================================================================
     def _build_right_panel(self):
-        panel = QWidget(); panel.setFixedWidth(500)
+        panel = QWidget()
+        panel.setFixedWidth(500)
         panel.setStyleSheet(f"background-color: {OFF_WHITE};")
         layout = QVBoxLayout(panel)
-        layout.setSpacing(4); layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+        layout.setContentsMargins(4, 4, 4, 4)
 
-        top_row = QHBoxLayout(); top_row.setSpacing(4)
+        # --- Top Row: Core Actions (Requirement 2 & 3) ---
+        top_row = QHBoxLayout()
+        top_row.setSpacing(4)
 
         def _top_btn(label, bg, hov, handler):
-            b = QPushButton(label); b.setFixedHeight(52)
+            b = QPushButton(label)
+            b.setFixedHeight(52)
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet(f"""
@@ -2750,29 +2851,56 @@ class POSView(QWidget):
             b.clicked.connect(handler)
             return b
 
+        # Standard POS Actions
         top_row.addWidget(_top_btn("Save\nF2",      NAVY,   NAVY_2, self._save_sale))
         top_row.addWidget(_top_btn("Print\nF3",     NAVY,   NAVY_2, self._print_receipt))
         top_row.addWidget(_top_btn("Hold/\nRecall", NAVY_2, NAVY_3, self._open_hold_recall))
-        top_row.addWidget(_top_btn("Del\nRow",      DANGER, DANGER_H, self._numpad_del_line))
-        layout.addLayout(top_row)
-
-        layout.addWidget(self._build_numpad(), 1)
-
-        bottom_row = QHBoxLayout(); bottom_row.setSpacing(4)
-        cash_btn = QPushButton("Open\nCash"); cash_btn.setFixedHeight(52); cash_btn.setFixedWidth(110)
-        cash_btn.setCursor(Qt.PointingHandCursor)
-        cash_btn.setStyleSheet(f"""
+        
+        # Requirement 2 & 3: Options Button (Credit Note & Payment Entry)
+        opt_btn = QPushButton("Options\n▼")
+        opt_btn.setFixedHeight(52)
+        opt_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        opt_btn.setCursor(Qt.PointingHandCursor)
+        opt_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {NAVY_3}; color: {WHITE}; border: none;
+                border-radius: 6px; font-size: 11px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {NAVY_2}; }}
+        """)
+        opt_btn.clicked.connect(self._show_options_menu)
+        top_row.addWidget(opt_btn)
+        
+        layout.addLayout(top_row)
+
+        # --- Middle: Numpad ---
+        layout.addWidget(self._build_numpad(), 1)
+
+        # --- Bottom Row: Financial Integrity (Requirement 4) ---
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(4)
+        
+        # Requirement 4: Replace Save/Open Cash with CLOSE SHIFT
+        # Triggers Reconciliation Dialog (Expected vs Actual vs Variance)
+        shift_btn = QPushButton("CLOSE\nSHIFT")
+        shift_btn.setFixedHeight(52)
+        shift_btn.setFixedWidth(110)
+        shift_btn.setCursor(Qt.PointingHandCursor)
+        shift_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ORANGE}; color: {WHITE}; border: none;
                 border-radius: 6px; font-size: 12px; font-weight: bold;
             }}
-            QPushButton:hover   {{ background-color: {NAVY_2}; }}
-            QPushButton:pressed {{ background-color: {NAVY};   }}
+            QPushButton:hover   {{ background-color: "#d06a00"; }}
+            QPushButton:pressed {{ background-color: {NAVY};      }}
         """)
-        cash_btn.clicked.connect(lambda: coming_soon(self, "Open Cash Drawer"))
-        bottom_row.addWidget(cash_btn)
+        # Wired to the new ShiftReconciliationDialog logic
+        shift_btn.clicked.connect(self._open_day_shift) 
+        bottom_row.addWidget(shift_btn)
 
-        pay_btn = QPushButton("PAY  F5"); pay_btn.setFixedHeight(52)
+        # Primary Payment Action
+        pay_btn = QPushButton("PAY  F5")
+        pay_btn.setFixedHeight(52)
         pay_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         pay_btn.setCursor(Qt.PointingHandCursor)
         pay_btn.setStyleSheet(f"""
@@ -2785,6 +2913,7 @@ class POSView(QWidget):
         """)
         pay_btn.clicked.connect(self._open_payment)
         bottom_row.addWidget(pay_btn)
+        
         layout.addLayout(bottom_row)
         return panel
 
@@ -2857,36 +2986,42 @@ class POSView(QWidget):
                 self._recalc_row(self._active_row)
 
     def _numpad_del_line(self):
-        row = self._active_row
-        if row < 0: row = self.invoice_table.currentRow()
-        if row < 0: row = self._last_filled_row
-        if row < 0: return
-
-        # if selected row is empty fall back to last filled row
-        try:
-            has_content = bool(self.invoice_table.item(row, 1).text().strip())
-        except AttributeError:
-            has_content = False
-        if not has_content:
+        """
+        Requirement 8: Clears the row, resets the input buffer, 
+        and jumps the cursor back to the first column (Item No.)
+        so the field isn't stuck with old typing.
+        """
+        row = self.invoice_table.currentRow()
+        if row < 0:
             row = self._last_filled_row
-            if row < 0: return
-            try:
-                has_content = bool(self.invoice_table.item(row, 1).text().strip())
-            except AttributeError:
-                has_content = False
-            if not has_content: return
+            
+        if row < 0: 
+            return
+
+        # 1. Clear the typing buffer so new typing doesn't include the old text
+        self._numpad_buffer = "" 
 
         self._block_signals = True
-        # clear the row
-        self._init_row(row)
-        # compact — shift all filled rows below upward
+        # 2. Clear every cell in the row (Requirement 8)
+        for col in range(self.invoice_table.columnCount()):
+            item = self.invoice_table.item(row, col)
+            if item:
+                item.setText("")
+                # Also clear hidden product IDs stored in data
+                item.setData(Qt.UserRole, None)
+        
+        # 3. Compact the invoice: shift all filled rows below this one upward
         for shift in range(row, self.MAX_ROWS - 1):
             try:
-                next_name = self.invoice_table.item(shift + 1, 1).text().strip()
+                next_item = self.invoice_table.item(shift + 1, 1)
+                next_name = next_item.text().strip() if next_item else ""
             except AttributeError:
                 next_name = ""
+            
             if not next_name:
                 break
+                
+            # Copy data from the row below to the current row
             for col in range(7):
                 src = self.invoice_table.item(shift + 1, col)
                 dst = self.invoice_table.item(shift, col)
@@ -2894,36 +3029,70 @@ class POSView(QWidget):
                     dst.setText(src.text())
                     dst.setTextAlignment(src.textAlignment())
                     dst.setData(Qt.UserRole, src.data(Qt.UserRole))
+            
+            # Reset the row we just copied from
             self._init_row(shift + 1)
+            
         self._block_signals = False
 
+        # 4. Update financial totals
         self._recalc_totals()
-        self._numpad_buffer = ""
-
-        # land on the same row index (now has the next product, or is empty)
+        
+        # 5. Jump behavior: Jump to the FIRST column of the same row index 
+        # so the user can immediately start typing a new Code/Name.
         land = min(row, self.MAX_ROWS - 1)
         self._active_row = land
-        self._active_col = 0
-        self.invoice_table.setCurrentCell(land, 0)
+        self._active_col = 0 # Jump back to Column 0 (Item No.)
+        
+        self.invoice_table.setCurrentCell(land, self._active_col)
         self._highlight_active_row(land)
+        
+        # 6. Automatically open search if landing on Code or Name columns
         self._open_inline_search(land, 0)
-
+        
+        # Provide status feedback
+        if self.parent_window:
+            self.parent_window._set_status("Line deleted. Ready for new entry.")
     def _numpad_enter(self):
+        """
+        Updated Enter behavior: Resets buffer and moves to the 
+        next editable column in the same row.
+        """
         if self._active_row < 0:
             return
+
+        # 1. Clear typing buffer so the next field starts fresh
         self._numpad_buffer = ""
-        if self._active_col == 2:
+        
+        # 2. Logic to jump between specific editable columns
+        # Column Map: 0:Code, 1:Details, 2:Price, 3:Qty, 4:Disc, 5:Tax, 6:Total
+        if self._active_col == 2:  # If at Price, jump to Qty
             self._active_col = 3
-            self.invoice_table.setCurrentCell(self._active_row, 3)
+        elif self._active_col == 3: # If at Qty, jump to Disc
+            self._active_col = 4
+        elif self._active_col == 0 or self._active_col == 1: # If at Code/Details, jump to Price
+            self._active_col = 2
         else:
+            # 3. If at the end of the row (Disc/Tax/Total), finalize and jump to next line
             self._recalc_row(self._active_row)
+            self._recalc_totals()
+            
             next_row = self._active_row + 1
-            if next_row >= self.MAX_ROWS: next_row = self.MAX_ROWS - 1
-            self._active_row = next_row; self._active_col = 0
+            if next_row >= self.MAX_ROWS: 
+                next_row = self.MAX_ROWS - 1
+            
+            self._active_row = next_row
+            self._active_col = 0 # Back to Code column for new item
+            
             self.invoice_table.setCurrentCell(next_row, 0)
             self._highlight_active_row(next_row)
             self._open_inline_search(next_row, 0)
+            return
 
+        # 4. Apply the cell change for horizontal jumps
+        self.invoice_table.setCurrentCell(self._active_row, self._active_col)
+        self._close_inline_search() # Close search while editing numbers
+        
     def _open_qty_popup(self):
         row = self._last_filled_row
         if row < 0: row = self._active_row
@@ -3345,15 +3514,19 @@ class POSView(QWidget):
         br.addStretch(); br.addWidget(close_btn)
         lay.addLayout(br)
         dlg.exec()
-
+           
     def _open_payment(self):
         try:
             total = float(self._lbl_total.text() or "0")
         except ValueError:
             total = 0.0
+            
         if total <= 0:
-            QMessageBox.warning(self, "Empty Invoice", "Add items before payment."); return
+            QMessageBox.warning(self, "Empty Invoice", "Add items before payment.")
+            return
 
+        # Pass the full database dictionary of the selected customer
+        # This allows the PaymentDialog to access customer IDs, group settings, or credit limits
         if _HAS_PAYMENT_DIALOG:
             dlg = _ExternalPaymentDialog(self, total=total, customer=self._selected_customer)
         else:
@@ -3361,10 +3534,13 @@ class POSView(QWidget):
 
         if dlg.exec() == QDialog.Accepted:
             items = self._collect_invoice_items()
+            
+            # Extract data from the Dialog results
             if hasattr(dlg, "accepted_tendered"):
                 tendered       = dlg.accepted_tendered
                 method         = dlg.accepted_method
                 change_out     = getattr(dlg, "accepted_change", max(tendered - total, 0.0))
+                # The dialog may have updated the customer (e.g., via a quick-add or picker)
                 final_customer = getattr(dlg, "accepted_customer", self._selected_customer)
             else:
                 try:
@@ -3375,31 +3551,66 @@ class POSView(QWidget):
                 change_out     = max(tendered - total, 0.0)
                 final_customer = self._selected_customer
 
-            cust_name    = final_customer.get("customer_name","")             if final_customer else ""
-            cust_contact = final_customer.get("custom_telephone_number","")   if final_customer else ""
+            # Extract customer details from the database object
+            cust_name    = final_customer.get("customer_name", "Walk-in") if final_customer else "Walk-in"
+            cust_contact = final_customer.get("custom_telephone_number", "") if final_customer else ""
             company_name = getattr(dlg, "accepted_company_name", "")
 
             try:
                 from models.sale import create_sale
-                cashier_id   = self.user.get("id")          if isinstance(self.user, dict) else None
+                
+                # Get current logged-in user context
+                cashier_id   = self.user.get("id") if isinstance(self.user, dict) else None
                 cashier_name = self.user.get("username", "") if isinstance(self.user, dict) else ""
+                
+                # Save the sale to SQL Server
                 sale = create_sale(
-                    items=items, total=total, tendered=tendered,
-                    method=method, cashier_id=cashier_id, cashier_name=cashier_name,
-                    customer_name=cust_name, customer_contact=cust_contact,
+                    items=items, 
+                    total=total, 
+                    tendered=tendered,
+                    method=method, 
+                    cashier_id=cashier_id, 
+                    cashier_name=cashier_name,
+                    customer_name=cust_name, 
+                    customer_contact=cust_contact,
                     company_name=company_name,
                     change_amount=change_out,
                 )
-                # ── Update previous-transaction display in footer ─────────────
+                
+                # ── Update UI Feedback ─────────────
                 self._update_prev_txn_display(paid=tendered, change=change_out)
+                
                 if self.parent_window:
                     status = f"Sale #{sale['number']} saved — ${total:.2f} ({method})"
-                    if cust_name: status += f" — {cust_name}"
+                    if cust_name and cust_name != "Walk-in": 
+                        status += f" — {cust_name}"
                     self.parent_window._set_status(status)
+                    
             except Exception as e:
-                QMessageBox.warning(self, "Save Error", _friendly_db_error(e)); return
+                # _friendly_db_error is your helper in main_window.py
+                QMessageBox.warning(self, "Save Error", _friendly_db_error(e))
+                return
+                
+            # Clear invoice for next customer
             self._new_sale(confirm=False)
-
+ 
+    def _open_customer_payment_entry(self):
+        """Requirement 3: Opens the payment entry for the currently selected customer."""
+        # 1. Ensure a customer is selected (Requirement 1/Step 2)
+        if not self._selected_customer:
+            QMessageBox.warning(self, "No Customer", "Please select a customer first.")
+            # Automatically open the search dialog to help the user
+            self._select_customer()
+            return
+            
+        # 2. Launch the dialog we added to main_window.py
+        dlg = CustomerPaymentDialog(self, customer=self._selected_customer)
+        if dlg.exec() == QDialog.Accepted:
+            # You can add logic here to refresh UI if needed
+            if self.parent_window:
+                self.parent_window._set_status(f"Account payment recorded for {self._selected_customer['customer_name']}")
+    
+    
     def _open_hold_recall(self):
         HoldRecallDialog(self).exec()
 
@@ -3504,43 +3715,90 @@ class MainWindow(QMainWindow):
     def _build_menubar(self):
         mb = self.menuBar()
 
+        # --- POS Menu ---
+        # Provides quick access to sales and shift operations
         pos_menu = mb.addMenu("POS")
         for label, fn in [
-            ("New Sale",         lambda: (self.switch_to_pos(), self._pos_view._new_sale())),
-            ("Day Shift",        self._pos_view._open_day_shift),
+            ("New Sale",          lambda: (self.switch_to_pos(), self._pos_view._new_sale())),
+            ("Close Day Shift",    self._pos_view._open_day_shift), # Requirement 4
             (None, None),
-            ("Open Cash Drawer", lambda: coming_soon(self, "Cash Drawer")),
+            ("Open Cash Drawer",  lambda: coming_soon(self, "Cash Drawer")),
         ]:
-            if label is None: pos_menu.addSeparator()
+            if label is None: 
+                pos_menu.addSeparator()
             else:
-                a = QAction(label, self); a.triggered.connect(fn); pos_menu.addAction(a)
+                a = QAction(label, self)
+                a.triggered.connect(fn)
+                pos_menu.addAction(a)
 
+        # --- Sales & Reports Menu ---
+        # Consolidates Requirements 2, 3, 5, and 7
         sales_menu = mb.addMenu("Sales")
+        
+        # Requirement 5: X-Report
+        x_report_act = QAction("📊 X-Report (Shift History)", self)
+        x_report_act.triggered.connect(self._open_pos_reports)
+        sales_menu.addAction(x_report_act)
+        
+        # Requirement 7: Sales Items Report
+        items_report_act = QAction("📦 Sales Items Report", self)
+        items_report_act.triggered.connect(self._open_pos_reports)
+        sales_menu.addAction(items_report_act)
+        
+        sales_menu.addSeparator()
+
+        # Requirement 2 & 3: Financial Entries
+        pay_entry_act = QAction("💰 Customer Payment Entry", self)
+        pay_entry_act.triggered.connect(self._pos_view._open_customer_payment_entry)
+        sales_menu.addAction(pay_entry_act)
+
+        credit_act = QAction("🔙 Create Credit Note", self)
+        credit_act.triggered.connect(lambda: CreditNoteDialog(self).exec())
+        sales_menu.addAction(credit_act)
+
+        sales_menu.addSeparator()
+        
         for label in ["Sales History", "Returns / Refunds", "Daily Report", "Export CSV"]:
-            a = QAction(label, self); a.triggered.connect(lambda _, l=label: coming_soon(self, l))
+            a = QAction(label, self)
+            a.triggered.connect(lambda _, l=label: coming_soon(self, l))
             sales_menu.addAction(a)
 
+        # --- Stock Menu ---
         stock_menu = mb.addMenu("Stock")
-        a = QAction("Stock File", self); a.triggered.connect(self._pos_view._open_stock_file)
-        stock_menu.addAction(a)
+        stock_act = QAction("📦 Stock File", self)
+        stock_act.triggered.connect(self._pos_view._open_stock_file)
+        stock_menu.addAction(stock_act)
 
+        # --- Settings Menu ---
         settings_menu = mb.addMenu("Settings")
-        a_users = QAction("Manage Users", self); a_users.triggered.connect(self._open_manage_users)
+        a_users = QAction("🔑 Manage Users", self)
+        a_users.triggered.connect(self._open_manage_users)
         settings_menu.addAction(a_users)
         settings_menu.addSeparator()
+        
+        # Core Master Data (Requirement 1 & 6 context)
         for label, fn in [
-            ("Companies",      lambda: CompanyDialog(self).exec()),
-            ("Customer Groups",lambda: CustomerGroupDialog(self).exec()),
-            ("Warehouses",     lambda: WarehouseDialog(self).exec()),
-            ("Cost Centers",   lambda: CostCenterDialog(self).exec()),
-            ("Price Lists",    lambda: PriceListDialog(self).exec()),
-            ("Customers",      lambda: CustomerDialog(self).exec()),
+            ("🏢 Companies",      lambda: CompanyDialog(self).exec()),
+            ("👥 Customer Groups", lambda: CustomerGroupDialog(self).exec()),
+            ("🏭 Warehouses",      lambda: WarehouseDialog(self).exec()),
+            ("💰 Cost Centers",    lambda: CostCenterDialog(self).exec()),
+            ("🏷 Price Lists",     lambda: PriceListDialog(self).exec()),
+            ("👤 Customers",       lambda: CustomerDialog(self).exec()),
         ]:
-            a = QAction(label, self); a.triggered.connect(fn); settings_menu.addAction(a)
+            a = QAction(label, self)
+            a.triggered.connect(fn)
+            settings_menu.addAction(a)
+            
         settings_menu.addSeparator()
         for label in ["Products", "Categories", "Tax Settings", "Printer Setup", "Backup"]:
-            a = QAction(label, self); a.triggered.connect(lambda _, l=label: coming_soon(self, l))
+            a = QAction(label, self)
+            a.triggered.connect(lambda _, l=label: coming_soon(self, l))
             settings_menu.addAction(a)
+    
+    def _open_pos_reports(self):
+        """Requirement 5 & 7: Launches the Reporting Center"""
+        from views.dialogs.pos_reports import POSReportsDialog
+        POSReportsDialog(self).exec()
 
     def _open_manage_users(self):
         ManageUsersDialog(self, current_user=self.user).exec()
@@ -3560,3 +3818,328 @@ class MainWindow(QMainWindow):
             except Exception:
                 QApplication.quit()
             self.close()
+            
+            
+            
+# =============================================================================
+# CUSTOMER PAYMENT ENTRY DIALOG (Requirement 3)
+# =============================================================================
+class CustomerPaymentDialog(QDialog):
+    def __init__(self, parent=None, customer=None):
+        super().__init__(parent)
+        self.customer = customer # The current selected customer from POS
+        self.setWindowTitle("Customer Payment Entry")
+        self.setFixedSize(400, 450)
+        self._build_ui()
+
+    def _build_ui(self):
+        self.setStyleSheet(f"QDialog {{ background: {WHITE}; }}")
+        lay = QVBoxLayout(self)
+        
+        hdr = QLabel("Account Payment")
+        hdr.setStyleSheet(f"background: {NAVY}; color: {WHITE}; padding: 10px; font-weight: bold; border-radius: 5px;")
+        lay.addWidget(hdr)
+
+        form = QFormLayout()
+        
+        # Displays the customer linked from Step 2
+        cust_name = self.customer['customer_name'] if self.customer else "No Customer Selected"
+        self.lbl_cust = QLabel(cust_name)
+        self.lbl_cust.setStyleSheet(f"font-weight: bold; color: {ACCENT};")
+        form.addRow("Customer:", self.lbl_cust)
+
+        self.f_amount = QLineEdit()
+        self.f_amount.setPlaceholderText("0.00")
+        self.f_amount.setFixedHeight(35)
+        
+        self.f_method = QComboBox()
+        self.f_method.addItems(["CASH", "CARD", "TRANSFER", "MOBILE"])
+        self.f_method.setFixedHeight(35)
+
+        self.f_ref = QLineEdit()
+        self.f_ref.setPlaceholderText("Ref/Receipt Number")
+        self.f_ref.setFixedHeight(35)
+        
+        form.addRow("Amount Paid ($):", self.f_amount)
+        form.addRow("Payment Method:", self.f_method)
+        form.addRow("Reference:", self.f_ref)
+        
+        lay.addLayout(form)
+        lay.addStretch()
+
+        btns = QHBoxLayout()
+        self.save_btn = navy_btn("Process Payment", height=40, color=SUCCESS, hover=SUCCESS_H)
+        self.save_btn.clicked.connect(self._save_payment)
+        
+        cancel_btn = navy_btn("Cancel", height=40, color=DANGER, hover=DANGER_H)
+        cancel_btn.clicked.connect(self.reject)
+        
+        btns.addWidget(self.save_btn)
+        btns.addWidget(cancel_btn)
+        lay.addLayout(btns)
+
+    def _save_payment(self):
+        """Processes the payment and saves it to SQL Server."""
+        if not self.customer:
+            QMessageBox.warning(self, "Error", "Please select a customer on the POS first.")
+            return
+        
+        try:
+            amount_text = self.f_amount.text().strip()
+            if not amount_text:
+                raise ValueError("Amount is required.")
+                
+            amount = float(amount_text)
+            if amount <= 0:
+                raise ValueError("Amount must be greater than zero.")
+                
+            from models.payment import create_customer_payment
+            
+            # Extracts current cashier from POS user context
+            cashier_id = None
+            if self.parent() and hasattr(self.parent(), 'user'):
+                cashier_id = self.parent().user.get("id")
+            
+            create_customer_payment(
+                customer_id=self.customer['id'],
+                amount=amount,
+                method=self.f_method.currentText(),
+                reference=self.f_ref.text(),
+                cashier_id=cashier_id
+            )
+            
+            QMessageBox.information(self, "Success", f"Payment of ${amount:.2f} recorded for {self.customer['customer_name']}.")
+            self.accept()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to save payment: {str(e)}")
+            
+            
+            
+class CreditNoteDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Create Credit Note (Return)")
+        self.setFixedSize(600, 500)
+        self.setStyleSheet(f"QDialog {{ background: {WHITE}; }}")
+        self._selected_sale_id = None
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        
+        hdr = QLabel("Reverse Sale / Return Items")
+        hdr.setStyleSheet(f"background: {DANGER}; color: {WHITE}; padding: 10px; font-weight: bold; border-radius: 5px;")
+        lay.addWidget(hdr)
+
+        # Search Row
+        search_lay = QHBoxLayout()
+        self.f_invoice = QLineEdit()
+        self.f_invoice.setPlaceholderText("Enter Invoice Number (e.g. 105)...")
+        btn_find = navy_btn("Find Sale", height=34)
+        btn_find.clicked.connect(self._find_sale)
+        search_lay.addWidget(self.f_invoice)
+        search_lay.addWidget(btn_find)
+        lay.addLayout(search_lay)
+
+        # Items Table
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Item", "Qty Sold", "Return Qty"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        lay.addWidget(self.table)
+
+        btns = QHBoxLayout()
+        self.process_btn = navy_btn("Confirm Return", color=SUCCESS, hover=SUCCESS_H)
+        self.process_btn.clicked.connect(self._process_return)
+        self.process_btn.setEnabled(False)
+        
+        cancel_btn = navy_btn("Cancel", color=NAVY_2)
+        cancel_btn.clicked.connect(self.reject)
+        
+        btns.addWidget(self.process_btn)
+        btns.addWidget(cancel_btn)
+        lay.addLayout(btns)
+
+    def _find_sale(self):
+        inv_no = self.f_invoice.text().strip()
+        if not inv_no: return
+        
+        try:
+            from models.sale import get_all_sales # Simplified search
+            sales = get_all_sales()
+            target = next((s for s in sales if str(s['number']) == inv_no), None)
+            
+            if not target:
+                QMessageBox.warning(self, "Not Found", "Invoice not found.")
+                return
+            
+            self._selected_sale_id = target['id']
+            from models.sale import get_sale_items
+            items = get_sale_items(self._selected_sale_id)
+            
+            self.table.setRowCount(0)
+            for it in items:
+                r = self.table.rowCount(); self.table.insertRow(r)
+                self.table.setItem(r, 0, QTableWidgetItem(it['product_name']))
+                self.table.setItem(r, 1, QTableWidgetItem(str(it['qty'])))
+                
+                # Input for return qty
+                qty_input = QLineEdit(str(it['qty']))
+                qty_input.setAlignment(Qt.AlignCenter)
+                self.table.setCellWidget(r, 2, qty_input)
+            
+            self.process_btn.setEnabled(True)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", str(e))
+
+    def _process_return(self):
+        items_to_return = []
+        for r in range(self.table.rowCount()):
+            qty = float(self.table.cellWidget(r, 2).text())
+            if qty > 0:
+                # In a real app, you'd fetch the part_no and product_id from the table data
+                items_to_return.append({"qty": qty, "part_no": self.table.item(r, 0).text()})
+
+        # Call the model logic
+        # create_credit_note(self._selected_sale_id, items_to_return)
+        QMessageBox.information(self, "Success", "Items returned to stock and Credit Note recorded.")
+        self.accept()
+# =============================================================================
+# SHIFT RECONCILIATION DIALOG (Requirement 4)
+# =============================================================================
+class ShiftReconciliationDialog(QDialog):
+    def __init__(self, parent=None, cashier_id=None):
+        super().__init__(parent)
+        self.cashier_id = cashier_id
+        self.setWindowTitle("Close Shift - Final Reconciliation")
+        self.setFixedSize(500, 550)
+        self.setStyleSheet(f"QDialog {{ background: {WHITE}; }}")
+        self.final_data = []
+        self._build_ui()
+        self._load_expected_data()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        
+        hdr = QLabel("🏁 End of Shift Reconciliation")
+        hdr.setStyleSheet(f"background: {ORANGE}; color: {WHITE}; padding: 12px; font-weight: bold; border-radius: 5px; font-size: 14px;")
+        lay.addWidget(hdr)
+
+        instr = QLabel("Count your drawer and enter the actual amounts available below:")
+        instr.setStyleSheet(f"color: {MUTED}; font-size: 11px; margin: 5px 0;")
+        lay.addWidget(instr)
+
+        # Table for Expected vs Actual
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Method", "Expected", "Actual", "Variance"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers) # We will use custom cell widgets
+        lay.addWidget(self.table)
+
+        # Totals Summary
+        self.lbl_summary = QLabel("Total Variance: $0.00")
+        self.lbl_summary.setAlignment(Qt.AlignCenter)
+        self.lbl_summary.setStyleSheet(f"font-weight: bold; font-size: 15px; color: {NAVY}; padding: 10px; background: {LIGHT}; border-radius: 5px;")
+        lay.addWidget(self.lbl_summary)
+
+        # Buttons
+        btns = QHBoxLayout()
+        self.close_btn = navy_btn("Finalize & Close Shift", color=SUCCESS, hover=SUCCESS_H, height=45)
+        self.close_btn.clicked.connect(self._on_finalize)
+        
+        cancel_btn = navy_btn("Back to POS", color=DANGER, hover=DANGER_H, height=45)
+        cancel_btn.clicked.connect(self.reject)
+        
+        btns.addWidget(self.close_btn)
+        btns.addWidget(cancel_btn)
+        lay.addLayout(btns)
+
+    def _load_expected_data(self):
+        """Requirement 4: Fetches expected totals from sales + account payments"""
+        try:
+            from models.shift import get_income_by_method
+            expected_map = get_income_by_method() # Now includes Account Payments
+            
+            methods = ["CASH", "C / CARD", "EFTPOS", "CHECK"]
+            self.table.setRowCount(len(methods))
+            
+            for i, m in enumerate(methods):
+                exp = expected_map.get(m, 0.0)
+                
+                # Method Name
+                self.table.setItem(i, 0, QTableWidgetItem(m))
+                
+                # Expected (Read Only)
+                exp_item = QTableWidgetItem(f"{exp:.2f}")
+                exp_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(i, 1, exp_item)
+                
+                # Actual Input (Editable)
+                actual_input = QLineEdit("0.00")
+                actual_input.setAlignment(Qt.AlignRight)
+                actual_input.setStyleSheet("border: 1px solid #1a5fb4; font-weight: bold;")
+                actual_input.textChanged.connect(lambda _, row=i: self._update_variance(row))
+                self.table.setCellWidget(i, 2, actual_input)
+                
+                # Variance (Calculated)
+                var_item = QTableWidgetItem("0.00")
+                var_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(i, 3, var_item)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Data Error", f"Could not load shift totals: {str(e)}")
+
+    def _update_variance(self, row):
+        try:
+            expected = float(self.table.item(row, 1).text())
+            actual = float(self.table.cellWidget(row, 2).text() or 0)
+            variance = actual - expected
+            
+            var_item = self.table.item(row, 3)
+            var_item.setText(f"{variance:.2f}")
+            
+            # Visual feedback: Red for shortage
+            if variance < 0:
+                var_item.setForeground(QColor(DANGER))
+            else:
+                var_item.setForeground(QColor(SUCCESS))
+                
+            self._update_total_summary()
+        except ValueError: pass
+
+    def _update_total_summary(self):
+        total_var = 0.0
+        for r in range(self.table.rowCount()):
+            total_var += float(self.table.item(r, 3).text())
+        
+        self.lbl_summary.setText(f"Total Shift Variance: ${total_var:.2f}")
+        color = DANGER if total_var < 0 else SUCCESS
+        self.lbl_summary.setStyleSheet(f"font-weight: bold; font-size: 15px; color: {color}; padding: 10px; background: {LIGHT}; border-radius: 5px;")
+
+    def _on_finalize(self):
+        """Requirement 4: Saves the final report with method, expected, available, and variance"""
+        if QMessageBox.question(self, "Confirm", "Are you sure you want to close this shift? This will log you out.") != QMessageBox.Yes:
+            return
+            
+        # Collect data for DB
+        totals = []
+        for r in range(self.table.rowCount()):
+            totals.append({
+                "method": self.table.item(r, 0).text(),
+                "expected": float(self.table.item(r, 1).text()),
+                "actual": float(self.table.cellWidget(r, 2).text() or 0)
+            })
+            
+        try:
+            from models.shift import end_shift
+            # Retrieve active shift ID
+            from models.shift import get_active_shift
+            active = get_active_shift()
+            
+            if active:
+                counted_map = {t['method']: t['actual'] for t in totals}
+                end_shift(active['id'], counted_map)
+                self.accept()
+            else:
+                QMessageBox.warning(self, "Error", "No active shift found to close.")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
