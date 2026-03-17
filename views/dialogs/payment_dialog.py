@@ -6,11 +6,11 @@ from PySide6.QtWidgets import (
     QDialog, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QFrame, QSizePolicy, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QComboBox,
 )
 from PySide6.QtCore import Qt, QLocale
-from PySide6.QtGui  import QDoubleValidator, QColor
+from PySide6.QtGui  import QDoubleValidator
 
-# ── Palette — identical to main_window.py ─────────────────────────────────────
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
 NAVY_3    = "#1e3d6e"
@@ -31,6 +31,7 @@ DANGER_H  = "#cc2828"
 ORANGE    = "#c05a00"
 
 PAYMENT_METHODS = ["CASH", "CHECK", "C / CARD", "AMEX", "DINERS", "EFTPOS"]
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -126,11 +127,16 @@ def _field_style(active):
     """
 
 
+def _section_label(text: str) -> QLabel:
+    l = QLabel(text)
+    l.setStyleSheet(
+        f"color: {MUTED}; font-size: 10px; font-weight: bold; "
+        f"letter-spacing: 0.8px; background: transparent;"
+    )
+    return l
+
+
 def _get_default_customer() -> dict | None:
-    """
-    Try to load a default customer from settings/DB.
-    Returns None if no default is configured — treated as Walk-in.
-    """
     try:
         from models.customer import get_all_customers
         custs = get_all_customers()
@@ -142,70 +148,85 @@ def _get_default_customer() -> dict | None:
     return None
 
 
+def _get_default_company() -> dict | None:
+    try:
+        from models.company import get_all_companies
+        companies = get_all_companies()
+        return companies[0] if companies else None
+    except Exception:
+        return None
+
+
+def _get_all_companies() -> list[dict]:
+    try:
+        from models.company import get_all_companies
+        return get_all_companies()
+    except Exception:
+        return []
+
+
+def _get_all_customers() -> list[dict]:
+    try:
+        from models.customer import get_all_customers
+        return get_all_customers()
+    except Exception:
+        return []
+
+
 # =============================================================================
-# INLINE CUSTOMER SEARCH  (embedded inside the payment dialog)
+# CUSTOMER PICKER DIALOG
 # =============================================================================
 
-class _CustomerPickerWidget(QWidget):
-    """
-    Compact inline customer selector embedded in the payment dialog left panel.
-    """
-    def __init__(self, parent=None, initial_customer=None):
+class _CustomerPickerDialog(QDialog):
+
+    def __init__(self, parent=None, current_customer=None):
         super().__init__(parent)
-        self.current_customer = initial_customer
+        self.setWindowTitle("Select Customer")
+        self.setFixedSize(520, 440)
+        self.setModal(True)
+        self.chosen = current_customer
+        self._all   = _get_all_customers()
         self._build()
-        if initial_customer:
-            self._update_display(initial_customer)
+        self._populate(self._all)
 
     def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setSpacing(4)
-        lay.setContentsMargins(0, 0, 0, 0)
+        self.setStyleSheet(f"QDialog {{ background: {OFF_WHITE}; }}")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
 
-        self._cust_lbl = QLabel()
-        self._cust_lbl.setFixedHeight(32)
-        self._cust_lbl.setWordWrap(False)
-        self._update_display(self.current_customer)
-        lay.addWidget(self._cust_lbl)
+        hdr = QWidget()
+        hdr.setStyleSheet(f"background: {NAVY}; border-radius: 6px;")
+        hl  = QHBoxLayout(hdr)
+        hl.setContentsMargins(14, 10, 14, 10)
+        t   = QLabel("Select Customer")
+        t.setStyleSheet(
+            f"color:{WHITE}; font-size:14px; font-weight:bold; background:transparent;"
+        )
+        hl.addWidget(t)
+        root.addWidget(hdr)
 
-        sr = QHBoxLayout(); sr.setSpacing(6)
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Search customer…")
-        self._search.setFixedHeight(30)
+        self._search.setPlaceholderText("Search by name, phone or city…")
+        self._search.setFixedHeight(36)
         self._search.setStyleSheet(f"""
             QLineEdit {{
-                background:{WHITE}; border:1px solid {BORDER}; border-radius:4px;
-                font-size:12px; padding:0 8px; color:{DARK_TEXT};
+                background:{WHITE}; border:2px solid {ACCENT};
+                border-radius:6px; font-size:13px; padding:0 10px; color:{DARK_TEXT};
             }}
-            QLineEdit:focus {{ border:2px solid {ACCENT}; }}
         """)
-        self._search.textChanged.connect(self._do_search)
-
-        walkin_btn = QPushButton("Walk-in")
-        walkin_btn.setFixedHeight(30)
-        walkin_btn.setFixedWidth(68)
-        walkin_btn.setCursor(Qt.PointingHandCursor)
-        walkin_btn.setFocusPolicy(Qt.NoFocus)
-        walkin_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{NAVY_2}; color:{WHITE}; border:none;
-                border-radius:4px; font-size:11px; font-weight:bold;
-            }}
-            QPushButton:hover {{ background:{NAVY_3}; }}
-        """)
-        walkin_btn.clicked.connect(self._set_walkin)
-        sr.addWidget(self._search, 1)
-        sr.addWidget(walkin_btn)
-        lay.addLayout(sr)
+        self._search.textChanged.connect(self._on_search)
+        root.addWidget(self._search)
 
         self._tbl = QTableWidget(0, 3)
         self._tbl.setHorizontalHeaderLabels(["Name", "Phone", "City"])
         hh = self._tbl.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
-        hh.setSectionResizeMode(1, QHeaderView.Fixed); self._tbl.setColumnWidth(1, 100)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed); self._tbl.setColumnWidth(2, 80)
+        hh.setSectionResizeMode(1, QHeaderView.Fixed)
+        self._tbl.setColumnWidth(1, 120)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed)
+        self._tbl.setColumnWidth(2, 100)
         self._tbl.verticalHeader().setVisible(False)
-        self._tbl.setMaximumHeight(130)
         self._tbl.setAlternatingRowColors(True)
         self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -213,85 +234,119 @@ class _CustomerPickerWidget(QWidget):
         self._tbl.setStyleSheet(f"""
             QTableWidget {{
                 background:{WHITE}; border:1px solid {BORDER};
-                gridline-color:{LIGHT}; font-size:12px; outline:none;
+                gridline-color:{LIGHT}; font-size:13px; outline:none;
             }}
-            QTableWidget::item           {{ padding:4px 6px; }}
-            QTableWidget::item:selected  {{ background-color:{ACCENT}; color:{WHITE}; }}
-            QTableWidget::item:alternate {{ background-color:{ROW_ALT}; }}
+            QTableWidget::item           {{ padding:7px 10px; }}
+            QTableWidget::item:selected  {{ background:{ACCENT}; color:{WHITE}; }}
+            QTableWidget::item:alternate {{ background:{ROW_ALT}; }}
             QHeaderView::section {{
-                background-color:{NAVY}; color:{WHITE};
-                padding:6px; border:none; font-size:11px; font-weight:bold;
+                background:{NAVY}; color:{WHITE}; padding:8px;
+                border:none; border-right:1px solid {NAVY_2};
+                font-size:12px; font-weight:bold;
             }}
         """)
-        self._tbl.doubleClicked.connect(self._pick_current)
-        self._tbl.hide()
-        lay.addWidget(self._tbl)
+        self._tbl.doubleClicked.connect(self._pick)
+        root.addWidget(self._tbl, 1)
 
-    def _update_display(self, customer):
-        if customer:
-            name  = customer.get("customer_name","")
-            phone = customer.get("custom_telephone_number","")
-            extra = f"  ·  {phone}" if phone else ""
-            self._cust_lbl.setText(f"👤  {name}{extra}")
-            self._cust_lbl.setStyleSheet(
-                f"background:{ACCENT}14; color:{ACCENT}; font-size:12px; "
-                f"font-weight:bold; border:1px solid {ACCENT}44; "
-                f"border-radius:4px; padding:0 8px;"
-            )
-        else:
-            self._cust_lbl.setText("👤  Walk-in  (no customer)")
-            self._cust_lbl.setStyleSheet(
-                f"background:{LIGHT}; color:{MUTED}; font-size:12px; "
-                f"border:1px solid {BORDER}; border-radius:4px; padding:0 8px;"
-            )
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
 
-    def _do_search(self, query):
+        walkin = QPushButton("Walk-in (no customer)")
+        walkin.setFixedHeight(38)
+        walkin.setCursor(Qt.PointingHandCursor)
+        walkin.setFocusPolicy(Qt.NoFocus)
+        walkin.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY_2}; color:{WHITE}; border:none;
+                border-radius:6px; font-size:12px; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{NAVY_3}; }}
+        """)
+        walkin.clicked.connect(self._set_walkin)
+
+        select_btn = QPushButton("Select  ↵")
+        select_btn.setFixedHeight(38)
+        select_btn.setFixedWidth(110)
+        select_btn.setCursor(Qt.PointingHandCursor)
+        select_btn.setFocusPolicy(Qt.NoFocus)
+        select_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{ACCENT}; color:{WHITE}; border:none;
+                border-radius:6px; font-size:12px; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{ACCENT_H}; }}
+        """)
+        select_btn.clicked.connect(self._pick)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedHeight(38)
+        cancel_btn.setFixedWidth(90)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setFocusPolicy(Qt.NoFocus)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{LIGHT}; color:{DARK_TEXT}; border:1px solid {BORDER};
+                border-radius:6px; font-size:12px;
+            }}
+            QPushButton:hover {{ background:{BORDER}; }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_row.addWidget(walkin, 1)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(select_btn)
+        root.addLayout(btn_row)
+
+    def _populate(self, customers: list[dict]):
+        self._tbl.setRowCount(0)
+        for c in customers:
+            r = self._tbl.rowCount()
+            self._tbl.insertRow(r)
+            for col, val in enumerate([
+                c.get("customer_name", ""),
+                c.get("custom_telephone_number", ""),
+                c.get("custom_city", ""),
+            ]):
+                it = QTableWidgetItem(str(val))
+                it.setData(Qt.UserRole, c)
+                self._tbl.setItem(r, col, it)
+            self._tbl.setRowHeight(r, 34)
+        if self._tbl.rowCount():
+            self._tbl.selectRow(0)
+
+    def _on_search(self, query):
         if not query.strip():
-            self._tbl.hide()
+            self._populate(self._all)
             return
         try:
-            from models.customer import search_customers, get_all_customers
-            custs = search_customers(query) if query.strip() else get_all_customers()
+            from models.customer import search_customers
+            self._populate(search_customers(query))
         except Exception:
-            custs = []
+            q = query.lower()
+            self._populate([
+                c for c in self._all
+                if q in c.get("customer_name", "").lower()
+                or q in c.get("custom_telephone_number", "").lower()
+            ])
 
-        self._tbl.setRowCount(0)
-        for c in custs[:20]:
-            r = self._tbl.rowCount(); self._tbl.insertRow(r)
-            for col, val in enumerate([
-                c.get("customer_name",""),
-                c.get("custom_telephone_number",""),
-                c.get("custom_city",""),
-            ]):
-                it = QTableWidgetItem(str(val)); it.setData(Qt.UserRole, c)
-                self._tbl.setItem(r, col, it)
-            self._tbl.setRowHeight(r, 26)
-
-        if self._tbl.rowCount() > 0:
-            self._tbl.setCurrentRow(0)
-            self._tbl.show()
-        else:
-            self._tbl.hide()
-
-    def _pick_current(self):
+    def _pick(self):
         row = self._tbl.currentRow()
         if row < 0:
             return
-        self.current_customer = self._tbl.item(row, 0).data(Qt.UserRole)
-        self._update_display(self.current_customer)
-        self._search.clear()
-        self._tbl.hide()
+        self.chosen = self._tbl.item(row, 0).data(Qt.UserRole)
+        self.accept()
 
     def _set_walkin(self):
-        self.current_customer = None
-        self._update_display(None)
-        self._search.clear()
-        self._tbl.hide()
+        self.chosen = None
+        self.accept()
 
-    def pick_from_table(self):
-        """Called by Enter key — select highlighted row."""
-        if self._tbl.isVisible():
-            self._pick_current()
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self._pick()
+        elif event.key() == Qt.Key_Escape:
+            self.reject()
+        else:
+            super().keyPressEvent(event)
 
 
 # =============================================================================
@@ -300,28 +355,33 @@ class _CustomerPickerWidget(QWidget):
 
 class PaymentDialog(QDialog):
     """
-    Navy-branded POS payment dialog with inline customer selector.
+    After accept():
+      self.accepted_method       — payment method string
+      self.accepted_tendered     — float
+      self.accepted_change       — float
+      self.accepted_customer     — customer dict or None
+      self.accepted_company      — company dict or None
+      self.accepted_company_name — str  ← pass to create_sale()
     """
 
     def __init__(self, parent=None, total: float = 0.0, customer: dict | None = None):
         super().__init__(parent)
-        self.total             = total
-        self.accepted_method   = "CASH"
-        self.accepted_tendered = 0.0
-        self.accepted_change   = 0.0
-        self.accepted_customer = None
+        self.total              = total
+        self.accepted_method    = "CASH"
+        self.accepted_tendered  = 0.0
+        self.accepted_change    = 0.0
+        self.accepted_customer  = None
+        self.accepted_company   = None
+        self.accepted_company_name = ""
 
-        if customer:
-            self._customer = customer
-        else:
-            self._customer = _get_default_customer()
-
+        self._customer      = customer or _get_default_customer()
+        self._company       = _get_default_company()
         self._active_method = "CASH"
         self._method_rows: dict[str, tuple[QPushButton, QLineEdit]] = {}
 
         self.setWindowTitle("Payment")
-        self.setMinimumSize(860, 600)
-        self.resize(920, 660)
+        self.setMinimumSize(1100, 680)
+        self.resize(1160, 720)
         self.setModal(True)
 
         self._build_ui()
@@ -341,7 +401,7 @@ class PaymentDialog(QDialog):
         outer.setSpacing(0)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        # Navy header
+        # navy header
         header = QWidget()
         header.setFixedHeight(48)
         header.setStyleSheet(f"background-color: {NAVY}; border: none;")
@@ -351,7 +411,7 @@ class PaymentDialog(QDialog):
         title.setStyleSheet(
             f"color: {WHITE}; font-size: 16px; font-weight: bold; background: transparent;"
         )
-        hint = QLabel("Click a field and type  |  numpad  |  Enter to confirm")
+        hint = QLabel("Number keys switch method  |  Enter to confirm")
         hint.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
         hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         hl.addWidget(title)
@@ -359,13 +419,13 @@ class PaymentDialog(QDialog):
         hl.addWidget(hint)
         outer.addWidget(header)
 
-        # Body
+        # body
         body = QWidget()
         body.setStyleSheet(f"background-color: {OFF_WHITE};")
         bl = QHBoxLayout(body)
         bl.setSpacing(16)
         bl.setContentsMargins(16, 14, 16, 14)
-        bl.addLayout(self._build_left(),  stretch=4)
+        bl.addLayout(self._build_left(), stretch=4)
 
         vline = QFrame()
         vline.setFrameShape(QFrame.VLine)
@@ -380,53 +440,116 @@ class PaymentDialog(QDialog):
 
     def _build_left(self):
         vbox = QVBoxLayout()
-        vbox.setSpacing(8)
+        vbox.setSpacing(6)
 
-        # ── Customer section ──────────────────────────────────────────────────
-        cust_sec = QLabel("CUSTOMER")
-        cust_sec.setStyleSheet(
-            f"color:{MUTED}; font-size:10px; font-weight:bold;"
-            " letter-spacing:0.8px; background:transparent;"
+        # ── COMPANY + CUSTOMER side by side ───────────────────────────────────
+        cc_row = QHBoxLayout()
+        cc_row.setSpacing(8)
+
+        # company column
+        co_col = QVBoxLayout()
+        co_col.setSpacing(2)
+        co_col.addWidget(_section_label("COMPANY"))
+        company_name = (
+            self._company.get("name", "—") if self._company else "No company"
         )
-        vbox.addWidget(cust_sec)
+        co_lbl = QLabel(f"🏢  {company_name}")
+        co_lbl.setFixedHeight(28)
+        co_lbl.setStyleSheet(f"""
+            background: {NAVY}; color: {WHITE};
+            font-size: 12px; font-weight: bold;
+            border-radius: 5px; padding: 0 10px;
+        """)
+        co_col.addWidget(co_lbl)
+        cc_row.addLayout(co_col, 1)
 
-        self._cust_picker = _CustomerPickerWidget(self, initial_customer=self._customer)
-        vbox.addWidget(self._cust_picker)
+        # customer column
+        cu_col = QVBoxLayout()
+        cu_col.setSpacing(2)
+        cu_col.addWidget(_section_label("CUSTOMER"))
+        self._cust_btn = QPushButton()
+        self._cust_btn.setFixedHeight(28)
+        self._cust_btn.setCursor(Qt.PointingHandCursor)
+        self._cust_btn.setFocusPolicy(Qt.NoFocus)
+        self._cust_btn.clicked.connect(self._open_customer_picker)
+        self._refresh_customer_btn()
+        cu_col.addWidget(self._cust_btn)
+        cc_row.addLayout(cu_col, 1)
 
+        vbox.addLayout(cc_row)
         vbox.addWidget(_hr())
 
-        # ── Green-on-black display ────────────────────────────────────────────
-        display_frame = QFrame()
-        display_frame.setFixedHeight(64)
-        display_frame.setStyleSheet(
-            "QFrame { background-color: #000; border: 2px solid #222; border-radius: 6px; }"
-        )
-        dfl = QHBoxLayout(display_frame)
-        dfl.setContentsMargins(14, 4, 14, 4)
-        self._display_lbl = QLabel(f"{self.total:.2f}")
-        self._display_lbl.setStyleSheet(
-            "color: #00ff44; font-size: 30px; font-weight: bold;"
-            " font-family: 'Courier New', monospace; background: transparent;"
-        )
-        self._display_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        dfl.addWidget(self._display_lbl)
-        vbox.addWidget(display_frame)
+        # ── TWO DISPLAYS ──────────────────────────────────────────────────────
+        displays = QHBoxLayout()
+        displays.setSpacing(8)
 
-        # ── Method rows ───────────────────────────────────────────────────────
+        # Total to pay — static, blue border
+        total_frame = QFrame()
+        total_frame.setFixedHeight(68)
+        total_frame.setStyleSheet(
+            f"QFrame {{ background:#000; border:2px solid {ACCENT}; border-radius:6px; }}"
+        )
+        tfl = QVBoxLayout(total_frame)
+        tfl.setContentsMargins(10, 4, 10, 4)
+        tfl.setSpacing(1)
+        cap1 = QLabel("TOTAL TO PAY")
+        cap1.setStyleSheet(
+            f"color:{ACCENT}; font-size:9px; font-weight:bold; "
+            f"letter-spacing:1px; background:transparent;"
+        )
+        cap1.setAlignment(Qt.AlignRight)
+        self._total_display = QLabel(f"{self.total:.2f}")
+        self._total_display.setStyleSheet(
+            "color:#00ff44; font-size:24px; font-weight:bold;"
+            " font-family:'Courier New',monospace; background:transparent;"
+        )
+        self._total_display.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        tfl.addWidget(cap1)
+        tfl.addWidget(self._total_display)
+        displays.addWidget(total_frame, 1)
+
+        # Change — updates as cashier types, orange border
+        tendered_frame = QFrame()
+        tendered_frame.setFixedHeight(68)
+        tendered_frame.setStyleSheet(
+            f"QFrame {{ background:#000; border:2px solid {ORANGE}; border-radius:6px; }}"
+        )
+        tndfl = QVBoxLayout(tendered_frame)
+        tndfl.setContentsMargins(10, 4, 10, 4)
+        tndfl.setSpacing(1)
+        cap2 = QLabel("CHANGE")
+        cap2.setStyleSheet(
+            f"color:{ORANGE}; font-size:9px; font-weight:bold; "
+            f"letter-spacing:1px; background:transparent;"
+        )
+        cap2.setAlignment(Qt.AlignRight)
+        self._tendered_display = QLabel("0.00")
+        self._tendered_display.setStyleSheet(
+            f"color:{ORANGE}; font-size:24px; font-weight:bold;"
+            " font-family:'Courier New',monospace; background:transparent;"
+        )
+        self._tendered_display.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        tndfl.addWidget(cap2)
+        tndfl.addWidget(self._tendered_display)
+        displays.addWidget(tendered_frame, 1)
+
+        vbox.addLayout(displays)
+
+        # ── method rows ───────────────────────────────────────────────────────
         validator = QDoubleValidator(0.0, 999999.99, 2)
         validator.setLocale(QLocale(QLocale.English))
 
         for idx, method in enumerate(PAYMENT_METHODS, 1):
             row = QWidget()
-            row.setFixedHeight(42)
+            row.setFixedHeight(38)
             row.setStyleSheet("background: transparent;")
             rl = QHBoxLayout(row)
             rl.setContentsMargins(0, 0, 0, 0)
             rl.setSpacing(8)
 
             mb = QPushButton(f"  {idx}  {method}")
-            mb.setFixedHeight(36)
-            mb.setMinimumWidth(120)
+            mb.setFixedHeight(32)
+            mb.setMinimumWidth(110)
             mb.setCursor(Qt.PointingHandCursor)
             mb.setFocusPolicy(Qt.NoFocus)
             mb.setStyleSheet(_method_btn_style(False))
@@ -434,7 +557,7 @@ class PaymentDialog(QDialog):
 
             ae = QLineEdit()
             ae.setPlaceholderText("")
-            ae.setFixedHeight(36)
+            ae.setFixedHeight(32)
             ae.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             ae.setValidator(validator)
             ae.setStyleSheet(_field_style(False))
@@ -451,24 +574,30 @@ class PaymentDialog(QDialog):
         vbox.addStretch(1)
         vbox.addWidget(_hr())
 
-        # ── Rounding & Change ─────────────────────────────────────────────────
-        for label, is_change in [("Rounding $", False), ("Change $", True)]:
+        # ── rounding & change ─────────────────────────────────────────────────
+        for label, is_change in [("Rounding $", False), ("Tendered $", True)]:
             card = QFrame()
-            card.setFixedHeight(38)
+            card.setFixedHeight(34)
             card.setStyleSheet(
-                f"QFrame {{ background-color: {WHITE}; border: 1px solid {BORDER}; border-radius: 5px; }}"
+                f"QFrame {{ background:{WHITE}; border:1px solid {BORDER}; border-radius:5px; }}"
             )
             cl = QHBoxLayout(card)
             cl.setContentsMargins(12, 0, 12, 0)
             lw = QLabel(label)
-            lw.setStyleSheet(f"color: {MUTED}; font-size: 12px; font-weight: bold; background: transparent;")
+            lw.setStyleSheet(
+                f"color:{MUTED}; font-size:12px; font-weight:bold; background:transparent;"
+            )
             vw = QLabel("0.00")
             vw.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             if is_change:
-                vw.setStyleSheet(f"color: {ORANGE}; font-size: 15px; font-weight: bold; background: transparent;")
+                vw.setStyleSheet(
+                    f"color:{ORANGE}; font-size:14px; font-weight:bold; background:transparent;"
+                )
                 self._change_lbl = vw
             else:
-                vw.setStyleSheet(f"color: {DARK_TEXT}; font-size: 13px; background: transparent;")
+                vw.setStyleSheet(
+                    f"color:{DARK_TEXT}; font-size:12px; background:transparent;"
+                )
                 self._rounding_lbl = vw
             cl.addWidget(lw)
             cl.addWidget(vw)
@@ -514,13 +643,14 @@ class PaymentDialog(QDialog):
             qb.clicked.connect(lambda _, a=qa: self._numpad_quick(a))
             grid.addWidget(qb, ri, 3)
 
-        for r in range(5): grid.setRowStretch(r, 1)
-        for c in range(4): grid.setColumnStretch(c, 1)
+        for r in range(5):
+            grid.setRowStretch(r, 1)
+        for c in range(4):
+            grid.setColumnStretch(c, 1)
 
         vbox.addLayout(grid, stretch=5)
         vbox.addWidget(_hr())
 
-        # ── Save & Print buttons ────────────────────────────────────────────────
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         bsave  = _navy_btn("💾  Save  (F2)",  color=SUCCESS, hover=SUCCESS_H, height=48)
@@ -532,6 +662,41 @@ class PaymentDialog(QDialog):
         vbox.addLayout(btn_row, stretch=1)
 
         return vbox
+
+    # ── Customer picker ───────────────────────────────────────────────────────
+
+    def _open_customer_picker(self):
+        dlg = _CustomerPickerDialog(self, current_customer=self._customer)
+        if dlg.exec() == QDialog.Accepted:
+            self._customer = dlg.chosen
+            self._refresh_customer_btn()
+
+    def _refresh_customer_btn(self):
+        if self._customer:
+            name  = self._customer.get("customer_name", "")
+            phone = self._customer.get("custom_telephone_number", "")
+            extra = f"   ·   {phone}" if phone else ""
+            self._cust_btn.setText(f"👤  {name}{extra}   ▾")
+            self._cust_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {ACCENT}; color: {WHITE};
+                    border: none; border-radius: 5px;
+                    font-size: 12px; font-weight: bold;
+                    text-align: left; padding: 0 10px;
+                }}
+                QPushButton:hover {{ background: {ACCENT_H}; }}
+            """)
+        else:
+            self._cust_btn.setText("👤  Walk-in   ▾")
+            self._cust_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {LIGHT}; color: {MUTED};
+                    border: 1px solid {BORDER}; border-radius: 5px;
+                    font-size: 12px;
+                    text-align: left; padding: 0 10px;
+                }}
+                QPushButton:hover {{ background: {BORDER}; }}
+            """)
 
     # ── Method management ─────────────────────────────────────────────────────
 
@@ -589,13 +754,12 @@ class PaymentDialog(QDialog):
         except ValueError:
             tendered = 0.0
 
-        self._display_lbl.setText(
-            f"{tendered:.2f}" if tendered > 0 else f"{self.total:.2f}"
-        )
         change = tendered - self.total
-        self._change_lbl.setText(
-            f"{change:.2f}" if tendered > 0 else f"{-self.total:.2f}"
-        )
+        self._tendered_display.setText(f"{change:.2f}" if tendered > 0 else "0.00")
+        self._total_display.setText(f"{self.total:.2f}")
+
+        self._change_lbl.setText(f"{tendered:.2f}" if tendered > 0 else "0.00")
+
         if tendered > 0:
             rounded = round(tendered * 20) / 20
             self._rounding_lbl.setText(f"{rounded - tendered:.2f}")
@@ -614,25 +778,26 @@ class PaymentDialog(QDialog):
         tendered = self._get_tendered()
         if tendered <= 0:
             QMessageBox.warning(self, "No Amount", "Please enter the tendered amount.")
+            self._active_field().setFocus()
             return
         if tendered < self.total:
-            if QMessageBox.question(
+            QMessageBox.warning(
                 self, "Insufficient Amount",
                 f"Tendered ${tendered:.2f} is less than total ${self.total:.2f}.\n"
-                "Confirm partial payment?",
-                QMessageBox.Yes | QMessageBox.No,
-            ) != QMessageBox.Yes:
-                return
+                "Please enter the full amount or more."
+            )
+            self._active_field().setFocus()
+            self._active_field().selectAll()
+            return
 
-        self.accepted_method   = self._active_method
-        self.accepted_tendered = tendered
-        self.accepted_change   = max(tendered - self.total, 0.0)
-        self.accepted_customer = self._cust_picker.current_customer
-
-        self._method = self._active_method
-        _t = tendered
-        self._amt = type("_Amt", (), {"text": lambda s, t=_t: str(t)})()
-
+        self.accepted_method       = self._active_method
+        self.accepted_tendered     = tendered
+        self.accepted_change       = max(tendered - self.total, 0.0)
+        self.accepted_customer     = self._customer
+        self.accepted_company      = self._company
+        self.accepted_company_name = (
+            self._company.get("name", "") if self._company else ""
+        )
         self.accept()
 
     def _print(self):
@@ -645,28 +810,19 @@ class PaymentDialog(QDialog):
         key = event.key()
 
         if key == Qt.Key_F2:
-            self._save();  return
+            self._save()
+            return
         if key == Qt.Key_F3:
-            self._print(); return
+            self._print()
+            return
         if key in (Qt.Key_Return, Qt.Key_Enter):
-            if self._cust_picker._tbl.isVisible():
-                self._cust_picker.pick_from_table()
-                return
             self._save()
             return
         if key == Qt.Key_Escape:
-            if self._cust_picker._tbl.isVisible():
-                self._cust_picker._tbl.hide()
-                self._cust_picker._search.clear()
-                return
             self.reject()
             return
 
         focused = self.focusWidget()
-        if focused is self._cust_picker._search:
-            super().keyPressEvent(event)
-            return
-
         is_editing = isinstance(focused, QLineEdit) and focused.text()
         if not is_editing:
             method_keys = {

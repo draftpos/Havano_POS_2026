@@ -1992,7 +1992,7 @@ class POSView(QWidget):
         layout.addWidget(_npb("Settings",  self._open_settings))
         layout.addSpacing(10)
 
-        f7_btn = QPushButton("F7  Sales"); f7_btn.setFixedHeight(26); f7_btn.setCursor(Qt.PointingHandCursor)
+        f7_btn = QPushButton("Sales invoice"); f7_btn.setFixedHeight(26); f7_btn.setCursor(Qt.PointingHandCursor)
         f7_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {ACCENT}; color: {WHITE}; border: none;
@@ -2543,25 +2543,87 @@ class POSView(QWidget):
                 except ValueError:
                     current_qty = 0.0
                 new_qty = current_qty + 1
+
+                # ── Collect this row's data so we can move it ─────────────────
+                def _cell_text(row, col):
+                    it = self.invoice_table.item(row, col)
+                    return it.text() if it else ""
+                def _cell_data(row, col):
+                    it = self.invoice_table.item(row, col)
+                    return it.data(Qt.UserRole) if it else None
+
+                saved_part_no    = _cell_text(r, 0)
+                saved_pid        = _cell_data(r, 0)
+                saved_name       = _cell_text(r, 1)
+                saved_price      = _cell_text(r, 2)
+                saved_disc       = _cell_text(r, 4)
+                saved_tax        = _cell_text(r, 5)
+
+                # ── Remove this row and compact upward ────────────────────────
                 self._block_signals = True
-                qty_item = self.invoice_table.item(r, 3)
+                self._init_row(r)
+                # Shift all filled rows above the gap down by one
+                for shift in range(r, self.MAX_ROWS - 1):
+                    try:
+                        next_name = self.invoice_table.item(shift + 1, 1).text().strip()
+                    except AttributeError:
+                        next_name = ""
+                    if not next_name:
+                        break
+                    # copy shift+1 → shift
+                    for col in range(7):
+                        src = self.invoice_table.item(shift + 1, col)
+                        dst = self.invoice_table.item(shift, col)
+                        if src and dst:
+                            dst.setText(src.text())
+                            dst.setTextAlignment(src.textAlignment())
+                            dst.setData(Qt.UserRole, src.data(Qt.UserRole))
+                    # clear the row we just copied from
+                    self._init_row(shift + 1)
+                self._block_signals = False
+
+                # ── Find last filled row after compaction ─────────────────────
+                last_filled = -1
+                for scan in range(self.MAX_ROWS):
+                    try:
+                        if self.invoice_table.item(scan, 1).text().strip():
+                            last_filled = scan
+                    except AttributeError:
+                        pass
+
+                dest = last_filled + 1 if last_filled + 1 < self.MAX_ROWS else last_filled
+
+                # ── Write to destination row ──────────────────────────────────
+                self._block_signals = True
+                self._init_row(dest, part_no=saved_part_no, details=saved_name,
+                               qty=f"{new_qty:.4g}", amount=saved_price,
+                               disc=saved_disc or "0.00", tax=saved_tax)
+                item0 = self.invoice_table.item(dest, 0)
+                if item0:
+                    item0.setData(Qt.UserRole, saved_pid)
+                qty_item = self.invoice_table.item(dest, 3)
                 if qty_item:
-                    qty_item.setText(f"{new_qty:.4g}")
                     qty_item.setTextAlignment(Qt.AlignCenter)
                 self._block_signals = False
-                self._recalc_row(r)
-                self._active_row      = r
+
+                self._recalc_row(dest)
+                self._recalc_totals()
+                self._active_row      = dest
                 self._active_col      = 3
-                self._last_filled_row = r
+                self._last_filled_row = dest
                 self._numpad_buffer   = ""
-                self.invoice_table.setCurrentCell(r, 3)
-                self._highlight_active_row(r)
+                self.invoice_table.setCurrentCell(dest, 3)
+                self.invoice_table.scrollToItem(
+                    self.invoice_table.item(dest, 3),
+                    QAbstractItemView.PositionAtBottom
+                )
+                self._highlight_active_row(dest)
                 self.invoice_table.setFocus()
                 if self.parent_window:
                     self.parent_window._set_status(f"{name}  ×{new_qty:.4g}  @ ${price:.2f}")
-                # Open inline search on the NEXT empty row so cursor moves down
+                # Open inline search on the NEXT empty row
                 next_r = self._find_next_empty_row()
-                if next_r != r:
+                if next_r != dest:
                     self._active_row = next_r
                     self._active_col = 0
                     self.invoice_table.setCurrentCell(next_r, 0)
@@ -2581,6 +2643,10 @@ class POSView(QWidget):
         self._last_filled_row = r
         self._numpad_buffer   = ""
         self._highlight_active_row(r)
+        self.invoice_table.scrollToItem(
+            self.invoice_table.item(r, 1),
+            QAbstractItemView.PositionAtBottom
+        )
         self.invoice_table.setFocus()
         if self.parent_window:
             self.parent_window._set_status(f"Added: {name} @ ${price:.2f}")
@@ -2793,13 +2859,54 @@ class POSView(QWidget):
     def _numpad_del_line(self):
         row = self._active_row
         if row < 0: row = self.invoice_table.currentRow()
+        if row < 0: row = self._last_filled_row
         if row < 0: return
+
+        # if selected row is empty fall back to last filled row
+        try:
+            has_content = bool(self.invoice_table.item(row, 1).text().strip())
+        except AttributeError:
+            has_content = False
+        if not has_content:
+            row = self._last_filled_row
+            if row < 0: return
+            try:
+                has_content = bool(self.invoice_table.item(row, 1).text().strip())
+            except AttributeError:
+                has_content = False
+            if not has_content: return
+
         self._block_signals = True
+        # clear the row
         self._init_row(row)
+        # compact — shift all filled rows below upward
+        for shift in range(row, self.MAX_ROWS - 1):
+            try:
+                next_name = self.invoice_table.item(shift + 1, 1).text().strip()
+            except AttributeError:
+                next_name = ""
+            if not next_name:
+                break
+            for col in range(7):
+                src = self.invoice_table.item(shift + 1, col)
+                dst = self.invoice_table.item(shift, col)
+                if src and dst:
+                    dst.setText(src.text())
+                    dst.setTextAlignment(src.textAlignment())
+                    dst.setData(Qt.UserRole, src.data(Qt.UserRole))
+            self._init_row(shift + 1)
         self._block_signals = False
+
         self._recalc_totals()
-        self._numpad_buffer = ""; self._active_row = -1; self._active_col = -1
-        self.invoice_table.setCurrentCell(row, 0)
+        self._numpad_buffer = ""
+
+        # land on the same row index (now has the next product, or is empty)
+        land = min(row, self.MAX_ROWS - 1)
+        self._active_row = land
+        self._active_col = 0
+        self.invoice_table.setCurrentCell(land, 0)
+        self._highlight_active_row(land)
+        self._open_inline_search(land, 0)
 
     def _numpad_enter(self):
         if self._active_row < 0:
@@ -3128,12 +3235,7 @@ class POSView(QWidget):
     def _open_sales_list(self):
         if _HAS_SALES_LIST:
             dlg = SalesListDialog(self)
-            if dlg.exec() == QDialog.Accepted and dlg.selected_sale:
-                self._new_sale(confirm=False)
-                for item in dlg.selected_items:
-                    self._add_product_to_invoice(
-                        name=item["product_name"], price=item["price"], part_no=item["part_no"],
-                    )
+            dlg.show()
         else:
             coming_soon(self, "Sales List — add views/dialogs/sales_list_dialog.py")
 
@@ -3275,6 +3377,7 @@ class POSView(QWidget):
 
             cust_name    = final_customer.get("customer_name","")             if final_customer else ""
             cust_contact = final_customer.get("custom_telephone_number","")   if final_customer else ""
+            company_name = getattr(dlg, "accepted_company_name", "")
 
             try:
                 from models.sale import create_sale
@@ -3284,6 +3387,7 @@ class POSView(QWidget):
                     items=items, total=total, tendered=tendered,
                     method=method, cashier_id=cashier_id, cashier_name=cashier_name,
                     customer_name=cust_name, customer_contact=cust_contact,
+                    company_name=company_name,
                     change_amount=change_out,
                 )
                 # ── Update previous-transaction display in footer ─────────────
@@ -3336,7 +3440,9 @@ class POSView(QWidget):
         elif key == Qt.Key_F3:     self._print_receipt()
         elif key == Qt.Key_F5:     self._open_payment()
         elif key == Qt.Key_F7:     self._open_sales_list()
-        elif key == Qt.Key_Delete: self._numpad_del_line()
+        elif key == Qt.Key_Delete:
+            self._active_row = self.invoice_table.currentRow()
+            self._numpad_del_line()
         elif key == Qt.Key_Escape: self._numpad_clear()
         else: super().keyPressEvent(event)
 

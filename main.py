@@ -1,6 +1,7 @@
 # main.py
 import sys
 from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtGui import QIcon
 from views.main_window import MainWindow
 from views.login_dialog import LoginDialog
 from database.db import get_connection   # confirms DB is reachable on startup
@@ -15,6 +16,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon("assets/erp.jpg"))
 
     app.setStyleSheet("""
         QMainWindow { background-color: #1e1e2e; }

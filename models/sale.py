@@ -39,7 +39,8 @@ _SALE_SELECT = """
            s.cashier_name,
            s.synced,
            COALESCE(s.total_items, 0)   AS total_items,
-           COALESCE(s.change_amount, 0) AS change_amount
+           COALESCE(s.change_amount, 0) AS change_amount,
+           COALESCE(s.company_name, '') AS company_name
     FROM sales s
     LEFT JOIN users u ON u.id = s.cashier_id
 """
@@ -129,6 +130,7 @@ def create_sale(
     cashier_name:     str   = "",
     customer_name:    str   = "",
     customer_contact: str   = "",
+    company_name:     str   = "",        # ← new
     kot:              str   = "",
     currency:         str   = "USD",
     subtotal:         float = None,
@@ -136,7 +138,7 @@ def create_sale(
     discount_amount:  float = 0.0,
     receipt_type:     str   = "Invoice",
     footer:           str   = "",
-    change_amount:    float = None,   # calculated automatically if not supplied
+    change_amount:    float = None,
 ) -> dict:
     from datetime import date
 
@@ -145,11 +147,8 @@ def create_sale(
     invoice_date  = date.today().isoformat()
     effective_sub = subtotal if subtotal is not None else total
 
-    # Calculate total_items (sum of qty across all line-items)
     total_items_val = sum(float(it.get("qty", 1)) for it in items)
-
-    # Calculate change
-    change_val = change_amount if change_amount is not None else max(float(tendered) - float(total), 0.0)
+    change_val      = change_amount if change_amount is not None else max(float(tendered) - float(total), 0.0)
 
     conn = get_connection()
     cur  = conn.cursor()
@@ -159,17 +158,19 @@ def create_sale(
             invoice_number, invoice_no, invoice_date,
             total, tendered, method, cashier_id,
             cashier_name, customer_name, customer_contact,
+            company_name,
             kot, currency,
             subtotal, total_vat, discount_amount,
             receipt_type, footer, synced,
             total_items, change_amount
         )
         OUTPUT INSERTED.id
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         seq, invoice_no, invoice_date,
         float(total), float(tendered), method, cashier_id,
         cashier_name, customer_name, customer_contact,
+        company_name,                                    # ← new
         kot, currency,
         float(effective_sub), float(total_vat), float(discount_amount),
         receipt_type, footer, 0,
@@ -209,9 +210,7 @@ def create_sale(
     return get_sale_by_id(sale_id)
 
 
-
 def get_unsynced_sales() -> list[dict]:
-    """Return all sales that have not yet been synced (synced = 0)."""
     conn = get_connection()
     cur  = conn.cursor()
     cur.execute(_SALE_SELECT + " WHERE s.synced = 0 ORDER BY s.id")
@@ -221,7 +220,6 @@ def get_unsynced_sales() -> list[dict]:
 
 
 def mark_synced(sale_id: int) -> bool:
-    """Mark a single sale as synced."""
     conn = get_connection()
     cur  = conn.cursor()
     cur.execute("UPDATE sales SET synced = 1 WHERE id = ?", (sale_id,))
@@ -232,7 +230,6 @@ def mark_synced(sale_id: int) -> bool:
 
 
 def mark_many_synced(sale_ids: list[int]) -> int:
-    """Mark multiple sales as synced. Returns count updated."""
     if not sale_ids:
         return 0
     conn = get_connection()
@@ -256,7 +253,7 @@ def delete_sale(sale_id: int) -> bool:
 
 
 # =============================================================================
-# MIGRATION  —  run once to create tables in SQL Server
+# MIGRATION
 # =============================================================================
 
 def migrate():
@@ -279,6 +276,7 @@ def migrate():
             cashier_name     NVARCHAR(120) NOT NULL DEFAULT '',
             customer_name    NVARCHAR(120) NOT NULL DEFAULT '',
             customer_contact NVARCHAR(80)  NOT NULL DEFAULT '',
+            company_name     NVARCHAR(120) NOT NULL DEFAULT '',
             kot              NVARCHAR(40)  NOT NULL DEFAULT '',
             currency         NVARCHAR(10)  NOT NULL DEFAULT 'USD',
             subtotal         DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -288,15 +286,17 @@ def migrate():
             footer           NVARCHAR(MAX) NOT NULL DEFAULT '',
             created_at       DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
             total_items      DECIMAL(12,4) NOT NULL DEFAULT 0,
-            change_amount    DECIMAL(12,2) NOT NULL DEFAULT 0
+            change_amount    DECIMAL(12,2) NOT NULL DEFAULT 0,
+            synced           INT           NOT NULL DEFAULT 0
         )
     """)
 
-    # ── Add new columns to existing tables (safe ALTER for upgrades) ──────────
+    # ── Safe ALTER for upgrades — adds any missing columns ────────────────────
     for col, definition in [
         ("total_items",   "DECIMAL(12,4) NOT NULL DEFAULT 0"),
         ("change_amount", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
         ("synced",        "INT NOT NULL DEFAULT 0"),
+        ("company_name",  "NVARCHAR(120) NOT NULL DEFAULT ''"),   # ← new
     ]:
         cur.execute(f"""
             IF NOT EXISTS (
@@ -372,12 +372,13 @@ def _sale_to_dict(row: dict) -> dict:
         "total":            float(row["total"]),
         "tendered":         float(row["tendered"]),
         "method":           row["method"] or "Cash",
-        "amount":           float(row["total"]),   # alias for SalesListDialog
+        "amount":           float(row["total"]),
         "invoice_no":       row["invoice_no"]       or "",
         "invoice_date":     row["invoice_date"]     or "",
         "kot":              row["kot"]              or "",
         "customer_name":    row["customer_name"]    or "",
         "customer_contact": row["customer_contact"] or "",
+        "company_name":     row["company_name"]     or "",   # ← new
         "currency":         row["currency"]         or "USD",
         "subtotal":         float(row["subtotal"]        or 0),
         "total_vat":        float(row["total_vat"]       or 0),
