@@ -1,0 +1,101 @@
+{
+  "doc_type": "receipt",
+  "receiptType": "Sales",
+  "companyLogoPath": "",
+  "companyName": "Havano Retail Store",
+  "KOT": "",
+  "companyAddress": "",
+  "companyAddressLine1": "",
+  "companyAddressLine2": "",
+  "city": "",
+  "state": "",
+  "postcode": "",
+  "cashier": "",
+  "contact": "",
+  "companyEmail": "",
+  "tin": "",
+  "vatNo": "",
+  "tel": "",
+  "invoiceNo": "ACC-SINV-2026-00048",
+  "invoiceDate": "2026-03-17",
+  "cashierName": "admin",
+  "customerName": "Walk-in",
+  "customerContact": "",
+  "customerTradeName": "",
+  "customerEmail": "",
+  "customerTin": "",
+  "customerVat": "",
+  "customeraddress": "",
+  "amountTendered": 80.0,
+  "change": 64.0,
+  "qrCodePath": "",
+  "qrCodePath2": "",
+  "currency": "USD",
+  "footer": "Thank you for your purchase!",
+  "multiCurrencyDetails": [],
+  "deviceId": "",
+  "fiscalDay": "",
+  "deviceSerial": "",
+  "receiptNo": "",
+  "customerRef": "",
+  "vCode": "",
+  "qrCode": "",
+  "discAmt": 0.0,
+  "grandTotal": 16.0,
+  "subtotal": 16.0,
+  "totalVat": 0.0,
+  "taxType": "",
+  "paymentMode": "CASH",
+  "items": [
+    {
+      "productName": "Sugar 2kg",
+      "productid": "GR002",
+      "qty": 1.0,
+      "price": 2.0,
+      "amount": 2.0,
+      "tax_amount": 0.0
+    },
+    {
+      "productName": "Rice 5kg",
+      "productid": "GR004",
+      "qty": 1.0,
+      "price": 6.0,
+      "amount": 6.0,
+      "tax_amount": 0.0
+    },
+    {
+      "productName": "Maize Meal 10kg",
+      "productid": "GR005",
+      "qty": 1.0,
+      "price": 8.0,
+      "amount": 8.0,
+      "tax_amount": 0.0
+    }
+  ],
+  "itemlist": [
+    {
+      "productName": "Sugar 2kg",
+      "productid": "GR002",
+      "qty": 1.0,
+      "price": 2.0,
+      "amount": 2.0,
+      "tax_amount": 0.0
+    },
+    {
+      "productName": "Rice 5kg",
+      "productid": "GR004",
+      "qty": 1.0,
+      "price": 6.0,
+      "amount": 6.0,
+      "tax_amount": 0.0
+    },
+    {
+      "productName": "Maize Meal 10kg",
+      "productid": "GR005",
+      "qty": 1.0,
+      "price": 8.0,
+      "amount": 8.0,
+      "tax_amount": 0.0
+    }
+  ]
+}
