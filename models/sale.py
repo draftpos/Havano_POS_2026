@@ -1,9 +1,15 @@
 # =============================================================================
-# models/sale.py  —  SQL Server version
+# models/sale.py  —  SQL Server version (FIXED WITH PRINTING)
 # =============================================================================
 
 from database.db import get_connection, fetchall_dicts, fetchone_dict
-from models.product import adjust_stock
+from models.product import adjust_stock, get_product_by_id
+from models.receipt import ReceiptData, Item
+from services.printing_service import printing_service
+
+from datetime import date
+import os
+import json
 
 
 # =============================================================================
@@ -11,7 +17,6 @@ from models.product import adjust_stock
 # =============================================================================
 
 def _format_invoice_no(seq: int) -> str:
-    from datetime import date
     return f"ACC-SINV-{date.today().year}-{seq:05d}"
 
 
@@ -234,7 +239,63 @@ def create_sale(
 
     conn.commit()
     conn.close()
-    return get_sale_by_id(sale_id)
+
+    # ── FETCH SALE FOR PRINTING ─────────────────────────────
+    sale = get_sale_by_id(sale_id)
+
+    # ── PRINTING ─────────────────────────────────────────────
+    active_printers = _get_active_printers()
+
+    if active_printers and sale:
+        try:
+            receipt = ReceiptData(
+                invoiceNo=sale["invoice_no"],
+                invoiceDate=sale["invoice_date"],
+                companyName=sale.get("company_name", "Havano POS"),
+                cashierName=sale.get("cashier_name", cashier_name),
+                customerName=sale.get("customer_name", customer_name),
+                customerContact=sale.get("customer_contact", customer_contact),
+                amountTendered=float(tendered),
+                change=float(sale.get("change_amount", 0)),
+                grandTotal=float(total),
+                subtotal=float(sale.get("subtotal", effective_sub)),
+                totalVat=float(sale.get("total_vat", 0)),
+                currency=currency,
+                footer=footer or "Thank you for your purchase!",
+                KOT=kot or "",
+                paymentMode=method,
+            )
+
+            for it in sale.get("items", []):
+                receipt.items.append(Item(
+                    productName=it["product_name"],
+                    productid=it.get("part_no", ""),
+                    qty=float(it["qty"]),
+                    price=float(it["price"]),
+                    amount=float(it["total"]),
+                    tax_amount=float(it.get("tax_amount", 0))
+                ))
+
+            for printer_name in active_printers:
+                try:
+                    success = printing_service.print_receipt(receipt, printer_name=printer_name)
+                    if success:
+                        print(f"✅ Receipt printed successfully → {printer_name}")
+                    else:
+                        print(f"⚠️ Print failed on {printer_name}")
+                except Exception as e:
+                    print(f"❌ Printer error on {printer_name}: {e}")
+
+        except Exception as e:
+            print(f"❌ PRINT ERROR: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    else:
+        print("⚠️ No active printers configured")
+
+    return sale
+
 
 
 def mark_synced(sale_id: int) -> bool:
@@ -331,7 +392,6 @@ def migrate():
         )
     """)
 
-    # ── Safe ALTER for upgrades — adds any missing columns ────────────────────
     for col, definition in [
         ("total_items",   "DECIMAL(12,4) NOT NULL DEFAULT 0"),
         ("change_amount", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
@@ -452,6 +512,31 @@ def _item_to_dict(row: dict) -> dict:
     }
 
 
+# =============================================================================
+# GET ACTIVE PRINTERS
+# =============================================================================
+def _get_active_printers() -> list[str]:
+    hw_file = os.path.join(os.path.dirname(__file__), "..", "hardware_settings.json")
+
+    try:
+        with open(hw_file, "r", encoding="utf-8") as f:
+            hw = json.load(f)
+
+        printers = []
+
+        if hw.get("main_printer") and hw["main_printer"] != "(None)":
+            printers.append(hw["main_printer"])
+
+        for station in hw.get("orders", {}).values():
+            if station.get("active") and station.get("printer") != "(None)":
+                printers.append(station["printer"])
+
+        return list(dict.fromkeys(printers))
+
+    except:
+        return []
+
+
 def create_credit_note(original_sale_id: int, items_to_return: list[dict]) -> bool:
     """
     Processes a return.
@@ -463,8 +548,11 @@ def create_credit_note(original_sale_id: int, items_to_return: list[dict]) -> bo
     cur  = conn.cursor()
     try:
         for item in items_to_return:
+            # 1. Add the quantity back to inventory
             if item.get("product_id"):
                 adjust_stock(item["product_id"], float(item["qty"]))
+            
+            # 2. Record the credit note entry
             cur.execute("""
                 INSERT INTO credit_notes (original_sale_id, part_no, qty, reason, created_at)
                 VALUES (?, ?, ?, ?, GETDATE())
@@ -474,6 +562,7 @@ def create_credit_note(original_sale_id: int, items_to_return: list[dict]) -> bo
                 item["qty"],
                 item.get("reason", "Customer Return"),
             ))
+            
         conn.commit()
         return True
     except Exception as e:

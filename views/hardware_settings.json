@@ -14,12 +14,12 @@
       "printer": "XP-80C"
     },
     "Order 4": {
-      "active": true,
-      "printer": "XP-80C"
+      "active": false,
+      "printer": "(None)"
     },
     "Order 5": {
-      "active": true,
-      "printer": "XP-80C"
+      "active": false,
+      "printer": "(None)"
     },
     "Order 6": {
       "active": false,

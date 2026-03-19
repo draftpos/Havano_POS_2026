@@ -1,0 +1,16 @@
+{
+    "contentFontName": "Arial",
+    "contentFontSize": 10,
+    "contentFontStyle": "Regular",
+    "contentHeaderFontName": "Arial",
+    "contentHeaderSize": 11,
+    "contentHeaderStyle": "Bold",
+    "subheaderFontName": "Times New Roman",
+    "subheaderSize": 10,
+    "subheaderStyle": "Bold",
+    "orderContentFontName": "Arial",
+    "orderContentFontSize": 10,
+    "orderContentStyle": "Bold",
+    "logoDirectory": "",
+    "charactersPerLine": 48
+}
