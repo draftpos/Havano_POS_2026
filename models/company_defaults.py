@@ -1,0 +1,108 @@
+# =============================================================================
+# models/company_defaults.py
+# =============================================================================
+
+from database.db import get_connection, fetchone_dict
+
+_BLANK = {
+    # Editable — receipt header
+    "company_name": "", "address_1": "", "address_2": "",
+    "email": "", "phone": "", "vat_number": "", "tin_number": "",
+    # Editable — receipt footer
+    "footer_text": "",
+    # Editable — ZIMRA
+    "zimra_serial_no": "", "zimra_device_id": "",
+    "zimra_api_key": "", "zimra_api_url": "",
+    # Read-only — from login
+    "server_company": "", "server_warehouse": "", "server_cost_center": "",
+    "server_username": "", "server_email": "", "server_role": "",
+    "server_full_name": "", "server_first_name": "", "server_last_name": "",
+    "server_mobile": "", "server_profile": "", "server_vat_enabled": "",
+}
+
+
+def get_defaults() -> dict:
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute("SELECT TOP 1 * FROM company_defaults ORDER BY id")
+        row = fetchone_dict(cur)
+    except Exception:
+        row = None
+    finally:
+        conn.close()
+
+    if not row:
+        return dict(_BLANK)
+
+    result = dict(_BLANK)
+    for key in _BLANK:
+        result[key] = str(row.get(key) or "")
+    return result
+
+
+def save_defaults(data: dict) -> None:
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute("""
+            IF NOT EXISTS (SELECT 1 FROM company_defaults)
+                INSERT INTO company_defaults DEFAULT VALUES
+        """)
+        cur.execute("""
+            UPDATE company_defaults SET
+                company_name        = ?,
+                address_1           = ?,
+                address_2           = ?,
+                email               = ?,
+                phone               = ?,
+                vat_number          = ?,
+                tin_number          = ?,
+                footer_text         = ?,
+                zimra_serial_no     = ?,
+                zimra_device_id     = ?,
+                zimra_api_key       = ?,
+                zimra_api_url       = ?,
+                server_company      = ?,
+                server_warehouse    = ?,
+                server_cost_center  = ?,
+                server_username     = ?,
+                server_email        = ?,
+                server_role         = ?,
+                server_full_name    = ?,
+                server_first_name   = ?,
+                server_last_name    = ?,
+                server_mobile       = ?,
+                server_profile      = ?,
+                server_vat_enabled  = ?,
+                updated_at          = GETDATE()
+            WHERE id = (SELECT MIN(id) FROM company_defaults)
+        """, (
+            str(data.get("company_name",       "")),
+            str(data.get("address_1",          "")),
+            str(data.get("address_2",          "")),
+            str(data.get("email",              "")),
+            str(data.get("phone",              "")),
+            str(data.get("vat_number",         "")),
+            str(data.get("tin_number",         "")),
+            str(data.get("footer_text",        "")),
+            str(data.get("zimra_serial_no",    "")),
+            str(data.get("zimra_device_id",    "")),
+            str(data.get("zimra_api_key",      "")),
+            str(data.get("zimra_api_url",      "")),
+            str(data.get("server_company",     "")),
+            str(data.get("server_warehouse",   "")),
+            str(data.get("server_cost_center", "")),
+            str(data.get("server_username",    "")),
+            str(data.get("server_email",       "")),
+            str(data.get("server_role",        "")),
+            str(data.get("server_full_name",   "")),
+            str(data.get("server_first_name",  "")),
+            str(data.get("server_last_name",   "")),
+            str(data.get("server_mobile",      "")),
+            str(data.get("server_profile",     "")),
+            str(data.get("server_vat_enabled", "")),
+        ))
+        conn.commit()
+    finally:
+        conn.close()

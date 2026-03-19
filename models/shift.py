@@ -1,5 +1,5 @@
 # =============================================================================
-# models/shift.py  —  SQL Server version (Updated for Variance & Account Payments)
+# models/shift.py  —  SQL Server version (Fixed)
 # =============================================================================
 
 from database.db import get_connection, fetchall_dicts, fetchone_dict
@@ -66,8 +66,9 @@ def get_next_shift_number() -> int:
 
 def get_income_by_method(date_str: str = None) -> dict:
     """
-    Requirement 4 & 3: Returns combined income (Sales + Account Payments)
-    grouped by payment method for the shift report.
+    Returns combined income (Sales + Account Payments) grouped by payment method.
+    FIX: Uses separate queries with proper parameterisation, and guards against
+         missing tables (customer_payments may not exist yet).
     """
     METHOD_MAP = {
         "Cash":   "CASH",
@@ -77,42 +78,59 @@ def get_income_by_method(date_str: str = None) -> dict:
     }
     conn = get_connection()
     cur  = conn.cursor()
-    
-    # 1. Query Sales Totals
-    sales_query = """
-        SELECT method, COALESCE(SUM(total), 0)
-        FROM sales
-        WHERE CAST(created_at AS DATE) = {}
-        GROUP BY method
-    """
-    date_filter = "?" if date_str else "CAST(GETDATE() AS DATE)"
-    params = (date_str,) if date_str else ()
-    
-    cur.execute(sales_query.format(date_filter), params)
-    sales_rows = cur.fetchall()
-
-    # 2. Query Account Payment Totals (Requirement 3)
-    payments_query = """
-        SELECT method, COALESCE(SUM(amount), 0)
-        FROM customer_payments
-        WHERE CAST(created_at AS DATE) = {}
-        GROUP BY method
-    """
-    cur.execute(payments_query.format(date_filter), params)
-    payment_rows = cur.fetchall()
-    conn.close()
-
     result = {}
-    # Combine Sales
-    for method, total in sales_rows:
-        mapped = METHOD_MAP.get(method, method.upper())
-        result[mapped] = result.get(mapped, 0.0) + float(total)
-    
-    # Combine Account Payments
-    for method, total in payment_rows:
-        mapped = METHOD_MAP.get(method, method.upper())
-        result[mapped] = result.get(mapped, 0.0) + float(total)
 
+    # ── 1. Sales totals ───────────────────────────────────────────────────────
+    try:
+        if date_str:
+            cur.execute("""
+                SELECT method, COALESCE(SUM(total), 0)
+                FROM sales
+                WHERE CAST(created_at AS DATE) = ?
+                GROUP BY method
+            """, (date_str,))
+        else:
+            cur.execute("""
+                SELECT method, COALESCE(SUM(total), 0)
+                FROM sales
+                WHERE CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
+                GROUP BY method
+            """)
+        for method, total in cur.fetchall():
+            mapped = METHOD_MAP.get(method, method.upper() if method else "OTHER")
+            result[mapped] = result.get(mapped, 0.0) + float(total)
+    except Exception:
+        pass  # sales table missing or query error — income stays 0
+
+    # ── 2. Account payment totals (customer_payments may not exist yet) ───────
+    try:
+        # Check table exists before querying
+        cur.execute("""
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = 'customer_payments'
+        """)
+        if cur.fetchone():
+            if date_str:
+                cur.execute("""
+                    SELECT method, COALESCE(SUM(amount), 0)
+                    FROM customer_payments
+                    WHERE CAST(created_at AS DATE) = ?
+                    GROUP BY method
+                """, (date_str,))
+            else:
+                cur.execute("""
+                    SELECT method, COALESCE(SUM(amount), 0)
+                    FROM customer_payments
+                    WHERE CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
+                    GROUP BY method
+                """)
+            for method, total in cur.fetchall():
+                mapped = METHOD_MAP.get(method, method.upper() if method else "OTHER")
+                result[mapped] = result.get(mapped, 0.0) + float(total)
+    except Exception:
+        pass  # customer_payments missing or query error — skip silently
+
+    conn.close()
     return result
 
 
@@ -150,7 +168,7 @@ def start_shift(station: int, shift_number: int, cashier_id: int,
 
 def end_shift(shift_id: int, counted_values: dict,
               door_counter: int = 0, customers: int = 0) -> dict | None:
-    """Requirement 4: Finalizes the shift and saves actual counted amounts."""
+    """Finalizes the shift and saves actual counted amounts."""
     from datetime import datetime
     end_time = datetime.now().strftime("%H:%M:%S")
 
@@ -171,6 +189,20 @@ def end_shift(shift_id: int, counted_values: dict,
     conn.commit()
     conn.close()
     return get_shift_by_id(shift_id)
+
+
+def save_shift_floats(shift_id: int, opening_floats: dict):
+    """Updates opening floats mid-shift for the Save (F2) action."""
+    conn = get_connection()
+    cur  = conn.cursor()
+    for method, start_float in opening_floats.items():
+        cur.execute("""
+            UPDATE shift_rows
+            SET start_float = ?
+            WHERE shift_id = ? AND method = ?
+        """, (float(start_float), shift_id, method))
+    conn.commit()
+    conn.close()
 
 
 def refresh_income(shift_id: int) -> dict:
@@ -198,6 +230,7 @@ def refresh_income(shift_id: int) -> dict:
 def migrate():
     conn = get_connection()
     cur  = conn.cursor()
+
     # Master Shifts Table
     cur.execute("""
         IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'shifts')
@@ -215,7 +248,8 @@ def migrate():
             created_at   DATETIME2     NOT NULL DEFAULT SYSDATETIME()
         )
     """)
-    # Detail rows per payment method (for Variance calculation)
+
+    # Shift rows per payment method
     cur.execute("""
         IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'shift_rows')
         CREATE TABLE shift_rows (
@@ -227,8 +261,19 @@ def migrate():
             counted      DECIMAL(12,2) NOT NULL DEFAULT 0
         )
     """)
+
+    # Defensive: add 'method' column if somehow missing (handles pre-migration DBs)
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'shift_rows' AND COLUMN_NAME = 'method'
+        )
+        ALTER TABLE shift_rows ADD method NVARCHAR(50) NOT NULL DEFAULT ''
+    """)
+
     conn.commit()
     conn.close()
+
 
 # =============================================================================
 # PRIVATE
@@ -251,8 +296,9 @@ def _get_shift_rows(shift_id: int, cur) -> list[dict]:
         r["income"]      = income
         r["counted"]     = counted
         r["total"]       = total
-        r["variance"]    = total - counted  # Calculation for Requirement 4
+        r["variance"]    = total - counted
     return rows
+
 
 def get_shift_by_id(shift_id: int) -> dict | None:
     conn = get_connection()
@@ -274,11 +320,13 @@ def get_shift_by_id(shift_id: int) -> dict | None:
     conn.close()
     return row
 
+
 def get_shift_reports(date_from=None, date_to=None) -> list[dict]:
-    """Retrieves shift history for Requirement 5 (X-Report)."""
-    conn = get_connection(); cur = conn.cursor()
+    """Retrieves shift history for the X-Report."""
+    conn = get_connection()
+    cur  = conn.cursor()
     query = """
-        SELECT s.id, s.shift_number as shift_no, s.created_at, 
+        SELECT s.id, s.shift_number as shift_no, s.created_at,
                u.username as cashier_name,
                (SELECT SUM(start_float + income) FROM shift_rows WHERE shift_id = s.id) as expected_amount,
                (SELECT SUM(counted) FROM shift_rows WHERE shift_id = s.id) as actual_amount
@@ -289,7 +337,7 @@ def get_shift_reports(date_from=None, date_to=None) -> list[dict]:
     if date_from and date_to:
         query += " WHERE CAST(s.created_at AS DATE) BETWEEN ? AND ?"
         params = [date_from, date_to]
-    
+
     query += " ORDER BY s.id DESC"
     cur.execute(query, params)
     rows = fetchall_dicts(cur)

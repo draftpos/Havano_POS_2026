@@ -38,9 +38,10 @@ _SALE_SELECT = """
            s.discount_amount, s.receipt_type, s.footer,
            s.cashier_name,
            s.synced,
-           COALESCE(s.total_items, 0)   AS total_items,
-           COALESCE(s.change_amount, 0) AS change_amount,
-           COALESCE(s.company_name, '') AS company_name
+           COALESCE(s.frappe_ref,    '')  AS frappe_ref,
+           COALESCE(s.total_items,   0)   AS total_items,
+           COALESCE(s.change_amount, 0)   AS change_amount,
+           COALESCE(s.company_name,  '')  AS company_name
     FROM sales s
     LEFT JOIN users u ON u.id = s.cashier_id
 """
@@ -117,6 +118,29 @@ def get_today_total_by_method() -> dict:
     return {r[0]: float(r[1]) for r in rows}
 
 
+def get_unsynced_sales() -> list[dict]:
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute(_SALE_SELECT + " WHERE s.synced = 0 ORDER BY s.id")
+    rows = fetchall_dicts(cur)
+    conn.close()
+    return [_sale_to_dict(r) for r in rows]
+
+
+def get_sales_with_frappe_ref() -> list[dict]:
+    """Returns all sales that have been matched to a Frappe document."""
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute(
+        _SALE_SELECT +
+        " WHERE s.frappe_ref IS NOT NULL AND s.frappe_ref != ''"
+        " ORDER BY s.id DESC"
+    )
+    rows = fetchall_dicts(cur)
+    conn.close()
+    return [_sale_to_dict(r) for r in rows]
+
+
 # =============================================================================
 # WRITE
 # =============================================================================
@@ -141,7 +165,7 @@ def create_sale(
     change_amount:     float = None,
 ) -> dict:
     from datetime import date
-    from models.product import get_product_by_id, adjust_stock # Ensure imports are here
+    from models.product import get_product_by_id, adjust_stock
 
     seq           = get_next_invoice_number()
     invoice_no    = _format_invoice_no(seq)
@@ -181,7 +205,6 @@ def create_sale(
     sale_id = int(cur.fetchone()[0])
 
     for item in items:
-        # 1. Save the Sale Item entry
         cur.execute("""
             INSERT INTO sale_items (
                 sale_id, part_no, product_name, qty, price,
@@ -203,38 +226,42 @@ def create_sale(
             item.get("remarks",        ""),
         ))
 
-        # 2. Requirement 6: Handle UOM Conversion Factor for Stock Deduction
         product_id = item.get("product_id")
         if product_id:
-            # Fetch the actual product to get its specific conversion factor
             prod_data = get_product_by_id(product_id)
-            # Default to 1.0 if not set
-            factor = float(prod_data.get("conversion_factor", 1.0) or 1.0)
-            
-            # Actual units to remove = Quantity Sold * Conversion Factor
-            # Example: 2 Boxes * 12 units/box = 24 units removed from stock
-            total_units_to_remove = float(item.get("qty", 1)) * factor
-            
-            # Pass as negative to adjust_stock to decrease inventory
-            adjust_stock(product_id, -total_units_to_remove)
+            factor    = float(prod_data.get("conversion_factor", 1.0) or 1.0)
+            adjust_stock(product_id, -(float(item.get("qty", 1)) * factor))
 
     conn.commit()
     conn.close()
     return get_sale_by_id(sale_id)
 
-def get_unsynced_sales() -> list[dict]:
-    conn = get_connection()
-    cur  = conn.cursor()
-    cur.execute(_SALE_SELECT + " WHERE s.synced = 0 ORDER BY s.id")
-    rows = fetchall_dicts(cur)
-    conn.close()
-    return [_sale_to_dict(r) for r in rows]
-
 
 def mark_synced(sale_id: int) -> bool:
+    """Mark a sale as synced (no Frappe ref available)."""
     conn = get_connection()
     cur  = conn.cursor()
     cur.execute("UPDATE sales SET synced = 1 WHERE id = ?", (sale_id,))
+    affected = cur.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def mark_synced_with_ref(sale_id: int, frappe_ref: str = "") -> bool:
+    """
+    Mark a sale as synced and store the Frappe document name.
+
+    frappe_ref: Frappe Sales Invoice name e.g. 'ACC-SINV-2026-00565'
+                Pass empty string for permanent-error cases (not-sales-item etc.)
+                where the sale is marked done but has no Frappe counterpart.
+    """
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute(
+        "UPDATE sales SET synced = 1, frappe_ref = ? WHERE id = ?",
+        (frappe_ref or None, sale_id)
+    )
     affected = cur.rowcount
     conn.commit()
     conn.close()
@@ -299,7 +326,8 @@ def migrate():
             created_at       DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
             total_items      DECIMAL(12,4) NOT NULL DEFAULT 0,
             change_amount    DECIMAL(12,2) NOT NULL DEFAULT 0,
-            synced           INT           NOT NULL DEFAULT 0
+            synced           INT           NOT NULL DEFAULT 0,
+            frappe_ref       NVARCHAR(80)  NULL
         )
     """)
 
@@ -308,7 +336,8 @@ def migrate():
         ("total_items",   "DECIMAL(12,4) NOT NULL DEFAULT 0"),
         ("change_amount", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
         ("synced",        "INT NOT NULL DEFAULT 0"),
-        ("company_name",  "NVARCHAR(120) NOT NULL DEFAULT ''"),   # ← new
+        ("company_name",  "NVARCHAR(120) NOT NULL DEFAULT ''"),
+        ("frappe_ref",    "NVARCHAR(80) NULL"),                  # ← Frappe doc name
     ]:
         cur.execute(f"""
             IF NOT EXISTS (
@@ -383,14 +412,14 @@ def _sale_to_dict(row: dict) -> dict:
         "user":             row["username"] or str(row["cashier_id"] or ""),
         "total":            float(row["total"]),
         "tendered":         float(row["tendered"]),
-        "method":           row["method"] or "Cash",
+        "method":           row["method"]           or "Cash",
         "amount":           float(row["total"]),
         "invoice_no":       row["invoice_no"]       or "",
         "invoice_date":     row["invoice_date"]     or "",
         "kot":              row["kot"]              or "",
         "customer_name":    row["customer_name"]    or "",
         "customer_contact": row["customer_contact"] or "",
-        "company_name":     row["company_name"]     or "",   # ← new
+        "company_name":     row["company_name"]     or "",
         "currency":         row["currency"]         or "USD",
         "subtotal":         float(row["subtotal"]        or 0),
         "total_vat":        float(row["total_vat"]       or 0),
@@ -399,7 +428,8 @@ def _sale_to_dict(row: dict) -> dict:
         "footer":           row["footer"]           or "",
         "cashier_name":     row["cashier_name"]     or "",
         "synced":           bool(row.get("synced", False)),
-        "total_items":      float(row.get("total_items",  0) or 0),
+        "frappe_ref":       row.get("frappe_ref")   or "",      # ← Frappe doc name
+        "total_items":      float(row.get("total_items",   0) or 0),
         "change_amount":    float(row.get("change_amount", 0) or 0),
     }
 
@@ -424,26 +454,26 @@ def _item_to_dict(row: dict) -> dict:
 
 def create_credit_note(original_sale_id: int, items_to_return: list[dict]) -> bool:
     """
-    Requirement 2: Processes a return.
+    Processes a return.
     1. Adjusts stock (adds items back).
-    2. Marks items as returned in the DB.
+    2. Records the credit note entry.
     """
     from models.product import adjust_stock
     conn = get_connection()
-    cur = conn.cursor()
-    
+    cur  = conn.cursor()
     try:
         for item in items_to_return:
-            # 1. Add the quantity back to inventory
             if item.get("product_id"):
                 adjust_stock(item["product_id"], float(item["qty"]))
-            
-            # 2. Record the credit note entry
             cur.execute("""
                 INSERT INTO credit_notes (original_sale_id, part_no, qty, reason, created_at)
                 VALUES (?, ?, ?, ?, GETDATE())
-            """, (original_sale_id, item["part_no"], item["qty"], item.get("reason", "Customer Return")))
-            
+            """, (
+                original_sale_id,
+                item["part_no"],
+                item["qty"],
+                item.get("reason", "Customer Return"),
+            ))
         conn.commit()
         return True
     except Exception as e:

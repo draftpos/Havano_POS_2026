@@ -1,107 +1,63 @@
-# =============================================================================
-# models/uom.py - Unit of Measure management
-# =============================================================================
+"""
+migrate_frappe_ref.py
+---------------------
+Adds the frappe_ref column to the sales table.
 
-from database.db import get_connection, fetchall_dicts, fetchone_dict
+This column stores the Frappe Sales Invoice document name
+(e.g. ACC-SINV-2026-00565) after a local sale is successfully
+pushed to Frappe. invoice_no is also overwritten with this value
+so both columns hold the authoritative Frappe reference.
+
+Run once:
+    py migrate_frappe_ref.py
+"""
+
+from database.db import get_connection
 
 
-def get_all_uoms():
-    """Get all units of measure"""
+def run():
     conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT id, name, abbreviation, category, conversion FROM uom ORDER BY name")
-    rows = fetchall_dicts(cur)
-    conn.close()
-    return rows
+    cur  = conn.cursor()
 
+    print("Starting migration...\n")
 
-def create_uom(name, abbreviation, category, conversion):
-    """Create a new unit of measure"""
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    # ── 1. Add frappe_ref column ──────────────────────────────────────────────
+    print("  Checking column: frappe_ref")
+    cur.execute("""
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = 'sales' AND COLUMN_NAME = 'frappe_ref'
+    """)
+    if cur.fetchone()[0]:
+        print("    Already exists — skipping.\n")
+    else:
+        cur.execute("ALTER TABLE sales ADD frappe_ref NVARCHAR(80) NULL")
+        conn.commit()
         cur.execute("""
-            INSERT INTO uom (name, abbreviation, category, conversion)
-            VALUES (?, ?, ?, ?)
-        """, (name, abbreviation, category, conversion))
-        conn.commit()
-        return True
-    except Exception as e:
-        print(f"Error creating UOM: {e}")
-        return False
-    finally:
-        conn.close()
+            SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'sales' AND COLUMN_NAME = 'frappe_ref'
+        """)
+        if cur.fetchone()[0]:
+            print("    Added frappe_ref NVARCHAR(80) NULL. ✅\n")
+        else:
+            print("    WARNING: Column may not have been added. Check manually. ⚠️\n")
 
-
-def update_uom(uom_id, name, abbreviation, category, conversion):
-    """Update a unit of measure"""
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            UPDATE uom
-            SET name = ?, abbreviation = ?, category = ?, conversion = ?
-            WHERE id = ?
-        """, (name, abbreviation, category, conversion, uom_id))
-        conn.commit()
-        return cur.rowcount > 0
-    except Exception as e:
-        print(f"Error updating UOM: {e}")
-        return False
-    finally:
-        conn.close()
-
-
-def delete_uom(uom_id):
-    """Delete a unit of measure"""
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("DELETE FROM uom WHERE id = ?", (uom_id,))
-        conn.commit()
-        return cur.rowcount > 0
-    except Exception as e:
-        print(f"Error deleting UOM: {e}")
-        return False
-    finally:
-        conn.close()
-
-
-def migrate():
-    """Create uom table"""
-    conn = get_connection()
-    cur = conn.cursor()
+    # ── 2. Back-fill: for already-synced sales that have no frappe_ref,
+    #       copy invoice_no → frappe_ref so existing records are consistent.
+    #       Only copies values that look like Frappe doc names (contain 'SINV').
+    print("  Back-filling frappe_ref from invoice_no for already-synced sales...")
     cur.execute("""
-        IF NOT EXISTS (
-            SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'uom'
-        )
-        CREATE TABLE uom (
-            id            INT           IDENTITY(1,1) PRIMARY KEY,
-            name          NVARCHAR(50)  NOT NULL UNIQUE,
-            abbreviation  NVARCHAR(10)  NOT NULL,
-            category      NVARCHAR(30)  NOT NULL DEFAULT 'Count',
-            conversion    DECIMAL(12,4) NOT NULL DEFAULT 1.0,
-            created_at    DATETIME2     NOT NULL DEFAULT SYSDATETIME()
-        )
+        UPDATE sales
+        SET frappe_ref = invoice_no
+        WHERE synced = 1
+          AND (frappe_ref IS NULL OR frappe_ref = '')
+          AND invoice_no LIKE '%SINV%'
     """)
-    
-    # Add uom columns to products if not exists
-    cur.execute("""
-        IF NOT EXISTS (
-            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = 'products' AND COLUMN_NAME = 'uom'
-        )
-        ALTER TABLE products ADD uom NVARCHAR(50) NOT NULL DEFAULT 'Unit'
-    """)
-    
-    cur.execute("""
-        IF NOT EXISTS (
-            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = 'products' AND COLUMN_NAME = 'conversion_factor'
-        )
-        ALTER TABLE products ADD conversion_factor DECIMAL(12,4) NOT NULL DEFAULT 1.0
-    """)
-    
     conn.commit()
+    print(f"    {cur.rowcount} row(s) back-filled. ✅\n")
+
     conn.close()
-    print("[uom] ✅ Tables ready.")
+    print("Migration complete. Restart your POS application.")
+
+
+if __name__ == "__main__":
+    run()
