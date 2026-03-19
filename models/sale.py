@@ -35,20 +35,30 @@ def get_next_invoice_number() -> int:
 
 _SALE_SELECT = """
     SELECT s.id, s.invoice_number, s.created_at, s.cashier_id,
-           s.total, s.tendered, s.method,
-           COALESCE(u.username, '') AS username,
-           s.invoice_no, s.invoice_date, s.kot,
-           s.customer_name, s.customer_contact,
-           s.currency, s.subtotal, s.total_vat,
-           s.discount_amount, s.receipt_type, s.footer,
-           s.cashier_name,
-           s.synced,
-           COALESCE(s.frappe_ref,    '')  AS frappe_ref,
-           COALESCE(s.total_items,   0)   AS total_items,
-           COALESCE(s.change_amount, 0)   AS change_amount,
-           COALESCE(s.company_name,  '')  AS company_name
-    FROM sales s
-    LEFT JOIN users u ON u.id = s.cashier_id
+       s.total, s.tendered, s.method,
+       COALESCE(u.username, '') AS username,
+       s.invoice_no, s.invoice_date, s.kot,
+       s.customer_name, s.customer_contact,
+       s.currency, s.subtotal, s.total_vat,
+       s.discount_amount, s.receipt_type, s.footer,
+       s.cashier_name,
+       s.synced,
+       COALESCE(s.frappe_ref,    '')  AS frappe_ref,
+       COALESCE(s.total_items,   0)   AS total_items,
+       COALESCE(s.change_amount, 0)   AS change_amount,
+       COALESCE(C.company_name,  '')  AS company_name,
+       COALESCE(C.address_1,     '')  AS address_1,
+       COALESCE(C.address_2,     '')  AS address_2,
+       COALESCE(C.vat_number,    '')  AS vat_number,
+       C.tin_number,
+       C.footer_text,
+       C.phone,
+       C.email,
+       C.zimra_serial_no,
+       C.zimra_device_id
+FROM sales s
+LEFT JOIN users u ON u.id = s.cashier_id
+CROSS JOIN company_defaults C 
 """
 
 
@@ -72,6 +82,8 @@ def get_sale_by_id(sale_id: int) -> dict | None:
     sale = _sale_to_dict(row)
     sale["items"] = _fetch_items(sale_id, cur)
     conn.close()
+    print(f"✅ Sales Data 2   → {sale}\n\n Sql \n  {_SALE_SELECT}")
+    # print(f"✅ \n   → ")
     return sale
 
 
@@ -244,17 +256,33 @@ def create_sale(
     sale = get_sale_by_id(sale_id)
 
     # ── PRINTING ─────────────────────────────────────────────
+    # active_printers = _get_active_printers()
     active_printers = _get_active_printers()
-
+    print(f"✅ Sales Data → {sale}")
     if active_printers and sale:
+        footer=sale["footer_text"]
         try:
             receipt = ReceiptData(
                 invoiceNo=sale["invoice_no"],
                 invoiceDate=sale["invoice_date"],
                 companyName=sale.get("company_name", "Havano POS"),
+                companyAddress=sale.get("address_1", ""),
+                companyAddressLine1=sale.get("address_2", ""),
+                companyAddressLine2="",
+                city="",
+                state="",
+                postcode="",
+                companyEmail=sale.get("email", ""),
+                tel=sale.get("phone", ""),
+                tin=sale.get("tin_number", ""),
+                vatNo=sale.get("vat_number", ""),
+                deviceSerial=sale.get("zimra_serial_no", ""),
+                deviceId=sale.get("zimra_device_id", ""),
                 cashierName=sale.get("cashier_name", cashier_name),
                 customerName=sale.get("customer_name", customer_name),
                 customerContact=sale.get("customer_contact", customer_contact),
+                customerTin="",
+                customerVat="",
                 amountTendered=float(tendered),
                 change=float(sale.get("change_amount", 0)),
                 grandTotal=float(total),
@@ -295,7 +323,6 @@ def create_sale(
         print("⚠️ No active printers configured")
 
     return sale
-
 
 
 def mark_synced(sale_id: int) -> bool:
@@ -491,6 +518,16 @@ def _sale_to_dict(row: dict) -> dict:
         "frappe_ref":       row.get("frappe_ref")   or "",      # ← Frappe doc name
         "total_items":      float(row.get("total_items",   0) or 0),
         "change_amount":    float(row.get("change_amount", 0) or 0),
+        "company_name":     row.get("company_name", "Havano POS"),
+        "address_1":        row.get("address_1", ""),
+        "address_2":        row.get("address_2", ""),
+        "phone":            row.get("phone", ""),
+        "email":            row.get("email", ""),
+        "vat_number":       row.get("vat_number", ""),
+        "tin_number":       row.get("tin_number", ""),
+        "zimra_serial_no":  row.get("zimra_serial_no", ""),
+        "zimra_device_id":  row.get("zimra_device_id", ""),
+        "footer_text":      row.get("footer_text", ""),
     }
 
 

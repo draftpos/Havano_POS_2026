@@ -36,6 +36,7 @@ class ReceiptData:
     companyAddress: str = ""
     companyAddressLine1: str = ""
     companyAddressLine2: str = ""
+    # companyEmail: str = ""
     city: str = ""
     state: str = ""
     postcode: str = ""

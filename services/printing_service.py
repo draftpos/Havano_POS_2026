@@ -1,11 +1,11 @@
 from models.receipt import ReceiptData
 from models.advance_settings import AdvanceSettings
 from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
-from PySide6.QtGui import QPainter, QFont, QFontMetrics, QPixmap   # ← QPixmap added
+from PySide6.QtGui import QPainter, QFont, QFontMetrics, QPixmap
 from PySide6.QtCore import Qt, QMarginsF, QSizeF
 from PySide6.QtGui import QPageSize
 from datetime import datetime
-from pathlib import Path   # ← For safe path handling
+from pathlib import Path
 
 
 class PrintingService:
@@ -39,25 +39,15 @@ class PrintingService:
                 if not info.isNull():
                     printer.setPrinterName(printer_name)
 
-            # printer.setPageSize(QPageSize(QSizeF(100, 1000), QPageSize.Millimeter))
-            # printer.setFullPage(True)
-            # printer.setPageMargins(QMarginsF(0, 0, 0, 0))
-            # painter = QPainter(printer)
-            # painter.translate(0, -5)  # adjust: -3 to -10 if needed
-
             printer.setPageSize(QPageSize(QSizeF(100, 1000), QPageSize.Millimeter))
             printer.setFullPage(True)
             printer.setPageMargins(QMarginsF(0, 0, 0, 0))
 
             painter = QPainter(printer)
 
-# eliminate top offset from printer
+            # eliminate top offset from printer
             rect = printer.pageRect(QPrinter.DevicePixel)
             painter.translate(0, -rect.top())
-
-
-
-
 
             y = 0
 
@@ -71,11 +61,6 @@ class PrintingService:
                         x = (self.paper_width - scaled.width()) // 2
                         painter.drawPixmap(x, y, scaled)
                         y += scaled.height() + 10
-                    # increase spacing after logo
-
-                        # scaled = logo_pix.scaled(180, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        # painter.drawPixmap(self.paper_width // 2 - 90, y, scaled)
-                        # y += 90   # space after logo
 
             # ====================== FONT SETUP ======================
             header_font = self._create_font(
@@ -113,15 +98,48 @@ class PrintingService:
             y += 60
 
             # ====================== COMPANY INFO ======================
-            painter.setFont(normal_font)
+            painter.setFont(subheader_font)
+
+            if receipt.companyAddress:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
+                                 Qt.AlignCenter, receipt.companyAddress)
+                y += 30
 
             if receipt.companyAddressLine1:
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
                                  Qt.AlignCenter, receipt.companyAddressLine1)
-                y += 24
+                y += 30
+
             if receipt.companyAddressLine2:
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
                                  Qt.AlignCenter, receipt.companyAddressLine2)
+                y += 30
+
+            if receipt.city or receipt.state or receipt.postcode:
+                city_state = f"{receipt.city} {receipt.state} {receipt.postcode}".strip()
+                if city_state:
+                    painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
+                                     Qt.AlignCenter, city_state)
+                    y += 30
+
+            if receipt.tel:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
+                                 Qt.AlignCenter, f"Tel: {receipt.tel}")
+                y += 30
+
+            if receipt.companyEmail:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
+                                 Qt.AlignCenter, receipt.companyEmail)
+                y += 24
+
+            if receipt.tin:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
+                                 Qt.AlignCenter, f"TIN: {receipt.tin}")
+                y += 24
+
+            if receipt.vatNo:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
+                                 Qt.AlignCenter, f"VAT: {receipt.vatNo}")
                 y += 24
 
             y += 10
@@ -138,6 +156,18 @@ class PrintingService:
 
             if receipt.customerName:
                 painter.drawText(self.margin, y, f"Customer : {receipt.customerName}")
+                y += 22
+
+            if receipt.customerContact:
+                painter.drawText(self.margin, y, f"Contact : {receipt.customerContact}")
+                y += 22
+
+            if receipt.customerTin:
+                painter.drawText(self.margin, y, f"Customer TIN : {receipt.customerTin}")
+                y += 22
+
+            if receipt.customerVat:
+                painter.drawText(self.margin, y, f"Customer VAT : {receipt.customerVat}")
                 y += 22
 
             y += 10
@@ -166,7 +196,7 @@ class PrintingService:
             QTY_X   = PRICE_X - max_qty_w - 10
 
             # ====================== ITEM HEADER ======================
-            painter.setFont(subheader_font)   # or subheader_font if you prefer
+            painter.setFont(subheader_font)
 
             painter.drawText(QTY_X,   y, max_qty_w,   24, Qt.AlignCenter, "Qty")
             painter.drawText(PRICE_X, y, max_price_w, 24, Qt.AlignRight,  "Price")
