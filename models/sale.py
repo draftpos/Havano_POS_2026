@@ -82,7 +82,7 @@ def get_sale_by_id(sale_id: int) -> dict | None:
     sale = _sale_to_dict(row)
     sale["items"] = _fetch_items(sale_id, cur)
     conn.close()
-    print(f"✅ Sales Data 2   → {sale}\n\n Sql \n  {_SALE_SELECT}")
+    # print(f"✅ Sales Data 2   → {sale}\n\n Sql \n  {_SALE_SELECT}")
     # print(f"✅ \n   → ")
     return sale
 
@@ -258,7 +258,7 @@ def create_sale(
     # ── PRINTING ─────────────────────────────────────────────
     # active_printers = _get_active_printers()
     active_printers = _get_active_printers()
-    print(f"✅ Sales Data → {sale}")
+    # print(f"✅ Sales Data → {sale}")
     if active_printers and sale:
         footer=sale["footer_text"]
         try:
@@ -314,6 +314,8 @@ def create_sale(
                 except Exception as e:
                     print(f"❌ Printer error on {printer_name}: {e}")
 
+# ====================== KITCHEN ORDERS (KOT) ======================
+            print_kitchen_orders(sale)          # ←←← MOVED HERE (before return)
         except Exception as e:
             print(f"❌ PRINT ERROR: {str(e)}")
             import traceback
@@ -324,6 +326,10 @@ def create_sale(
 
     return sale
 
+
+
+        # ── KITCHEN ORDERS (NEW) ─────────────────────────────
+    # print_kitchen_orders(sale)
 
 def mark_synced(sale_id: int) -> bool:
     """Mark a sale as synced (no Frappe ref available)."""
@@ -467,15 +473,41 @@ def migrate():
 
 def _fetch_items(sale_id: int, cur) -> list[dict]:
     cur.execute("""
-        SELECT id, sale_id, part_no, product_name, qty, price,
+       SELECT s.id, s.sale_id, s.part_no, s.product_name, qty, s.price,
                discount, tax, total,
-               tax_type, tax_rate, tax_amount, remarks
-        FROM sale_items
-        WHERE sale_id = ?
+               tax_type, tax_rate, tax_amount, remarks,order_1,order_2,order_3,order_4,order_5,order_6  
+        FROM sale_items s
+		inner join products p on p.part_no= s.part_no  
+                WHERE sale_id = ?
         ORDER BY id
     """, (sale_id,))
     return [_item_to_dict(r) for r in fetchall_dicts(cur)]
 
+
+def _item_to_dict(row: dict) -> dict:
+    return {
+        "id":           row["id"],
+        "sale_id":      row["sale_id"],
+        "part_no":      row.get("part_no", "") or "",
+        "product_name": row.get("product_name", "") or "",
+        "qty":          float(row.get("qty", 0)),
+        "price":        float(row.get("price", 0)),
+        "discount":     float(row.get("discount", 0)),
+        "tax":          row.get("tax", "") or "",
+        "total":        float(row.get("total", 0)),
+        "tax_type":     row.get("tax_type", "") or "",
+        "tax_rate":     float(row.get("tax_rate", 0)),
+        "tax_amount":   float(row.get("tax_amount", 0)),
+        "remarks":      row.get("remarks", "") or "",
+
+        # ── ORDER FLAGS (used for KOT routing) ─────────────────────
+        "order_1": row.get("order_1", False),
+        "order_2": row.get("order_2", False),
+        "order_3": row.get("order_3", False),
+        "order_4": row.get("order_4", False),
+        "order_5": row.get("order_5", False),
+        "order_6": row.get("order_6", False),
+    }
 
 def _sale_to_dict(row: dict) -> dict:
     from datetime import datetime
@@ -546,6 +578,13 @@ def _item_to_dict(row: dict) -> dict:
         "tax_rate":     float(row["tax_rate"]   or 0),
         "tax_amount":   float(row["tax_amount"] or 0),
         "remarks":      row["remarks"]      or "",
+        # ── NEW ORDER COLUMNS ─────────────────────────────────────
+        "order_1": row.get("order_1", "") or "",
+        "order_2": row.get("order_2", "") or "",
+        "order_3": row.get("order_3", "") or "",
+        "order_4": row.get("order_4", "") or "",
+        "order_5": row.get("order_5", "") or "",
+        "order_6": row.get("order_6", "") or "",
     }
 
 
@@ -572,7 +611,57 @@ def _get_active_printers() -> list[str]:
 
     except:
         return []
+# =============================================================================
+# KITCHEN ORDER PRINTING (Multi-Station)
+# =============================================================================
+def print_kitchen_orders(sale: dict):
+    """Print separate KOT for every active Order 1–6 station"""
+    try:
+        hw_file = os.path.join(os.path.dirname(__file__), "..", "hardware_settings.json")
+        with open(hw_file, "r", encoding="utf-8") as f:
+            hw = json.load(f)
 
+        orders_config = hw.get("orders", {})
+
+        for order_key in ["Order 1", "Order 2", "Order 3", "Order 4", "Order 5", "Order 6"]:
+            config = orders_config.get(order_key, {})
+            if not config.get("active", False):
+                continue
+
+            printer_name = config.get("printer")
+            if not printer_name or printer_name == "(None)":
+                continue
+
+            # Filter items that belong to this order
+            order_items = [
+                it for it in sale.get("items", [])
+                if it.get(order_key.lower().replace(" ", "_"))  # order_1, order_2...
+            ]
+
+            if not order_items:
+                continue
+
+            # Build mini ReceiptData for KOT
+            from models.receipt import ReceiptData, Item
+            kot_receipt = ReceiptData(
+                invoiceNo=sale["invoice_no"],
+                KOT=order_key,
+                cashierName=sale.get("cashier_name", ""),
+                items=[Item(
+                    productName=it["product_name"],
+                    qty=float(it["qty"]),
+                    productid=it.get("part_no", "")
+                ) for it in order_items]
+            )
+
+            success = printing_service.print_kitchen_order(kot_receipt, printer_name=printer_name)
+            if success:
+                print(f"✅ KOT printed for {order_key} → {printer_name}")
+            else:
+                print(f"⚠️ KOT failed for {order_key}")
+
+    except Exception as e:
+        print(f"❌ Kitchen Order printing error: {e}")
 
 def create_credit_note(original_sale_id: int, items_to_return: list[dict]) -> bool:
     """

@@ -13,6 +13,87 @@ class PrintingService:
         self.paper_width = 550
         self.margin = 10
 
+        
+    def print_kitchen_order(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+        """Prints simple KOT for kitchen - Qty + Name only"""
+        settings = AdvanceSettings.load_from_file()   # Fresh settings every print
+
+        painter = None
+        try:
+            printer = QPrinter(QPrinter.HighResolution)
+            if printer_name and printer_name != "(None)":
+                info = QPrinterInfo.printerInfo(printer_name)
+                if not info.isNull():
+                    printer.setPrinterName(printer_name)
+
+            printer.setPageSize(QPageSize(QSizeF(80, 2000), QPageSize.Millimeter))
+            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+
+            painter = QPainter(printer)
+            y = 20
+
+            # ====================== KOT HEADER ======================
+            kot_font = QFont("Arial", 18)
+            kot_font.setBold(True)
+            painter.setFont(kot_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 50,
+                             Qt.AlignCenter, "KITCHEN ORDER")
+            y += 60
+
+            # ====================== ORDER & INVOICE NO ======================
+            normal_font = self._create_font(
+                settings.contentFontName,
+                settings.contentFontSize + 2,
+                "Bold"
+            )
+            painter.setFont(normal_font)
+
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
+                             Qt.AlignCenter, f"Order No : {receipt.KOT or 'KOT-' + str(receipt.invoiceNo)}")
+            y += 35
+
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
+                             Qt.AlignCenter, f"Invoice No : {receipt.invoiceNo or 'N/A'}")
+            y += 35
+
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
+                             Qt.AlignCenter, f"Time : {datetime.now().strftime('%H:%M')}")
+            y += 40
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 30
+
+            # ====================== ITEMS (Qty × Name only) ======================
+            painter.setFont(self._create_font(settings.contentFontName, settings.contentFontSize + 4, "Bold"))
+
+            for item in receipt.items:
+                line = f"{int(item.qty)} × {item.productName}"
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 35,
+                                 Qt.AlignLeft, line)
+                y += 38
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 30
+
+            # ====================== FOOTER ======================
+            painter.setFont(self._create_font(settings.contentFontName, 9))
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
+                             Qt.AlignCenter, "Please prepare quickly!")
+            y += 25
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 25,
+                             Qt.AlignCenter, "Thank you - Havano POS")
+
+            painter.end()
+            print(f"✅ KITCHEN ORDER printed successfully → {printer_name or 'Default'}")
+            return True
+
+        except Exception as e:
+            print(f"❌ KOT Printing failed: {str(e)}")
+            if painter and painter.isActive():
+                painter.end()
+            return False
+
+
     def _create_font(self, family: str, size: int, style_str: str = "Regular") -> QFont:
         font = QFont(family or "Arial", max(size or 10, 8))
 
@@ -290,6 +371,21 @@ class PrintingService:
             return ["(None)"] + [p.printerName() for p in QPrinterInfo.availablePrinters()]
         except:
             return ["(None)", "Default Printer"]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # Singleton
