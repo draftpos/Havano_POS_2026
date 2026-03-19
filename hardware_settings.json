@@ -2,16 +2,16 @@
   "main_printer": "XP-80C",
   "orders": {
     "Order 1": {
-      "active": true,
-      "printer": "XP-80C"
+      "active": false,
+      "printer": "(None)"
     },
     "Order 2": {
-      "active": true,
-      "printer": "XP-80C"
+      "active": false,
+      "printer": "(None)"
     },
     "Order 3": {
-      "active": true,
-      "printer": "XP-80C"
+      "active": false,
+      "printer": "(None)"
     },
     "Order 4": {
       "active": false,

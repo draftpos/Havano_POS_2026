@@ -304,6 +304,8 @@ def create_sale(
                     tax_amount=float(it.get("tax_amount", 0))
                 ))
 
+            print(f"Active Printer {active_printers}")
+            # return
             for printer_name in active_printers:
                 try:
                     success = printing_service.print_receipt(receipt, printer_name=printer_name)
@@ -314,8 +316,8 @@ def create_sale(
                 except Exception as e:
                     print(f"❌ Printer error on {printer_name}: {e}")
 
-# ====================== KITCHEN ORDERS (KOT) ======================
-            print_kitchen_orders(sale)          # ←←← MOVED HERE (before return)
+
+
         except Exception as e:
             print(f"❌ PRINT ERROR: {str(e)}")
             import traceback
@@ -323,6 +325,10 @@ def create_sale(
 
     else:
         print("⚠️ No active printers configured")
+
+
+        # ====================== KITCHEN ORDERS (KOT) ======================
+    print_kitchen_orders(sale)          # ←←← MOVED HERE (before return)
 
     return sale
 
@@ -603,15 +609,38 @@ def _get_active_printers() -> list[str]:
         if hw.get("main_printer") and hw["main_printer"] != "(None)":
             printers.append(hw["main_printer"])
 
-        for station in hw.get("orders", {}).values():
-            if station.get("active") and station.get("printer") != "(None)":
-                printers.append(station["printer"])
+        # for station in hw.get("orders", {}).values():
+        #     if station.get("active") and station.get("printer") != "(None)":
+        #         printers.append(station["printer"])
 
         return list(dict.fromkeys(printers))
 
     except:
         return []
-# =============================================================================
+
+
+
+# def _get_active_printersorder() -> list[str]:
+#     hw_file = os.path.join(os.path.dirname(__file__), "..", "hardware_settings.json")
+
+#     try:
+#         with open(hw_file, "r", encoding="utf-8") as f:
+#             hw = json.load(f)
+
+#         printers = []
+
+#         # if hw.get("main_printer") and hw["main_printer"] != "(None)":
+#         #     printers.append(hw["main_printer"])
+
+#         for station in hw.get("orders", {}).values():
+#             if station.get("active") and station.get("printer") != "(None)":
+#                 printers.append(station["printer"])
+
+#         return list(dict.fromkeys(printers))
+
+#     except:
+#         return []
+# # =============================================================================
 # KITCHEN ORDER PRINTING (Multi-Station)
 # =============================================================================
 def print_kitchen_orders(sale: dict):

@@ -32,25 +32,39 @@ class PrintingService:
             painter = QPainter(printer)
             y = 20
 
-            # ====================== KOT HEADER ======================
-            kot_font = QFont("Arial", 18)
-            kot_font.setBold(True)
-            painter.setFont(kot_font)
+            # ====================== FONT SETUP (from AdvanceSettings) ======================
+            header_font = self._create_font(
+                settings.contentHeaderFontName,
+                settings.contentHeaderSize,
+                settings.contentHeaderStyle
+            )
+
+            normal_font = self._create_font(
+                settings.contentFontName,
+                settings.contentFontSize,
+                settings.contentFontStyle
+            )
+
+            order_font = self._create_font(
+                settings.orderContentFontName,
+                settings.orderContentFontSize,
+                settings.orderContentStyle
+            )
+
+            # ====================== KOT HEADER (uses Header Font) ======================
+            painter.setFont(header_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 50,
                              Qt.AlignCenter, "KITCHEN ORDER")
             y += 60
 
-            # ====================== ORDER & INVOICE NO ======================
-            normal_font = self._create_font(
-                settings.contentFontName,
-                settings.contentFontSize + 2,
-                "Bold"
-            )
-            painter.setFont(normal_font)
+            # ====================== ORDER & INVOICE NO (uses Normal Font) ======================
+            painter.setFont(order_font)
 
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
                              Qt.AlignCenter, f"Order No : {receipt.KOT or 'KOT-' + str(receipt.invoiceNo)}")
             y += 35
+
+            painter.setFont(normal_font)
 
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
                              Qt.AlignCenter, f"Invoice No : {receipt.invoiceNo or 'N/A'}")
@@ -63,8 +77,8 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 30
 
-            # ====================== ITEMS (Qty × Name only) ======================
-            painter.setFont(self._create_font(settings.contentFontName, settings.contentFontSize + 4, "Bold"))
+            # ====================== ITEMS (Qty × Name) - uses Order Content Font ======================
+            painter.setFont(order_font)
 
             for item in receipt.items:
                 line = f"{int(item.qty)} × {item.productName}"
@@ -75,8 +89,8 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 30
 
-            # ====================== FOOTER ======================
-            painter.setFont(self._create_font(settings.contentFontName, 9))
+            # ====================== FOOTER (uses Normal Font) ======================
+            painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
                              Qt.AlignCenter, "Please prepare quickly!")
             y += 25
@@ -92,7 +106,6 @@ class PrintingService:
             if painter and painter.isActive():
                 painter.end()
             return False
-
 
     def _create_font(self, family: str, size: int, style_str: str = "Regular") -> QFont:
         font = QFont(family or "Arial", max(size or 10, 8))
