@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
 from datetime import datetime
+from models.advance_settings import AdvanceSettings
 import json
 import os as _os
 

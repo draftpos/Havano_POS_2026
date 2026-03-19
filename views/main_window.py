@@ -7,18 +7,23 @@
 #   cashier → goes straight to the POS (invoice) view only.
 #
 # Admin can switch between Dashboard and POS mode at any time.
-# =============================================================================
+# ===from PySide6.QtWidgets import (
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QPushButton, QLabel, QFrame, QTableWidget, QTableWidgetItem,
     QLineEdit, QGridLayout, QMessageBox, QStatusBar, QSizePolicy,
     QDialog, QHeaderView, QAbstractItemView, QApplication,
-    QListWidget, QListWidgetItem, QFormLayout, QComboBox, QScrollArea, QCompleter
+    QListWidget, QListWidgetItem, QFormLayout, QComboBox, QScrollArea, QCompleter,
+    QSpinBox, QTabWidget, QFileDialog, QCheckBox   # ←←← ADD THIS ONE
 )
+import shutil
+import os
+from models.advance_settings import AdvanceSettings
 from PySide6.QtCore import Qt, QTimer, QDate
-from PySide6.QtGui import QAction, QColor, QFont
-
+# from PySide6.QtGui import QAction, QColor, QFont
+from PySide6.QtGui import QAction, QColor, QFont, QPixmap
+from pathlib import Path
 try:
     from views.dialogs.day_shift_dialog import DayShiftDialog
     _HAS_DAY_SHIFT = True
@@ -4094,6 +4099,11 @@ class MainWindow(QMainWindow):
         a_users.triggered.connect(self._open_manage_users)
         settings_menu.addAction(a_users)
         settings_menu.addSeparator()
+
+        adv_act = QAction("🖨 Advanced Printing Settings", self)
+        adv_act.triggered.connect(lambda: AdvanceSettingsDialog(self).exec())
+        settings_menu.addAction(adv_act)
+        settings_menu.addSeparator()
         
         # Core Master Data (Requirement 1 & 6 context)
         for label, fn in [
@@ -4322,6 +4332,310 @@ class CreditNoteDialog(QDialog):
         # create_credit_note(self._selected_sale_id, items_to_return)
         QMessageBox.information(self, "Success", "Items returned to stock and Credit Note recorded.")
         self.accept()
+
+
+# =============================================================================
+# ADD THIS CLASS TO views/main_window.py
+# (Paste it near the bottom, after CreditNoteDialog / ShiftReconciliationDialog)
+# =============================================================================
+
+# =============================================================================
+# ADVANCE SETTINGS DIALOG (with logo copy + preview)
+# =============================================================================
+class AdvanceSettingsDialog(QDialog):
+    """
+    Full UI for advanced printing settings
+    - Logo is copied to app_data/logos/logo.png
+    - Preview shown immediately
+    - Only relative path is saved
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🖨 Advanced Printing & Receipt Settings")
+        self.setMinimumSize(920, 680)
+        self.setModal(True)
+        self.setStyleSheet(f"QDialog {{ background-color: {OFF_WHITE}; }}")
+
+        self.settings = AdvanceSettings.load_from_file()
+
+        # Logo destination folder
+        self.app_data_dir = Path("app_data/logos")
+        self.app_data_dir.mkdir(parents=True, exist_ok=True)
+        self.default_logo_name = "logo.png"
+
+        self.selected_logo_path = None   # temporary path chosen by user
+
+        self._build_ui()
+        self._update_logo_preview()      # show current logo if any
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(12)
+        root.setContentsMargins(20, 20, 20, 20)
+
+        # Header
+        hdr = QWidget()
+        hdr.setFixedHeight(52)
+        hdr.setStyleSheet(f"background-color:{NAVY}; border-radius:8px;")
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(20, 0, 20, 0)
+        title = QLabel("Advanced Printing Settings")
+        title.setStyleSheet(f"font-size:18px; font-weight:bold; color:{WHITE};")
+        hl.addWidget(title)
+        hl.addStretch()
+        root.addWidget(hdr)
+
+        # Tabs
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._create_fonts_tab(), "Fonts")
+        self.tabs.addTab(self._create_logo_tab(), "Logo & Layout")
+        self.tabs.addTab(self._create_receipt_tab(), "Receipt Layout")
+        root.addWidget(self.tabs, 1)
+
+        # Bottom buttons
+        btn_row = QHBoxLayout()
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.setFixedHeight(40)
+        reset_btn.clicked.connect(self._reset_to_defaults)
+
+        save_btn = navy_btn("💾 Save & Apply", height=40, color=SUCCESS, hover=SUCCESS_H)
+        save_btn.clicked.connect(self._save_and_close)
+
+        cancel_btn = navy_btn("Cancel", height=40, color=DANGER, hover=DANGER_H)
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_row.addWidget(reset_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(cancel_btn)
+        root.addLayout(btn_row)
+
+    # =====================================================================
+    # TAB 1 – Fonts
+    # =====================================================================
+    def _create_fonts_tab(self):
+        w = QWidget()
+        lay = QFormLayout(w)
+        lay.setSpacing(16)
+        lay.setLabelAlignment(Qt.AlignRight)
+
+        def font_row(label, name_val, size_val, style_val):
+            name_cb = self._font_combo(name_val)
+            size_sb = QSpinBox(); size_sb.setRange(6, 30); size_sb.setValue(size_val)
+            style_cb = self._style_combo(style_val)
+            row = QHBoxLayout()
+            row.addWidget(name_cb, 3)
+            row.addWidget(size_sb, 1)
+            row.addWidget(style_cb, 2)
+            lay.addRow(label + ":", row)
+            return name_cb, size_sb, style_cb
+
+        self.cb_content_name, self.sb_content_size, self.cb_content_style = font_row(
+            "Content Font", self.settings.contentFontName, self.settings.contentFontSize, self.settings.contentFontStyle)
+
+        self.cb_header_name, self.sb_header_size, self.cb_header_style = font_row(
+            "Header Font", self.settings.contentHeaderFontName, self.settings.contentHeaderSize, self.settings.contentHeaderStyle)
+
+        self.cb_sub_name, self.sb_sub_size, self.cb_sub_style = font_row(
+            "Subheader Font", self.settings.subheaderFontName, self.settings.subheaderSize, self.settings.subheaderStyle)
+
+        self.cb_order_name, self.sb_order_size, self.cb_order_style = font_row(
+            "Order Content", self.settings.orderContentFontName, self.settings.orderContentFontSize, self.settings.orderContentStyle)
+
+        return w
+
+    # =====================================================================
+    # TAB 2 – Logo & Layout (with preview + copy)
+    # =====================================================================
+    def _create_logo_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(20)
+        lay.setContentsMargins(20, 20, 20, 20)
+
+        # Characters per line
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Characters per line:"))
+        self.sb_chars = QSpinBox()
+        self.sb_chars.setRange(30, 80)
+        self.sb_chars.setValue(self.settings.charactersPerLine)
+        row.addWidget(self.sb_chars)
+        lay.addLayout(row)
+
+        # Logo section
+        group = QVBoxLayout()
+        group.setSpacing(12)
+
+        lbl = QLabel("Receipt Logo")
+        lbl.setStyleSheet("font-weight:bold; font-size:14px;")
+        group.addWidget(lbl)
+
+        sel_row = QHBoxLayout()
+        self.btn_browse = QPushButton("Select Logo Image...")
+        self.btn_browse.setFixedWidth(180)
+        self.btn_browse.clicked.connect(self._browse_logo)
+
+        self.lbl_path = QLabel(self.settings.logoDirectory or "No logo selected")
+        self.lbl_path.setWordWrap(True)
+        self.lbl_path.setStyleSheet(f"color:{MUTED};")
+
+        sel_row.addWidget(self.btn_browse)
+        sel_row.addWidget(self.lbl_path, 1)
+        group.addLayout(sel_row)
+
+        # Preview
+        self.preview_label = QLabel()
+        self.preview_label.setFixedSize(240, 120)
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setStyleSheet(f"QLabel {{ background:white; border:2px dashed {BORDER}; border-radius:6px; }}")
+        group.addWidget(self.preview_label, alignment=Qt.AlignCenter)
+
+        note = QLabel("Logo will be copied to app_data/logos/logo.png")
+        note.setStyleSheet(f"color:{MUTED}; font-size:11px;")
+        group.addWidget(note)
+
+        lay.addLayout(group)
+        lay.addStretch()
+        return w
+
+    def _browse_logo(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Logo", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if path:
+            self.selected_logo_path = path
+            self.lbl_path.setText(path)
+            self._update_logo_preview(path)
+
+    def _update_logo_preview(self, path=None):
+        if path is None:
+            path = self.settings.logoDirectory
+        if not path or not os.path.isfile(path):
+            self.preview_label.setText("No logo\nPreview")
+            self.preview_label.setPixmap(QPixmap())
+            return
+
+        pix = QPixmap(path)
+        if pix.isNull():
+            self.preview_label.setText("Invalid image")
+        else:
+            scaled = pix.scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.preview_label.setPixmap(scaled)
+
+    # =====================================================================
+    # TAB 3 – Receipt Layout
+    # =====================================================================
+    def _create_receipt_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(12)
+
+        self.chk_subtotal = QCheckBox("Show Subtotal line (exclusive of VAT)")
+        self.chk_subtotal.setChecked(self.settings.showSubtotalExclusive)
+
+        self.chk_inclusive = QCheckBox("Show Inclusive VAT total")
+        self.chk_inclusive.setChecked(self.settings.showInclusive)
+
+        self.chk_desc = QCheckBox("Show \"Description\" label")
+        self.chk_desc.setChecked(self.settings.showDescriptionLabel)
+
+        self.chk_payment = QCheckBox("Show Paid / Change / Payment Mode")
+        self.chk_payment.setChecked(self.settings.showPayment)
+
+        for chk in (self.chk_subtotal, self.chk_inclusive, self.chk_desc, self.chk_payment):
+            lay.addWidget(chk)
+        lay.addStretch()
+        return w
+
+    # =====================================================================
+    # Helpers
+    # =====================================================================
+    def _font_combo(self, current):
+        cb = QComboBox()
+        cb.addItems(["Arial", "Times New Roman", "Courier New", "Helvetica", "Verdana", "Calibri"])
+        cb.setCurrentText(current if current in ["Arial", "Times New Roman", "Courier New", "Helvetica", "Verdana", "Calibri"] else "Arial")
+        return cb
+
+    def _style_combo(self, current):
+        cb = QComboBox()
+        cb.addItems(["Regular", "Bold", "Italic", "Bold Italic"])
+        cb.setCurrentText(current)
+        return cb
+
+    def _reset_to_defaults(self):
+        if QMessageBox.question(self, "Reset", "Reset all settings to defaults?") != QMessageBox.Yes:
+            return
+        default = AdvanceSettings()
+        # Fonts
+        self.cb_content_name.setCurrentText(default.contentFontName)
+        self.sb_content_size.setValue(default.contentFontSize)
+        self.cb_content_style.setCurrentText(default.contentFontStyle)
+        # ... (repeat for header, subheader, order — same as before)
+        self.le_logo.setText("") if hasattr(self, 'le_logo') else None
+        self.sb_chars.setValue(default.charactersPerLine)
+        self.chk_subtotal.setChecked(default.showSubtotalExclusive)
+        self.chk_inclusive.setChecked(default.showInclusive)
+        self.chk_desc.setChecked(default.showDescriptionLabel)
+        self.chk_payment.setChecked(default.showPayment)
+        QMessageBox.information(self, "Reset", "Defaults loaded. Click Save to apply.")
+
+    # =====================================================================
+    # SAVE
+    # =====================================================================
+    
+    def _save_and_close(self):
+        # ── Fonts ─────────────────────────────────────────────────────
+        self.settings.contentFontName      = self.cb_content_name.currentText()
+        self.settings.contentFontSize      = self.sb_content_size.value()
+        self.settings.contentFontStyle     = self.cb_content_style.currentText()
+
+        self.settings.contentHeaderFontName = self.cb_header_name.currentText()
+        self.settings.contentHeaderSize     = self.sb_header_size.value()
+        self.settings.contentHeaderStyle    = self.cb_header_style.currentText()
+
+        self.settings.subheaderFontName     = self.cb_sub_name.currentText()
+        self.settings.subheaderSize         = self.sb_sub_size.value()
+        self.settings.subheaderStyle        = self.cb_sub_style.currentText()
+
+        self.settings.orderContentFontName  = self.cb_order_name.currentText()
+        self.settings.orderContentFontSize  = self.sb_order_size.value()
+        self.settings.orderContentStyle     = self.cb_order_style.currentText()
+
+        # ── Layout ────────────────────────────────────────────────────
+        self.settings.charactersPerLine = self.sb_chars.value()
+
+        self.settings.showSubtotalExclusive = self.chk_subtotal.isChecked()
+        self.settings.showInclusive         = self.chk_inclusive.isChecked()
+        self.settings.showDescriptionLabel  = self.chk_desc.isChecked()
+        self.settings.showPayment           = self.chk_payment.isChecked()
+
+        # ── LOGO — FIXED VERSION ──────────────────────────────────────
+        if self.selected_logo_path and os.path.isfile(self.selected_logo_path):
+            try:
+                dest_path = self.app_data_dir / self.default_logo_name
+                shutil.copy2(self.selected_logo_path, dest_path)
+                # We now store ONLY the filename (safest & cleanest)
+                self.settings.logoDirectory = self.default_logo_name
+            except Exception as e:
+                QMessageBox.warning(self, "Logo Copy Failed",
+                                    f"Could not copy logo:\n{str(e)}\n\n"
+                                    "Settings saved without logo update.")
+                self.settings.logoDirectory = ""
+        # else: keep previous value (no change)
+
+        # Save to JSON
+        self.settings.save_to_file()
+
+        QMessageBox.information(self, "Settings Saved",
+            "Advanced printing settings updated.\n\n"
+            "Logo has been copied to:\n"
+            f"app_data\\logos\\{self.default_logo_name}\n\n"
+            "Changes take effect on the next receipt print.")
+        self.accept()
+# =============================================================================
+# ADD THIS TO THE MENU (inside MainWindow._build_menubar)
+# =============================================================================
+
+
 # =============================================================================
 # SHIFT RECONCILIATION DIALOG (Requirement 4)
 # =============================================================================

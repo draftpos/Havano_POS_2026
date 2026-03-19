@@ -1,7 +1,8 @@
 # =============================================================================
 # models/sale.py  —  SQL Server version (FIXED WITH PRINTING)
 # =============================================================================
-
+# venv\Scripts\Activate
+# cd C:\xampp\htdocs\Havano_POS_2026
 from database.db import get_connection, fetchall_dicts, fetchone_dict
 from models.product import adjust_stock, get_product_by_id
 from models.receipt import ReceiptData, Item
