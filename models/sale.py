@@ -13,20 +13,50 @@ import json
 
 
 # =============================================================================
-# INVOICE NUMBER  —  ACC-SINV-YYYY-NNNNN
+# INVOICE NUMBER  —  uses prefix + start_number from company_defaults
+#
+# Examples:
+#   prefix="INV",  start=1   →  INV-000001
+#   prefix="HV",   start=100 →  HV-000100
+#   prefix="",     start=1   →  000001
 # =============================================================================
 
+def _get_invoice_settings() -> tuple[str, int]:
+    """Returns (prefix, start_number) from company_defaults."""
+    try:
+        from models.company_defaults import get_defaults
+        d = get_defaults()
+        prefix = str(d.get("invoice_prefix") or "").strip().upper()
+        start  = int(d.get("invoice_start_number") or 0)
+        return prefix, start
+    except Exception:
+        return "", 0
+
+
 def _format_invoice_no(seq: int) -> str:
-    return f"ACC-SINV-{date.today().year}-{seq:05d}"
+    """Format invoice number using company_defaults prefix."""
+    prefix, _ = _get_invoice_settings()
+    number = f"{seq:06d}"
+    return f"{prefix}-{number}" if prefix else number
 
 
 def get_next_invoice_number() -> int:
+    """
+    Returns the next invoice sequence number.
+    Starts from invoice_start_number if no sales exist yet,
+    otherwise continues from MAX(invoice_number) + 1.
+    """
     conn = get_connection()
     cur  = conn.cursor()
     cur.execute("SELECT COALESCE(MAX(invoice_number), 0) FROM sales")
     row = cur.fetchone()
     conn.close()
-    return int(row[0]) + 1
+    current_max = int(row[0])
+    if current_max == 0:
+        # First ever invoice — start from company_defaults setting
+        _, start = _get_invoice_settings()
+        return max(start, 1)
+    return current_max + 1
 
 
 # =============================================================================

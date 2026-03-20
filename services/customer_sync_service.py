@@ -1,70 +1,70 @@
+# =============================================================================
+# services/customer_sync_service.py
+# (credentials delegated to services.credentials)
+# =============================================================================
+
+from __future__ import annotations
+
 import json
-import urllib.request
 import logging
 import time
-from models.customer import upsert_from_frappe
-from services.sync_service import _read_credentials
+import urllib.request
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [CustomerSync] %(levelname)s: %(message)s"
-)
 log = logging.getLogger("CustomerSync")
 
-CUSTOMER_SYNC_INTERVAL = 300 
+CUSTOMER_SYNC_INTERVAL = 300   # 5 minutes
+
+
+def _get_credentials() -> tuple[str, str]:
+    try:
+        from services.credentials import get_credentials
+        return get_credentials()
+    except Exception:
+        pass
+    return "", ""
+
 
 def sync_customers():
-    """Fetches customers and upserts them. No longer skips records with missing fields."""
-    creds = _read_credentials()
-    if not creds:
-        log.error("No credentials found. Skipping customer sync.")
+    api_key, api_secret = _get_credentials()
+    if not api_key or not api_secret:
+        log.warning("[customer-sync] No credentials — skipping.")
         return
-        
-    api_key, api_secret = creds
-    # Note: Ensure the endpoint matches your Frappe API
+
     url = "https://apk.havano.cloud/api/method/havano_pos_integration.api.get_customer?page=1&limit=100"
-    
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"token {api_key}:{api_secret}")
 
     try:
-        log.info("Starting customer sync...")
+        log.info("[customer-sync] Starting...")
         with urllib.request.urlopen(req, timeout=30) as response:
             data = json.loads(response.read().decode())
-            # Handling both potential response structures
             msg = data.get("message", {})
             customer_list = msg.get("customers", []) if isinstance(msg, dict) else msg
-            
+
             if not customer_list:
-                log.info("No customers found in payload.")
+                log.info("[customer-sync] No customers in payload.")
                 return
 
-            success_count = 0
-            error_count = 0
-
-            for cust_dict in customer_list:
+            from models.customer import upsert_from_frappe
+            ok = err = 0
+            for cust in customer_list:
                 try:
-                    # =========================================================
-                    # CLEANED: Mandatory field check removed. 
-                    # We now trust the database NULL constraints and the Model 
-                    # logic to handle missing data.
-                    # =========================================================
-                    upsert_from_frappe(cust_dict)
-                    success_count += 1
-                    
-                except Exception as inner_e:
-                    error_count += 1
-                    log.error(f"Error processing {cust_dict.get('customer_name')}: {inner_e}")
-            
-            log.info(f"Sync Result: {success_count} synced, {error_count} errors.")
+                    upsert_from_frappe(cust)
+                    ok += 1
+                except Exception as e:
+                    err += 1
+                    log.error("[customer-sync] Error: %s — %s", cust.get("customer_name"), e)
+
+            log.info("[customer-sync] Done — %d synced, %d errors.", ok, err)
 
     except Exception as e:
-        log.error(f"Network Error: {e}")
+        log.error("[customer-sync] Network error: %s", e)
+
 
 # =============================================================================
 # BACKGROUND THREAD (PySide6)
 # =============================================================================
+
 try:
     from PySide6.QtCore import QObject, QThread, Signal
 
@@ -72,33 +72,36 @@ try:
         finished = Signal()
 
         def run(self) -> None:
+            log.info("[customer-sync] Worker thread started (interval=%ds).", CUSTOMER_SYNC_INTERVAL)
             while True:
                 try:
                     sync_customers()
                 except Exception as exc:
-                    log.error("Worker loop error: %s", exc)
-                
-                # Sleep for the interval before the next sync
+                    log.error("[customer-sync] Worker loop error: %s", exc)
                 time.sleep(CUSTOMER_SYNC_INTERVAL)
 
     def start_customer_sync_thread():
-        """Creates and starts the background thread for customer syncing."""
         thread = QThread()
         worker = CustomerSyncWorker()
         worker.moveToThread(thread)
-        
-        # Keep references to prevent garbage collection
         thread.started.connect(worker.run)
-        
-        # Proper cleanup handling
-        thread.worker = worker 
-        
+        thread.worker = worker    # prevent GC
         thread.start()
-        log.info("Customer sync thread started.")
+        log.info("[customer-sync] Thread started.")
         return thread
 
 except ImportError:
-    log.warning("PySide6 not found. Background thread functionality disabled.")
+    log.warning("PySide6 not found — background customer sync disabled.")
+
+    def start_customer_sync_thread():
+        import threading
+        t = threading.Thread(target=lambda: [sync_customers() or time.sleep(CUSTOMER_SYNC_INTERVAL)],
+                             daemon=True, name="CustomerSyncThread")
+        t.start()
+        return t
+
 
 if __name__ == "__main__":
+    import logging as _l
+    _l.basicConfig(level=_l.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     sync_customers()

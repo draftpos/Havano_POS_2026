@@ -14,6 +14,7 @@ from datetime import datetime
 from models.advance_settings import AdvanceSettings
 import json
 import os as _os
+# from views.dialogs.customer_dialog import CustomerDialog
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY      = "#0d1f3c"
