@@ -1,10 +1,11 @@
 {
     "auth_mode": "windows",
     "server": ".",
-    "database": "POS_DB2",
+    "database": "POS_DB3",
     "username": "",
     "password": "",
     "api_url": "",
+    "api_username": "",
     "api_token": "",
     "api_key": "",
     "api_secret": ""

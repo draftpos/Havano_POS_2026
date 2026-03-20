@@ -58,8 +58,8 @@ class SqlSettingsDialog(QDialog):
         if not self.settings_file.exists():
             default = {
                 "auth_mode": "windows", "server": ".", "database": "POS_DB",
-                "username": "", "password": "", "api_url": "", "api_token": "",
-                "api_key": "", "api_secret": ""
+                "username": "", "password": "", "api_url": "", "api_username": "", 
+                "api_token": "", "api_key": "", "api_secret": ""
             }
             self.settings_file.write_text(json.dumps(default, indent=4), encoding="utf-8")
 
@@ -70,6 +70,7 @@ class SqlSettingsDialog(QDialog):
         self.username = data.get("username", "")
         self.password = data.get("password", "")
         self.api_url = data.get("api_url", "")
+        self.api_username = data.get("api_username", "")
         self.api_token = data.get("api_token", "")
         self.api_key = data.get("api_key", "")
         self.api_secret = data.get("api_secret", "")
@@ -113,12 +114,16 @@ class SqlSettingsDialog(QDialog):
         api_layout = QFormLayout(api_group)
         api_layout.setSpacing(15)
         api_layout.setContentsMargins(20, 25, 20, 20)
+        
         self.api_url_input = QLineEdit(self.api_url)
+        self.api_username_input = QLineEdit(self.api_username)
         self.api_token_input = QLineEdit(self.api_token)
         self.api_key_input = QLineEdit(self.api_key)
         self.api_secret_input = QLineEdit(self.api_secret)
         self.api_secret_input.setEchoMode(QLineEdit.Password)
+        
         api_layout.addRow("Base URL:", self.api_url_input)
+        api_layout.addRow("API Username:", self.api_username_input)
         api_layout.addRow("Access Token:", self.api_token_input)
         api_layout.addRow("API Key:", self.api_key_input)
         api_layout.addRow("API Secret:", self.api_secret_input)
@@ -128,17 +133,15 @@ class SqlSettingsDialog(QDialog):
         test_sql_btn = QPushButton("🔍 Test SQL Connection")
         test_sql_btn.setObjectName("TestButton")
         test_sql_btn.clicked.connect(self._test_sql_connection)
-        test_api_btn = QPushButton("🔍 Test API")
-        test_api_btn.setObjectName("TestButton")
-        test_api_btn.clicked.connect(self._test_api)
+        
         save_btn = QPushButton("Save Configuration")
         save_btn.setObjectName("PrimaryButton")
         save_btn.clicked.connect(self._save_and_close)
+        
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
 
         btn_layout.addWidget(test_sql_btn)
-        btn_layout.addWidget(test_api_btn)
         btn_layout.addStretch()
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(save_btn)
@@ -177,9 +180,6 @@ class SqlSettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Connection Failed", f"❌ Failed:\n{str(e)}")
 
-    def _test_api(self):
-        QMessageBox.information(self, "API Test", "✅ API URL saved.")
-
     def _save_and_close(self):
         data = {
             "auth_mode": "windows" if self.mode_combo.currentText() == "Windows Authentication" else "sql",
@@ -188,6 +188,7 @@ class SqlSettingsDialog(QDialog):
             "username": self.user_input.text().strip(),
             "password": self.pass_input.text().strip(),
             "api_url": self.api_url_input.text().strip(),
+            "api_username": self.api_username_input.text().strip(),
             "api_token": self.api_token_input.text().strip(),
             "api_key": self.api_key_input.text().strip(),
             "api_secret": self.api_secret_input.text().strip()
@@ -240,6 +241,7 @@ BEGIN
         [server_mobile] [nvarchar](100) NOT NULL DEFAULT '',
         [server_profile] [nvarchar](100) NOT NULL DEFAULT '',
         [server_vat_enabled] [nvarchar](10) NOT NULL DEFAULT '',
+        [api_username] [nvarchar](200) NOT NULL DEFAULT '',
         [api_key] [nvarchar](200) NOT NULL DEFAULT '',
         [api_secret] [nvarchar](200) NOT NULL DEFAULT '',
         [invoice_prefix] [nvarchar](6) NOT NULL DEFAULT '',
