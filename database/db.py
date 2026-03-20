@@ -1,4 +1,4 @@
-# database/db.py  —  SQL Server version (Windows Authentication)
+# database/db.py  —  Dynamic SQL Server connection (Windows or SQL Auth)
 
 import pyodbc
 
@@ -23,19 +23,71 @@ def _best_driver() -> str:
 
 DRIVER = _best_driver()
 
-def _conn_str(database: str = "") -> str:
-    db_part = f"DATABASE={database};" if database else ""
-    return (
-        f"DRIVER={{{DRIVER}}};"
-        f"SERVER={SERVER};"
-        f"{db_part}"
-        "Trusted_Connection=yes;"
-        "TrustServerCertificate=yes;"
-        "Application Name=POSSystem;"
-    )
+def _load_settings():
+    path = Path("app_data/sql_settings.json")
+    if not path.exists():
+        return {
+            "auth_mode": "windows",
+            "server": ".",
+            "database": "pos_db",
+            "username": "",
+            "password": ""
+        }
+    return json.loads(path.read_text(encoding="utf-8"))
+
+def is_connection_valid() -> bool:
+    """Returns True only if settings file exists AND connection works"""
+    path = Path("app_data/sql_settings.json")
+    if not path.exists():
+        return False
+    try:
+        cfg = _load_settings()
+        if cfg.get("auth_mode") == "windows":
+            conn_str = (
+                f"DRIVER={{{DRIVER}}};"
+                f"SERVER={cfg['server']};"
+                f"DATABASE={cfg['database']};"
+                "Trusted_Connection=yes;"
+                "TrustServerCertificate=yes;"
+            )
+        else:
+            conn_str = (
+                f"DRIVER={{{DRIVER}}};"
+                f"SERVER={cfg['server']};"
+                f"DATABASE={cfg['database']};"
+                f"UID={cfg['username']};"
+                f"PWD={cfg['password']};"
+                "TrustServerCertificate=yes;"
+            )
+        conn = pyodbc.connect(conn_str, timeout=4)
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 def get_connection() -> pyodbc.Connection:
-    return pyodbc.connect(_conn_str(DATABASE))
+    cfg = _load_settings()
+    # ... (your existing get_connection code - unchanged)
+    if cfg.get("auth_mode") == "windows":
+        conn_str = (
+            f"DRIVER={{{DRIVER}}};"
+            f"SERVER={cfg['server']};"
+            f"DATABASE={cfg['database']};"
+            "Trusted_Connection=yes;"
+            "TrustServerCertificate=yes;"
+            "Application Name=POSSystem;"
+        )
+    else:
+        conn_str = (
+            f"DRIVER={{{DRIVER}}};"
+            f"SERVER={cfg['server']};"
+            f"DATABASE={cfg['database']};"
+            f"UID={cfg['username']};"
+            f"PWD={cfg['password']};"
+            "TrustServerCertificate=yes;"
+            "Application Name=POSSystem;"
+        )
+    return pyodbc.connect(conn_str)
 
 def fetchall_dicts(cursor) -> list:
     cols = [d[0] for d in cursor.description]

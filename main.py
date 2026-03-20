@@ -1,23 +1,21 @@
 # main.py
 import sys
+from pathlib import Path
 from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtGui import QIcon
+
 from views.main_window import MainWindow
 from views.login_dialog import LoginDialog
-from database.db import get_connection   # confirms DB is reachable on startup
+from database.db import is_connection_valid
+from views.dialogs.sql_settings_dialog import SqlSettingsDialog
+
 
 if __name__ == "__main__":
-    # Verify DB connection on startup — crashes early with a clear message if not reachable
-    try:
-        conn = get_connection()
-        conn.close()
-    except Exception as e:
-        print(f"[main] ❌  Cannot connect to SQL Server: {e}")
-        sys.exit(1)
-
+    # ==================== 1. Create QApplication FIRST (required by Qt) ====================
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon("assets/havano-logo.jpeg"))
 
+    # Apply your dark theme for the main POS
     app.setStyleSheet("""
         QMainWindow { background-color: #1e1e2e; }
         QWidget {
@@ -85,10 +83,29 @@ if __name__ == "__main__":
         QDialog { background-color: #1e1e2e; }
     """)
 
-    # ── show login first ──────────────────────────
+    # ==================== 2. FIRST CHECK: Does sql_settings.json exist? ====================
+    settings_file = Path("app_data/sql_settings.json")
+    
+    if not settings_file.exists():
+        print("⚠️  sql_settings.json not found → opening SQL Settings...")
+        dlg = SqlSettingsDialog()
+        if dlg.exec() != QDialog.Accepted:
+            print("❌ User cancelled settings. Exiting.")
+            sys.exit(0)
+
+    # ==================== 3. File exists → check connection ====================
+    elif not is_connection_valid():
+        print("⚠️  Settings file exists but connection failed → opening SQL Settings...")
+        dlg = SqlSettingsDialog()
+        if dlg.exec() != QDialog.Accepted:
+            print("❌ User cancelled settings. Exiting.")
+            sys.exit(0)
+
+    # ==================== 4. Database is ready → show Login ====================
     login = LoginDialog()
     if login.exec() == QDialog.Accepted:
         window = MainWindow(user=login.logged_in_user)
         window.show()
         sys.exit(app.exec())
-    # if login closed without success — app exits silently
+    else:
+        sys.exit(0)
