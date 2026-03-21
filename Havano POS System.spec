@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets'), ('views', 'views'), ('models', 'models'), ('services', 'services'), ('database', 'database')],
+    datas=[('assets', 'assets'), ('views', 'views'), ('models', 'models'), ('services', 'services'), ('database', 'database'), ('setup_database.py', '.')],
     hiddenimports=['pyodbc', 'PySide6.QtSvg', 'PySide6.QtPrintSupport', 'PySide6.QtNetwork', 'PySide6.QtXml'],
     hookspath=[],
     hooksconfig={},
