@@ -2,12 +2,17 @@
 
 import json
 import pyodbc
+<<<<<<< HEAD
 from pathlib import Path
 
+=======
+import json
+from pathlib import Path
+>>>>>>> 0e8d1deb42ba6831c3c6714405de42a075fc17fd
 # =============================================================================
 # CONFIG  —  edit these two lines only
 # =============================================================================
-SERVER = r".\SQLEXPRESS"
+SERVER = r"."
 DATABASE = "pos_db"
 # =============================================================================
 

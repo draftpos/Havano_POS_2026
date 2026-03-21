@@ -597,6 +597,7 @@ import re
 import sys
 from pathlib import Path
 
+
 class SqlSettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -644,14 +645,28 @@ class SqlSettingsDialog(QDialog):
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
         if not self.settings_file.exists():
             default = {
+<<<<<<< HEAD
                 "auth_mode": "windows", "server": ".", "database": "pos_db",
                 "username": "", "password": "", "api_url": "", "api_token": "",
                 "api_key": "", "api_secret": ""
+=======
+                "auth_mode": "windows", 
+                "server": ".", 
+                "database": "POS_DB",
+                "username": "", 
+                "password": "", 
+                "api_url": "", 
+                "api_username": "", 
+                "api_password": ""
+>>>>>>> 0e8d1deb42ba6831c3c6714405de42a075fc17fd
             }
             self.settings_file.write_text(json.dumps(default, indent=4), encoding="utf-8")
 
         data = json.loads(self.settings_file.read_text(encoding="utf-8"))
+        
+        # SQL settings
         self.auth_mode = data.get("auth_mode", "windows")
+<<<<<<< HEAD
         self.server    = data.get("server",   ".")
         self.database  = data.get("database", "pos_db")
         self.username  = data.get("username", "")
@@ -660,6 +675,17 @@ class SqlSettingsDialog(QDialog):
         self.api_token = data.get("api_token", "")
         self.api_key   = data.get("api_key",   "")
         self.api_secret = data.get("api_secret", "")
+=======
+        self.server = data.get("server", ".")
+        self.database = data.get("database", "POS_DB")
+        self.username = data.get("username", "")
+        self.password = data.get("password", "")
+        
+        # API settings (only url, username, password)
+        self.api_url = data.get("api_url", "")
+        self.api_username = data.get("api_username", "")
+        self.api_password = data.get("api_password", "")
+>>>>>>> 0e8d1deb42ba6831c3c6714405de42a075fc17fd
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -673,6 +699,7 @@ class SqlSettingsDialog(QDialog):
         main_layout.addWidget(title)
         main_layout.addWidget(subtitle)
 
+        # ==================== SQL SERVER SECTION ====================
         sql_group = QGroupBox("🗄️ SQL Server Database")
         sql_layout = QFormLayout(sql_group)
         sql_layout.setSpacing(15)
@@ -699,10 +726,12 @@ class SqlSettingsDialog(QDialog):
         sql_layout.addRow("Password:",      self.pass_input)
         main_layout.addWidget(sql_group)
 
-        api_group = QGroupBox("🌐 API Integrations")
+        # ==================== API SECTION (ONLY URL + USERNAME + PASSWORD) ====================
+        api_group = QGroupBox("🌐 API Integration")
         api_layout = QFormLayout(api_group)
         api_layout.setSpacing(15)
         api_layout.setContentsMargins(20, 25, 20, 20)
+<<<<<<< HEAD
         self.api_url_input    = QLineEdit(self.api_url)
         self.api_token_input  = QLineEdit(self.api_token)
         self.api_key_input    = QLineEdit(self.api_key)
@@ -712,27 +741,39 @@ class SqlSettingsDialog(QDialog):
         api_layout.addRow("Access Token:", self.api_token_input)
         api_layout.addRow("API Key:",      self.api_key_input)
         api_layout.addRow("API Secret:",   self.api_secret_input)
+=======
+        
+        self.api_url_input = QLineEdit(self.api_url)
+        self.api_username_input = QLineEdit(self.api_username)
+        self.api_password_input = QLineEdit(self.api_password)
+        self.api_password_input.setEchoMode(QLineEdit.Password)
+        
+        api_layout.addRow("API URL:", self.api_url_input)
+        api_layout.addRow("API Username:", self.api_username_input)
+        api_layout.addRow("API Password:", self.api_password_input)
+        
+>>>>>>> 0e8d1deb42ba6831c3c6714405de42a075fc17fd
         main_layout.addWidget(api_group)
 
+        # ==================== BUTTONS ====================
         btn_layout = QHBoxLayout()
         test_sql_btn = QPushButton("🔍 Test SQL Connection")
         test_sql_btn.setObjectName("TestButton")
         test_sql_btn.clicked.connect(self._test_sql_connection)
-        test_api_btn = QPushButton("🔍 Test API")
-        test_api_btn.setObjectName("TestButton")
-        test_api_btn.clicked.connect(self._test_api)
+        
         save_btn = QPushButton("Save Configuration")
         save_btn.setObjectName("PrimaryButton")
         save_btn.clicked.connect(self._save_and_close)
+        
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
 
         btn_layout.addWidget(test_sql_btn)
-        btn_layout.addWidget(test_api_btn)
         btn_layout.addStretch()
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(save_btn)
         main_layout.addLayout(btn_layout)
+
         self._toggle_auth_fields()
 
     def _toggle_auth_fields(self):
@@ -771,12 +812,10 @@ class SqlSettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Connection Failed", f"❌ Failed:\n{str(e)}")
 
-    def _test_api(self):
-        QMessageBox.information(self, "API Test", "✅ API URL saved.")
-
     def _save_and_close(self):
         data = {
             "auth_mode": "windows" if self.mode_combo.currentText() == "Windows Authentication" else "sql",
+<<<<<<< HEAD
             "server":    self.server_input.text().strip()    or ".",
             "database":  self.db_input.text().strip()        or "pos_db",
             "username":  self.user_input.text().strip(),
@@ -785,11 +824,22 @@ class SqlSettingsDialog(QDialog):
             "api_token": self.api_token_input.text().strip(),
             "api_key":   self.api_key_input.text().strip(),
             "api_secret":self.api_secret_input.text().strip(),
+=======
+            "server": self.server_input.text().strip() or ".",
+            "database": self.db_input.text().strip() or "POS_DB",
+            "username": self.user_input.text().strip(),
+            "password": self.pass_input.text().strip(),
+            # API section now contains ONLY url, username, and password
+            "api_url": self.api_url_input.text().strip(),
+            "api_username": self.api_username_input.text().strip(),
+            "api_password": self.api_password_input.text().strip()
+>>>>>>> 0e8d1deb42ba6831c3c6714405de42a075fc17fd
         }
         self.settings_file.write_text(json.dumps(data, indent=4), encoding="utf-8")
         self._run_migration_script()
         self.accept()
 
+<<<<<<< HEAD
     # =========================================================================
     # _run_migration_script
     #
@@ -803,6 +853,321 @@ class SqlSettingsDialog(QDialog):
     #        fixes, and seeds the default admin user — all safely with
     #        IF NOT EXISTS guards.
     # =========================================================================
+=======
+    def _get_embedded_sql_script(self):
+        """Return embedded SQL script for table creation"""
+        return """
+-- 1. ORGANIZATIONAL STRUCTURE
+IF OBJECT_ID('dbo.companies', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.companies(
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        name NVARCHAR(120) NOT NULL UNIQUE,
+        abbreviation NVARCHAR(40) NOT NULL,
+        default_currency NVARCHAR(10) NOT NULL DEFAULT 'USD',
+        country NVARCHAR(80) NOT NULL
+    );
+END
+
+IF OBJECT_ID('dbo.company_defaults', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.company_defaults(
+        [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [company_name] [nvarchar](200) NOT NULL DEFAULT '',
+        [address_1] [nvarchar](200) NOT NULL DEFAULT '',
+        [address_2] [nvarchar](200) NOT NULL DEFAULT '',
+        [email] [nvarchar](200) NOT NULL DEFAULT '',
+        [phone] [nvarchar](100) NOT NULL DEFAULT '',
+        [vat_number] [nvarchar](100) NOT NULL DEFAULT '',
+        [tin_number] [nvarchar](100) NOT NULL DEFAULT '',
+        [footer_text] [nvarchar](500) NOT NULL DEFAULT '',
+        [zimra_serial_no] [nvarchar](100) NOT NULL DEFAULT '',
+        [zimra_device_id] [nvarchar](100) NOT NULL DEFAULT '',
+        [zimra_api_key] [nvarchar](500) NOT NULL DEFAULT '',
+        [zimra_api_url] [nvarchar](300) NOT NULL DEFAULT '',
+        [server_company] [nvarchar](200) NOT NULL DEFAULT '',
+        [server_warehouse] [nvarchar](200) NOT NULL DEFAULT '',
+        [server_cost_center] [nvarchar](200) NOT NULL DEFAULT '',
+        [server_username] [nvarchar](200) NOT NULL DEFAULT '',
+        [server_email] [nvarchar](200) NOT NULL DEFAULT '',
+        [server_role] [nvarchar](100) NOT NULL DEFAULT '',
+        [server_full_name] [nvarchar](200) NOT NULL DEFAULT '',
+        [updated_at] [datetime] NOT NULL DEFAULT GETDATE(),
+        [server_first_name] [nvarchar](100) NOT NULL DEFAULT '',
+        [server_last_name] [nvarchar](100) NOT NULL DEFAULT '',
+        [server_mobile] [nvarchar](100) NOT NULL DEFAULT '',
+        [server_profile] [nvarchar](100) NOT NULL DEFAULT '',
+        [server_vat_enabled] [nvarchar](10) NOT NULL DEFAULT '',
+        [api_username] [nvarchar](200) NOT NULL DEFAULT '',
+        [api_key] [nvarchar](200) NOT NULL DEFAULT '',
+        [api_secret] [nvarchar](200) NOT NULL DEFAULT '',
+        [invoice_prefix] [nvarchar](6) NOT NULL DEFAULT '',
+        [invoice_start_number] [int] NOT NULL DEFAULT 0
+    );
+END
+
+IF OBJECT_ID('dbo.cost_centers', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.cost_centers(
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        name NVARCHAR(120) NOT NULL,
+        company_id INT NOT NULL
+    );
+END
+
+IF OBJECT_ID('dbo.warehouses', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.warehouses(
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        name NVARCHAR(120) NOT NULL,
+        company_id INT NOT NULL
+    );
+END
+
+-- 2. MASTER DATA
+IF OBJECT_ID('dbo.customer_groups', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.customer_groups(
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        name NVARCHAR(120) NOT NULL UNIQUE,
+        parent_group_id INT NULL
+    );
+END
+
+IF OBJECT_ID('dbo.price_lists', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.price_lists(
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        name NVARCHAR(120) NOT NULL UNIQUE,
+        selling BIT DEFAULT 1
+    );
+END
+
+IF OBJECT_ID('dbo.customers', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.customers(
+        [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [customer_name] [nvarchar](120) NOT NULL,
+        [customer_group_id] [int] NULL,
+        [customer_type] [nvarchar](20) NULL,
+        [custom_trade_name] [nvarchar](120) NOT NULL,
+        [custom_telephone_number] [nvarchar](40) NOT NULL,
+        [custom_email_address] [nvarchar](120) NOT NULL,
+        [custom_city] [nvarchar](80) NOT NULL,
+        [custom_house_no] [nvarchar](40) NOT NULL,
+        [custom_warehouse_id] [int] NULL,
+        [custom_cost_center_id] [int] NULL,
+        [default_price_list_id] [int] NULL,
+        [balance] [decimal](18, 2) DEFAULT 0,
+        [outstanding_amount] [decimal](18, 2) DEFAULT 0,
+        [loyalty_points] [int] DEFAULT 0
+    );
+END
+
+IF OBJECT_ID('dbo.products', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.products(
+        [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [part_no] [nvarchar](50) NOT NULL,
+        [name] [nvarchar](120) NOT NULL,
+        [price] [decimal](12, 2) NOT NULL,
+        [stock] [int] NOT NULL,
+        [category] [nvarchar](80) NOT NULL,
+        [active] [bit] NOT NULL,
+        [image_path] [nvarchar](500) NULL,
+        [order_1] [bit] NOT NULL DEFAULT 0,
+        [order_2] [bit] NOT NULL DEFAULT 0,
+        [order_3] [bit] NOT NULL DEFAULT 0,
+        [order_4] [bit] NOT NULL DEFAULT 0,
+        [order_5] [bit] NOT NULL DEFAULT 0,
+        [order_6] [bit] NOT NULL DEFAULT 0,
+        [uom] [nvarchar](20) NULL,
+        [conversion_factor] [decimal](12, 4) NULL 
+    );
+END
+
+IF OBJECT_ID('dbo.users', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.users(
+        [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [username] [nvarchar](80) NOT NULL UNIQUE,
+        [password] [nvarchar](255) NOT NULL,
+        [display_name] [nvarchar](120) NULL,
+        [active] [bit] NOT NULL DEFAULT 1,
+        role NVARCHAR(20) DEFAULT 'cashier'
+    );
+END
+
+-- 3. TRANSACTIONS
+IF OBJECT_ID('dbo.sales', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.sales(
+        [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [invoice_number] [int] NOT NULL,
+        [invoice_no] [nvarchar](40) NOT NULL,
+        [invoice_date] DATETIME2 NOT NULL,
+        [total] [decimal](12, 2) NOT NULL,
+        [tendered] [decimal](12, 2) NOT NULL,
+        [method] [nvarchar](30) NOT NULL,
+        [cashier_id] [int] NULL,
+        [cashier_name] [nvarchar](120) NOT NULL,
+        [customer_name] [nvarchar](120) NOT NULL,
+        [customer_contact] [nvarchar](80) NOT NULL,
+        [kot] [nvarchar](40) NOT NULL,
+        [currency] [nvarchar](10) NOT NULL,
+        [subtotal] [decimal](12, 2) NOT NULL,
+        [total_vat] [decimal](12, 2) NOT NULL,
+        [discount_amount] [decimal](12, 2) NOT NULL,
+        [receipt_type] [nvarchar](30) NOT NULL,
+        [footer] [nvarchar](max) NOT NULL,
+        [synced] [bit] NOT NULL DEFAULT 0,
+        [total_items] [decimal](12, 4) NOT NULL,
+        [change_amount] [decimal](12, 2) NOT NULL,
+        [company_name] [nvarchar](120) NOT NULL,
+        [frappe_ref] [nvarchar](80) NULL,
+        created_at DATETIME2 DEFAULT SYSDATETIME()
+    );
+END
+
+IF OBJECT_ID('dbo.sale_items', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.sale_items(
+        [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [sale_id] [int] NOT NULL,
+        [part_no] [nvarchar](50) NOT NULL,
+        [product_name] [nvarchar](120) NOT NULL,
+        [qty] [decimal](12, 4) NOT NULL,
+        [price] [decimal](12, 2) NOT NULL,
+        [discount] [decimal](12, 2) NOT NULL,
+        [tax] [nvarchar](20) NOT NULL,
+        [total] [decimal](12, 2) NOT NULL,
+        [tax_type] [nvarchar](20) NOT NULL,
+        [tax_rate] [decimal](8, 4) NOT NULL,
+        [tax_amount] [decimal](12, 2) NOT NULL
+    );
+END
+
+-- 4. SHIFT MANAGEMENT & REPORTING
+IF OBJECT_ID('dbo.shifts', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.shifts(
+       [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [shift_number] [int] NOT NULL,
+        [station] [int] NOT NULL,
+        [cashier_id] [int] NULL,
+        [date] DATE NOT NULL,
+        [start_time] DATETIME2 NOT NULL,
+        [end_time] DATETIME2 NULL,
+        [door_counter] [int] NOT NULL DEFAULT 0,
+        [customers] [int] NOT NULL DEFAULT 0,
+        [notes] [nvarchar](max) NULL,
+        created_at DATETIME2 DEFAULT SYSDATETIME()
+    );
+END
+
+IF OBJECT_ID('dbo.shift_rows', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.shift_rows(
+        [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [shift_id] [int] NOT NULL,
+        [method] [nvarchar](50) NOT NULL,
+        [start_float] [decimal](12, 2) NOT NULL,
+        [income] [decimal](12, 2) NOT NULL,
+        [counted] [decimal](12, 2) NOT NULL
+    );
+END
+
+IF OBJECT_ID('dbo.shift_reports', 'U') IS NULL
+BEGIN
+    CREATE TABLE [dbo].[shift_reports](
+        [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [cashier_id] [int] NULL,
+        [cashier_name] [nvarchar](100) NULL,
+        [shift_number] [int] NULL,
+        [total_expected] [decimal](18, 2) NULL,
+        [total_actual] [decimal](18, 2) NULL,
+        [total_variance] [decimal](18, 2) NULL,
+        [report_date] [date] NULL,
+        [created_at] [datetime2](7) DEFAULT SYSDATETIME()
+    );
+END
+
+IF OBJECT_ID('dbo.shift_report_details', 'U') IS NULL
+BEGIN
+    CREATE TABLE [dbo].[shift_report_details](
+        [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        [report_id] [int] NULL,
+        [payment_method] [nvarchar](50) NULL,
+        [amount_expected] [decimal](18, 2) NULL,
+        [amount_available] [decimal](18, 2) NULL,
+        [variance] [decimal](18, 2) NULL,
+        [created_at] [datetime2](7) DEFAULT SYSDATETIME()
+    );
+END
+
+-- 5. FOREIGN KEYS
+IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE name = 'FK_cost_centers_companies')
+    ALTER TABLE dbo.cost_centers ADD CONSTRAINT FK_cost_centers_companies FOREIGN KEY (company_id) REFERENCES dbo.companies(id);
+
+IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE name = 'FK_customers_customer_groups')
+    ALTER TABLE dbo.customers ADD CONSTRAINT FK_customers_customer_groups FOREIGN KEY (customer_group_id) REFERENCES dbo.customer_groups(id);
+
+IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE name = 'FK_customers_warehouses')
+    ALTER TABLE dbo.customers ADD CONSTRAINT FK_customers_warehouses FOREIGN KEY (custom_warehouse_id) REFERENCES dbo.warehouses(id);
+
+IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE name = 'FK_customers_cost_centers')
+    ALTER TABLE dbo.customers ADD CONSTRAINT FK_customers_cost_centers FOREIGN KEY (custom_cost_center_id) REFERENCES dbo.cost_centers(id);
+
+IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE name = 'FK_customers_price_lists')
+    ALTER TABLE dbo.customers ADD CONSTRAINT FK_customers_price_lists FOREIGN KEY (default_price_list_id) REFERENCES dbo.price_lists(id);
+
+IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE name = 'FK_sale_items_sales')
+    ALTER TABLE dbo.sale_items ADD CONSTRAINT FK_sale_items_sales FOREIGN KEY (sale_id) REFERENCES dbo.sales(id) ON DELETE CASCADE;
+
+IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE name = 'FK_shift_rows_shifts')
+    ALTER TABLE dbo.shift_rows ADD CONSTRAINT FK_shift_rows_shifts FOREIGN KEY (shift_id) REFERENCES dbo.shifts(id) ON DELETE CASCADE;
+
+IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE name = 'FK_warehouses_companies')
+    ALTER TABLE dbo.warehouses ADD CONSTRAINT FK_warehouses_companies FOREIGN KEY (company_id) REFERENCES dbo.companies(id);
+
+-- 6. SEED DATA
+IF NOT EXISTS (SELECT 1 FROM dbo.companies WHERE name = 'Confidence Pro')
+BEGIN
+    INSERT INTO dbo.companies (name, abbreviation, default_currency, country)
+    VALUES ('Confidence Pro', 'CP', 'NGN', 'Nigeria');
+END
+
+IF NOT EXISTS (SELECT 1 FROM dbo.users WHERE username = 'admin')
+BEGIN
+    INSERT INTO dbo.users (username, password, role)
+    VALUES ('admin', 'admin123', 'admin');
+END
+IF NOT EXISTS (SELECT 1 FROM dbo.company_defaults)
+BEGIN
+    INSERT INTO dbo.company_defaults (
+        company_name,
+        address_1,
+        address_2,
+        email,
+        phone,
+        vat_number,
+        tin_number,
+        footer_text
+    )
+    VALUES (
+        'Confidence Pro',
+        'Lagos Office',
+        '',
+        'info@confidencepro.com',
+        '+2340000000000',
+        '',
+        '',
+        'Thank you for your business!'
+    );
+END
+        """
+
+>>>>>>> 0e8d1deb42ba6831c3c6714405de42a075fc17fd
     def _run_migration_script(self):
         db_name = self.db_input.text().strip() or "pos_db"
         try:
