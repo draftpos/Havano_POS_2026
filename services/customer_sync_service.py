@@ -30,7 +30,8 @@ def sync_customers():
         log.warning("[customer-sync] No credentials — skipping.")
         return
 
-    url = "https://apk.havano.cloud/api/method/havano_pos_integration.api.get_customer?page=1&limit=100"
+    from services.site_config import get_host as _gh
+    url = f"{_gh()}/api/method/havano_pos_integration.api.get_customer?page=1&limit=100"
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"token {api_key}:{api_secret}")
 

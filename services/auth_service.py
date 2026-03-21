@@ -5,8 +5,9 @@ import json
 import urllib.request
 import urllib.error
 
-API_BASE_URL    = "https://apk.havano.cloud"
-LOGIN_ENDPOINT  = f"{API_BASE_URL}/api/method/havano_pos_integration.auth.login"
+from services.site_config import get_host as _site_get_host
+API_BASE_URL    = _site_get_host()
+LOGIN_ENDPOINT  = f"{_site_get_host()}/api/method/havano_pos_integration.auth.login"
 TIMEZONE        = "Africa/Harare"
 REQUEST_TIMEOUT = 8
 
