@@ -1,11 +1,12 @@
 # database/db.py  —  Dynamic SQL Server connection (Windows or SQL Auth)
 
 import pyodbc
-
+import json
+from pathlib import Path
 # =============================================================================
 # CONFIG  —  edit these two lines only
 # =============================================================================
-SERVER = r".\SQLEXPRESS"
+SERVER = r"."
 DATABASE = "pos_db"
 # =============================================================================
 

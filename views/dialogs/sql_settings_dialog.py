@@ -10,6 +10,7 @@ import re
 import sys
 from pathlib import Path
 
+
 class SqlSettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -57,23 +58,30 @@ class SqlSettingsDialog(QDialog):
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
         if not self.settings_file.exists():
             default = {
-                "auth_mode": "windows", "server": ".", "database": "POS_DB",
-                "username": "", "password": "", "api_url": "", "api_username": "", 
-                "api_token": "", "api_key": "", "api_secret": ""
+                "auth_mode": "windows", 
+                "server": ".", 
+                "database": "POS_DB",
+                "username": "", 
+                "password": "", 
+                "api_url": "", 
+                "api_username": "", 
+                "api_password": ""
             }
             self.settings_file.write_text(json.dumps(default, indent=4), encoding="utf-8")
 
         data = json.loads(self.settings_file.read_text(encoding="utf-8"))
+        
+        # SQL settings
         self.auth_mode = data.get("auth_mode", "windows")
         self.server = data.get("server", ".")
         self.database = data.get("database", "POS_DB")
         self.username = data.get("username", "")
         self.password = data.get("password", "")
+        
+        # API settings (only url, username, password)
         self.api_url = data.get("api_url", "")
         self.api_username = data.get("api_username", "")
-        self.api_token = data.get("api_token", "")
-        self.api_key = data.get("api_key", "")
-        self.api_secret = data.get("api_secret", "")
+        self.api_password = data.get("api_password", "")
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -87,6 +95,7 @@ class SqlSettingsDialog(QDialog):
         main_layout.addWidget(title)
         main_layout.addWidget(subtitle)
 
+        # ==================== SQL SERVER SECTION ====================
         sql_group = QGroupBox("🗄️ SQL Server Database")
         sql_layout = QFormLayout(sql_group)
         sql_layout.setSpacing(15)
@@ -110,25 +119,24 @@ class SqlSettingsDialog(QDialog):
         sql_layout.addRow("Password:", self.pass_input)
         main_layout.addWidget(sql_group)
 
-        api_group = QGroupBox("🌐 API Integrations")
+        # ==================== API SECTION (ONLY URL + USERNAME + PASSWORD) ====================
+        api_group = QGroupBox("🌐 API Integration")
         api_layout = QFormLayout(api_group)
         api_layout.setSpacing(15)
         api_layout.setContentsMargins(20, 25, 20, 20)
         
         self.api_url_input = QLineEdit(self.api_url)
         self.api_username_input = QLineEdit(self.api_username)
-        self.api_token_input = QLineEdit(self.api_token)
-        self.api_key_input = QLineEdit(self.api_key)
-        self.api_secret_input = QLineEdit(self.api_secret)
-        self.api_secret_input.setEchoMode(QLineEdit.Password)
+        self.api_password_input = QLineEdit(self.api_password)
+        self.api_password_input.setEchoMode(QLineEdit.Password)
         
-        api_layout.addRow("Base URL:", self.api_url_input)
+        api_layout.addRow("API URL:", self.api_url_input)
         api_layout.addRow("API Username:", self.api_username_input)
-        api_layout.addRow("Access Token:", self.api_token_input)
-        api_layout.addRow("API Key:", self.api_key_input)
-        api_layout.addRow("API Secret:", self.api_secret_input)
+        api_layout.addRow("API Password:", self.api_password_input)
+        
         main_layout.addWidget(api_group)
 
+        # ==================== BUTTONS ====================
         btn_layout = QHBoxLayout()
         test_sql_btn = QPushButton("🔍 Test SQL Connection")
         test_sql_btn.setObjectName("TestButton")
@@ -146,6 +154,7 @@ class SqlSettingsDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(save_btn)
         main_layout.addLayout(btn_layout)
+
         self._toggle_auth_fields()
 
     def _toggle_auth_fields(self):
@@ -187,11 +196,10 @@ class SqlSettingsDialog(QDialog):
             "database": self.db_input.text().strip() or "POS_DB",
             "username": self.user_input.text().strip(),
             "password": self.pass_input.text().strip(),
+            # API section now contains ONLY url, username, and password
             "api_url": self.api_url_input.text().strip(),
             "api_username": self.api_username_input.text().strip(),
-            "api_token": self.api_token_input.text().strip(),
-            "api_key": self.api_key_input.text().strip(),
-            "api_secret": self.api_secret_input.text().strip()
+            "api_password": self.api_password_input.text().strip()
         }
         self.settings_file.write_text(json.dumps(data, indent=4), encoding="utf-8")
         self._run_migration_script()
