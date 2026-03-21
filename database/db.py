@@ -1,8 +1,13 @@
 # database/db.py  —  Dynamic SQL Server connection (Windows or SQL Auth)
 
 import pyodbc
-import json
-from pathlib import Path
+
+# =============================================================================
+# CONFIG  —  edit these two lines only
+# =============================================================================
+SERVER = r".\SQLEXPRESS"
+DATABASE = "pos_db"
+# =============================================================================
 
 def _best_driver() -> str:
     preferred = [

@@ -1,298 +1,559 @@
 # =============================================================================
-# views/dialogs/credit_note_dialog.py
+# views/dialogs/credit_note_dialog.py  —  Credit Note / Return Dialog
+#
+# Flow:
+#   1. Cashier types invoice no OR customer name  → smart autocomplete dropdown
+#   2. Selected invoice loads — header shows invoice no, customer, total, date,
+#      Frappe ref status
+#   3. Items shown with checkboxes, return qty spinbox, reason combo
+#   4. Confirm → creates credit note → emits signal so POSView loads it
+#      into the main invoice table in RETURN MODE
 # =============================================================================
+from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QLineEdit, QComboBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox,
-    QDateEdit, QTextEdit
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QLabel, QLineEdit, QFrame, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView, QMessageBox, QComboBox,
+    QSizePolicy, QDoubleSpinBox, QListWidget, QListWidgetItem,
 )
-from PySide6.QtCore import Qt, QDate, QTimer
-from PySide6.QtGui import QColor, QDoubleValidator
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui  import QColor
 
-# Import colors (same as before)
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
-NAVY_3    = "#1e3d6e"
-ACCENT    = "#1a5fb4"
-ACCENT_H  = "#1c6dd0"
 WHITE     = "#ffffff"
 OFF_WHITE = "#f5f8fc"
 LIGHT     = "#e4eaf4"
-MID       = "#8fa8c8"
+BORDER    = "#c8d8ec"
 DARK_TEXT = "#0d1f3c"
 MUTED     = "#5a7a9a"
-BORDER    = "#c8d8ec"
-ROW_ALT   = "#edf3fb"
+ACCENT    = "#1a5fb4"
+ACCENT_H  = "#1c6dd0"
 SUCCESS   = "#1a7a3c"
 SUCCESS_H = "#1f9447"
 DANGER    = "#b02020"
 DANGER_H  = "#cc2828"
+AMBER     = "#b7770d"
 ORANGE    = "#c05a00"
-AMBER     = "#b06000"
 
-
-def navy_btn(text, height=36, font_size=12, width=None, color=None, hover=None):
-    bg  = color or NAVY
-    hov = hover or NAVY_2
-    btn = QPushButton(text)
-    btn.setFixedHeight(height)
-    if width:
-        btn.setFixedWidth(width)
-    btn.setCursor(Qt.PointingHandCursor)
-    btn.setStyleSheet(f"""
-        QPushButton {{
-            background-color: {bg}; color: {WHITE}; border: none;
-            border-radius: 5px; font-size: {font_size}px; font-weight: bold; padding: 0 14px;
-        }}
-        QPushButton:hover   {{ background-color: {hov}; }}
-        QPushButton:pressed {{ background-color: {NAVY_3}; }}
-    """)
-    return btn
-
-
-def hr():
-    from PySide6.QtWidgets import QFrame
-    line = QFrame()
-    line.setFrameShape(QFrame.HLine)
-    line.setStyleSheet(f"background-color: {BORDER}; border: none;")
-    line.setFixedHeight(1)
-    return line
+REASONS = [
+    "Customer Return",
+    "Damaged Goods",
+    "Wrong Item",
+    "Overcharge",
+    "Quality Issue",
+    "Other",
+]
 
 
 class CreditNoteDialog(QDialog):
-    def __init__(self, parent=None, customer=None):
+    """
+    Smart credit note dialog.
+    After confirmation emits credit_note_ready(cn_dict) so the caller
+    (POSView / OptionsDialog) can load it into the main table in return mode.
+    """
+
+    credit_note_ready = Signal(dict)   # emits the created CN dict
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.customer = customer
-        self.setWindowTitle("Credit Note")
-        self.setMinimumSize(700, 500)
-        self.setStyleSheet(f"QDialog {{ background-color: {WHITE}; }}")
+        self.setWindowTitle("Credit Note / Return")
+        self.setFixedSize(820, 580)
+        self.setModal(True)
+        self.setStyleSheet(
+            f"QDialog {{ background:{OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}"
+        )
+
+        self._sale:        dict | None = None
+        self._all_sales:   list[dict]  = []
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)      # 200 ms debounce
+        self._search_timer.timeout.connect(self._run_search)
+
         self._build()
-        self._load_customers()
-        if customer:
-            self._select_customer(customer)
+        self._preload_sales()
+
+    # =========================================================================
+    # Preload
+    # =========================================================================
+
+    def _preload_sales(self):
+        """Load all sales once into memory for fast autocomplete."""
+        try:
+            from models.sale import get_all_sales
+            self._all_sales = get_all_sales()
+        except Exception:
+            self._all_sales = []
+
+    # =========================================================================
+    # Build UI
+    # =========================================================================
 
     def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 16, 20, 16)
+        root = QVBoxLayout(self)
+        root.setSpacing(0)
+        root.setContentsMargins(0, 0, 0, 0)
 
-        # Header
+        # ── header ────────────────────────────────────────────────────────────
         hdr = QWidget()
-        hdr.setFixedHeight(44)
-        hdr.setStyleSheet(f"background-color: {NAVY}; border-radius: 5px;")
-        hl = QHBoxLayout(hdr)
-        hl.setContentsMargins(16, 0, 16, 0)
-        title = QLabel("Credit Note")
-        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {WHITE}; background: transparent;")
+        hdr.setFixedHeight(52)
+        hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
+        hl  = QHBoxLayout(hdr)
+        hl.setContentsMargins(28, 0, 28, 0)
+        title = QLabel("Credit Note / Return")
+        title.setStyleSheet(
+            f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;"
+        )
+        sub = QLabel("Search for an invoice, select items to return, then confirm.")
+        sub.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
         hl.addWidget(title)
-        layout.addWidget(hdr)
+        hl.addSpacing(16)
+        hl.addWidget(sub)
+        hl.addStretch()
+        root.addWidget(hdr)
 
-        # Customer selection
-        cust_row = QHBoxLayout()
-        cust_row.setSpacing(8)
+        # ── body ──────────────────────────────────────────────────────────────
+        body = QWidget()
+        body.setStyleSheet(f"background:{OFF_WHITE};")
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(28, 18, 28, 18)
+        bl.setSpacing(12)
 
-        cust_lbl = QLabel("Customer:")
-        cust_lbl.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
+        bl.addWidget(self._build_search_area())
 
-        self._cust_combo = QComboBox()
-        self._cust_combo.setFixedHeight(34)
-        self._cust_combo.setMinimumWidth(250)
-        self._cust_combo.currentIndexChanged.connect(self._on_customer_changed)
+        self._banner = self._build_banner()
+        self._banner.setVisible(False)
+        bl.addWidget(self._banner)
 
-        cust_row.addWidget(cust_lbl)
-        cust_row.addWidget(self._cust_combo)
-        cust_row.addStretch()
-        layout.addLayout(cust_row)
+        self._items_frame = self._build_items_table()
+        self._items_frame.setVisible(False)
+        bl.addWidget(self._items_frame, stretch=1)
 
-        # Credit note details
-        details_group = QWidget()
-        details_group.setStyleSheet(f"QWidget {{ background-color: {OFF_WHITE}; border: 1px solid {BORDER}; border-radius: 5px; }}")
-        details_layout = QGridLayout(details_group)
-        details_layout.setSpacing(10)
-        details_layout.setContentsMargins(16, 16, 16, 16)
+        bl.addWidget(self._build_btns())
+        root.addWidget(body, stretch=1)
 
-        # Date
-        date_lbl = QLabel("Date:")
-        date_lbl.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
-        self._date_edit = QDateEdit()
-        self._date_edit.setDate(QDate.currentDate())
-        self._date_edit.setCalendarPopup(True)
-        self._date_edit.setFixedHeight(34)
-        details_layout.addWidget(date_lbl, 0, 0)
-        details_layout.addWidget(self._date_edit, 0, 1)
+    # ── Search area ──────────────────────────────────────────────────────────
 
-        # Reference
-        ref_lbl = QLabel("Reference No:")
-        ref_lbl.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
-        self._ref_edit = QLineEdit()
-        self._ref_edit.setPlaceholderText("Auto-generated if blank")
-        self._ref_edit.setFixedHeight(34)
-        details_layout.addWidget(ref_lbl, 0, 2)
-        details_layout.addWidget(self._ref_edit, 0, 3)
+    def _build_search_area(self) -> QWidget:
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        vl = QVBoxLayout(wrap)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(4)
 
-        # Amount
-        amount_lbl = QLabel("Amount:")
-        amount_lbl.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
-        self._amount_edit = QLineEdit()
-        self._amount_edit.setPlaceholderText("0.00")
-        self._amount_edit.setFixedHeight(34)
-        self._amount_edit.setValidator(QDoubleValidator(0.0, 999999.99, 2))
-        self._amount_edit.textChanged.connect(self._update_balance)
-        details_layout.addWidget(amount_lbl, 1, 0)
-        details_layout.addWidget(self._amount_edit, 1, 1)
+        row = QHBoxLayout()
+        row.setSpacing(8)
 
-        # Current Balance
-        balance_lbl = QLabel("Current Balance:")
-        balance_lbl.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
-        self._balance_display = QLabel("$0.00")
-        self._balance_display.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {DARK_TEXT}; background: transparent;")
-        details_layout.addWidget(balance_lbl, 1, 2)
-        details_layout.addWidget(self._balance_display, 1, 3)
+        lbl = QLabel("Invoice / Customer:")
+        lbl.setFixedWidth(140)
+        lbl.setStyleSheet(
+            f"color:{MUTED}; font-size:11px; font-weight:bold; background:transparent;"
+        )
 
-        # New Balance after credit
-        new_balance_lbl = QLabel("New Balance:")
-        new_balance_lbl.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
-        self._new_balance_display = QLabel("$0.00")
-        self._new_balance_display.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {SUCCESS}; background: transparent;")
-        details_layout.addWidget(new_balance_lbl, 2, 2)
-        details_layout.addWidget(self._new_balance_display, 2, 3)
-
-        layout.addWidget(details_group)
-
-        # Reason/Notes
-        notes_lbl = QLabel("Reason / Notes:")
-        notes_lbl.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
-        layout.addWidget(notes_lbl)
-
-        self._notes_edit = QTextEdit()
-        self._notes_edit.setPlaceholderText("Enter reason for credit note...")
-        self._notes_edit.setFixedHeight(100)
-        self._notes_edit.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {WHITE}; color: {DARK_TEXT};
-                border: 1px solid {BORDER}; border-radius: 5px;
-                padding: 8px; font-size: 13px;
+        self._search = QLineEdit()
+        self._search.setPlaceholderText(
+            "Type invoice number or customer name…"
+        )
+        self._search.setFixedHeight(38)
+        self._search.setStyleSheet(f"""
+            QLineEdit {{
+                background:{WHITE}; color:{DARK_TEXT};
+                border:2px solid {BORDER}; border-radius:6px;
+                font-size:13px; padding:0 12px;
             }}
-            QTextEdit:focus {{ border: 2px solid {ACCENT}; }}
+            QLineEdit:focus {{ border:2px solid {ACCENT}; }}
         """)
-        layout.addWidget(self._notes_edit)
+        self._search.textChanged.connect(self._on_search_changed)
+        self._search.returnPressed.connect(self._run_search)
 
-        layout.addWidget(hr())
+        row.addWidget(lbl)
+        row.addWidget(self._search, 1)
+        vl.addLayout(row)
 
-        # Button row
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        # Autocomplete dropdown (hidden until there are results)
+        self._ac_list = QListWidget()
+        self._ac_list.setFixedHeight(0)        # collapsed by default
+        self._ac_list.setStyleSheet(f"""
+            QListWidget {{
+                background:{WHITE}; border:2px solid {ACCENT};
+                border-top:none; border-radius:0 0 6px 6px;
+                font-size:13px; color:{DARK_TEXT}; outline:none;
+            }}
+            QListWidget::item           {{ padding:7px 14px; min-height:28px; }}
+            QListWidget::item:selected  {{ background:{ACCENT}; color:{WHITE}; }}
+            QListWidget::item:hover     {{ background:{LIGHT}; }}
+        """)
+        self._ac_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._ac_list.itemClicked.connect(self._on_ac_clicked)
+        # Indent to align under the QLineEdit
+        ac_row = QHBoxLayout()
+        ac_row.setContentsMargins(148, 0, 0, 0)   # 140 label + 8 spacing
+        ac_row.addWidget(self._ac_list)
+        vl.addLayout(ac_row)
 
-        self._status = QLabel("")
-        self._status.setStyleSheet(f"font-size: 12px; color: {SUCCESS}; background: transparent;")
+        return wrap
 
-        save_btn = navy_btn("Save Credit Note", height=38, color=SUCCESS, hover=SUCCESS_H)
-        save_btn.clicked.connect(self._save)
+    # ── Info banner ──────────────────────────────────────────────────────────
 
-        cancel_btn = navy_btn("Cancel", height=38, color=NAVY_2, hover=NAVY_3)
-        cancel_btn.clicked.connect(self.reject)
+    def _build_banner(self) -> QFrame:
+        f = QFrame()
+        f.setFixedHeight(58)
+        f.setStyleSheet(
+            f"QFrame {{ background:{WHITE}; border:1px solid {BORDER}; border-radius:8px; }}"
+        )
+        hl = QHBoxLayout(f)
+        hl.setContentsMargins(16, 0, 16, 0)
+        hl.setSpacing(28)
 
-        btn_row.addWidget(self._status, 1)
-        btn_row.addWidget(save_btn)
-        btn_row.addWidget(cancel_btn)
-        layout.addLayout(btn_row)
+        self._b_inv    = self._pill("INVOICE NO")
+        self._b_cust   = self._pill("CUSTOMER")
+        self._b_date   = self._pill("DATE")
+        self._b_total  = self._pill("TOTAL")
+        self._b_status = self._pill("FRAPPE STATUS")
 
-    def _load_customers(self):
-        self._cust_combo.clear()
-        self._cust_combo.addItem("Select Customer", None)
+        for w in [self._b_inv, self._b_cust, self._b_date,
+                  self._b_total, self._b_status]:
+            hl.addWidget(w)
+        hl.addStretch()
+        return f
 
+    def _pill(self, cap: str) -> QWidget:
+        w  = QWidget(); w.setStyleSheet("background:transparent;")
+        vl = QVBoxLayout(w); vl.setContentsMargins(0, 4, 0, 4); vl.setSpacing(1)
+        c  = QLabel(cap)
+        c.setStyleSheet(
+            f"color:{MUTED}; font-size:8px; font-weight:bold;"
+            f" letter-spacing:0.8px; background:transparent;"
+        )
+        v  = QLabel("—")
+        v.setStyleSheet(
+            f"color:{DARK_TEXT}; font-size:12px; font-weight:bold; background:transparent;"
+        )
+        vl.addWidget(c); vl.addWidget(v)
+        w._val = v
+        return w
+
+    def _set_pill(self, pill: QWidget, text: str, color: str = DARK_TEXT):
+        pill._val.setText(text)
+        pill._val.setStyleSheet(
+            f"color:{color}; font-size:12px; font-weight:bold; background:transparent;"
+        )
+
+    # ── Items table ──────────────────────────────────────────────────────────
+
+    def _build_items_table(self) -> QFrame:
+        f  = QFrame(); f.setStyleSheet("QFrame{background:transparent;}")
+        vl = QVBoxLayout(f); vl.setContentsMargins(0, 0, 0, 0); vl.setSpacing(5)
+
+        cap = QLabel("Select items and quantities to return:")
+        cap.setStyleSheet(
+            f"color:{MUTED}; font-size:10px; font-weight:bold;"
+            f" letter-spacing:0.6px; background:transparent;"
+        )
+        vl.addWidget(cap)
+
+        self._tbl = QTableWidget(0, 6)
+        self._tbl.setHorizontalHeaderLabels(
+            ["✓", "ITEM", "UNIT PRICE", "ORIG QTY", "RETURN QTY", "REASON"]
+        )
+        hh = self._tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Fixed);  self._tbl.setColumnWidth(0, 36)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed);  self._tbl.setColumnWidth(2, 100)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed);  self._tbl.setColumnWidth(3, 80)
+        hh.setSectionResizeMode(4, QHeaderView.Fixed);  self._tbl.setColumnWidth(4, 110)
+        hh.setSectionResizeMode(5, QHeaderView.Fixed);  self._tbl.setColumnWidth(5, 160)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setAlternatingRowColors(True)
+        self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._tbl.setSelectionMode(QAbstractItemView.NoSelection)
+        self._tbl.setStyleSheet(f"""
+            QTableWidget {{
+                background:{WHITE}; border:1px solid {BORDER};
+                gridline-color:{LIGHT}; font-size:12px; outline:none;
+            }}
+            QTableWidget::item           {{ padding:3px 8px; }}
+            QTableWidget::item:alternate {{ background:{OFF_WHITE}; }}
+            QHeaderView::section {{
+                background:{NAVY}; color:{WHITE};
+                padding:7px; border:none;
+                border-right:1px solid {NAVY_2};
+                font-size:10px; font-weight:bold;
+            }}
+        """)
+        # Check/uncheck on row click
+        self._tbl.cellClicked.connect(self._on_tbl_cell_clicked)
+        vl.addWidget(self._tbl, 1)
+        return f
+
+    # ── Bottom buttons ────────────────────────────────────────────────────────
+
+    def _build_btns(self) -> QWidget:
+        w  = QWidget(); w.setStyleSheet("background:transparent;")
+        hl = QHBoxLayout(w); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(10)
+
+        bcancel = QPushButton("Cancel")
+        bcancel.setFixedHeight(44); bcancel.setFixedWidth(100)
+        bcancel.setCursor(Qt.PointingHandCursor)
+        bcancel.setFocusPolicy(Qt.NoFocus)
+        bcancel.setStyleSheet(f"""
+            QPushButton {{ background:{LIGHT}; color:{DARK_TEXT};
+                           border:1px solid {BORDER}; border-radius:6px;
+                           font-size:13px; font-weight:bold; }}
+            QPushButton:hover {{ background:{BORDER}; }}
+        """)
+        bcancel.clicked.connect(self.reject)
+
+        self._btn_confirm = QPushButton("✅  Issue Credit Note")
+        self._btn_confirm.setFixedHeight(44)
+        self._btn_confirm.setEnabled(False)
+        self._btn_confirm.setCursor(Qt.PointingHandCursor)
+        self._btn_confirm.setFocusPolicy(Qt.NoFocus)
+        self._btn_confirm.setStyleSheet(f"""
+            QPushButton {{ background:{SUCCESS}; color:{WHITE}; border:none;
+                           border-radius:6px; font-size:13px; font-weight:bold; }}
+            QPushButton:hover    {{ background:{SUCCESS_H}; }}
+            QPushButton:disabled {{ background:{LIGHT}; color:{MUTED}; }}
+        """)
+        self._btn_confirm.clicked.connect(self._confirm)
+
+        hl.addWidget(bcancel)
+        hl.addStretch()
+        hl.addWidget(self._btn_confirm)
+        return w
+
+    # =========================================================================
+    # Autocomplete logic
+    # =========================================================================
+
+    def _on_search_changed(self, text: str):
+        self._search_timer.start()   # debounce
+
+    def _run_search(self):
+        query = self._search.text().strip().lower()
+        self._ac_list.clear()
+
+        if len(query) < 1:
+            self._ac_list.setFixedHeight(0)
+            return
+
+        matches = [
+            s for s in self._all_sales
+            if query in (s.get("invoice_no") or "").lower()
+            or query in (s.get("customer_name") or "").lower()
+        ][:15]   # cap at 15 results
+
+        if not matches:
+            self._ac_list.setFixedHeight(0)
+            return
+
+        for s in matches:
+            inv_no  = s.get("invoice_no", "")
+            cust    = s.get("customer_name") or "Walk-in"
+            total   = f"${float(s.get('total', 0)):.2f}"
+            date    = s.get("invoice_date", "")
+            label   = f"{inv_no}   ·   {cust}   ·   {total}   ·   {date}"
+            it = QListWidgetItem(label)
+            it.setData(Qt.UserRole, s)
+            self._ac_list.addItem(it)
+
+        row_h = 42
+        visible = min(len(matches), 6)
+        self._ac_list.setFixedHeight(visible * row_h)
+
+    def _on_ac_clicked(self, item: QListWidgetItem):
+        sale_stub = item.data(Qt.UserRole)
+        self._ac_list.setFixedHeight(0)
+        self._ac_list.clear()
+        self._search.setText(sale_stub.get("invoice_no", ""))
+        self._load_sale(sale_stub["id"])
+
+    # =========================================================================
+    # Load sale
+    # =========================================================================
+
+    def _load_sale(self, sale_id: int):
         try:
-            from models.customer import get_all_customers_with_balance
-            customers = get_all_customers_with_balance()
-            for c in customers:
-                name = c["customer_name"]
-                balance = float(c.get("balance", 0))
-                if balance > 0:
-                    name += f" (${balance:.2f})"
-                self._cust_combo.addItem(name, c)
+            from models.sale import get_sale_by_id
+            full = get_sale_by_id(sale_id)
         except Exception as e:
-            print(f"Error loading customers: {e}")
-
-    def _select_customer(self, customer):
-        for i in range(self._cust_combo.count()):
-            data = self._cust_combo.itemData(i)
-            if data and data.get("id") == customer.get("id"):
-                self._cust_combo.setCurrentIndex(i)
-                break
-
-    def _on_customer_changed(self, index):
-        if index <= 0:
-            self._balance_display.setText("$0.00")
-            self._new_balance_display.setText("$0.00")
+            QMessageBox.warning(self, "Error", f"Could not load sale:\n{e}")
+            return
+        if not full:
             return
 
-        customer = self._cust_combo.currentData()
-        if customer:
-            balance = float(customer.get("balance", 0))
-            self._balance_display.setText(f"${balance:.2f}")
-            self._balance_display.setStyleSheet(
-                f"font-size: 16px; font-weight: bold; color: {DANGER if balance > 0 else SUCCESS}; background: transparent;"
-            )
-            self._update_balance()
+        self._sale = full
 
-    def _update_balance(self):
-        if self._cust_combo.currentIndex() <= 0:
+        # ── Banner ────────────────────────────────────────────────────────────
+        frappe_ref = full.get("frappe_ref", "")
+        synced     = full.get("synced", False)
+        if frappe_ref:
+            status_txt, status_col = frappe_ref, SUCCESS
+        elif synced:
+            status_txt, status_col = "Synced (no ref)", AMBER
+        else:
+            status_txt, status_col = "Not yet synced", AMBER
+
+        self._set_pill(self._b_inv,    full.get("invoice_no", "—"))
+        self._set_pill(self._b_cust,   full.get("customer_name") or "Walk-in")
+        self._set_pill(self._b_date,   full.get("invoice_date", "—"))
+        self._set_pill(self._b_total,  f"${full.get('total', 0):.2f}")
+        self._set_pill(self._b_status, status_txt, status_col)
+        self._banner.setVisible(True)
+
+        # ── Items ─────────────────────────────────────────────────────────────
+        self._populate_items(full.get("items", []))
+        self._items_frame.setVisible(True)
+        self._btn_confirm.setEnabled(True)
+
+    # =========================================================================
+    # Items table
+    # =========================================================================
+
+    def _populate_items(self, items: list[dict]):
+        self._tbl.setRowCount(0)
+        for item in items:
+            r = self._tbl.rowCount()
+            self._tbl.insertRow(r)
+            self._tbl.setRowHeight(r, 40)
+
+            # Col 0 — checkbox (checked by default)
+            chk = QTableWidgetItem()
+            chk.setCheckState(Qt.Checked)
+            chk.setTextAlignment(Qt.AlignCenter)
+            chk.setData(Qt.UserRole, item)
+            self._tbl.setItem(r, 0, chk)
+
+            # Col 1 — name
+            self._tbl.setItem(r, 1, QTableWidgetItem(item.get("product_name", "")))
+
+            # Col 2 — unit price
+            pi = QTableWidgetItem(f"${float(item.get('price', 0)):.2f}")
+            pi.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._tbl.setItem(r, 2, pi)
+
+            # Col 3 — original qty
+            orig_qty = float(item.get("qty", 0))
+            oq = QTableWidgetItem(f"{orig_qty:.0f}")
+            oq.setTextAlignment(Qt.AlignCenter)
+            self._tbl.setItem(r, 3, oq)
+
+            # Col 4 — return qty spinbox
+            spin = QDoubleSpinBox()
+            spin.setMinimum(0.01)
+            spin.setMaximum(orig_qty)
+            spin.setValue(orig_qty)
+            spin.setDecimals(0)
+            spin.setFixedHeight(30)
+            spin.setStyleSheet(f"""
+                QDoubleSpinBox {{
+                    background:{WHITE}; color:{DARK_TEXT};
+                    border:1px solid {BORDER}; border-radius:5px;
+                    font-size:12px; padding:0 6px;
+                }}
+                QDoubleSpinBox:focus {{ border:1px solid {ACCENT}; }}
+            """)
+            self._tbl.setCellWidget(r, 4, spin)
+
+            # Col 5 — reason combo
+            combo = QComboBox()
+            combo.addItems(REASONS)
+            combo.setFixedHeight(30)
+            combo.setStyleSheet(f"""
+                QComboBox {{
+                    background:{WHITE}; color:{DARK_TEXT};
+                    border:1px solid {BORDER}; border-radius:5px;
+                    font-size:11px; padding:0 6px;
+                }}
+                QComboBox::drop-down {{ border:none; }}
+                QComboBox QAbstractItemView {{
+                    background:{WHITE}; border:1px solid {BORDER};
+                    selection-background-color:{ACCENT}; selection-color:{WHITE};
+                }}
+            """)
+            self._tbl.setCellWidget(r, 5, combo)
+
+    def _on_tbl_cell_clicked(self, row: int, col: int):
+        """Clicking anywhere on a row toggles the checkbox."""
+        chk = self._tbl.item(row, 0)
+        if chk:
+            new_state = Qt.Unchecked if chk.checkState() == Qt.Checked else Qt.Checked
+            chk.setCheckState(new_state)
+
+    # =========================================================================
+    # Confirm
+    # =========================================================================
+
+    def _confirm(self):
+        if not self._sale:
+            return
+
+        items_to_return = []
+        for r in range(self._tbl.rowCount()):
+            chk = self._tbl.item(r, 0)
+            if not chk or chk.checkState() != Qt.Checked:
+                continue
+            orig_item = chk.data(Qt.UserRole)
+            spin      = self._tbl.cellWidget(r, 4)
+            combo     = self._tbl.cellWidget(r, 5)
+            qty       = float(spin.value()) if spin else float(orig_item.get("qty", 0))
+            if qty <= 0:
+                continue
+            price = float(orig_item.get("price", 0))
+            items_to_return.append({
+                **orig_item,
+                "qty":    qty,
+                "total":  round(qty * price, 2),
+                "reason": combo.currentText() if combo else "Customer Return",
+            })
+
+        if not items_to_return:
+            QMessageBox.warning(
+                self, "Nothing Selected",
+                "Please check at least one item and set a return quantity."
+            )
+            return
+
+        total = sum(i["total"] for i in items_to_return)
+        reply = QMessageBox.question(
+            self, "Confirm Credit Note",
+            f"Issue credit note for {len(items_to_return)} item(s)\n"
+            f"Total: ${total:.2f}\n\n"
+            f"Original invoice: {self._sale.get('invoice_no', '')}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
             return
 
         try:
-            amount = float(self._amount_edit.text() or "0")
-        except ValueError:
-            amount = 0.0
-
-        customer = self._cust_combo.currentData()
-        if customer:
-            current_balance = float(customer.get("balance", 0))
-            new_balance = current_balance - amount  # Credit note reduces balance
-            self._new_balance_display.setText(f"${new_balance:.2f}")
-            self._new_balance_display.setStyleSheet(
-                f"font-size: 16px; font-weight: bold; color: {DANGER if new_balance > 0 else SUCCESS}; background: transparent;"
+            from models.credit_note import create_credit_note
+            cn = create_credit_note(
+                original_sale_id=self._sale["id"],
+                items_to_return=items_to_return,
+                currency=self._sale.get("currency", "USD"),
+                customer_name=self._sale.get("customer_name", ""),
             )
-
-    def _save(self):
-        if self._cust_combo.currentIndex() <= 0:
-            self._show_status("Please select a customer.", error=True)
-            return
-
-        try:
-            amount = float(self._amount_edit.text() or "0")
-        except ValueError:
-            amount = 0.0
-
-        if amount <= 0:
-            self._show_status("Please enter a valid amount.", error=True)
-            return
-
-        customer = self._cust_combo.currentData()
-        notes = self._notes_edit.toPlainText().strip()
-        ref_no = self._ref_edit.text().strip() or f"CN-{QDate.currentDate().toString('yyyyMMdd')}-{id(self)}"
-
-        try:
-            from models.customer import create_credit_note
-            credit_note = create_credit_note(
-                customer_id=customer["id"],
-                amount=amount,
-                reference=ref_no,
-                notes=notes,
-                date=self._date_edit.date().toString("yyyy-MM-dd")
-            )
-
-            if credit_note:
-                self._show_status(f"Credit note saved. New balance: ${credit_note.get('new_balance', 0):.2f}")
-                QTimer.singleShot(1500, self.accept)
-            else:
-                self._show_status("Error saving credit note.", error=True)
-
         except Exception as e:
-            self._show_status(str(e), error=True)
+            QMessageBox.critical(self, "Error", f"Could not create credit note:\n{e}")
+            return
 
-    def _show_status(self, msg, error=False):
-        color = DANGER if error else SUCCESS
-        self._status.setStyleSheet(f"font-size: 12px; color: {color}; background: transparent;")
-        self._status.setText(msg)
+        # Status message
+        status = cn.get("cn_status", "")
+        if status == "ready":
+            extra = "Will be submitted to Frappe shortly."
+        elif status == "pending_sync":
+            extra = "Queued — will sync after the original invoice syncs."
+        else:
+            extra = "Recorded locally."
+
+        QMessageBox.information(
+            self, "Credit Note Issued",
+            f"✅  {cn['cn_number']} created.\n{extra}"
+        )
+
+        # Emit signal so POSView can load it into the main table
+        self.credit_note_ready.emit({**cn, "items_to_return": items_to_return})
+        self.accept()

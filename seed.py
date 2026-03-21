@@ -1,63 +1,79 @@
-"""
-migrate_frappe_ref.py
----------------------
-Adds the frappe_ref column to the sales table.
+# =============================================================================
+# migrate_credit_notes.py
+#
+# Run this once to create the credit_notes and credit_note_items tables.
+#
+# Usage:
+#   cd C:\Users\DELL\Desktop\Pos Pyside6\pos_system
+#   python migrate_credit_notes.py
+# =============================================================================
 
-This column stores the Frappe Sales Invoice document name
-(e.g. ACC-SINV-2026-00565) after a local sale is successfully
-pushed to Frappe. invoice_no is also overwritten with this value
-so both columns hold the authoritative Frappe reference.
+import sys
+import os
 
-Run once:
-    py migrate_frappe_ref.py
-"""
+# Make sure the project root is on the path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database.db import get_connection
 
-
-def run():
+def migrate():
     conn = get_connection()
     cur  = conn.cursor()
 
-    print("Starting migration...\n")
-
-    # ── 1. Add frappe_ref column ──────────────────────────────────────────────
-    print("  Checking column: frappe_ref")
+    print("Creating credit_notes table...")
     cur.execute("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = 'sales' AND COLUMN_NAME = 'frappe_ref'
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = 'credit_notes'
+        )
+        CREATE TABLE credit_notes (
+            id                  INT           IDENTITY(1,1) PRIMARY KEY,
+            cn_number           NVARCHAR(40)  NOT NULL DEFAULT '',
+            original_sale_id    INT           NOT NULL,
+            original_invoice_no NVARCHAR(40)  NOT NULL DEFAULT '',
+            frappe_ref          NVARCHAR(80)  NULL,
+            frappe_cn_ref       NVARCHAR(80)  NULL,
+            reason              NVARCHAR(255) NOT NULL DEFAULT 'Customer Return',
+            total               DECIMAL(12,2) NOT NULL DEFAULT 0,
+            currency            NVARCHAR(10)  NOT NULL DEFAULT 'USD',
+            cashier_name        NVARCHAR(120) NOT NULL DEFAULT '',
+            customer_name       NVARCHAR(120) NOT NULL DEFAULT '',
+            cn_status           NVARCHAR(20)  NOT NULL DEFAULT 'pending_sync',
+            created_at          DATETIME2     NOT NULL DEFAULT SYSDATETIME()
+        )
     """)
-    if cur.fetchone()[0]:
-        print("    Already exists — skipping.\n")
-    else:
-        cur.execute("ALTER TABLE sales ADD frappe_ref NVARCHAR(80) NULL")
-        conn.commit()
-        cur.execute("""
-            SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = 'sales' AND COLUMN_NAME = 'frappe_ref'
-        """)
-        if cur.fetchone()[0]:
-            print("    Added frappe_ref NVARCHAR(80) NULL. ✅\n")
-        else:
-            print("    WARNING: Column may not have been added. Check manually. ⚠️\n")
+    print("  credit_notes: OK")
 
-    # ── 2. Back-fill: for already-synced sales that have no frappe_ref,
-    #       copy invoice_no → frappe_ref so existing records are consistent.
-    #       Only copies values that look like Frappe doc names (contain 'SINV').
-    print("  Back-filling frappe_ref from invoice_no for already-synced sales...")
+    print("Creating credit_note_items table...")
     cur.execute("""
-        UPDATE sales
-        SET frappe_ref = invoice_no
-        WHERE synced = 1
-          AND (frappe_ref IS NULL OR frappe_ref = '')
-          AND invoice_no LIKE '%SINV%'
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = 'credit_note_items'
+        )
+        CREATE TABLE credit_note_items (
+            id             INT           IDENTITY(1,1) PRIMARY KEY,
+            credit_note_id INT           NOT NULL
+                               REFERENCES credit_notes(id) ON DELETE CASCADE,
+            part_no        NVARCHAR(50)  NOT NULL DEFAULT '',
+            product_name   NVARCHAR(120) NOT NULL DEFAULT '',
+            qty            DECIMAL(12,4) NOT NULL DEFAULT 0,
+            price          DECIMAL(12,2) NOT NULL DEFAULT 0,
+            total          DECIMAL(12,2) NOT NULL DEFAULT 0,
+            tax_type       NVARCHAR(20)  NOT NULL DEFAULT '',
+            tax_rate       DECIMAL(8,4)  NOT NULL DEFAULT 0,
+            tax_amount     DECIMAL(12,2) NOT NULL DEFAULT 0,
+            reason         NVARCHAR(255) NOT NULL DEFAULT ''
+        )
     """)
+    print("  credit_note_items: OK")
+
     conn.commit()
-    print(f"    {cur.rowcount} row(s) back-filled. ✅\n")
-
     conn.close()
-    print("Migration complete. Restart your POS application.")
-
+    print("\nDone. Both tables are ready.")
 
 if __name__ == "__main__":
-    run()
+    try:
+        migrate()
+    except Exception as e:
+        print(f"\nError: {e}")
+        sys.exit(1)
