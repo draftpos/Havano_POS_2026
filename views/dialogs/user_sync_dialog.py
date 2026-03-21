@@ -72,7 +72,9 @@ class UserSyncDialog(QDialog):
         self.setMinimumSize(720, 500)
         self.setModal(True)
         self.setStyleSheet(f"QDialog {{ background:{OFF_WHITE}; }}")
-        self._thread = None
+        self._thread  = None
+        self._worker  = None
+        self._syncing = False   # simple flag — avoids touching deleted QThread
         self._build()
         self._load_users()
 
@@ -175,17 +177,16 @@ class UserSyncDialog(QDialog):
             for col, val in enumerate([name, email, role, pin, cc, wh]):
                 it = QTableWidgetItem(str(val))
                 it.setFlags(it.flags() & ~Qt.ItemIsEditable)
-                if col == 2:   # Role
+                if col == 2:
                     it.setForeground(QColor(ACCENT if role.lower() == "admin" else MUTED))
                     it.setFont(_bold_font())
-                if col == 3 and val == "—":   # No PIN
+                if col == 3 and val == "—":
                     it.setForeground(QColor(MUTED))
-                # Synced from Frappe indicator on name
                 if col == 0 and u.get("synced_from_frappe"):
                     it.setText(f"☁  {val}")
                 self._tbl.setItem(r, col, it)
 
-        total = self._tbl.rowCount()
+        total  = self._tbl.rowCount()
         synced = sum(1 for u in users if u.get("synced_from_frappe"))
         self._count_lbl.setText(
             f"{total} user(s) — {synced} synced from Frappe, {total - synced} local"
@@ -194,12 +195,17 @@ class UserSyncDialog(QDialog):
     # ── Sync ──────────────────────────────────────────────────────────────────
 
     def _start_sync(self):
-        if self._thread and self._thread.isRunning():
+        # Use a plain bool flag instead of calling isRunning() on a
+        # potentially-deleted C++ QThread object
+        if self._syncing:
             return
+
+        self._syncing = True
         self._sync_btn.setEnabled(False)
         self._sync_btn.setText("Syncing…")
         self._close_btn.setEnabled(False)
         self._status_lbl.setText("Fetching from Frappe…")
+        self._status_lbl.setStyleSheet(f"color:{MUTED}; font-size:12px; background:transparent;")
 
         self._thread = QThread(self)
         self._worker = _SyncWorker()
@@ -209,7 +215,14 @@ class UserSyncDialog(QDialog):
         self._worker.finished.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._clear_thread)
         self._thread.start()
+
+    def _clear_thread(self):
+        """Called after thread finishes — clears refs so GC can clean up."""
+        self._thread  = None
+        self._worker  = None
+        self._syncing = False
 
     def _on_done(self, result: dict):
         self._sync_btn.setEnabled(True)
@@ -224,7 +237,9 @@ class UserSyncDialog(QDialog):
             self._status_lbl.setStyleSheet(f"color:{DANGER}; font-size:12px; background:transparent;")
         else:
             self._status_lbl.setText(f"✅ {n} user(s) synced")
-            self._status_lbl.setStyleSheet(f"color:{GREEN}; font-size:12px; font-weight:bold; background:transparent;")
+            self._status_lbl.setStyleSheet(
+                f"color:{GREEN}; font-size:12px; font-weight:bold; background:transparent;"
+            )
 
         self._load_users()
 

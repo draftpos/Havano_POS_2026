@@ -1,79 +1,92 @@
 # =============================================================================
-# migrate_credit_notes.py
+# wipe_sales.py  —  Havano POS
 #
-# Run this once to create the credit_notes and credit_note_items tables.
+# Wipes all sales-related data cleanly in the correct order
+# (respects foreign key constraints).
+#
+# Tables cleared:
+#   payment_entries, credit_note_items, credit_notes,
+#   sale_items, sales
+#
+# Tables NOT touched:
+#   products, users, customers, company_defaults,
+#   shifts, shift_rows, gl_accounts, exchange_rates, etc.
 #
 # Usage:
-#   cd C:\Users\DELL\Desktop\Pos Pyside6\pos_system
-#   python migrate_credit_notes.py
+#   python wipe_sales.py
 # =============================================================================
 
 import sys
 import os
 
-# Make sure the project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from database.db import get_connection
 
-def migrate():
+def run():
+    try:
+        from database.db import get_connection
+    except Exception as e:
+        print(f"[ERROR] Cannot import database.db: {e}")
+        sys.exit(1)
+
+    print("\n======================================")
+    print("  Havano POS — Wipe Sales Data")
+    print("======================================\n")
+    print("  This will permanently delete:")
+    print("    - All payment entries")
+    print("    - All credit notes and credit note items")
+    print("    - All sales and sale items")
+    print("\n  Products, customers, users and settings")
+    print("  will NOT be affected.\n")
+
+    confirm = input("  Type YES to confirm: ").strip()
+    if confirm != "YES":
+        print("\n  Cancelled.\n")
+        sys.exit(0)
+
     conn = get_connection()
     cur  = conn.cursor()
 
-    print("Creating credit_notes table...")
-    cur.execute("""
-        IF NOT EXISTS (
-            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_NAME = 'credit_notes'
-        )
-        CREATE TABLE credit_notes (
-            id                  INT           IDENTITY(1,1) PRIMARY KEY,
-            cn_number           NVARCHAR(40)  NOT NULL DEFAULT '',
-            original_sale_id    INT           NOT NULL,
-            original_invoice_no NVARCHAR(40)  NOT NULL DEFAULT '',
-            frappe_ref          NVARCHAR(80)  NULL,
-            frappe_cn_ref       NVARCHAR(80)  NULL,
-            reason              NVARCHAR(255) NOT NULL DEFAULT 'Customer Return',
-            total               DECIMAL(12,2) NOT NULL DEFAULT 0,
-            currency            NVARCHAR(10)  NOT NULL DEFAULT 'USD',
-            cashier_name        NVARCHAR(120) NOT NULL DEFAULT '',
-            customer_name       NVARCHAR(120) NOT NULL DEFAULT '',
-            cn_status           NVARCHAR(20)  NOT NULL DEFAULT 'pending_sync',
-            created_at          DATETIME2     NOT NULL DEFAULT SYSDATETIME()
-        )
-    """)
-    print("  credit_notes: OK")
+    steps = [
+        ("payment_entries",   "DELETE FROM payment_entries"),
+        ("credit_note_items", "DELETE FROM credit_note_items"),
+        ("credit_notes",      "DELETE FROM credit_notes"),
+        ("sale_items",        "DELETE FROM sale_items"),
+        ("sales",             "DELETE FROM sales"),
+    ]
 
-    print("Creating credit_note_items table...")
-    cur.execute("""
-        IF NOT EXISTS (
-            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_NAME = 'credit_note_items'
-        )
-        CREATE TABLE credit_note_items (
-            id             INT           IDENTITY(1,1) PRIMARY KEY,
-            credit_note_id INT           NOT NULL
-                               REFERENCES credit_notes(id) ON DELETE CASCADE,
-            part_no        NVARCHAR(50)  NOT NULL DEFAULT '',
-            product_name   NVARCHAR(120) NOT NULL DEFAULT '',
-            qty            DECIMAL(12,4) NOT NULL DEFAULT 0,
-            price          DECIMAL(12,2) NOT NULL DEFAULT 0,
-            total          DECIMAL(12,2) NOT NULL DEFAULT 0,
-            tax_type       NVARCHAR(20)  NOT NULL DEFAULT '',
-            tax_rate       DECIMAL(8,4)  NOT NULL DEFAULT 0,
-            tax_amount     DECIMAL(12,2) NOT NULL DEFAULT 0,
-            reason         NVARCHAR(255) NOT NULL DEFAULT ''
-        )
-    """)
-    print("  credit_note_items: OK")
+    total = 0
+    for table, sql in steps:
+        try:
+            cur.execute(sql)
+            n = cur.rowcount
+            total += n
+            print(f"  [+] {table:<22} {n} rows deleted")
+        except Exception as e:
+            print(f"  [!] {table:<22} ERROR: {e}")
+            conn.rollback()
+            conn.close()
+            print("\n  Rolled back. No data was changed.\n")
+            sys.exit(1)
+
+    # Reset invoice number sequence so next sale starts fresh
+    try:
+        cur.execute("""
+            IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='company_defaults')
+            UPDATE company_defaults SET invoice_start_number = '0'
+        """)
+        print(f"  [+] invoice_start_number     reset to 0")
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()
-    print("\nDone. Both tables are ready.")
+
+    print(f"\n  Done. {total} total rows deleted.")
+    print("\n======================================")
+    print("  Wipe complete!")
+    print("======================================\n")
+
 
 if __name__ == "__main__":
-    try:
-        migrate()
-    except Exception as e:
-        print(f"\nError: {e}")
-        sys.exit(1)
+    run()

@@ -1,6 +1,8 @@
 # database/db.py  —  Dynamic SQL Server connection (Windows or SQL Auth)
 
+import json
 import pyodbc
+from pathlib import Path
 
 # =============================================================================
 # CONFIG  —  edit these two lines only
@@ -67,7 +69,6 @@ def is_connection_valid() -> bool:
 
 def get_connection() -> pyodbc.Connection:
     cfg = _load_settings()
-    # ... (your existing get_connection code - unchanged)
     if cfg.get("auth_mode") == "windows":
         conn_str = (
             f"DRIVER={{{DRIVER}}};"
