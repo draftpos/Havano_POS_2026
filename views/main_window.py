@@ -787,29 +787,6 @@ class _InlineSettingsDialog(QDialog):
         root.setSpacing(0)
         root.setContentsMargins(0, 0, 0, 0)
 
-        hdr = QWidget()
-        hdr.setFixedHeight(52)
-        hdr.setStyleSheet(f"background-color:{NAVY};")
-        hl = QHBoxLayout(hdr)
-        hl.setContentsMargins(20, 0, 20, 0)
-        t = QLabel("Settings")
-        t.setStyleSheet(
-            f"font-size:17px; font-weight:bold; color:{WHITE}; background:transparent;"
-        )
-        close_btn = QPushButton("✕  Close")
-        close_btn.setFixedSize(90, 32)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color:{DANGER}; color:{WHITE}; border:none;
-                border-radius:4px; font-size:12px; font-weight:bold;
-            }}
-            QPushButton:hover {{ background-color:{DANGER_H}; }}
-        """)
-        close_btn.clicked.connect(self.accept)
-        hl.addWidget(t); hl.addStretch(); hl.addWidget(close_btn)
-        root.addWidget(hdr)
-
         body = QWidget()
         body.setStyleSheet(f"background:{OFF_WHITE};")
         bl = QHBoxLayout(body)
@@ -2097,25 +2074,6 @@ class AdminDashboard(QWidget):
         date_lbl.setStyleSheet(f"font-size: 12px; color: {NAVY}; background: transparent;")
         nav_layout.addWidget(date_lbl); nav_layout.addSpacing(16)
 
-        self._pos_btn = QPushButton("Switch to POS  →")
-        self._pos_btn.setFixedHeight(34)
-        self._pos_btn.setCursor(Qt.PointingHandCursor)
-        self._pos_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {WHITE}; color: {NAVY};
-                border: none; border-radius: 4px;
-                font-size: 12px; font-weight: bold; padding: 0 16px;
-            }}
-            QPushButton:hover {{ background-color: {LIGHT}; }}
-        """)
-        if self.parent_window:
-            self._pos_btn.clicked.connect(self.parent_window.switch_to_pos)
-        nav_layout.addWidget(self._pos_btn)
-
-        user_lbl = QLabel(self.user.get("username", ""))
-        user_lbl.setStyleSheet(f"font-size: 12px; color: {OFF_WHITE}; background: transparent;")
-        nav_layout.addSpacing(8); nav_layout.addWidget(user_lbl); nav_layout.addSpacing(4)
-
         logout_btn = navy_btn("Logout", height=30, width=72, color=DANGER, hover=DANGER_H)
         if self.parent_window:
             logout_btn.clicked.connect(self.parent_window._logout)
@@ -2640,29 +2598,30 @@ class POSView(QWidget):
         self._cust_btn.clicked.connect(self._select_customer)
         layout.addWidget(self._cust_btn); layout.addSpacing(4)
 
-        # Queue badge
-        self._unsynced_badge = QPushButton("⏳ Q : —")
+        # ── Queue badge — shows unsynced invoices + credit notes ──────────────
+        self._unsynced_badge = QPushButton("⏳ Q: —")
         self._unsynced_badge.setFixedHeight(26)
-        self._unsynced_badge.setMinimumWidth(80)
-        self._unsynced_badge.setMaximumWidth(160)
+        self._unsynced_badge.setMinimumWidth(70)
+        self._unsynced_badge.setMaximumWidth(170)
         self._unsynced_badge.setCursor(Qt.PointingHandCursor)
         self._unsynced_badge.setStyleSheet(f"""
             QPushButton {{
-                background-color: {AMBER}; color: {WHITE}; border: none;
+                background-color: {NAVY_2}; color: {WHITE}; border: none;
                 border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 8px;
             }}
-            QPushButton:hover {{ background-color: {ORANGE}; }}
+            QPushButton:hover {{ background-color: {NAVY_3}; }}
         """)
-        self._unsynced_badge.setToolTip("Unsynced sales — click to view")
+        self._unsynced_badge.setToolTip("Unsynced invoices / credit notes — click to view")
         self._unsynced_badge.clicked.connect(self._open_sales_list)
         layout.addWidget(self._unsynced_badge); layout.addSpacing(4)
 
+        # ── Return mode indicator (only visible during a return/CN flow) ──────
         self._return_btn = _npb("↩  Return", self._process_return, color=DANGER, hov=DANGER_H)
         self._return_btn.setToolTip("Confirm return (credit note loaded)")
         self._return_btn.setVisible(False)
         layout.addWidget(self._return_btn); layout.addSpacing(4)
 
-        # Refresh badge on startup and every 15 s
+        # Refresh on startup and every 5 s
         QTimer.singleShot(500, self._refresh_unsynced_badge)
         self._unsynced_timer = QTimer(self)
         self._unsynced_timer.setInterval(5000)
@@ -3896,82 +3855,42 @@ class POSView(QWidget):
         self._grid_resize_filter = _GridResizeFilter()
         self._product_grid_widget.installEventFilter(self._grid_resize_filter)
 
-        # ── Pagination bar with user/server/SQL info ──────────────────────────
-        page_bar = QWidget(); page_bar.setFixedHeight(36)
+        # ── Pagination bar ─────────────────────────────────────────────────────
+        page_bar = QWidget(); page_bar.setFixedHeight(22)
         page_bar.setStyleSheet(f"background-color: {NAVY}; border-top: 1px solid {NAVY_2};")
         page_bar_h = QHBoxLayout(page_bar)
-        page_bar_h.setContentsMargins(10, 4, 10, 4); page_bar_h.setSpacing(8)
-
-        # #37 user · #38 server · #39 SQL — left side of the bar
-        username = (self.user or {}).get("username", "")
-        role     = (self.user or {}).get("role", "")
-        user_info = QLabel(f"👤 {username} [{role.upper()}]")
-        user_info.setStyleSheet(f"color: {MID}; font-size: 9px; background: transparent;")
-        page_bar_h.addWidget(user_info)
-        page_bar_h.addSpacing(12)
-
-        try:
-            from services.site_config import get_host_label as _ghl2
-            _srv2 = _ghl2()
-        except Exception:
-            _srv2 = "apk.havano.cloud"
-        srv_lbl2 = QLabel(f"🌐 {_srv2}")
-        srv_lbl2.setStyleSheet(f"color: {MID}; font-size: 9px; background: transparent;")
-        page_bar_h.addWidget(srv_lbl2)
-        page_bar_h.addSpacing(12)
-
-        _sql2 = ""
-        try:
-            from database.db import get_connection as _gc2
-            _conn2 = _gc2()
-            try: _sql2 = _conn2.getinfo(2)
-            except Exception: pass
-            _conn2.close()
-        except Exception:
-            pass
-        if not _sql2:
-            try:
-                from models.company_defaults import get_defaults as _gd2
-                _d2 = _gd2() or {}
-                _sql2 = _d2.get("db_server", "") or _d2.get("server", "") or "localhost"
-            except Exception:
-                _sql2 = "localhost"
-        sql_lbl2 = QLabel(f"🗄 {_sql2}")
-        sql_lbl2.setStyleSheet(f"color: {MID}; font-size: 9px; background: transparent;")
-        page_bar_h.addWidget(sql_lbl2)
+        page_bar_h.setContentsMargins(0, 0, 0, 0); page_bar_h.setSpacing(4)
 
         page_bar_h.addStretch(1)
 
-        # Prev / page label / Next — centred in the remaining space
-        self._grid_prev_btn = QPushButton("◀  Prev")
-        self._grid_prev_btn.setFixedSize(80, 26)
-        self._grid_prev_btn.setCursor(Qt.PointingHandCursor)
-        self._grid_prev_btn.setStyleSheet(f"""
+        _btn_style = f"""
             QPushButton {{ background-color: {NAVY_2}; color: {WHITE}; border: none;
-                border-radius: 4px; font-size: 11px; font-weight: bold; padding: 0 4px; }}
+                border-radius: 3px; font-size: 9px; font-weight: bold; padding: 0 6px; }}
             QPushButton:hover {{ background-color: {NAVY_3}; }}
             QPushButton:disabled {{ background-color: {NAVY}; color: {MID}; }}
-        """)
+        """
+
+        self._grid_prev_btn = QPushButton("◀ Prev")
+        self._grid_prev_btn.setFixedSize(52, 16)
+        self._grid_prev_btn.setCursor(Qt.PointingHandCursor)
+        self._grid_prev_btn.setStyleSheet(_btn_style)
         self._grid_prev_btn.clicked.connect(lambda: self._grid_turn_page(-1))
 
-        self._grid_page_lbl = QLabel("Page 1 / 1  (0 products)")
+        self._grid_page_lbl = QLabel("Page 1 / 1")
         self._grid_page_lbl.setAlignment(Qt.AlignCenter)
-        self._grid_page_lbl.setStyleSheet(f"color: {MID}; font-size: 10px; background: transparent;")
+        self._grid_page_lbl.setStyleSheet(f"color: {MID}; font-size: 9px; background: transparent;")
+        self._grid_page_lbl.setFixedWidth(80)
 
-        self._grid_next_btn = QPushButton("Next  ▶")
-        self._grid_next_btn.setFixedSize(80, 26)
+        self._grid_next_btn = QPushButton("Next ▶")
+        self._grid_next_btn.setFixedSize(52, 16)
         self._grid_next_btn.setCursor(Qt.PointingHandCursor)
-        self._grid_next_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {NAVY_2}; color: {WHITE}; border: none;
-                border-radius: 4px; font-size: 11px; font-weight: bold; padding: 0 4px; }}
-            QPushButton:hover {{ background-color: {NAVY_3}; }}
-            QPushButton:disabled {{ background-color: {NAVY}; color: {MID}; }}
-        """)
+        self._grid_next_btn.setStyleSheet(_btn_style)
         self._grid_next_btn.clicked.connect(lambda: self._grid_turn_page(1))
 
         page_bar_h.addWidget(self._grid_prev_btn)
         page_bar_h.addWidget(self._grid_page_lbl)
         page_bar_h.addWidget(self._grid_next_btn)
+        page_bar_h.addStretch(1)
         outer.addWidget(page_bar)
 
         self._refresh_cat_tabs()
@@ -4154,9 +4073,7 @@ class POSView(QWidget):
                 self._product_grid.addWidget(btn, r, c)
 
         # Update pagination bar
-        self._grid_page_lbl.setText(
-            f"Page {self._product_page + 1} / {total_pages}  ({total} products)"
-        )
+        self._grid_page_lbl.setText(f"{self._product_page + 1} / {total_pages}")
         self._grid_prev_btn.setEnabled(self._product_page > 0)
         self._grid_next_btn.setEnabled(self._product_page < total_pages - 1)
 
@@ -4339,6 +4256,8 @@ class POSView(QWidget):
             self._update_prev_txn_display(paid=total, change=0.0, invoice_no=sale.get("invoice_no",""))
             if self.parent_window:
                 self.parent_window._set_status(f"Sale #{sale['number']} saved — ${total:.2f}")
+            # ── Badge refresh: immediately after DB write, before UI reset ──
+            self._refresh_unsynced_badge()
             self._new_sale(confirm=False)
         except Exception as e:
             QMessageBox.warning(self, "Save Error", _friendly_db_error(e))
@@ -4553,15 +4472,17 @@ class POSView(QWidget):
                     if cust_name and cust_name != "Walk-in": 
                         status += f" — {cust_name}"
                     self.parent_window._set_status(status)
-                    
+
+                # ── Badge refresh: immediately after DB write, before UI reset ──
+                self._refresh_unsynced_badge()
+
             except Exception as e:
                 # _friendly_db_error is your helper in main_window.py
                 QMessageBox.warning(self, "Save Error", _friendly_db_error(e))
                 return
-                
+
             # Clear invoice for next customer
             self._new_sale(confirm=False)
-            self._refresh_unsynced_badge()
     def _open_customer_payment_entry(self):
         """Open the customer payment entry dialog.
         If no customer is selected on POS, open customer search first then proceed."""
@@ -4782,6 +4703,8 @@ class POSView(QWidget):
         if self.parent_window:
             self.parent_window._set_status(
                 f"Return processed  ·  {cn.get('invoice_no', '')}  ·  ${total:.2f}")
+        # ── Badge refresh: immediately after DB write, before UI reset ──
+        self._refresh_unsynced_badge()
         self._new_sale(confirm=False)
 
     def _new_sale(self, confirm=True):
@@ -4859,11 +4782,55 @@ class MainWindow(QMainWindow):
         self._build_menubar()
 
         self._status_bar = QStatusBar()
-        self._status_bar.showMessage(
-            f"  {self.user['username']} ({self.user['role']})  |  "
-            f"{QDate.currentDate().toString('dd/MM/yyyy')}  |  Ready"
-        )
+        self._status_bar.setSizeGripEnabled(False)
+        self._status_bar.showMessage("  Ready")
         self.setStatusBar(self._status_bar)
+
+        # #37 — logged-in user in footer
+        _uname = self.user.get("username", "")
+        _urole = self.user.get("role", "cashier")
+        _user_lbl = QLabel(f"  👤 {_uname} [{_urole.upper()}]  ")
+        _user_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
+        self._status_bar.addPermanentWidget(_user_lbl)
+
+        _sep1 = QLabel("|")
+        _sep1.setStyleSheet(f"color: {NAVY_2}; background: transparent;")
+        self._status_bar.addPermanentWidget(_sep1)
+
+        # #38 — server URL in footer
+        try:
+            from services.site_config import get_host_label as _ghl
+            _srv = _ghl()
+        except Exception:
+            _srv = "—"
+        _srv_lbl = QLabel(f"  🌐 {_srv}  ")
+        _srv_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
+        self._status_bar.addPermanentWidget(_srv_lbl)
+
+        _sep2 = QLabel("|")
+        _sep2.setStyleSheet(f"color: {NAVY_2}; background: transparent;")
+        self._status_bar.addPermanentWidget(_sep2)
+
+        # #39 — SQL connection string in footer
+        _sql = ""
+        try:
+            from database.db import get_connection as _gc
+            _conn = _gc()
+            try: _sql = _conn.getinfo(2)
+            except Exception: pass
+            _conn.close()
+        except Exception:
+            pass
+        if not _sql:
+            try:
+                from models.company_defaults import get_defaults as _gd
+                _d = _gd() or {}
+                _sql = _d.get("db_server", "") or _d.get("server", "") or "localhost"
+            except Exception:
+                _sql = "localhost"
+        _sql_lbl = QLabel(f"  🗄 {_sql}  ")
+        _sql_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
+        self._status_bar.addPermanentWidget(_sql_lbl)
 
         # #18 — everyone lands on POS first, always
         self._stack.setCurrentIndex(0)
@@ -4942,9 +4909,6 @@ class MainWindow(QMainWindow):
             ("New Sale",               lambda: (self.switch_to_pos(), self._pos_view._new_sale())),
             ("Sales List",             self._pos_view._open_sales_list),
             (None, None),
-            ("Day Shift",              self._pos_view._open_day_shift),
-            ("Open Cash Drawer",       lambda: coming_soon(self, "Cash Drawer")),
-            (None, None),
             ("Customer Payment Entry", self._pos_view._open_customer_payment_entry),
             ("Create Credit Note",     lambda: CreditNoteDialog(self).exec()),
             ("Credit Note Sync",       lambda: CreditNoteManagerDialog(self).exec()),
@@ -4965,6 +4929,10 @@ class MainWindow(QMainWindow):
             ("💰 Cost Centers",      lambda: CostCenterDialog(self).exec()),
             ("🏷 Price Lists",       lambda: PriceListDialog(self).exec()),
             ("👤 Customers",         lambda: CustomerDialog(self).exec()),
+            ("🧑‍💼 Users",            lambda: UserManagementPage(self, current_user=self.user).exec() if hasattr(UserManagementPage, 'exec') else coming_soon(self, "Users")),
+            (None, None),
+            ("📅 Day Shift",         self._pos_view._open_day_shift),
+            ("⏳ Sync Queue",        self._pos_view._open_sales_list),
             (None, None),
             ("📦 Stock File",        self._pos_view._open_stock_file),
             (None, None),
