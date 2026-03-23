@@ -1,4 +1,3 @@
-
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QPushButton, QLabel, QFrame, QTableWidget, QTableWidgetItem,
@@ -250,6 +249,139 @@ def numpad_btn(text, kind="digit"):
 # =============================================================================
 # PRODUCT SEARCH DIALOG
 # =============================================================================
+
+# =============================================================================
+# UOM Picker Dialog — shown when a product has multiple selling UOMs
+# =============================================================================
+class UomPickerDialog(QDialog):
+    """Touch-friendly UOM picker — shows each unit and price as a large tappable button."""
+
+    def __init__(self, product_name: str, uom_prices: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Unit / Pack Size")
+        n = len(uom_prices)
+        # Width 460, height: header 110 + 80px per option + 60 cancel
+        self.setFixedSize(460, min(110 + n * 82 + 60, 580))
+        self.setModal(True)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background: {WHITE};
+                font-family: 'Segoe UI', sans-serif;
+            }}
+        """)
+        self.selected_uom   = None
+        self.selected_price = None
+        self._build(product_name, uom_prices)
+
+    def _build(self, product_name: str, uom_prices: list[dict]):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(0)
+
+        # ── Header ────────────────────────────────────────────────────
+        hdr = QWidget()
+        hdr.setStyleSheet(f"background:{NAVY}; border-radius:10px;")
+        hdr_layout = QVBoxLayout(hdr)
+        hdr_layout.setContentsMargins(16, 12, 16, 12)
+        hdr_layout.setSpacing(2)
+
+        lbl_prompt = QLabel("Select unit / pack size")
+        lbl_prompt.setStyleSheet(
+            "color:rgba(255,255,255,0.7); font-size:11px; "
+            "font-weight:500; background:transparent;"
+        )
+        lbl_name = QLabel(product_name)
+        lbl_name.setStyleSheet(
+            "color:#ffffff; font-size:15px; font-weight:bold; background:transparent;"
+        )
+        lbl_name.setWordWrap(True)
+        hdr_layout.addWidget(lbl_prompt)
+        hdr_layout.addWidget(lbl_name)
+        root.addWidget(hdr)
+        root.addSpacing(14)
+
+        # ── UOM buttons ───────────────────────────────────────────────
+        for i, up in enumerate(uom_prices):
+            uom   = str(up.get("uom",   "Nos")).strip()
+            price = float(up.get("price", 0))
+
+            btn = QPushButton()
+            btn.setFixedHeight(70)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.NoFocus)
+
+            # Build button content as two lines via rich-ish layout inside
+            btn_layout = QHBoxLayout(btn)
+            btn_layout.setContentsMargins(18, 0, 18, 0)
+
+            uom_lbl = QLabel(uom)
+            uom_lbl.setStyleSheet(
+                f"color:{DARK_TEXT}; font-size:16px; font-weight:bold; "
+                "background:transparent;"
+            )
+            price_lbl = QLabel(f"${price:.2f}")
+            price_lbl.setStyleSheet(
+                f"color:{ACCENT}; font-size:18px; font-weight:bold; "
+                "background:transparent;"
+            )
+            price_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+            btn_layout.addWidget(uom_lbl, 1)
+            btn_layout.addWidget(price_lbl)
+
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {LIGHT};
+                    border: 2px solid {BORDER};
+                    border-radius: 10px;
+                }}
+                QPushButton:hover {{
+                    background: {ACCENT};
+                    border-color: {ACCENT};
+                }}
+                QPushButton:hover QLabel {{
+                    color: white;
+                }}
+                QPushButton:pressed {{
+                    background: {NAVY};
+                    border-color: {NAVY};
+                }}
+            """)
+            btn.clicked.connect(lambda _, u=uom, pr=price: self._pick(u, pr))
+            root.addWidget(btn)
+            if i < len(uom_prices) - 1:
+                root.addSpacing(8)
+
+        root.addSpacing(14)
+
+        # ── Cancel ────────────────────────────────────────────────────
+        cancel = QPushButton("✕  Cancel")
+        cancel.setFixedHeight(46)
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setFocusPolicy(Qt.NoFocus)
+        cancel.setStyleSheet(f"""
+            QPushButton {{
+                background: {WHITE};
+                color: {MUTED};
+                border: 1px solid {BORDER};
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {LIGHT};
+                color: {DARK_TEXT};
+            }}
+        """)
+        cancel.clicked.connect(self.reject)
+        root.addWidget(cancel)
+
+    def _pick(self, uom: str, price: float):
+        self.selected_uom   = uom
+        self.selected_price = price
+        self.accept()
+
+
 class ProductSearchDialog(QDialog):
     def __init__(self, parent=None, initial_query=""):
         super().__init__(parent)
@@ -1702,6 +1834,23 @@ class ManageUsersDialog(QDialog):
         lbl_un, self._f_username = _field("Username *", "e.g. john.doe")
         lbl_em, self._f_email    = _field("Email", "user@example.com")
         lbl_pw, self._f_password = _field("Password *", "Leave blank to keep existing", echo=True)
+
+        # #40 — eye button to toggle password visibility
+        pw_row = QWidget(); pw_row.setStyleSheet("background:transparent;")
+        pw_rl  = QHBoxLayout(pw_row); pw_rl.setContentsMargins(0,0,0,0); pw_rl.setSpacing(4)
+        pw_rl.addWidget(self._f_password, 1)
+        _eye_btn = QPushButton("👁")
+        _eye_btn.setFixedSize(34, 34); _eye_btn.setCursor(Qt.PointingHandCursor)
+        _eye_btn.setCheckable(True)
+        _eye_btn.setStyleSheet(f"""
+            QPushButton {{ background:{LIGHT}; border:1px solid {BORDER}; border-radius:5px; font-size:14px; }}
+            QPushButton:checked {{ background:{ACCENT}; color:{WHITE}; }}
+        """)
+        def _toggle_pw(checked, f=self._f_password):
+            f.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+        _eye_btn.toggled.connect(_toggle_pw)
+        pw_rl.addWidget(_eye_btn)
+
         lbl_pi, self._f_pin      = _field("PIN", "4–6 digit PIN for quick login")
         lbl_cc, self._f_cost     = _field("Cost Centre", "e.g. Main - AT")
         lbl_wh, self._f_whouse   = _field("Warehouse", "e.g. Stores - AT")
@@ -1720,7 +1869,7 @@ class ManageUsersDialog(QDialog):
             (lbl_fn, self._f_fullname),
             (lbl_un, self._f_username),
             (lbl_em, self._f_email),
-            (lbl_pw, self._f_password),
+            (lbl_pw, pw_row),
             (lbl_pi, self._f_pin),
             (lbl_cc, self._f_cost),
             (lbl_wh, self._f_whouse),
@@ -2286,6 +2435,8 @@ class OptionsDialog(QDialog):
 
         # Invoice actions
         _section("Invoice Actions")
+        _opt_btn("🖨", "Reprint Invoice",
+                 self._do_reprint, color=NAVY, hov=NAVY_2)
         # _opt_btn("🗑", "Delete Selected Row",
         #          self._do_delete_row, color=DANGER, hov=DANGER_H)
         _opt_btn("🧾", "Sales Invoice List",
@@ -2337,6 +2488,11 @@ class OptionsDialog(QDialog):
         if self._pos:
             self._pos._open_sales_list()
 
+    def _do_reprint(self):
+        self.accept()
+        if self._pos:
+            self._pos._reprint_by_invoice_no()
+
     def _do_company_defaults(self):
         self.accept()
         try:
@@ -2371,7 +2527,18 @@ class OptionsDialog(QDialog):
 # CASHIER POS VIEW
 # =============================================================================
 class POSView(QWidget):
-    MAX_ROWS = 20
+    MAX_ROWS = 999   # safety ceiling — table grows elastically
+
+    def _ensure_rows(self, needed: int):
+        """Grow the table in blocks of 20 so there are at least `needed` rows."""
+        current = self.invoice_table.rowCount()
+        if needed <= current:
+            return
+        new_count = min(self.MAX_ROWS, ((needed + 19) // 20) * 20)
+        self.invoice_table.setRowCount(new_count)
+        for r in range(current, new_count):
+            self.invoice_table.setRowHeight(r, 20)
+            self._init_row(r)
 
     def __init__(self, parent_window=None, user=None):
         super().__init__()
@@ -2389,6 +2556,7 @@ class POSView(QWidget):
         # Shown in the footer bar so the cashier always sees the last sale
         self._prev_paid:   float = 0.0
         self._prev_change: float = 0.0
+        self._prev_invoice: str  = ""
 
         # Product grid pagination state
         self._product_page     = 0
@@ -2453,18 +2621,18 @@ class POSView(QWidget):
             b.clicked.connect(handler)
             return b
 
-        layout.addWidget(_npb("Day Shift",   self._open_day_shift))
-        layout.addWidget(_npb("Stock",       self._open_stock_file))
+        # #34 — only Maintenance and Sales remain in the nav bar
         layout.addWidget(_npb("Maintenance", self._open_settings))
         layout.addWidget(_npb("Sales",       self._open_sales_list, color=ACCENT, hov=ACCENT_H))
         layout.addSpacing(10)
 
+        # Customer selector — keep here, it's a POS action not a setting
         self._cust_btn = QPushButton("👤  Customer")
         self._cust_btn.setFixedHeight(26); self._cust_btn.setMaximumWidth(170)
         self._cust_btn.setCursor(Qt.PointingHandCursor)
         self._cust_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {NAVY_2}; color: {MID}; border: 1px solid {NAVY_3};
+                background-color: {NAVY_2}; color: {WHITE}; border: 1px solid {NAVY_3};
                 border-radius: 3px; font-size: 11px; padding: 0 8px;
             }}
             QPushButton:hover {{ background-color: {NAVY_3}; color: {WHITE}; }}
@@ -2472,7 +2640,7 @@ class POSView(QWidget):
         self._cust_btn.clicked.connect(self._select_customer)
         layout.addWidget(self._cust_btn); layout.addSpacing(4)
 
-        # ── Unsynced count badge ──────────────────────────────────────────────────
+        # Queue badge
         self._unsynced_badge = QPushButton("⏳ Q : —")
         self._unsynced_badge.setFixedHeight(26)
         self._unsynced_badge.setMinimumWidth(80)
@@ -2488,39 +2656,27 @@ class POSView(QWidget):
         self._unsynced_badge.setToolTip("Unsynced sales — click to view")
         self._unsynced_badge.clicked.connect(self._open_sales_list)
         layout.addWidget(self._unsynced_badge); layout.addSpacing(4)
+
         self._return_btn = _npb("↩  Return", self._process_return, color=DANGER, hov=DANGER_H)
         self._return_btn.setToolTip("Confirm return (credit note loaded)")
         self._return_btn.setVisible(False)
         layout.addWidget(self._return_btn); layout.addSpacing(4)
-        # Populate badge on startup and keep it auto-refreshing every 15 seconds
+
+        # Refresh badge on startup and every 15 s
         QTimer.singleShot(500, self._refresh_unsynced_badge)
         self._unsynced_timer = QTimer(self)
-        self._unsynced_timer.setInterval(15000)  # refresh every 15 s
+        self._unsynced_timer.setInterval(5000)
         self._unsynced_timer.timeout.connect(self._refresh_unsynced_badge)
         self._unsynced_timer.start()
 
-        # ── Site link — edit SITE_URL / SITE_LABEL to change ─────────────────────
-        try:
-            from services.site_config import get_host as _gh, get_host_label as _ghl
-            SITE_URL   = _gh()
-            SITE_LABEL = _ghl()
-        except Exception:
-            SITE_URL   = "https://apk.havano.cloud"
-            SITE_LABEL = "apk.havano.cloud"
-        layout.addStretch(1)
-        from PySide6.QtWidgets import QLabel as _QL
-        havano_lnk = _QL(f'<a href="{SITE_URL}" style="color:#0d1f3c;font-size:11px;text-decoration:none;font-weight:bold;">{SITE_LABEL}</a>')
-        havano_lnk.setOpenExternalLinks(True)
-        havano_lnk.setAlignment(Qt.AlignCenter)
-        havano_lnk.setStyleSheet("background: transparent;")
-        havano_lnk.setCursor(Qt.PointingHandCursor)
-        layout.addWidget(havano_lnk)
         layout.addStretch(1)
 
+        # #34 — admin Dashboard button (right side only, no switch-to-pos)
         try:
             from models.user import is_admin
             if self.user and is_admin(self.user):
-                dash_btn = QPushButton("Dashboard"); dash_btn.setFixedHeight(26); dash_btn.setCursor(Qt.PointingHandCursor)
+                dash_btn = QPushButton("Dashboard")
+                dash_btn.setFixedHeight(26); dash_btn.setCursor(Qt.PointingHandCursor)
                 dash_btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {ACCENT}; color: {WHITE};
@@ -2534,41 +2690,15 @@ class POSView(QWidget):
         except Exception:
             pass
 
-        # ── Right-side buttons — all NAV_BTN_H height ─────────────────────────
-        NAV_BTN_H = 30
-
-        role_badge = QPushButton(self.user.get("role", "").upper())
-        role_badge.setFixedHeight(NAV_BTN_H); role_badge.setEnabled(False)
-        role_c = ACCENT if self.user.get("role") == "admin" else NAVY_3
-        role_badge.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {role_c}; color: {WHITE};
-                border: none; border-radius: 4px;
-                font-size: 10px; font-weight: bold; padding: 0 10px;
-            }}
-        """)
-        layout.addWidget(role_badge); layout.addSpacing(4)
-
-        user_lbl = QPushButton(self.user.get("username", ""))
-        user_lbl.setFixedHeight(NAV_BTN_H); user_lbl.setEnabled(False)
-        user_lbl.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent; color: {NAVY};
-                border: 1px solid {BORDER}; border-radius: 4px;
-                font-size: 11px; font-weight: bold; padding: 0 10px;
-            }}
-        """)
-        layout.addWidget(user_lbl); layout.addSpacing(4)
-
         logout = QPushButton("Logout")
-        logout.setFixedHeight(NAV_BTN_H); logout.setCursor(Qt.PointingHandCursor)
+        logout.setFixedHeight(26); logout.setCursor(Qt.PointingHandCursor)
         logout.setStyleSheet(f"""
             QPushButton {{
                 background-color: {DANGER}; color: {WHITE}; border: none;
                 border-radius: 4px; font-size: 11px; font-weight: bold; padding: 0 12px;
             }}
             QPushButton:hover   {{ background-color: {DANGER_H}; }}
-            QPushButton:pressed {{ background-color: {NAVY_2};   }}
+            QPushButton:pressed {{ background-color: {NAVY_2}; }}
         """)
         if self.parent_window:
             logout.clicked.connect(self.parent_window._logout)
@@ -2612,8 +2742,10 @@ class POSView(QWidget):
         self.invoice_table.verticalHeader().setVisible(False)
         self.invoice_table.setAlternatingRowColors(False)
         self.invoice_table.setShowGrid(True)
-        self.invoice_table.setRowCount(self.MAX_ROWS)
+        self.invoice_table.setRowCount(20)
         self.invoice_table.verticalHeader().setDefaultSectionSize(20)
+        self.invoice_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.invoice_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # ── No native cell editor — all input goes through numpad / inline search
         self.invoice_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.invoice_table.setStyleSheet(f"""
@@ -2639,7 +2771,7 @@ class POSView(QWidget):
                 font-size: 10px; font-weight: bold; letter-spacing: 0.3px;
             }}
         """)
-        for r in range(self.MAX_ROWS):
+        for r in range(self.invoice_table.rowCount()):
             self.invoice_table.setRowHeight(r, 20)
             self._init_row(r)
 
@@ -2663,13 +2795,16 @@ class POSView(QWidget):
             self.invoice_table.setItem(r, c, item)
         self.invoice_table.setRowHeight(r, 20)
 
-    def _find_next_empty_row(self):
+    def _find_next_empty_row(self) -> int:
+        current = self.invoice_table.rowCount()
         last_filled = -1
-        for r in range(self.MAX_ROWS):
+        for r in range(current):
             name = self.invoice_table.item(r, 1)
             if name and name.text().strip():
                 last_filled = r
         next_row = last_filled + 1
+        if next_row >= current:
+            self._ensure_rows(next_row + 1)
         return min(next_row, self.MAX_ROWS - 1)
 
     def _highlight_active_row(self, row: int):
@@ -2679,7 +2814,7 @@ class POSView(QWidget):
         FILLED_FG  = QColor(NAVY)
         ALT_BG     = QColor("#f5f8fc")
 
-        for r in range(self.MAX_ROWS):
+        for r in range(self.invoice_table.rowCount()):
             is_active = (r == row)
             for c in range(7):
                 item = self.invoice_table.item(r, c)
@@ -2718,7 +2853,7 @@ class POSView(QWidget):
     def _recalc_totals(self):
         grand_total = 0.0
         qty_total   = 0.0
-        for r in range(self.MAX_ROWS):
+        for r in range(self.invoice_table.rowCount()):
             try:
                 grand_total += float(self.invoice_table.item(r, 6).text() or "0")
                 qty_total   += float(self.invoice_table.item(r, 3).text() or "0")
@@ -2899,29 +3034,55 @@ class POSView(QWidget):
             if matches: product = matches[0]
 
         if product:
-            # Route through _add_product_to_invoice so existing rows are incremented
+            result = self._maybe_pick_uom(product)
+            if result is None:
+                return   # user cancelled UOM picker
+            uom, price = result
             self._add_product_to_invoice(
                 name=product["name"],
-                price=product["price"],
+                price=price,
                 part_no=product.get("part_no", ""),
                 product_id=product.get("id"),
             )
         else:
-            self._block_signals = True
-            item0 = self.invoice_table.item(row, 0)
-            if item0: item0.setText(query)
-            self._block_signals = False
-            self.invoice_table.setCurrentCell(row, 1)
-            self._active_row = row; self._active_col = 1
+            # #31 — show popup then reopen search on the same row
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Item Not Found")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setText(f"No item matched:  \"{query}\"")
+            msg.setInformativeText(
+                "Check the code or description and try again.\n"
+                "Double-click the row to open the full product search."
+            )
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.setStyleSheet(f"""
+                QMessageBox {{ background:{WHITE}; }}
+                QLabel       {{ color:{DARK_TEXT}; font-size:13px; }}
+                QPushButton  {{
+                    background:{ACCENT}; color:{WHITE}; border:none;
+                    border-radius:5px; padding:8px 22px; font-size:13px; min-width:80px;
+                }}
+                QPushButton:hover {{ background:{ACCENT_H}; }}
+            """)
+            msg.exec()
+            # After OK or Enter — reopen search on the same row so user can try again
+            self._highlight_active_row(row)
+            self.invoice_table.setCurrentCell(row, 0)
+            self._active_row = row
+            self._active_col = 0
+            self._open_inline_search(row, 0)
 
     def _inline_commit_product(self, product):
         self._close_inline_search()
         if not product:
             return
-        # Route through _add_product_to_invoice so duplicates are incremented
+        result = self._maybe_pick_uom(product)
+        if result is None:
+            return   # user cancelled UOM picker
+        uom, price = result
         self._add_product_to_invoice(
             name=product["name"],
-            price=product["price"],
+            price=price,
             part_no=product.get("part_no", ""),
             product_id=product.get("id"),
         )
@@ -2962,74 +3123,118 @@ class POSView(QWidget):
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
-        if obj is self._inline_edit and self._inline_popup:
-            if event.type() == QEvent.KeyPress:
-                key = event.key()
-                popup = self._inline_popup
-                if key == Qt.Key_Down:
-                    if popup.isVisible():
-                        cur = popup.currentRow()
-                        popup.setCurrentRow(min(cur + 1, popup.count() - 1))
-                    return True
-                elif key == Qt.Key_Up:
-                    if popup.isVisible():
-                        cur = popup.currentRow()
-                        popup.setCurrentRow(max(cur - 1, 0))
-                    return True
-                elif key == Qt.Key_Escape:
-                    self._close_inline_search()
-                    self.invoice_table.setFocus()
-                    return True
-                elif key == Qt.Key_Tab:
+
+        # ── inline search edit ────────────────────────────────────────────────
+        if obj is self._inline_edit and event.type() == QEvent.KeyPress:
+            key   = event.key()
+            popup = self._inline_popup
+            if key == Qt.Key_Down:
+                if popup and popup.isVisible():
+                    popup.setCurrentRow(min(popup.currentRow() + 1, popup.count() - 1))
+                return True
+            if key == Qt.Key_Up:
+                if popup and popup.isVisible():
+                    popup.setCurrentRow(max(popup.currentRow() - 1, 0))
+                return True
+            if key == Qt.Key_Escape:
+                self._close_inline_search()
+                self.invoice_table.setFocus()
+                return True
+            if key == Qt.Key_Tab:
+                self._inline_on_enter()
+                return True
+
+        # ── invoice table ─────────────────────────────────────────────────────
+        if obj is self.invoice_table and event.type() == QEvent.KeyPress:
+            key  = event.key()
+            mods = event.modifiers()
+
+            # #6 Enter/Return — always advance to next cart line
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                if self._inline_edit is not None:
                     self._inline_on_enter()
                     return True
-        if obj is self.invoice_table and event.type().__class__.__name__ != "type":
-            from PySide6.QtCore import QEvent
-            if event.type() == QEvent.KeyPress:
-                key = event.key()
-                if key in (Qt.Key_Return, Qt.Key_Enter):
-                    if self._inline_edit is not None:
-                        return True
-                    self._numpad_enter(); return True
-                if key == Qt.Key_Delete:
-                    self._numpad_del_line(); return True
-                if key == Qt.Key_Asterisk:
-                    self._open_qty_popup(); return True
-                if key == Qt.Key_F2:
-                    self._save_sale(); return True
-                if key == Qt.Key_F3:
-                    self._print_receipt(); return True
-                if key == Qt.Key_F5:
-                    self._open_payment(); return True
-                if key == Qt.Key_F7:
-                    self._open_sales_list(); return True
-                if key == Qt.Key_Escape:
-                    self._close_inline_search()
-                    self._numpad_clear()
-                    return True
-                if key == Qt.Key_Backspace:
-                    # Remove last char from numpad buffer
-                    if self._inline_edit is None and self._active_col in (3, 4):
-                        self._numpad_buffer = self._numpad_buffer[:-1]
-                        self._block_signals = True
-                        item = self.invoice_table.item(self._active_row, self._active_col)
-                        if item: item.setText(self._numpad_buffer)
-                        self._block_signals = False
-                        if self._active_col in (2, 3, 4):
-                            self._recalc_row(self._active_row)
-                        return True
-                # ── Digit / decimal keys → route to numpad ────────────────
+                self._numpad_enter()
+                return True
+
+            # #36 Up arrow — move to row above
+            if key == Qt.Key_Up:
+                self._close_inline_search()
+                target = max(0, self._active_row - 1)
+                self._active_row = target
+                self.invoice_table.setCurrentCell(target, self._active_col)
+                self._highlight_active_row(target)
+                self.invoice_table.scrollToItem(
+                    self.invoice_table.item(target, self._active_col),
+                    QAbstractItemView.EnsureVisible)
+                if self._active_col in (0, 1):
+                    self._open_inline_search(target, self._active_col)
+                return True
+
+            # #36 Down arrow — move to row below
+            if key == Qt.Key_Down:
+                self._close_inline_search()
+                target = min(self._active_row + 1, self.invoice_table.rowCount() - 1)
+                self._active_row = target
+                self.invoice_table.setCurrentCell(target, self._active_col)
+                self._highlight_active_row(target)
+                self.invoice_table.scrollToItem(
+                    self.invoice_table.item(target, self._active_col),
+                    QAbstractItemView.EnsureVisible)
+                if self._active_col in (0, 1):
+                    self._open_inline_search(target, self._active_col)
+                return True
+
+            # #36 Tab — cycle Code→Qty→Disc, wrap to next/prev row
+            if key == Qt.Key_Tab:
+                self._close_inline_search()
+                _TAB = [0, 3, 4]
+                reverse = bool(mods & Qt.ShiftModifier)
+                if reverse:
+                    _TAB = list(reversed(_TAB))
+                try:
+                    nxt = _TAB.index(self._active_col) + 1
+                except ValueError:
+                    nxt = 0
+                if nxt >= len(_TAB):
+                    step = -1 if reverse else 1
+                    self._active_row = max(0, min(
+                        self._active_row + step,
+                        self.invoice_table.rowCount() - 1))
+                    self._active_col = _TAB[0]
+                else:
+                    self._active_col = _TAB[nxt]
+                self.invoice_table.setCurrentCell(self._active_row, self._active_col)
+                self._highlight_active_row(self._active_row)
+                if self._active_col in (0, 1):
+                    self._open_inline_search(self._active_row, self._active_col)
+                return True
+
+            if key == Qt.Key_Delete:    self._numpad_del_line(); return True
+            if key == Qt.Key_Asterisk:  self._open_qty_popup();  return True
+            if key == Qt.Key_F2:        self._save_sale();        return True
+            if key == Qt.Key_F3:        self._print_receipt();    return True
+            if key == Qt.Key_F5:        self._open_payment();     return True
+            if key == Qt.Key_F7:        self._open_sales_list();  return True
+            if key == Qt.Key_Escape:
+                self._close_inline_search(); self._numpad_clear(); return True
+            if key == Qt.Key_Backspace:
                 if self._inline_edit is None and self._active_col in (3, 4):
-                    ch = None
-                    if Qt.Key_0 <= key <= Qt.Key_9:
-                        ch = chr(key)
-                    elif key == Qt.Key_Period:
-                        ch = "."
-                    elif key in (Qt.Key_Minus, Qt.Key_Underscore):
-                        ch = "-"
-                    if ch is not None:
-                        self._numpad_press(ch)
-                        return True
+                    self._numpad_buffer = self._numpad_buffer[:-1]
+                    self._block_signals = True
+                    item = self.invoice_table.item(self._active_row, self._active_col)
+                    if item: item.setText(self._numpad_buffer)
+                    self._block_signals = False
+                    self._recalc_row(self._active_row)
+                    return True
+            if self._inline_edit is None and self._active_col in (3, 4):
+                ch = None
+                if Qt.Key_0 <= key <= Qt.Key_9: ch = chr(key)
+                elif key == Qt.Key_Period:       ch = "."
+                elif key in (Qt.Key_Minus, Qt.Key_Underscore): ch = "-"
+                if ch is not None:
+                    self._numpad_press(ch); return True
+
         return super().eventFilter(obj, event)
 
     # =========================================================================
@@ -3058,9 +3263,13 @@ class POSView(QWidget):
         dlg = ProductSearchDialog(self, initial_query=query)
         if dlg.exec() == QDialog.Accepted and dlg.selected_product:
             p = dlg.selected_product
+            result = self._maybe_pick_uom(p)
+            if result is None:
+                return   # user cancelled UOM picker
+            uom, price = result
             self._block_signals = True
             self._init_row(row, part_no=p["part_no"], details=p["name"],
-                           qty="1", amount=f"{p['price']:.2f}", disc="0.00", tax="")
+                           qty="1", amount=f"{price:.2f}", disc="0.00", tax="")
             item0 = self.invoice_table.item(row, 0)
             if item0: item0.setData(Qt.UserRole, p.get("id"))
             self._block_signals = False
@@ -3068,12 +3277,72 @@ class POSView(QWidget):
             self.invoice_table.setCurrentCell(row, 3)
             self._active_row = row; self._active_col = 3; self._numpad_buffer = ""
 
+    def _on_product_btn_clicked(self, product: dict):
+        """Called when a product tile button is clicked — shows UOM picker if needed."""
+        result = self._maybe_pick_uom(product)
+        if result is None:
+            return
+        uom, price = result
+        self._add_product_to_invoice(
+            name=product.get("name", ""),
+            price=price,
+            part_no=product.get("part_no", ""),
+            product_id=product.get("id"),
+        )
+
+    def _get_uom_prices(self, part_no: str) -> list[dict]:
+        """Returns list of {uom, price} for a product from product_uom_prices table."""
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute(
+                "SELECT uom, price FROM product_uom_prices WHERE part_no=? ORDER BY price",
+                (part_no,)
+            )
+            rows = cur.fetchall(); conn.close()
+            return [{"uom": r[0], "price": float(r[1])} for r in rows]
+        except Exception:
+            return []
+
+    def _maybe_pick_uom(self, product: dict) -> tuple[str, float] | None:
+        """
+        If product has multiple UOM prices, show picker dialog.
+        Returns (uom, price) tuple — never returns None for no-data case.
+        Returns None only if user explicitly cancels the picker.
+        """
+        part_no    = product.get("part_no", "")
+        base_price = float(product.get("price", 0))
+        base_uom   = str(product.get("uom", "Nos") or "Nos")
+
+        uom_prices = self._get_uom_prices(part_no)
+
+        # No UOM table data or table doesn't exist yet —
+        # fall through silently with base price, no popup
+        if not uom_prices:
+            return (base_uom, base_price)
+
+        # Single UOM — no dialog needed, use it directly
+        if len(uom_prices) == 1:
+            return (uom_prices[0]["uom"], uom_prices[0]["price"])
+
+        # Multiple UOMs — show picker so cashier chooses pack size
+        dlg = UomPickerDialog(
+            product_name=product.get("name", ""),
+            uom_prices=uom_prices,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.Accepted and dlg.selected_uom:
+            return (dlg.selected_uom, dlg.selected_price)
+
+        # Cancelled — still add with base price rather than blocking
+        return (base_uom, base_price)
+
     def _add_product_to_invoice(self, name, price, part_no="", product_id=None):
         # ── Always close any open inline search before we touch the table ─────
         self._close_inline_search()
 
         # ── Check if already on invoice — increment qty ───────────────────────
-        for r in range(self.MAX_ROWS):
+        for r in range(self.invoice_table.rowCount()):
             try:
                 row_name   = self.invoice_table.item(r, 1).text().strip()
                 row_amount = self.invoice_table.item(r, 2).text().strip()
@@ -3083,7 +3352,8 @@ class POSView(QWidget):
             if not row_name:
                 continue
             row_pid = self.invoice_table.item(r, 0).data(Qt.UserRole) if self.invoice_table.item(r, 0) else None
-            match = (row_pid and row_pid == product_id) or \
+            # Must match BOTH product_id AND price — different UOMs have same id but different price
+            match = (row_pid and row_pid == product_id and row_amount == f"{price:.2f}") or \
                     (not product_id and row_name == name and row_amount == f"{price:.2f}")
             if match:
                 try:
@@ -3111,7 +3381,7 @@ class POSView(QWidget):
                 self._block_signals = True
                 self._init_row(r)
                 # Shift all filled rows above the gap down by one
-                for shift in range(r, self.MAX_ROWS - 1):
+                for shift in range(r, self.invoice_table.rowCount() - 1):
                     try:
                         next_name = self.invoice_table.item(shift + 1, 1).text().strip()
                     except AttributeError:
@@ -3132,14 +3402,15 @@ class POSView(QWidget):
 
                 # ── Find last filled row after compaction ─────────────────────
                 last_filled = -1
-                for scan in range(self.MAX_ROWS):
+                for scan in range(self.invoice_table.rowCount()):
                     try:
                         if self.invoice_table.item(scan, 1).text().strip():
                             last_filled = scan
                     except AttributeError:
                         pass
 
-                dest = last_filled + 1 if last_filled + 1 < self.MAX_ROWS else last_filled
+                dest = last_filled + 1
+                self._ensure_rows(dest + 1)
 
                 # ── Write to destination row ──────────────────────────────────
                 self._block_signals = True
@@ -3206,7 +3477,7 @@ class POSView(QWidget):
         self._highlight_active_row(next_r)
         self._open_inline_search(next_r, 0)
 
-    # ── Invoice footer — Items | Paid | Change | TOTAL ───────────────────────
+    # ── Invoice footer — Items | Paid | Change+InvoiceNo | TOTAL ─────────────
     def _build_invoice_footer(self):
         bar = QWidget(); bar.setFixedHeight(42)
         bar.setStyleSheet(f"background-color: #f0e8d0; border-top: 2px solid {BORDER};")
@@ -3214,63 +3485,52 @@ class POSView(QWidget):
         layout.setContentsMargins(14, 0, 14, 0)
         layout.setSpacing(0)
 
-        # ── Items count ───────────────────────────────────────────────────────
         self._bin_qty = QLabel("Items: 0")
         self._bin_qty.setStyleSheet(f"color: {NAVY}; font-size: 11px; background: transparent;")
         layout.addWidget(self._bin_qty)
+        layout.addSpacing(16)
 
-        layout.addSpacing(20)
-
-        # ── Previous transaction: Paid ────────────────────────────────────────
         prev_paid_lbl = QLabel("Paid")
-        prev_paid_lbl.setStyleSheet(f"color: {NAVY}; font-size: 10px; background: transparent; letter-spacing: 0.5px;")
-        layout.addWidget(prev_paid_lbl)
-        layout.addSpacing(4)
+        prev_paid_lbl.setStyleSheet(f"color: {NAVY}; font-size: 10px; background: transparent;")
+        layout.addWidget(prev_paid_lbl); layout.addSpacing(4)
 
         self._lbl_prev_paid = QLabel("—")
         self._lbl_prev_paid.setStyleSheet(f"color: {NAVY}; font-size: 13px; font-weight: bold; background: transparent; min-width: 70px;")
         self._lbl_prev_paid.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self._lbl_prev_paid)
+        layout.addSpacing(16)
 
-        layout.addSpacing(20)
-
-        # ── Previous transaction: Change ──────────────────────────────────────
         prev_chg_lbl = QLabel("Change")
-        prev_chg_lbl.setStyleSheet(f"color: {NAVY}; font-size: 10px; background: transparent; letter-spacing: 0.5px;")
-        layout.addWidget(prev_chg_lbl)
-        layout.addSpacing(4)
+        prev_chg_lbl.setStyleSheet(f"color: {NAVY}; font-size: 10px; background: transparent;")
+        layout.addWidget(prev_chg_lbl); layout.addSpacing(4)
 
+        # Change + last invoice number on the same label (#25)
         self._lbl_prev_change = QLabel("—")
-        self._lbl_prev_change.setStyleSheet(f"color: {NAVY}; font-size: 13px; font-weight: bold; background: transparent; min-width: 70px;")
+        self._lbl_prev_change.setStyleSheet(
+            f"color: {NAVY}; font-size: 13px; font-weight: bold; background: transparent; min-width: 160px;")
         self._lbl_prev_change.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self._lbl_prev_change)
 
         layout.addStretch(1)
 
-        # ── TOTAL ─────────────────────────────────────────────────────────────
-        total_container = QWidget(); total_container.setStyleSheet("background: transparent;")
-        tc_lay = QHBoxLayout(total_container)
-        tc_lay.setContentsMargins(10, 4, 10, 4); tc_lay.setSpacing(10)
-
         tot_lbl = QLabel("TOTAL")
         tot_lbl.setStyleSheet(f"color: {NAVY}; font-size: 11px; font-weight: bold; letter-spacing: 1.5px; background: transparent;")
         tot_lbl.setAlignment(Qt.AlignVCenter)
-
         self._lbl_total = QLabel("")
         self._lbl_total.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._lbl_total.setStyleSheet(f"color: {NAVY}; font-size: 22px; font-weight: bold; background: transparent; min-width: 110px;")
-
-        tc_lay.addWidget(tot_lbl); tc_lay.addWidget(self._lbl_total)
-        layout.addWidget(total_container)
+        layout.addWidget(tot_lbl); layout.addSpacing(8); layout.addWidget(self._lbl_total)
 
         return bar
 
-    def _update_prev_txn_display(self, paid: float, change: float):
-        """Call after every completed sale to refresh the footer labels."""
-        self._prev_paid   = paid
-        self._prev_change = change
+    def _update_prev_txn_display(self, paid: float, change: float, invoice_no: str = ""):
+        """Call after every completed sale to refresh the footer labels. #25 shows last invoice no."""
+        self._prev_paid      = paid
+        self._prev_change    = change
+        self._prev_invoice   = invoice_no
         self._lbl_prev_paid.setText(f"${paid:.2f}")
-        self._lbl_prev_change.setText(f"${change:.2f}")
+        inv_suffix = f"   #{invoice_no}" if invoice_no else ""
+        self._lbl_prev_change.setText(f"${change:.2f}{inv_suffix}")
 
     # =========================================================================
     # RIGHT PANEL
@@ -3305,10 +3565,10 @@ class POSView(QWidget):
 
         # Requirement 4: Close Shift at top left
         top_row.addWidget(_top_btn("CLOSE\nSHIFT (F2)", ORANGE, AMBER, self._open_day_shift))
-        top_row.addWidget(_top_btn("Print\nF3",        NAVY,   NAVY_2, self._print_receipt))
-        top_row.addWidget(_top_btn("Hold/\nRecall",   NAVY_2, NAVY_3, self._open_hold_recall))
-        
-        # Requirement 2 & 3: Options Button
+        top_row.addWidget(_top_btn("Reprint\nF3",       NAVY,   NAVY_2, self._reprint_by_invoice_no))
+        top_row.addWidget(_top_btn("Hold/\nRecall",     NAVY_2, NAVY_3, self._open_hold_recall))
+
+        # Options Button
         opt_btn = QPushButton("Options\n▼")
         opt_btn.setFixedHeight(52)
         opt_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -3322,32 +3582,31 @@ class POSView(QWidget):
         """)
         opt_btn.clicked.connect(self._show_options_menu)
         top_row.addWidget(opt_btn)
-        
+
         layout.addLayout(top_row)
 
         # --- Middle: Numpad ---
         layout.addWidget(self._build_numpad(), 1)
 
-        # --- Bottom Row: Open Cash & Pay Button ---
+        # --- Bottom Row: New Transaction + PAY ---
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(4)
-        
-        # Open Cash Button restored
-        cash_btn = QPushButton("OPEN\nCASH")
-        cash_btn.setFixedHeight(52)
-        cash_btn.setFixedWidth(110)
-        cash_btn.setCursor(Qt.PointingHandCursor)
-        cash_btn.setStyleSheet(f"""
+
+        new_txn_btn = QPushButton("New\nTransaction")
+        new_txn_btn.setFixedHeight(52)
+        new_txn_btn.setFixedWidth(120)
+        new_txn_btn.setCursor(Qt.PointingHandCursor)
+        new_txn_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {NAVY_2}; color: {WHITE}; border: none;
-                border-radius: 6px; font-size: 12px; font-weight: bold;
+                border-radius: 6px; font-size: 11px; font-weight: bold;
             }}
             QPushButton:hover   {{ background-color: {NAVY_3}; }}
+            QPushButton:pressed {{ background-color: {NAVY};   }}
         """)
-        cash_btn.clicked.connect(lambda: coming_soon(self, "Open Cash Drawer"))
-        bottom_row.addWidget(cash_btn)
+        new_txn_btn.clicked.connect(lambda: self._new_sale(confirm=False))
+        bottom_row.addWidget(new_txn_btn)
 
-        # Primary Payment Action
         pay_btn = QPushButton("PAY  F5")
         pay_btn.setFixedHeight(52)
         pay_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -3362,7 +3621,7 @@ class POSView(QWidget):
         """)
         pay_btn.clicked.connect(self._open_payment)
         bottom_row.addWidget(pay_btn)
-        
+
         layout.addLayout(bottom_row)
         return panel
    
@@ -3460,7 +3719,7 @@ class POSView(QWidget):
                 item.setData(Qt.UserRole, None)
         
         # 3. Compact the invoice: shift all filled rows below this one upward
-        for shift in range(row, self.MAX_ROWS - 1):
+        for shift in range(row, self.invoice_table.rowCount() - 1):
             try:
                 next_item = self.invoice_table.item(shift + 1, 1)
                 next_name = next_item.text().strip() if next_item else ""
@@ -3503,44 +3762,31 @@ class POSView(QWidget):
         if self.parent_window:
             self.parent_window._set_status("Line deleted — ready for next item.")
     def _numpad_enter(self):
-        """
-        Updated Enter behavior: Resets buffer and moves to the 
-        next editable column in the same row.
+        """#6 Enter always advances to next cart line.
+        Cols 0/1/2 (Code/Details/Price) → land on Qty.
+        Col 3+ (Qty/Disc/Tax/Total)     → finalise, open search on next row.
         """
         if self._active_row < 0:
             return
-
-        # 1. Clear typing buffer so the next field starts fresh
         self._numpad_buffer = ""
-        
-        # 2. Logic to jump between specific editable columns
-        # Column Map: 0:Code, 1:Details, 2:Price, 3:Qty, 4:Disc, 5:Tax, 6:Total
-        if self._active_col == 2:  # If at Price, jump to Qty
+
+        if self._active_col in (0, 1, 2):
             self._active_col = 3
-        elif self._active_col == 3: # If at Qty, jump to Disc
-            self._active_col = 4
-        elif self._active_col == 0 or self._active_col == 1: # If at Code/Details, jump to Qty
-            self._active_col = 3
+            self.invoice_table.setCurrentCell(self._active_row, 3)
+            self._close_inline_search()
+            self._highlight_active_row(self._active_row)
         else:
-            # 3. If at the end of the row (Disc/Tax/Total), finalize and jump to next line
             self._recalc_row(self._active_row)
             self._recalc_totals()
-            
-            next_row = self._active_row + 1
-            if next_row >= self.MAX_ROWS: 
-                next_row = self.MAX_ROWS - 1
-            
+            next_row = self._find_next_empty_row()
             self._active_row = next_row
-            self._active_col = 0 # Back to Code column for new item
-            
+            self._active_col = 0
             self.invoice_table.setCurrentCell(next_row, 0)
+            self.invoice_table.scrollToItem(
+                self.invoice_table.item(next_row, 0),
+                QAbstractItemView.EnsureVisible)
             self._highlight_active_row(next_row)
             self._open_inline_search(next_row, 0)
-            return
-
-        # 4. Apply the cell change for horizontal jumps
-        self.invoice_table.setCurrentCell(self._active_row, self._active_col)
-        self._close_inline_search() # Close search while editing numbers
         
     def _open_qty_popup(self):
         row = self._last_filled_row
@@ -3650,43 +3896,82 @@ class POSView(QWidget):
         self._grid_resize_filter = _GridResizeFilter()
         self._product_grid_widget.installEventFilter(self._grid_resize_filter)
 
-        # ── Pagination bar ────────────────────────────────────────────────────
+        # ── Pagination bar with user/server/SQL info ──────────────────────────
         page_bar = QWidget(); page_bar.setFixedHeight(36)
-        page_bar.setStyleSheet(f"background-color: {LIGHT}; border-top: 1px solid {BORDER};")
+        page_bar.setStyleSheet(f"background-color: {NAVY}; border-top: 1px solid {NAVY_2};")
         page_bar_h = QHBoxLayout(page_bar)
-        page_bar_h.setContentsMargins(8, 4, 8, 4); page_bar_h.setSpacing(8)
+        page_bar_h.setContentsMargins(10, 4, 10, 4); page_bar_h.setSpacing(8)
 
+        # #37 user · #38 server · #39 SQL — left side of the bar
+        username = (self.user or {}).get("username", "")
+        role     = (self.user or {}).get("role", "")
+        user_info = QLabel(f"👤 {username} [{role.upper()}]")
+        user_info.setStyleSheet(f"color: {MID}; font-size: 9px; background: transparent;")
+        page_bar_h.addWidget(user_info)
+        page_bar_h.addSpacing(12)
+
+        try:
+            from services.site_config import get_host_label as _ghl2
+            _srv2 = _ghl2()
+        except Exception:
+            _srv2 = "apk.havano.cloud"
+        srv_lbl2 = QLabel(f"🌐 {_srv2}")
+        srv_lbl2.setStyleSheet(f"color: {MID}; font-size: 9px; background: transparent;")
+        page_bar_h.addWidget(srv_lbl2)
+        page_bar_h.addSpacing(12)
+
+        _sql2 = ""
+        try:
+            from database.db import get_connection as _gc2
+            _conn2 = _gc2()
+            try: _sql2 = _conn2.getinfo(2)
+            except Exception: pass
+            _conn2.close()
+        except Exception:
+            pass
+        if not _sql2:
+            try:
+                from models.company_defaults import get_defaults as _gd2
+                _d2 = _gd2() or {}
+                _sql2 = _d2.get("db_server", "") or _d2.get("server", "") or "localhost"
+            except Exception:
+                _sql2 = "localhost"
+        sql_lbl2 = QLabel(f"🗄 {_sql2}")
+        sql_lbl2.setStyleSheet(f"color: {MID}; font-size: 9px; background: transparent;")
+        page_bar_h.addWidget(sql_lbl2)
+
+        page_bar_h.addStretch(1)
+
+        # Prev / page label / Next — centred in the remaining space
         self._grid_prev_btn = QPushButton("◀  Prev")
-        self._grid_prev_btn.setFixedSize(80, 28)
+        self._grid_prev_btn.setFixedSize(80, 26)
         self._grid_prev_btn.setCursor(Qt.PointingHandCursor)
         self._grid_prev_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {NAVY}; color: {WHITE}; border: none;
+            QPushButton {{ background-color: {NAVY_2}; color: {WHITE}; border: none;
                 border-radius: 4px; font-size: 11px; font-weight: bold; padding: 0 4px; }}
-            QPushButton:hover {{ background-color: {NAVY_2}; }}
-            QPushButton:disabled {{ background-color: {BORDER}; color: {MID}; }}
+            QPushButton:hover {{ background-color: {NAVY_3}; }}
+            QPushButton:disabled {{ background-color: {NAVY}; color: {MID}; }}
         """)
         self._grid_prev_btn.clicked.connect(lambda: self._grid_turn_page(-1))
 
         self._grid_page_lbl = QLabel("Page 1 / 1  (0 products)")
         self._grid_page_lbl.setAlignment(Qt.AlignCenter)
-        self._grid_page_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px; background: transparent;")
+        self._grid_page_lbl.setStyleSheet(f"color: {MID}; font-size: 10px; background: transparent;")
 
         self._grid_next_btn = QPushButton("Next  ▶")
-        self._grid_next_btn.setFixedSize(80, 28)
+        self._grid_next_btn.setFixedSize(80, 26)
         self._grid_next_btn.setCursor(Qt.PointingHandCursor)
         self._grid_next_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {NAVY}; color: {WHITE}; border: none;
+            QPushButton {{ background-color: {NAVY_2}; color: {WHITE}; border: none;
                 border-radius: 4px; font-size: 11px; font-weight: bold; padding: 0 4px; }}
-            QPushButton:hover {{ background-color: {NAVY_2}; }}
-            QPushButton:disabled {{ background-color: {BORDER}; color: {MID}; }}
+            QPushButton:hover {{ background-color: {NAVY_3}; }}
+            QPushButton:disabled {{ background-color: {NAVY}; color: {MID}; }}
         """)
         self._grid_next_btn.clicked.connect(lambda: self._grid_turn_page(1))
 
-        page_bar_h.addStretch()
         page_bar_h.addWidget(self._grid_prev_btn)
         page_bar_h.addWidget(self._grid_page_lbl)
         page_bar_h.addWidget(self._grid_next_btn)
-        page_bar_h.addStretch()
         outer.addWidget(page_bar)
 
         self._refresh_cat_tabs()
@@ -3816,7 +4101,7 @@ class POSView(QWidget):
                 background-color: {OFF_WHITE}; color: {NAVY};
                 border: 1px solid {BORDER}; border-radius: 0px;
                 font-size: {font_size}; font-weight: bold;
-                padding: 0px; spacing: 0px;
+                padding: 2px; spacing: 2px;
             }}
             QToolButton:hover   {{ background-color: {ACCENT}; color: {WHITE}; }}
             QToolButton:pressed {{ background-color: {ACCENT_H}; color: {WHITE}; }}
@@ -3824,8 +4109,13 @@ class POSView(QWidget):
 
         self._product_grid.setSpacing(GAP)
         self._product_grid.setContentsMargins(GAP, GAP, GAP, GAP)
-        for r in range(ROWS): self._product_grid.setRowStretch(r, 0)
-        for c in range(COLS): self._product_grid.setColumnStretch(c, 0)
+        # All rows and columns fixed — nothing stretches
+        for r in range(ROWS):
+            self._product_grid.setRowStretch(r, 0)
+            self._product_grid.setRowMinimumHeight(r, cell_h)
+        for c in range(COLS):
+            self._product_grid.setColumnStretch(c, 0)
+            self._product_grid.setColumnMinimumWidth(c, cell_w)
 
         from PySide6.QtWidgets import QToolButton
 
@@ -3836,6 +4126,7 @@ class POSView(QWidget):
                     pname, part_no, price, product_id, image_path = page_products[flat]
                     btn = QToolButton()
                     btn.setFixedSize(cell_w, cell_h)
+                    btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
                     btn.setCursor(Qt.PointingHandCursor)
                     btn.setAutoRaise(False)
                     btn.setToolTip(f"{pname}  ${price:.2f}\nRight-click for image options")
@@ -3844,8 +4135,7 @@ class POSView(QWidget):
                                          has_any_image=any_image)
                     btn.setStyleSheet(BTN_STYLE)
                     btn.clicked.connect(
-                        lambda _, n=pname, pr=price, pno=part_no, pid=product_id:
-                        self._add_product_to_invoice(n, pr, pno, pid)
+                        lambda _, prod=dict(name=pname,price=price,part_no=part_no,id=product_id): self._on_product_btn_clicked(prod)
                     )
                     btn.setContextMenuPolicy(Qt.CustomContextMenu)
                     btn.customContextMenuRequested.connect(
@@ -3855,6 +4145,7 @@ class POSView(QWidget):
                 else:
                     btn = QToolButton()
                     btn.setFixedSize(cell_w, cell_h)
+                    btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
                     btn.setEnabled(False)
                     btn.setStyleSheet(
                         f"QToolButton {{ background-color: {OFF_WHITE}; "
@@ -4002,7 +4293,7 @@ class POSView(QWidget):
 
     def _collect_invoice_items(self) -> list[dict]:
         items = []
-        for r in range(self.MAX_ROWS):
+        for r in range(self.invoice_table.rowCount()):
             try:
                 qty = float(self.invoice_table.item(r, 3).text() or "0")
             except (ValueError, AttributeError):
@@ -4045,7 +4336,7 @@ class POSView(QWidget):
                 customer_contact=self._selected_customer.get("custom_telephone_number","") if self._selected_customer else "",
                 change_amount=0.0,
             )
-            self._update_prev_txn_display(paid=total, change=0.0)
+            self._update_prev_txn_display(paid=total, change=0.0, invoice_no=sale.get("invoice_no",""))
             if self.parent_window:
                 self.parent_window._set_status(f"Sale #{sale['number']} saved — ${total:.2f}")
             self._new_sale(confirm=False)
@@ -4106,7 +4397,73 @@ class POSView(QWidget):
         br.addStretch(); br.addWidget(close_btn)
         lay.addLayout(br)
         dlg.exec()
-           
+
+    def _print_receipt_for_sale(self, sale: dict):
+        """Render and show a receipt preview for any sale dict (used by reprint)."""
+        items     = sale.get("items", [])
+        total     = float(sale.get("total", 0))
+        inv_no    = sale.get("invoice_no", "")
+        cust_name = sale.get("customer_name", "") or "Walk-in"
+        cust_phone= sale.get("customer_contact", "")
+        date_str  = sale.get("invoice_date", "") or sale.get("date", "")
+
+        W = 40
+        lines = ["=" * W, "          HAVANO POS  —  REPRINT"]
+        if inv_no:
+            lines.append(f"  Invoice:   {inv_no}")
+        lines += [f"  Date:      {date_str}", f"  Customer:  {cust_name}"]
+        if cust_phone:
+            lines.append(f"  Phone:     {cust_phone}")
+        lines += ["-" * W]
+
+        subtotal = 0.0; total_disc = 0.0
+        for it in items:
+            name_str  = str(it.get("product_name", ""))[:24]
+            qty       = float(it.get("qty", 0))
+            price     = float(it.get("price", 0))
+            disc      = float(it.get("discount", 0))
+            line_tot  = float(it.get("total", 0))
+            subtotal   += qty * price
+            total_disc += qty * price * (disc / 100.0) if disc else 0.0
+            qty_str = f"{int(qty)}" if qty == int(qty) else f"{qty:.2f}"
+            lines.append(f"{name_str:<24} {qty_str:>3}x ${price:.2f}")
+            if disc:
+                lines.append(f"  Disc {disc:.0f}%               -${qty*price*(disc/100):.2f}")
+            lines.append(f"  {'─'*20}  ${line_tot:.2f}")
+
+        lines += ["-" * W]
+        if total_disc > 0:
+            lines.append(f"  Subtotal:          ${subtotal:.2f}")
+            lines.append(f"  Discount:         -${total_disc:.2f}")
+        lines += [f"  TOTAL:             ${total:.2f}", "=" * W,
+                  "      Thank you for your purchase!", "=" * W]
+
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
+        from PySide6.QtGui import QFont
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Reprint — {inv_no}")
+        dlg.setMinimumSize(400, 520)
+        dlg.setStyleSheet(f"QDialog {{ background:{WHITE}; }}")
+        lay = QVBoxLayout(dlg); lay.setContentsMargins(16, 16, 16, 16); lay.setSpacing(10)
+        txt = QTextEdit(); txt.setReadOnly(True)
+        txt.setFont(QFont("Courier New", 10))
+        txt.setPlainText("\n".join(lines))
+        txt.setStyleSheet(f"QTextEdit {{ background:{WHITE}; color:{DARK_TEXT}; border:1px solid {BORDER}; border-radius:4px; }}")
+        lay.addWidget(txt, 1)
+        br = QHBoxLayout(); br.setSpacing(8)
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(36); close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"QPushButton {{ background:{NAVY}; color:{WHITE}; border:none; border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }} QPushButton:hover {{ background:{NAVY_2}; }}")
+        close_btn.clicked.connect(dlg.accept)
+        br.addStretch(); br.addWidget(close_btn)
+        lay.addLayout(br)
+        dlg.exec()
+
+    def _reprint_by_invoice_no(self):
+        """Open the ReprintDialog — autocomplete invoice search then reprint."""
+        dlg = ReprintDialog(self)
+        dlg.exec()
+
     def _open_payment(self):
         try:
             total = float(self._lbl_total.text() or "0")
@@ -4170,14 +4527,26 @@ class POSView(QWidget):
                 )
                 
                 # ── Store local payment entry for Frappe sync ──────────
+                # #6: Do NOT create a payment entry for credit/account sales —
+                # those are settled later via a separate payment entry.
                 try:
-                    from services.payment_entry_service import create_payment_entry
-                    create_payment_entry(sale)
+                    _credit_methods = {"credit", "account", "on account", "on-account"}
+                    if str(method).lower().strip() not in _credit_methods:
+                        from services.payment_entry_service import create_payment_entry
+                        create_payment_entry(sale)
+                    else:
+                        import logging as _lg
+                        _lg.getLogger("POSView").info(
+                            "Skipped payment entry for credit/account sale %s.", sale.get("invoice_no", "")
+                        )
                 except Exception as _pe_err:
                     log.warning("Could not create local payment entry: %s", _pe_err)
 
                 # ── Update UI Feedback ─────────────
-                self._update_prev_txn_display(paid=tendered, change=change_out)
+                self._update_prev_txn_display(
+                    paid=tendered, change=change_out,
+                    invoice_no=sale.get("invoice_no", "")
+                )
                 
                 if self.parent_window:
                     status = f"Sale #{sale['number']} saved — ${total:.2f} ({method})"
@@ -4280,12 +4649,12 @@ class POSView(QWidget):
         if not items:
             return
         self._block_signals = True
-        for r in range(self.MAX_ROWS):
+        self.invoice_table.setRowCount(max(20, len(items) + 5))
+        for r in range(self.invoice_table.rowCount()):
             self._init_row(r)
         self._block_signals = False
         for i, item in enumerate(items):
-            if i >= self.MAX_ROWS:
-                break
+            self._ensure_rows(i + 1)
             self._block_signals = True
             vals = [
                 item.get("part_no", ""),
@@ -4357,7 +4726,7 @@ class POSView(QWidget):
 
         # Read what is CURRENTLY in the table (cashier may have deleted/changed qty)
         items = []
-        for r in range(self.MAX_ROWS):
+        for r in range(self.invoice_table.rowCount()):
             try:
                 qty = float(self.invoice_table.item(r, 3).text() or "0")
             except (ValueError, AttributeError):
@@ -4420,7 +4789,8 @@ class POSView(QWidget):
             reply = QMessageBox.question(self, "New Sale", "Clear the current invoice and start a new sale?", QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes: return
         self._block_signals = True
-        for r in range(self.MAX_ROWS): self._init_row(r)
+        self.invoice_table.setRowCount(20)
+        for r in range(20): self._init_row(r)
         self._block_signals = False
         self._exit_return_mode()
         self._numpad_buffer   = ""
@@ -4458,6 +4828,19 @@ class POSView(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self, user=None):
         super().__init__()
+
+        # #33 — single instance: bind a local port; second launch shows warning and exits
+        import socket as _socket
+        self._instance_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        self._instance_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 0)
+        try:
+            self._instance_sock.bind(("127.0.0.1", 47634))
+        except OSError:
+            from PySide6.QtWidgets import QMessageBox as _MB
+            _MB.warning(None, "Already Running",
+                        "Havano POS is already open.\nPlease use the existing window.")
+            import sys; sys.exit(0)
+
         self.user = user or {"username": "admin", "role": "admin"}
         self.setWindowTitle("Havano POS System")
         self.setMinimumSize(1280, 820)
@@ -4473,9 +4856,7 @@ class MainWindow(QMainWindow):
             self._stack.addWidget(self._dashboard)
 
         self.setCentralWidget(self._stack)
-
-        if is_admin(self.user):
-            self._build_menubar()
+        self._build_menubar()
 
         self._status_bar = QStatusBar()
         self._status_bar.showMessage(
@@ -4484,10 +4865,8 @@ class MainWindow(QMainWindow):
         )
         self.setStatusBar(self._status_bar)
 
-        if is_admin(self.user):
-            self._stack.setCurrentIndex(1)
-        else:
-            self._stack.setCurrentIndex(0)
+        # #18 — everyone lands on POS first, always
+        self._stack.setCurrentIndex(0)
 
         # ── Background sync services ──────────────────────────────────────────
         # Product sync (every 5 min) — keeps local product list up to date
@@ -4557,93 +4936,49 @@ class MainWindow(QMainWindow):
     def _build_menubar(self):
         mb = self.menuBar()
 
-        # --- POS Menu ---
-        # Provides quick access to sales and shift operations
+        # ── POS ───────────────────────────────────────────────────────────────
         pos_menu = mb.addMenu("POS")
         for label, fn in [
-            ("New Sale",          lambda: (self.switch_to_pos(), self._pos_view._new_sale())),
-            ("Close Day Shift",    self._pos_view._open_day_shift), # Requirement 4
+            ("New Sale",               lambda: (self.switch_to_pos(), self._pos_view._new_sale())),
+            ("Sales List",             self._pos_view._open_sales_list),
             (None, None),
-            ("Open Cash Drawer",  lambda: coming_soon(self, "Cash Drawer")),
+            ("Day Shift",              self._pos_view._open_day_shift),
+            ("Open Cash Drawer",       lambda: coming_soon(self, "Cash Drawer")),
+            (None, None),
+            ("Customer Payment Entry", self._pos_view._open_customer_payment_entry),
+            ("Create Credit Note",     lambda: CreditNoteDialog(self).exec()),
+            ("Credit Note Sync",       lambda: CreditNoteManagerDialog(self).exec()),
+            (None, None),
+            ("X-Report",               self._open_pos_reports),
         ]:
-            if label is None: 
+            if label is None:
                 pos_menu.addSeparator()
             else:
-                a = QAction(label, self)
-                a.triggered.connect(fn)
-                pos_menu.addAction(a)
+                a = QAction(label, self); a.triggered.connect(fn); pos_menu.addAction(a)
 
-        # --- Sales & Reports Menu ---
-        # Consolidates Requirements 2, 3, 5, and 7
-        sales_menu = mb.addMenu("Sales")
-        
-        
-        # Requirement 5: X-Report
-        x_report_act = QAction("📊 X-Report (Shift History)", self)
-        x_report_act.triggered.connect(self._open_pos_reports)
-        sales_menu.addAction(x_report_act)
-        
-        # Requirement 7: Sales Items Report
-        items_report_act = QAction("📦 Sales Items Report", self)
-        items_report_act.triggered.connect(self._open_pos_reports)
-        sales_menu.addAction(items_report_act)
-        
-        
-        sales_menu.addSeparator()
-
-        # Requirement 2 & 3: Financial Entries
-        pay_entry_act = QAction("💰 Customer Payment Entry", self)
-        pay_entry_act.triggered.connect(self._pos_view._open_customer_payment_entry)
-        sales_menu.addAction(pay_entry_act)
-
-        credit_act = QAction("🔙 Create Credit Note", self)
-        credit_act.triggered.connect(lambda: CreditNoteDialog(self).exec())
-        sales_menu.addAction(credit_act)
-
-        cn_sync_act = QAction("🔄 Credit Note Sync", self)
-        cn_sync_act.triggered.connect(lambda: CreditNoteManagerDialog(self).exec())
-        sales_menu.addAction(cn_sync_act)
-
-        sales_menu.addSeparator()
-        
-        for label in ["Sales History", "Returns / Refunds", "Daily Report", "Export CSV"]:
-            a = QAction(label, self)
-            a.triggered.connect(lambda _, l=label: coming_soon(self, l))
-            sales_menu.addAction(a)
-
-        # --- Stock Menu ---
-        stock_menu = mb.addMenu("Stock")
-        stock_act = QAction("📦 Stock File", self)
-        stock_act.triggered.connect(self._pos_view._open_stock_file)
-        stock_menu.addAction(stock_act)
-
-        # --- Settings Menu ---
-        settings_menu = mb.addMenu("Settings")
-
-
-        adv_act = QAction("🖨 Advanced Printing Settings", self)
-        adv_act.triggered.connect(lambda: AdvanceSettingsDialog(self).exec())
-        settings_menu.addAction(adv_act)
-        settings_menu.addSeparator()
-        
-        # Core Master Data (Requirement 1 & 6 context)
+        # ── Maintenance (#30 #34 #35 — single menu, replaces Settings) ────────
+        maint = mb.addMenu("Maintenance")
         for label, fn in [
-            ("🏢 Companies",      lambda: CompanyDialog(self).exec()),
-            ("👥 Customer Groups", lambda: CustomerGroupDialog(self).exec()),
-            ("🏭 Warehouses",      lambda: WarehouseDialog(self).exec()),
-            ("💰 Cost Centers",    lambda: CostCenterDialog(self).exec()),
-            ("🏷 Price Lists",     lambda: PriceListDialog(self).exec()),
-            ("👤 Customers",       lambda: CustomerDialog(self).exec()),
+            ("🏢 Companies",         lambda: CompanyDialog(self).exec()),
+            ("👥 Customer Groups",   lambda: CustomerGroupDialog(self).exec()),
+            ("🏭 Warehouses",        lambda: WarehouseDialog(self).exec()),
+            ("💰 Cost Centers",      lambda: CostCenterDialog(self).exec()),
+            ("🏷 Price Lists",       lambda: PriceListDialog(self).exec()),
+            ("👤 Customers",         lambda: CustomerDialog(self).exec()),
+            (None, None),
+            ("📦 Stock File",        self._pos_view._open_stock_file),
+            (None, None),
+            ("🖨 Advanced Printing", lambda: AdvanceSettingsDialog(self).exec()),
+            (None, None),
+            ("Products",             lambda: coming_soon(self, "Products")),
+            ("Tax Settings",         lambda: coming_soon(self, "Tax Settings")),
+            ("Printer Setup",        lambda: coming_soon(self, "Printer Setup")),
+            ("Backup",               lambda: coming_soon(self, "Backup")),
         ]:
-            a = QAction(label, self)
-            a.triggered.connect(fn)
-            settings_menu.addAction(a)
-            
-        settings_menu.addSeparator()
-        for label in ["Products", "Categories", "Tax Settings", "Printer Setup", "Backup"]:
-            a = QAction(label, self)
-            a.triggered.connect(lambda _, l=label: coming_soon(self, l))
-            settings_menu.addAction(a)
+            if label is None:
+                maint.addSeparator()
+            else:
+                a = QAction(label, self); a.triggered.connect(fn); maint.addAction(a)
     
     def _open_pos_reports(self):
         """Requirement 5 & 7: Launches the Reporting Center"""
@@ -4848,6 +5183,63 @@ class CustomerPaymentDialog(QDialog):
         vbox = QVBoxLayout()
         vbox.setSpacing(10)
 
+        # ── Date field ────────────────────────────────────────────────────────
+        from PySide6.QtWidgets import QDateEdit
+        from PySide6.QtCore import QDate
+        date_row = QHBoxLayout()
+        date_lbl = QLabel("Date:")
+        date_lbl.setFixedWidth(80)
+        date_lbl.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
+        self._date_edit = QDateEdit(QDate.currentDate())
+        self._date_edit.setFixedHeight(32)
+        self._date_edit.setCalendarPopup(True)
+        self._date_edit.setDisplayFormat("dd/MM/yyyy")
+        self._date_edit.setStyleSheet(
+            f"QDateEdit {{ background:{self._WHITE}; color:{self._NAVY};"
+            f" border:1px solid {self._BORDER}; border-radius:6px;"
+            f" font-size:12px; padding:0 10px; }}"
+            f"QDateEdit:focus {{ border:2px solid {self._ACCENT}; }}"
+        )
+        date_row.addWidget(date_lbl)
+        date_row.addWidget(self._date_edit, 1)
+        vbox.addLayout(date_row)
+
+        # ── Account (mode of payment) selector ────────────────────────────────
+        acct_row = QHBoxLayout()
+        acct_lbl = QLabel("Account:")
+        acct_lbl.setFixedWidth(80)
+        acct_lbl.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
+        self._acct_combo = QComboBox()
+        self._acct_combo.setFixedHeight(32)
+        for m in self._methods:
+            self._acct_combo.addItem(f"{m['label']}  ({m['currency']})", userData=m)
+        self._acct_combo.setStyleSheet(
+            f"QComboBox {{ background:{self._WHITE}; color:{self._NAVY};"
+            f" border:1px solid {self._BORDER}; border-radius:6px;"
+            f" font-size:12px; padding:0 10px; }}"
+            f"QComboBox::drop-down {{ border:none; width:20px; }}"
+            f"QComboBox QAbstractItemView {{ background:{self._WHITE}; border:1px solid {self._BORDER};"
+            f" selection-background-color:{self._ACCENT}; selection-color:{self._WHITE}; }}"
+        )
+        self._acct_combo.currentIndexChanged.connect(self._on_acct_changed)
+        acct_row.addWidget(acct_lbl)
+        acct_row.addWidget(self._acct_combo, 1)
+        vbox.addLayout(acct_row)
+
+        # ── Balance display ───────────────────────────────────────────────────
+        bal_row = QHBoxLayout()
+        bal_lbl = QLabel("Balance:")
+        bal_lbl.setFixedWidth(80)
+        bal_lbl.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
+        self._bal_lbl = QLabel("—")
+        self._bal_lbl.setStyleSheet(
+            f"font-size:13px; font-weight:bold; color:{self._ACCENT};"
+        )
+        bal_row.addWidget(bal_lbl)
+        bal_row.addWidget(self._bal_lbl, 1)
+        vbox.addLayout(bal_row)
+        self._refresh_balance()
+
         # amount card
         cards = QHBoxLayout()
         cards.setSpacing(10)
@@ -5028,7 +5420,7 @@ class CustomerPaymentDialog(QDialog):
         vbox.addWidget(sep)
 
         brow = QHBoxLayout(); brow.setSpacing(8)
-        bsave = QPushButton("💾  Record Payment")
+        bsave = QPushButton("🖨  Print & Post to Frappe")
         bsave.setFixedHeight(48)
         bsave.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         bsave.setCursor(Qt.PointingHandCursor)
@@ -5042,6 +5434,41 @@ class CustomerPaymentDialog(QDialog):
         vbox.addLayout(brow, stretch=1)
 
         return vbox
+
+    # ── account / balance helpers ─────────────────────────────────────────
+    def _on_acct_changed(self, idx: int):
+        """Sync active payment method when the account combo changes."""
+        m = self._acct_combo.itemData(idx)
+        if m and m["label"] in self._method_rows:
+            self._activate(m["label"])
+        self._refresh_balance()
+
+    def _refresh_balance(self):
+        """Try to show the customer's outstanding balance from the local DB."""
+        if not self._customer:
+            self._bal_lbl.setText("—")
+            return
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM customer_payments WHERE customer_id=?",
+                (self._customer["id"],)
+            )
+            paid = float(cur.fetchone()[0])
+            # total invoiced
+            cur.execute(
+                "SELECT COALESCE(SUM(total),0) FROM sales WHERE customer_name=?",
+                (self._customer.get("customer_name",""),)
+            )
+            invoiced = float(cur.fetchone()[0])
+            conn.close()
+            balance  = invoiced - paid
+            color    = self._DANGER if balance > 0 else self._SUCCESS
+            self._bal_lbl.setText(f"${balance:.2f}")
+            self._bal_lbl.setStyleSheet(f"font-size:13px; font-weight:bold; color:{color};")
+        except Exception:
+            self._bal_lbl.setText("—")
 
     # ── style helpers ─────────────────────────────────────────────────────
     def _method_style(self, active: bool) -> str:
@@ -5126,7 +5553,6 @@ class CustomerPaymentDialog(QDialog):
         if not self._customer:
             QMessageBox.warning(self, "No Customer",
                                 "Please select a customer before recording a payment.")
-            self._cust_search.setFocus()
             return
 
         total_usd = sum(self._get_paid_usd(m["label"]) for m in self._methods)
@@ -5135,7 +5561,7 @@ class CustomerPaymentDialog(QDialog):
             self._active_field().setFocus()
             return
 
-        # Build splits list
+        # Collect splits
         splits = []
         for m in self._methods:
             _, ae = self._method_rows[m["label"]]
@@ -5145,29 +5571,35 @@ class CustomerPaymentDialog(QDialog):
                 val = 0.0
             if val > 0:
                 splits.append({
-                    "method":   m["label"],
-                    "currency": m["currency"],
-                    "amount":   val,
+                    "method":     m["label"],
+                    "currency":   m["currency"],
+                    "amount":     val,
                     "amount_usd": self._get_paid_usd(m["label"]),
                 })
 
-        method_label = splits[0]["method"] if len(splits) == 1 else "SPLIT"
+        method_label = splits[0]["method"]   if len(splits) == 1 else "SPLIT"
         currency     = splits[0]["currency"] if len(splits) == 1 else "USD"
+
+        # Date from the date picker
+        payment_date = self._date_edit.date().toString("yyyy-MM-dd")
+
+        # Account from the combo
+        acct_data    = self._acct_combo.currentData() or {}
+        account_name = acct_data.get("label", method_label)
 
         cashier_id = None
         try:
             p = self.parent()
             while p:
                 if hasattr(p, "user"):
-                    cashier_id = p.user.get("id")
-                    break
+                    cashier_id = p.user.get("id"); break
                 p = p.parent()
         except Exception:
             pass
 
         try:
             from models.payment import create_customer_payment
-            create_customer_payment(
+            payment = create_customer_payment(
                 customer_id  = self._customer["id"],
                 amount       = total_usd,
                 method       = method_label,
@@ -5175,15 +5607,88 @@ class CustomerPaymentDialog(QDialog):
                 reference    = self._ref_input.text().strip(),
                 cashier_id   = cashier_id,
                 splits       = splits,
+                payment_date = payment_date,
+                account_name = account_name,
             )
-            cname = self._customer.get("customer_name", "")
-            QMessageBox.information(
-                self, "Payment Recorded",
-                f"\u2705  USD {total_usd:.2f} payment recorded for {cname}.\n\nQueued for Frappe sync."
-            )
-            self.accept()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not save payment:\n{e}")
+            return
+
+        # Post to Frappe
+        frappe_status = "queued"
+        try:
+            from services.payment_entry_service import post_payment_entry_to_frappe
+            result = post_payment_entry_to_frappe(payment)
+            frappe_status = "posted" if result else "queued"
+        except Exception:
+            frappe_status = "queued"
+
+        # Print receipt slip
+        self._print_payment_slip(payment, frappe_status)
+
+        cname = self._customer.get("customer_name", "")
+        QMessageBox.information(
+            self, "Payment Recorded",
+            f"✅  USD {total_usd:.2f} payment recorded for {cname}.\n"
+            f"Frappe: {frappe_status}."
+        )
+        self.accept()
+
+    def _print_payment_slip(self, payment: dict, frappe_status: str = "queued"):
+        """Show a printable payment receipt slip."""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
+        from PySide6.QtGui import QFont
+        cname   = self._customer.get("customer_name", "") if self._customer else ""
+        amount  = float(payment.get("amount", 0))
+        method  = payment.get("method", "")
+        ref     = payment.get("reference", "") or ""
+        pdate   = payment.get("payment_date", self._date_edit.date().toString("dd/MM/yyyy"))
+        account = self._acct_combo.currentText()
+
+        W = 40
+        lines = [
+            "=" * W,
+            "     HAVANO POS — PAYMENT RECEIPT",
+            f"  Date:     {pdate}",
+            f"  Customer: {cname}",
+            "-" * W,
+            f"  Account:  {account}",
+            f"  Method:   {method}",
+            f"  Amount:   USD {amount:.2f}",
+        ]
+        if ref:
+            lines.append(f"  Ref:      {ref}")
+        lines += [
+            "-" * W,
+            f"  Frappe:   {frappe_status.upper()}",
+            "=" * W,
+        ]
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Payment Receipt")
+        dlg.setMinimumSize(380, 380)
+        dlg.setStyleSheet(f"QDialog {{ background:{self._WHITE}; }}")
+        lay = QVBoxLayout(dlg); lay.setContentsMargins(16,16,16,16); lay.setSpacing(10)
+        txt = QTextEdit(); txt.setReadOnly(True)
+        txt.setFont(QFont("Courier New", 10))
+        txt.setPlainText("\n".join(lines))
+        txt.setStyleSheet(
+            f"QTextEdit {{ background:{self._WHITE}; color:{self._NAVY};"
+            f" border:1px solid {self._BORDER}; border-radius:4px; }}"
+        )
+        lay.addWidget(txt, 1)
+        br = QHBoxLayout(); br.setSpacing(8)
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(36); close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(
+            f"QPushButton {{ background:{self._NAVY}; color:{self._WHITE}; border:none;"
+            f" border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }}"
+            f"QPushButton:hover {{ background:{self._NAVY_2}; }}"
+        )
+        close_btn.clicked.connect(dlg.accept)
+        br.addStretch(); br.addWidget(close_btn)
+        lay.addLayout(br)
+        dlg.exec()
 
     # ── keyboard ──────────────────────────────────────────────────────────
     def keyPressEvent(self, event):
@@ -5201,6 +5706,192 @@ class CustomerPaymentDialog(QDialog):
             
             
             
+# =============================================================================
+# REPRINT DIALOG  —  autocomplete invoice search → reprint receipt
+# =============================================================================
+class ReprintDialog(QDialog):
+    """
+    Autocomplete invoice search dialog for reprinting.
+    Type invoice number or customer name → select from dropdown → Reprint.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reprint Invoice")
+        self.setMinimumSize(620, 200)
+        self.setModal(True)
+        self.setStyleSheet(
+            f"QDialog {{ background:{OFF_WHITE}; font-family:\'Segoe UI\',sans-serif; }}"
+        )
+        self._all_sales: list[dict] = []
+        self._selected_sale: dict | None = None
+        self._stimer = QTimer(self)
+        self._stimer.setSingleShot(True)
+        self._stimer.setInterval(200)
+        self._stimer.timeout.connect(self._run_search)
+        self._build()
+        QTimer.singleShot(0, self._preload)
+
+    def _preload(self):
+        try:
+            from models.sale import get_all_sales
+            self._all_sales = get_all_sales()
+        except Exception:
+            self._all_sales = []
+        # If pre-filled text already in box, run search now
+        if self._search.text().strip():
+            self._run_search()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(0); root.setContentsMargins(0, 0, 0, 0)
+
+        # header
+        hdr = QWidget(); hdr.setFixedHeight(52)
+        hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
+        hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
+        title = QLabel("🖨  Reprint Invoice")
+        title.setStyleSheet(f"color:{NAVY}; font-size:16px; font-weight:bold; background:transparent;")
+        sub = QLabel("Type invoice number or customer name")
+        sub.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
+        hl.addWidget(title); hl.addSpacing(12); hl.addWidget(sub); hl.addStretch()
+        root.addWidget(hdr)
+
+        body = QWidget(); body.setStyleSheet(f"background:{OFF_WHITE};")
+        bl = QVBoxLayout(body); bl.setContentsMargins(24, 16, 24, 16); bl.setSpacing(6)
+
+        # search row
+        sr = QHBoxLayout(); sr.setSpacing(8)
+        lbl = QLabel("Invoice / Customer:")
+        lbl.setFixedWidth(140)
+        lbl.setStyleSheet(f"color:{MUTED}; font-size:11px; font-weight:bold; background:transparent;")
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Type invoice number or customer name\u2026")
+        self._search.setFixedHeight(38)
+        self._search.setStyleSheet(f"""
+            QLineEdit {{
+                background:{WHITE}; color:{NAVY};
+                border:2px solid {BORDER}; border-radius:6px;
+                font-size:13px; padding:0 12px;
+            }}
+            QLineEdit:focus {{ border:2px solid {ACCENT}; }}
+        """)
+        try:
+            prefill = getattr(self.parent(), "_prev_invoice", "")
+            if prefill: self._search.setText(prefill)
+        except Exception:
+            pass
+        self._search.textChanged.connect(lambda _: self._stimer.start())
+        self._search.returnPressed.connect(self._on_enter)
+        sr.addWidget(lbl); sr.addWidget(self._search, 1)
+        bl.addLayout(sr)
+
+        # autocomplete list
+        self._ac = QListWidget()
+        self._ac.setFixedHeight(0)
+        self._ac.setStyleSheet(f"""
+            QListWidget {{
+                background:{WHITE}; border:2px solid {ACCENT};
+                border-top:none; border-radius:0 0 6px 6px;
+                font-size:13px; color:{NAVY}; outline:none;
+            }}
+            QListWidget::item                  {{ padding:7px 14px; min-height:28px; color:{NAVY}; }}
+            QListWidget::item:hover            {{ background:{LIGHT}; color:{NAVY}; }}
+            QListWidget::item:selected         {{ background:{ACCENT}; color:{WHITE}; }}
+            QListWidget::item:selected:active  {{ background:{ACCENT}; color:{WHITE}; }}
+            QListWidget::item:selected:!active {{ background:{ACCENT}; color:{WHITE}; }}
+        """)
+        self._ac.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._ac.itemClicked.connect(self._on_item_clicked)
+        ac_row = QHBoxLayout(); ac_row.setContentsMargins(148, 0, 0, 0)
+        ac_row.addWidget(self._ac)
+        bl.addLayout(ac_row)
+
+        # buttons
+        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
+        bcancel = QPushButton("Cancel")
+        bcancel.setFixedHeight(40); bcancel.setFixedWidth(90)
+        bcancel.setCursor(Qt.PointingHandCursor)
+        bcancel.setStyleSheet(f"""
+            QPushButton {{ background:{LIGHT}; color:{NAVY};
+                border:1px solid {BORDER}; border-radius:6px; font-size:13px; font-weight:bold; }}
+            QPushButton:hover {{ background:{BORDER}; }}
+        """)
+        bcancel.clicked.connect(self.reject)
+        self._btn_reprint = QPushButton("\U0001f5a8  Reprint")
+        self._btn_reprint.setFixedHeight(40)
+        self._btn_reprint.setEnabled(False)
+        self._btn_reprint.setCursor(Qt.PointingHandCursor)
+        self._btn_reprint.setStyleSheet(f"""
+            QPushButton {{ background:{ACCENT}; color:{WHITE}; border:none;
+                border-radius:6px; font-size:13px; font-weight:bold; }}
+            QPushButton:hover    {{ background:{ACCENT_H}; }}
+            QPushButton:disabled {{ background:{LIGHT}; color:{MUTED}; }}
+        """)
+        self._btn_reprint.clicked.connect(self._do_reprint)
+        btn_row.addWidget(bcancel); btn_row.addStretch(); btn_row.addWidget(self._btn_reprint)
+        bl.addLayout(btn_row)
+        root.addWidget(body, 1)
+
+    def _run_search(self):
+        q = self._search.text().strip().lower()
+        self._ac.clear(); self._selected_sale = None
+        self._btn_reprint.setEnabled(False)
+        if not q: self._ac.setFixedHeight(0); return
+        matches = [s for s in self._all_sales
+                   if q in (s.get("invoice_no") or "").lower()
+                   or q in (s.get("customer_name") or "").lower()][:15]
+        if not matches: self._ac.setFixedHeight(0); return
+        for s in matches:
+            inv = s.get('invoice_no', '')
+            cust = s.get('customer_name') or 'Walk-in'
+            amt = float(s.get('total', 0))
+            dt = s.get('invoice_date', '') or s.get('date', '')
+            label = f"{inv}   ·   {cust}   ·   ${amt:.2f}   ·   {dt}"
+            it = QListWidgetItem(label); it.setData(Qt.UserRole, s)
+            self._ac.addItem(it)
+        self._ac.setFixedHeight(min(len(matches), 6) * 42)
+
+    def _on_item_clicked(self, item):
+        s = item.data(Qt.UserRole)
+        self._selected_sale = s
+        self._search.setText(s.get("invoice_no", ""))
+        self._ac.setFixedHeight(0); self._ac.clear()
+        self._btn_reprint.setEnabled(True)
+
+    def _on_enter(self):
+        cur = self._ac.currentItem()
+        if cur: self._on_item_clicked(cur)
+        elif self._selected_sale: self._do_reprint()
+        else:
+            self._run_search()
+            if self._ac.count() == 1: self._on_item_clicked(self._ac.item(0))
+
+    def _do_reprint(self):
+        sale = self._selected_sale
+        if not sale: return
+        try:
+            from models.sale import get_sale_items
+            sale["items"] = get_sale_items(sale["id"])
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not load items:\n{e}"); return
+        try:
+            self.parent()._print_receipt_for_sale(sale)
+            self.accept()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not print:\n{e}")
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (Qt.Key_Return, Qt.Key_Enter): self._on_enter()
+        elif k == Qt.Key_Escape: self.reject()
+        elif k == Qt.Key_Down and self._ac.count():
+            self._ac.setCurrentRow(min(self._ac.currentRow() + 1, self._ac.count() - 1))
+        elif k == Qt.Key_Up and self._ac.count():
+            self._ac.setCurrentRow(max(self._ac.currentRow() - 1, 0))
+        else: super().keyPressEvent(e)
+
+
 class CreditNoteDialog(QDialog):
     """Search-only dialog. Enter/click → confirmation popup → items load into POSView."""
 

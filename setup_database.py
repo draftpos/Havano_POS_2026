@@ -690,6 +690,23 @@ def run():
     else:
         skip("customer_payments")
 
+
+    # ==================================================================
+    # 21. product_uom_prices
+    # ==================================================================
+    if not table_exists("product_uom_prices"):
+        cur.execute("""
+            CREATE TABLE product_uom_prices (
+                id      INT           IDENTITY(1,1) PRIMARY KEY,
+                part_no NVARCHAR(50)  NOT NULL,
+                uom     NVARCHAR(40)  NOT NULL,
+                price   DECIMAL(12,2) NOT NULL DEFAULT 0,
+                CONSTRAINT UQ_product_uom UNIQUE (part_no, uom)
+            )
+        """); ok("product_uom_prices")
+    else:
+        skip("product_uom_prices")
+
     # ==================================================================
     # Commit all DDL
     # ==================================================================

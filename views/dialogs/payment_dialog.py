@@ -67,7 +67,12 @@ def _get_default_company() -> dict | None:
 def _load_payment_methods(company: str) -> list[dict]:
     """
     Pull GL accounts for this company, deduplicated by (account_type, currency).
-    Returns list of: {label, currency, rate_to_usd}
+    Returns list of: {label, currency, rate_to_usd, is_credit}
+
+    #16 — Accounts whose `is_credit` field is truthy in Frappe are included in
+    the display list so the cashier can see them, but they are tagged with
+    is_credit=True.  _save() checks this flag and skips payment-entry creation
+    for those methods.  The UI also shows a small badge so it is visually clear.
     """
     try:
         from models.gl_account import get_all_accounts
@@ -94,18 +99,23 @@ def _load_payment_methods(company: str) -> list[dict]:
         except Exception:
             pass
 
+        # #16 — read the is_credit flag from the Frappe account record.
+        # Frappe stores this as 1 / 0 or True / False on the Account doctype.
+        is_credit = bool(a.get("is_credit") or a.get("credit_account") or False)
+
         result.append({
-            "label":        a.get("account_name") or a.get("name") or atype,
-            "currency":     curr,
-            "rate_to_usd":  rate,
+            "label":       a.get("account_name") or a.get("name") or atype,
+            "currency":    curr,
+            "rate_to_usd": rate,
+            "is_credit":   is_credit,   # #16
         })
 
     if not result:
         result = [
-            {"label": "Cash",       "currency": "USD", "rate_to_usd": 1.0},
-            {"label": "Cash (ZIG)", "currency": "ZIG", "rate_to_usd": _get_local_rate("ZIG")},
-            {"label": "Card",       "currency": "USD", "rate_to_usd": 1.0},
-            {"label": "Bank / EFT", "currency": "USD", "rate_to_usd": 1.0},
+            {"label": "Cash",       "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
+            {"label": "Cash (ZIG)", "currency": "ZIG", "rate_to_usd": _get_local_rate("ZIG"), "is_credit": False},
+            {"label": "Card",       "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
+            {"label": "Bank / EFT", "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
         ]
     return result
 
@@ -206,6 +216,7 @@ class PaymentDialog(QDialog):
         self.accepted_customer = None
         self.accepted_company  = None
         self.accepted_company_name = ""
+        self.accepted_is_credit = False   # #16 — True when method is credit-flagged
 
         self._customer = customer or _get_default_customer()
         self._company  = _get_default_company()
@@ -399,8 +410,9 @@ class PaymentDialog(QDialog):
         validator.setLocale(QLocale(QLocale.English))
 
         for method in self._methods:
-            label = method["label"]
-            curr  = method["currency"]
+            label     = method["label"]
+            curr      = method["currency"]
+            is_credit = method.get("is_credit", False)   # #16
 
             rw = QWidget()
             rw.setFixedHeight(40)
@@ -409,13 +421,23 @@ class PaymentDialog(QDialog):
             rl.setContentsMargins(0, 0, 0, 0)
             rl.setSpacing(8)
 
-            # method button
-            mb = QPushButton(f"  {label}")
+            # method button — append "[Credit]" tag so cashier can see it
+            display_label = f"  {label}"
+            mb = QPushButton(display_label)
             mb.setFixedHeight(32)
             mb.setCursor(Qt.PointingHandCursor)
             mb.setFocusPolicy(Qt.NoFocus)
             mb.setStyleSheet(_method_btn_style(False))
             mb.clicked.connect(lambda _, m=label: self._activate_method(m))
+
+            # #16 — credit badge (shown only for credit-flagged methods)
+            if is_credit:
+                credit_badge = QLabel("CREDIT")
+                credit_badge.setFixedHeight(20)
+                credit_badge.setAlignment(Qt.AlignCenter)
+                credit_badge.setStyleSheet(
+                    f"background:{ORANGE}; color:{WHITE}; border-radius:4px;"
+                    f" font-size:9px; font-weight:bold; padding:0 5px;")
 
             # currency badge
             cb = QLabel(curr)
@@ -426,7 +448,7 @@ class PaymentDialog(QDialog):
                 f"background:{LIGHT}; color:{ACCENT}; border:1px solid {BORDER};"
                 f" border-radius:6px; font-size:10px; font-weight:bold;")
 
-            # paid field — no placeholder
+            # paid field
             ae = QLineEdit()
             ae.setFixedHeight(32)
             ae.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -436,7 +458,7 @@ class PaymentDialog(QDialog):
                 self._activate_method(m, focus_field=False), orig(e))
             ae.textChanged.connect(lambda _, m=label: self._on_text_changed(m))
 
-            # amount due label — two lines: native currency + USD equivalent
+            # amount due label
             due = QLabel("—")
             due.setFixedHeight(32)
             due.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -445,7 +467,19 @@ class PaymentDialog(QDialog):
                 f" background:{WHITE}; border:1px solid {BORDER};"
                 f" border-radius:6px; padding:0 8px;")
 
-            rl.addWidget(mb,  4)
+            # Build the method-label cell: button + optional credit badge stacked
+            if is_credit:
+                mb_wrap = QWidget()
+                mb_wrap.setStyleSheet("background:transparent;")
+                mb_vl = QVBoxLayout(mb_wrap)
+                mb_vl.setContentsMargins(0, 0, 0, 0)
+                mb_vl.setSpacing(1)
+                mb_vl.addWidget(mb)
+                mb_vl.addWidget(credit_badge)
+                rl.addWidget(mb_wrap, 4)
+            else:
+                rl.addWidget(mb, 4)
+
             rl.addWidget(cb,  1)
             rl.addWidget(ae,  3)
             rl.addWidget(due, 4)
@@ -488,7 +522,16 @@ class PaymentDialog(QDialog):
         bcan.clicked.connect(self.reject)
         grid.addWidget(bcan, 0, 2, 1, 2)
 
-        digit_rows = [["7","8","9"], ["4","5","6"], ["1","2","3"], ["0",".","±"]]
+        # ── Digit rows 7–1  (unchanged) ──────────────────────────────────────
+        # #2 — Layout: 4 columns.  Bottom two rows are rearranged to fit 00 / 000.
+        #
+        #   Row 1:  7   8   9   [10]
+        #   Row 2:  4   5   6   [20]
+        #   Row 3:  1   2   3   [50]
+        #   Row 4:  0   00  .   [100]
+        #   Row 5: 000       ←  spans cols 0-1, so it is wide and touch-friendly
+        #
+        digit_rows = [["7","8","9"], ["4","5","6"], ["1","2","3"]]
         quick_amts = [10, 20, 50, 100]
 
         for ri, digs in enumerate(digit_rows, 1):
@@ -501,7 +544,29 @@ class PaymentDialog(QDialog):
             qb.clicked.connect(lambda _, a=qa: self._numpad_quick(a))
             grid.addWidget(qb, ri, 3)
 
-        for r in range(5):
+        # Row 4:  0 | 00 | . | 100-quick
+        b0 = _numpad_btn("0", "digit")
+        b0.clicked.connect(lambda: self._numpad_press("0"))
+        grid.addWidget(b0, 4, 0)
+
+        b00 = _numpad_btn("00", "digit")
+        b00.clicked.connect(lambda: self._numpad_press_multi("00"))
+        grid.addWidget(b00, 4, 1)
+
+        bdot = _numpad_btn(".", "digit")
+        bdot.clicked.connect(lambda: self._numpad_press("."))
+        grid.addWidget(bdot, 4, 2)
+
+        qb100 = _numpad_btn("100", "quick")
+        qb100.clicked.connect(lambda: self._numpad_quick(100))
+        grid.addWidget(qb100, 4, 3)
+
+        # Row 5:  000 (spans 3 cols — visually prominent for 1 000 entry)
+        b000 = _numpad_btn("000", "digit")
+        b000.clicked.connect(lambda: self._numpad_press_multi("000"))
+        grid.addWidget(b000, 5, 0, 1, 3)   # colspan 3
+
+        for r in range(6):
             grid.setRowStretch(r, 1)
         for c in range(4):
             grid.setColumnStretch(c, 1)
@@ -509,13 +574,16 @@ class PaymentDialog(QDialog):
         vbox.addLayout(grid, stretch=5)
         vbox.addWidget(_hr())
 
+        # #15 — Only ONE button on the finalisation row.
+        # The old layout had both "Save (F2)" and "Print (F3)" — both called
+        # self._save(), making them identical.  Per requirement #15 the "Save"
+        # button is removed; only "Print" remains.  The keyboard shortcut F2
+        # still works via keyPressEvent (calls _save), but there is no separate
+        # on-screen Save button.
         brow = QHBoxLayout()
         brow.setSpacing(8)
-        bsave  = _action_btn("💾  Save  (F2)",  SUCCESS, SUCCESS_H, height=48)
-        bsave.clicked.connect(self._save)
-        bprint = _action_btn("🖨  Print  (F3)", NAVY_2,  NAVY_3,   height=48)
+        bprint = _action_btn("🖨  Print  (F2)", NAVY_2, NAVY_3, height=52)
         bprint.clicked.connect(self._save)
-        brow.addWidget(bsave)
         brow.addWidget(bprint)
         vbox.addLayout(brow, stretch=1)
 
@@ -574,6 +642,14 @@ class PaymentDialog(QDialog):
                     f.setText(cur + key)
             elif len(ip) < 8:
                 f.setText(cur + key)
+
+    def _numpad_press_multi(self, digits: str):
+        """#2 — Handle multi-digit presses: '00' and '000'.
+        Appends each digit in turn so the integer-part length cap (8 chars)
+        is honoured.  Decimal part is never touched by these buttons.
+        """
+        for d in digits:
+            self._numpad_press(d)
 
     def _numpad_back(self):
         f = self._active_field(); f.setText(f.text()[:-1])
@@ -672,6 +748,14 @@ class PaymentDialog(QDialog):
             return
 
         curr, _ = self._method_info(self._active_method)
+
+        # #16 — look up is_credit for the active method
+        is_credit = False
+        for m in self._methods:
+            if m["label"] == self._active_method:
+                is_credit = bool(m.get("is_credit", False))
+                break
+
         self.accepted_method       = self._active_method
         self.accepted_tendered     = tendered
         self.accepted_change       = max(tendered - self.total, 0.0)
@@ -681,6 +765,7 @@ class PaymentDialog(QDialog):
         self.accepted_company      = self._company
         self.accepted_company_name = (
             self._company.get("name", "") if self._company else "")
+        self.accepted_is_credit    = is_credit   # #16 — caller reads this
         self.accept()
 
     def _open_split(self):
