@@ -768,7 +768,7 @@ from services.printing_service import printing_service
 from datetime import date
 import os
 import json
-
+from pathlib import Path
 
 # =============================================================================
 # INVOICE NUMBER  —  uses prefix + start_number from company_defaults
@@ -1378,7 +1378,7 @@ def _sale_to_dict(row: dict) -> dict:
 # =============================================================================
 
 def _get_active_printers() -> list[str]:
-    hw_file = os.path.join(os.path.dirname(__file__), "..", "hardware_settings.json")
+    hw_file = Path("app_data/hardware_settings.json")
     try:
         with open(hw_file, "r", encoding="utf-8") as f:
             hw = json.load(f)
@@ -1388,16 +1388,18 @@ def _get_active_printers() -> list[str]:
         return list(dict.fromkeys(printers))
     except Exception:
         return []
-
+    
 
 # =============================================================================
 # KITCHEN ORDER PRINTING (Multi-Station)
 # =============================================================================
 
+
+
 def print_kitchen_orders(sale: dict):
     """Print separate KOT for every active Order 1–6 station."""
     try:
-        hw_file = os.path.join(os.path.dirname(__file__), "..", "hardware_settings.json")
+        hw_file = Path("app_data/hardware_settings.json")
         with open(hw_file, "r", encoding="utf-8") as f:
             hw = json.load(f)
 
@@ -1441,6 +1443,7 @@ def print_kitchen_orders(sale: dict):
 
     except Exception as e:
         print(f"❌ Kitchen Order printing error: {e}")
+
 
 
 # =============================================================================

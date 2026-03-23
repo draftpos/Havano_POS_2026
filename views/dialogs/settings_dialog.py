@@ -14,6 +14,7 @@ from datetime import datetime
 from models.advance_settings import AdvanceSettings
 import json
 import os as _os
+from pathlib import Path
 # from views.dialogs.customer_dialog import CustomerDialog
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -119,23 +120,29 @@ def _tbl():
 
 # ── Hardware Config Logic ─────────────────────────────────────────────────────
 # _HW_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "hardware_settings.json")
-_HW_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "hardware_settings.json")
+# _HW_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "hardware_settings.json")
+# _ORDER_STATIONS = [f"Order {i}" for i in range(1, 7)]
+# ── Hardware Config Logic ─────────────────────────────────────────────────────
+_HW_FILE = Path("app_data/hardware_settings.json")   # ← now matches sql_settings.json
 _ORDER_STATIONS = [f"Order {i}" for i in range(1, 7)]
-
 def _load_hw() -> dict:
     try:
-        if _os.path.exists(_HW_FILE):
+        _HW_FILE.parent.mkdir(parents=True, exist_ok=True)   # ensure app_data/ exists
+        if _HW_FILE.exists():
             with open(_HW_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-    except Exception: pass
+    except Exception:
+        pass
     return {"main_printer": "(None)", "orders": {}}
 
 def _save_hw(data: dict):
     try:
+        _HW_FILE.parent.mkdir(parents=True, exist_ok=True)   # ensure app_data/ exists
         with open(_HW_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-    except Exception: pass
-
+    except Exception:
+        pass
+    
 def _get_system_printers() -> list[str]:
     printers = ["(None)"]
     try:

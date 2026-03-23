@@ -21,8 +21,8 @@ class AdvanceSettings:
     contentHeaderStyle: str = "Bold"
 
     subheaderFontName: str = "Times New Roman"
-    subheaderSize: int = 19
-    subheaderStyle: str = "italic"
+    subheaderSize: int = 9
+    subheaderStyle: str = "bolditalic"
 
     orderContentFontName: str = "Arial"
     orderContentFontSize: int = 10
