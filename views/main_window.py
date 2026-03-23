@@ -3463,12 +3463,27 @@ class POSView(QWidget):
         prev_chg_lbl.setStyleSheet(f"color: {NAVY}; font-size: 10px; background: transparent;")
         layout.addWidget(prev_chg_lbl); layout.addSpacing(4)
 
-        # Change + last invoice number on the same label (#25)
         self._lbl_prev_change = QLabel("—")
         self._lbl_prev_change.setStyleSheet(
-            f"color: {NAVY}; font-size: 13px; font-weight: bold; background: transparent; min-width: 160px;")
+            f"color: {NAVY}; font-size: 13px; font-weight: bold; background: transparent; min-width: 70px;")
         self._lbl_prev_change.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self._lbl_prev_change)
+        layout.addSpacing(10)
+
+        inv_sep = QLabel("|")
+        inv_sep.setStyleSheet(f"color: {BORDER}; font-size: 13px; background: transparent;")
+        layout.addWidget(inv_sep)
+        layout.addSpacing(10)
+
+        inv_lbl = QLabel("Invoice")
+        inv_lbl.setStyleSheet(f"color: {NAVY}; font-size: 10px; background: transparent;")
+        layout.addWidget(inv_lbl); layout.addSpacing(4)
+
+        self._lbl_prev_invoice = QLabel("—")
+        self._lbl_prev_invoice.setStyleSheet(
+            f"color: {ACCENT}; font-size: 13px; font-weight: bold; background: transparent; min-width: 120px;")
+        self._lbl_prev_invoice.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(self._lbl_prev_invoice)
 
         layout.addStretch(1)
 
@@ -3483,13 +3498,13 @@ class POSView(QWidget):
         return bar
 
     def _update_prev_txn_display(self, paid: float, change: float, invoice_no: str = ""):
-        """Call after every completed sale to refresh the footer labels. #25 shows last invoice no."""
-        self._prev_paid      = paid
-        self._prev_change    = change
-        self._prev_invoice   = invoice_no
+        """Refresh footer: Paid | Change | Invoice No. — all on one line."""
+        self._prev_paid    = paid
+        self._prev_change  = change
+        self._prev_invoice = invoice_no
         self._lbl_prev_paid.setText(f"${paid:.2f}")
-        inv_suffix = f"   #{invoice_no}" if invoice_no else ""
-        self._lbl_prev_change.setText(f"${change:.2f}{inv_suffix}")
+        self._lbl_prev_change.setText(f"${change:.2f}")
+        self._lbl_prev_invoice.setText(invoice_no if invoice_no else "—")
 
     # =========================================================================
     # RIGHT PANEL
@@ -3857,17 +3872,17 @@ class POSView(QWidget):
 
         # ── Pagination bar ─────────────────────────────────────────────────────
         page_bar = QWidget(); page_bar.setFixedHeight(22)
-        page_bar.setStyleSheet(f"background-color: {NAVY}; border-top: 1px solid {NAVY_2};")
+        page_bar.setStyleSheet(f"background-color: #f0e8d0; border-top: 1px solid {BORDER};")
         page_bar_h = QHBoxLayout(page_bar)
         page_bar_h.setContentsMargins(0, 0, 0, 0); page_bar_h.setSpacing(4)
 
         page_bar_h.addStretch(1)
 
         _btn_style = f"""
-            QPushButton {{ background-color: {NAVY_2}; color: {WHITE}; border: none;
+            QPushButton {{ background-color: {NAVY}; color: {WHITE}; border: none;
                 border-radius: 3px; font-size: 9px; font-weight: bold; padding: 0 6px; }}
-            QPushButton:hover {{ background-color: {NAVY_3}; }}
-            QPushButton:disabled {{ background-color: {NAVY}; color: {MID}; }}
+            QPushButton:hover {{ background-color: {NAVY_2}; }}
+            QPushButton:disabled {{ background-color: {BORDER}; color: {MUTED}; }}
         """
 
         self._grid_prev_btn = QPushButton("◀ Prev")
@@ -3878,7 +3893,7 @@ class POSView(QWidget):
 
         self._grid_page_lbl = QLabel("Page 1 / 1")
         self._grid_page_lbl.setAlignment(Qt.AlignCenter)
-        self._grid_page_lbl.setStyleSheet(f"color: {MID}; font-size: 9px; background: transparent;")
+        self._grid_page_lbl.setStyleSheet(f"color: {NAVY}; font-size: 9px; background: transparent;")
         self._grid_page_lbl.setFixedWidth(80)
 
         self._grid_next_btn = QPushButton("Next ▶")
@@ -4779,7 +4794,7 @@ class MainWindow(QMainWindow):
             self._stack.addWidget(self._dashboard)
 
         self.setCentralWidget(self._stack)
-        self._build_menubar()
+        self.menuBar().setVisible(False)   # #30/#34 — top menubar hidden; all actions via white nav bar
 
         self._status_bar = QStatusBar()
         self._status_bar.setSizeGripEnabled(False)
