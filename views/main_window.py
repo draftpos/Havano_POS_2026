@@ -6844,6 +6844,16 @@ class POSView(QWidget):
                                  f"Could not save Laybye:\n{_friendly_db_error(e)}")
             return
 
+        # ── 4b. Queue deposit payment entry for ERPNext sync ─────────────────
+        if deposit_amount and deposit_amount > 0:
+            try:
+                from services.laybye_payment_entry_service import create_laybye_payment_entry
+                from models.sales_order import get_order_by_id
+                create_laybye_payment_entry(get_order_by_id(order_id))
+            except Exception as _lpe:
+                import logging as _lg
+                _lg.getLogger("Laybye").warning("Laybye payment entry skipped: %s", _lpe)
+
         # ── 5. Feedback + clear cart ─────────────────────────────────────────
         balance   = round(cart_total - deposit_amount, 2)
         cust_name = (confirmed_customer or {}).get("customer_name", "")

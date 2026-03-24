@@ -350,3 +350,27 @@ def add_deposit_payment(order_id: int, amount: float, method: str):
 
     log.info("Deposit added to order %d: +%.2f via %s  balance=%.2f",
              order_id, amount, method, new_balance)
+    
+    
+    
+    
+    
+def get_order_by_id(order_id: int) -> dict | None:
+   
+    ensure_tables()
+    conn = _get_conn()
+    cur  = conn.cursor()
+
+    # 1. Fetch the main order
+    cur.execute("SELECT * FROM sales_order WHERE id = ?", (order_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    
+    order_dict = _dict_row(cur, row)
+
+    # 2. Fetch the items for this order
+    cur.execute("SELECT * FROM sales_order_item WHERE sales_order_id = ?", (order_id,))
+    order_dict["items"] = [_dict_row(cur, r) for r in cur.fetchall()]
+
+    return order_dict

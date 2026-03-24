@@ -1,4 +1,3 @@
-
 # # =============================================================================
 # # models/sale.py  —  SQL Server version (FIXED WITH PRINTING)
 # # =============================================================================
@@ -962,6 +961,7 @@ def create_sale(
     subtotal:          float = None,
     total_vat:         float = 0.0,
     discount_amount:   float = 0.0,
+    discount_percent:  float = 0.0,
     receipt_type:      str   = "Invoice",
     footer:            str   = "",
     change_amount:     float = None,
@@ -1483,3 +1483,26 @@ def create_credit_note(original_sale_id: int, items_to_return: list[dict]) -> bo
         raise e
     finally:
         conn.close()
+        
+def get_order_by_id(order_id: int) -> dict | None:
+    """
+    Fetch a single Sales Order by its local ID, including its items.
+    This is required by the laybye_payment_entry_service.
+    """
+    ensure_tables()
+    conn = _get_conn()
+    cur  = conn.cursor()
+
+    # 1. Fetch the main order
+    cur.execute("SELECT * FROM sales_order WHERE id = ?", (order_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    
+    order_dict = _dict_row(cur, row)
+
+    # 2. Fetch the items for this order
+    cur.execute("SELECT * FROM sales_order_item WHERE sales_order_id = ?", (order_id,))
+    order_dict["items"] = [_dict_row(cur, r) for r in cur.fetchall()]
+
+    return order_dict

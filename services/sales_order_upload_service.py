@@ -972,6 +972,16 @@ def push_unsynced_orders() -> dict:
             except Exception as e:
                 log.error("mark_order_synced failed for %s: %s", order["id"], e)
                 result["failed"] += 1
+
+            # Link deposit payment entry to Frappe SO ref so the
+            # payment daemon can push it automatically
+            if frappe_ref and isinstance(frappe_ref, str):
+                try:
+                    from services.laybye_payment_entry_service import link_laybye_payment_to_frappe
+                    link_laybye_payment_to_frappe(order.get("order_no", ""), frappe_ref)
+                except Exception as _lpe:
+                    log.warning("[so-sync] link laybye payment failed for %s: %s",
+                                order.get("order_no", ""), _lpe)
         else:
             result["failed"] += 1
 
