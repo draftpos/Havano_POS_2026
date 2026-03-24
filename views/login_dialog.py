@@ -27,6 +27,12 @@
 #         password field.  Clicking it toggles between Password and Normal
 #         echo mode so the user can verify what they typed.
 #
+#  OFFLINE FIX — LoginWorker calls auth_service.login() which already
+#         handles the online→offline fallback internally.  If online fails
+#         (network error / timeout) it automatically tries models.user.authenticate
+#         against the local SQLite DB.  auth_failed=True (wrong password) skips
+#         the offline attempt so a bad password is rejected immediately.
+#
 # =============================================================================
 
 from PySide6.QtWidgets import (
@@ -70,7 +76,17 @@ except Exception:
 # Background workers
 # =============================================================================
 class LoginWorker(QThread):
-    """Runs online auth_service.login() off the UI thread."""
+    """
+    Runs auth_service.login() off the UI thread.
+
+    auth_service.login() already handles the full online → offline fallback:
+      1. Tries online API.
+      2. If network fails  → falls back to models.user.authenticate (local DB).
+      3. If auth_failed    → skips offline (wrong password) and returns error.
+
+    So the dialog does NOT need its own offline retry — it just reads
+    result["source"] to know how the login succeeded.
+    """
     finished = Signal(dict)
 
     def __init__(self, username: str, password: str):
@@ -79,11 +95,19 @@ class LoginWorker(QThread):
         self.password = password
 
     def run(self):
+        print(f"[login] ▶ LoginWorker started — username={self.username!r}")
         try:
             from services.auth_service import login
-            self.finished.emit(login(self.username, self.password))
+            result = login(self.username, self.password)
+            print(f"[login] ◀ auth_service.login() returned: "
+                  f"success={result.get('success')}, "
+                  f"source={result.get('source')!r}, "
+                  f"error={result.get('error')!r}")
+            self.finished.emit(result)
         except Exception as e:
-            self.finished.emit({"success": False, "error": str(e)})
+            import traceback
+            print(f"[login] ✗ LoginWorker EXCEPTION:\n{traceback.format_exc()}")
+            self.finished.emit({"success": False, "error": str(e), "source": "exception"})
 
 
 class BackgroundSyncWorker(QThread):
@@ -177,7 +201,6 @@ class LoginDialog(QDialog):
 
     def reject(self):
         """Disable the default Escape-to-close behaviour."""
-        # Do nothing — user must log in.
         pass
 
     # =========================================================================
@@ -280,7 +303,7 @@ class LoginDialog(QDialog):
         tl.setContentsMargins(28, 10, 28, 0)
         tl.setSpacing(8)
 
-        self._pin_tab = QPushButton("  🔢  PIN")
+        self._pin_tab   = QPushButton("  🔢  PIN")
         self._email_tab = QPushButton("  🔑  Email Login")
         for b in (self._pin_tab, self._email_tab):
             b.setFixedHeight(36)
@@ -295,8 +318,8 @@ class LoginDialog(QDialog):
         # ── Stacked pages ─────────────────────────────────────────────────────
         self._stack = QStackedWidget()
         self._stack.setStyleSheet(f"background:{OFF_WHITE};")
-        self._stack.addWidget(self._build_pin_page())     # index 0 — PIN  (#19)
-        self._stack.addWidget(self._build_email_page())   # index 1 — Email (#40)
+        self._stack.addWidget(self._build_pin_page())    # index 0 — PIN  (#19)
+        self._stack.addWidget(self._build_email_page())  # index 1 — Email (#40)
         vl.addWidget(self._stack, 1)
 
         # ── Error label ───────────────────────────────────────────────────────
@@ -569,22 +592,32 @@ class LoginDialog(QDialog):
         if not pin:
             self._show_error("Please enter your PIN.")
             return
+        print(f"[login] PIN attempt — length={len(pin)}")
         try:
             from models.user import authenticate_by_pin
             user = authenticate_by_pin(pin)
+            print(f"[login] authenticate_by_pin() returned: {user!r}")
         except Exception as e:
-            self._show_error("Local DB error — contact admin.")
-            print(f"[login] PIN auth error: {e}")
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[login] PIN auth EXCEPTION:\n{tb}")
+            self._show_error(f"Local DB error: {e}")
             return
         if not user:
+            print("[login] PIN not found in DB")
             self._show_error("Incorrect PIN.  Please try again.")
             self._pin_clear()
             self._shake()
             return
+        print(f"[login] PIN OK — user={user.get('username')!r} role={user.get('role')!r}")
         self._validate_and_accept(user, "pin")
 
     # =========================================================================
-    # Email / Password login  (online → offline fallback)
+    # Email / Password login
+    # auth_service.login() handles the full online → offline fallback:
+    #   • Online succeeds       → source = "online"
+    #   • Network fails         → offline DB attempted → source = "offline"
+    #   • Wrong password online → auth_failed=True, offline skipped → error shown
     # =========================================================================
     def _login_email(self):
         u = self.username_input.text().strip()
@@ -602,21 +635,45 @@ class LoginDialog(QDialog):
 
     def _on_email_login_done(self, result: dict):
         self._worker = None
+        print(f"[login] _on_email_login_done — success={result.get('success')}, "
+              f"source={result.get('source')!r}, error={result.get('error')!r}")
 
         if result.get("success"):
-            user = result["user"]
-            source = result.get("source", "online")
+            user   = result["user"]
+            source = result.get("source", "online")  # "online" or "offline"
             self._set_btn_normal(self._email_btn)
+            print(f"[login] Logged in as {user.get('username')!r} "
+                  f"role={user.get('role')!r} source={source!r}")
+            print(f"[login] User fields — company={user.get('company')!r} "
+                  f"warehouse={user.get('warehouse')!r} "
+                  f"cost_center={user.get('cost_center')!r}")
+
+            # Show a brief offline notice so the cashier knows they're offline
+            if source == "offline":
+                self._show_info("⚠️  Offline mode — using local account.")
+
             self._validate_and_accept(user, source)
+            return
+
+        # Both online and offline failed
+        err = result.get("error", "Login failed.")
+        source = result.get("source", "")
+        print(f"[login] FAILED — source={source!r} error={err!r}")
+        print(f"[login] Full result dict: {result}")
+
+        # Give a clearer message depending on where it failed
+        if source == "offline":
+            display_err = f"Login failed (offline): {err}"
         else:
-            err = result.get("error", "Login failed.")
-            self._show_error(err)
-            self._set_btn_error(self._email_btn)
-            self._shake()
-            self.password_input.clear()
-            self.password_input.setFocus()
-            QTimer.singleShot(1800, lambda: self._set_btn_normal(self._email_btn))
-            QTimer.singleShot(500, self._check_connectivity)
+            display_err = err
+
+        self._show_error(display_err)
+        self._set_btn_error(self._email_btn)
+        self._shake()
+        self.password_input.clear()
+        self.password_input.setFocus()
+        QTimer.singleShot(1800, lambda: self._set_btn_normal(self._email_btn))
+        QTimer.singleShot(500, self._check_connectivity)
 
     # =========================================================================
     # Completeness gate
@@ -628,8 +685,10 @@ class LoginDialog(QDialog):
         warehouse and cost_center set.
         """
         role = str(user.get("role") or "").lower()
+        print(f"[login] _validate_and_accept — role={role!r} source={source!r}")
         if role != "admin":
             ok, reason = _check_user_complete(user)
+            print(f"[login] completeness check — ok={ok} reason={reason!r}")
             if not ok:
                 self._show_error(reason or "Account not fully configured — contact admin.")
                 self._shake()
@@ -659,9 +718,10 @@ class LoginDialog(QDialog):
         # #27 — hide the dialog immediately; MainWindow appears with nothing behind it
         self.hide()
 
-        # Background sync (non-blocking)
-        self._bg_sync = BackgroundSyncWorker()
-        self._bg_sync.start()
+        # Background sync (non-blocking) — only when online credentials exist
+        if source != "pin":
+            self._bg_sync = BackgroundSyncWorker()
+            self._bg_sync.start()
 
         self.accept()   # QDialog.Accepted — caller can read .logged_in_user
 
@@ -747,8 +807,22 @@ class LoginDialog(QDialog):
         return inp
 
     def _show_error(self, msg: str):
+        self.error_label.setStyleSheet(f"""
+            color:{WHITE}; background:{DANGER}; font-size:12px; font-weight:bold;
+            border-radius:8px; padding:6px 14px;
+        """)
         self.error_label.setText(f"  {msg}  ")
         self.error_label.show()
+
+    def _show_info(self, msg: str):
+        """Shows a non-error (warning/info) message in the status area."""
+        self.error_label.setStyleSheet(f"""
+            color:{WHITE}; background:{WARNING}; font-size:12px; font-weight:bold;
+            border-radius:8px; padding:6px 14px;
+        """)
+        self.error_label.setText(f"  {msg}  ")
+        self.error_label.show()
+        QTimer.singleShot(3000, self.error_label.hide)
 
     # =========================================================================
     # Keyboard handling

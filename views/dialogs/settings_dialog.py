@@ -259,7 +259,472 @@ class CompanyDialog(_Base):
             from models.company import delete_company; delete_company(c["id"]); self._load(); self._msg("Deleted.")
         except Exception as e: self._msg(_friendly_error(e),True)
 
-# (The other dialogs — CustomerGroupDialog, WarehouseDialog, CostCenterDialog, PriceListDialog, CustomerDialog, UsersDialog — remain exactly as in your original code. I'm not repeating them here to save space.)
+# ── Users dialog — separate file, no circular dependency ─────────────────────
+try:
+    from views.dialogs.users_dialog import ManageUsersDialog, UsersDialog
+except Exception:
+    # Fallback: define minimal stub so SettingsDialog still opens
+    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
+    class ManageUsersDialog(QDialog):
+        def __init__(self, parent=None, current_user=None):
+            super().__init__(parent)
+            self.setWindowTitle("Users")
+            lay = QVBoxLayout(self)
+            lay.addWidget(QLabel("Users dialog unavailable."))
+    UsersDialog = ManageUsersDialog
+
+# ── Helpers — defined locally to avoid importing from main_window ─────────────
+def _friendly_db_error(e):
+    msg = str(e)
+    if "REFERENCE constraint" in msg or "FK_" in msg or "foreign key" in msg.lower():
+        return "Cannot delete — record is still linked to other data."
+    if "UNIQUE" in msg or "duplicate key" in msg.lower():
+        return "A record with that name already exists."
+    if "Cannot insert the value NULL" in msg:
+        return "A required field is missing."
+    return msg
+
+def _settings_table_style():
+    return f"""
+        QTableWidget {{ background:{WHITE}; border:1px solid {BORDER};
+            gridline-color:{LIGHT}; outline:none; font-size:13px; }}
+        QTableWidget::item           {{ padding:8px; }}
+        QTableWidget::item:selected  {{ background-color:{ACCENT}; color:{WHITE}; }}
+        QTableWidget::item:alternate {{ background-color:{ROW_ALT}; }}
+        QHeaderView::section {{
+            background-color:{NAVY}; color:{WHITE};
+            padding:10px 8px; border:none; border-right:1px solid {NAVY_2};
+            font-size:11px; font-weight:bold;
+        }}
+    """
+
+def navy_btn(text, height=36, font_size=12, width=None, color=None, hover=None):
+    from PySide6.QtWidgets import QPushButton
+    from PySide6.QtCore import Qt
+    bg  = color or NAVY
+    hov = hover or NAVY_2
+    btn = QPushButton(text)
+    btn.setFixedHeight(height)
+    if width: btn.setFixedWidth(width)
+    btn.setCursor(Qt.PointingHandCursor)
+    btn.setStyleSheet(f"""
+        QPushButton {{
+            background-color: {bg}; color: {WHITE}; border: none;
+            border-radius: 5px; font-size: {font_size}px; font-weight: bold; padding: 0 14px;
+        }}
+        QPushButton:hover   {{ background-color: {hov}; }}
+        QPushButton:pressed {{ background-color: {NAVY_3}; }}
+    """)
+    return btn
+
+def hr(horizontal=True):
+    from PySide6.QtWidgets import QFrame
+    line = QFrame()
+    line.setFrameShape(QFrame.HLine if horizontal else QFrame.VLine)
+    line.setStyleSheet(f"background-color: {BORDER}; border: none;")
+    if horizontal: line.setFixedHeight(1)
+    else: line.setFixedWidth(1)
+    return line
+
+class CustomerGroupDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Customer Groups"); self.setMinimumSize(560, 420)
+        self.setStyleSheet(f"QDialog {{ background-color:{WHITE}; }}")
+        self._build(); self._reload()
+
+    def _build(self):
+        lay = QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(20,16,20,16)
+        hdr = QWidget(); hdr.setFixedHeight(44); hdr.setStyleSheet(f"background-color:{NAVY}; border-radius:5px;")
+        hl = QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0)
+        hl.addWidget(QLabel("Customer Groups",styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
+        lay.addWidget(hdr)
+        self._tbl = QTableWidget(0,2); self._tbl.setHorizontalHeaderLabels(["Name","Parent Group"])
+        self._tbl.horizontalHeader().setStretchLastSection(True); self._tbl.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
+        self._tbl.verticalHeader().setVisible(False); self._tbl.setAlternatingRowColors(True)
+        self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers); self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._tbl.setStyleSheet(_settings_table_style()); lay.addWidget(self._tbl,1); lay.addWidget(hr())
+        fr = QHBoxLayout(); fr.setSpacing(8)
+        self._f_name = QLineEdit(); self._f_name.setPlaceholderText("Group name *"); self._f_name.setFixedHeight(34)
+        self._f_parent = QComboBox(); self._f_parent.setFixedHeight(34); self._f_parent.addItem("(No parent)", None)
+        fr.addWidget(self._f_name,2); fr.addWidget(QLabel("Parent:",styleSheet="background:transparent;"),0); fr.addWidget(self._f_parent,1)
+        lay.addLayout(fr)
+        br = QHBoxLayout(); br.setSpacing(8)
+        self._status = QLabel(""); self._status.setStyleSheet(f"font-size:12px;color:{SUCCESS};background:transparent;")
+        add_btn=navy_btn("Add",height=34,color=SUCCESS,hover=SUCCESS_H); del_btn=navy_btn("Delete",height=34,color=DANGER,hover=DANGER_H); cls_btn=navy_btn("Close",height=34)
+        add_btn.clicked.connect(self._add); del_btn.clicked.connect(self._delete); cls_btn.clicked.connect(self.accept)
+        br.addWidget(self._status,1); br.addWidget(add_btn); br.addWidget(del_btn); br.addWidget(cls_btn)
+        lay.addLayout(br)
+
+    def _reload(self):
+        self._tbl.setRowCount(0); self._f_parent.clear(); self._f_parent.addItem("(No parent)", None)
+        try:
+            from models.customer_group import get_all_customer_groups
+            groups = get_all_customer_groups()
+        except Exception: groups=[]
+        for g in groups:
+            r=self._tbl.rowCount(); self._tbl.insertRow(r)
+            parent_name = next((x["name"] for x in groups if x["id"]==g.get("parent_group_id")),"—")
+            for col,val in enumerate([g["name"],parent_name]):
+                it=QTableWidgetItem(val); it.setData(Qt.UserRole,g); self._tbl.setItem(r,col,it)
+            self._tbl.setRowHeight(r,32)
+            self._f_parent.addItem(g["name"], g["id"])
+
+    def _add(self):
+        name=self._f_name.text().strip()
+        if not name: self._status.setText("Name required."); return
+        parent_id=self._f_parent.currentData()
+        try:
+            from models.customer_group import create_customer_group
+            create_customer_group(name,parent_id); self._f_name.clear(); self._reload()
+            self._status.setText(f"Group '{name}' added."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+    def _delete(self):
+        row=self._tbl.currentRow()
+        if row<0: self._status.setText("Select a group first."); return
+        g=self._tbl.item(row,0).data(Qt.UserRole)
+        if QMessageBox.question(self,"Delete",f"Delete '{g['name']}'?",QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes: return
+        try:
+            from models.customer_group import delete_customer_group
+            delete_customer_group(g["id"]); self._reload()
+            self._status.setText("Deleted."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+
+class WarehouseDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Warehouses"); self.setMinimumSize(560,420)
+        self.setStyleSheet(f"QDialog {{ background-color:{WHITE}; }}")
+        self._build(); self._reload()
+
+    def _build(self):
+        lay=QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(20,16,20,16)
+        hdr=QWidget(); hdr.setFixedHeight(44); hdr.setStyleSheet(f"background-color:{NAVY}; border-radius:5px;")
+        hl=QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0)
+        hl.addWidget(QLabel("Warehouses",styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
+        lay.addWidget(hdr)
+        self._tbl=QTableWidget(0,2); self._tbl.setHorizontalHeaderLabels(["Name","Company"])
+        self._tbl.horizontalHeader().setStretchLastSection(True); self._tbl.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
+        self._tbl.verticalHeader().setVisible(False); self._tbl.setAlternatingRowColors(True)
+        self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers); self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._tbl.setStyleSheet(_settings_table_style()); lay.addWidget(self._tbl,1); lay.addWidget(hr())
+        fr=QHBoxLayout(); fr.setSpacing(8)
+        self._f_name=QLineEdit(); self._f_name.setPlaceholderText("Warehouse name *"); self._f_name.setFixedHeight(34)
+        self._f_company=QComboBox(); self._f_company.setFixedHeight(34)
+        fr.addWidget(self._f_name,2); fr.addWidget(QLabel("Company:",styleSheet="background:transparent;"),0); fr.addWidget(self._f_company,1)
+        lay.addLayout(fr)
+        br=QHBoxLayout(); br.setSpacing(8)
+        self._status=QLabel(""); self._status.setStyleSheet(f"font-size:12px;color:{SUCCESS};background:transparent;")
+        add_btn=navy_btn("Add",height=34,color=SUCCESS,hover=SUCCESS_H); del_btn=navy_btn("Delete",height=34,color=DANGER,hover=DANGER_H); cls_btn=navy_btn("Close",height=34)
+        add_btn.clicked.connect(self._add); del_btn.clicked.connect(self._delete); cls_btn.clicked.connect(self.accept)
+        br.addWidget(self._status,1); br.addWidget(add_btn); br.addWidget(del_btn); br.addWidget(cls_btn)
+        lay.addLayout(br)
+
+    def _reload(self):
+        self._tbl.setRowCount(0); self._f_company.clear()
+        try:
+            from models.warehouse import get_all_warehouses
+            from models.company import get_all_companies
+            rows=get_all_warehouses(); companies=get_all_companies()
+        except Exception: rows=[]; companies=[]
+        for w in rows:
+            r=self._tbl.rowCount(); self._tbl.insertRow(r)
+            for col,val in enumerate([w["name"],w.get("company_name","")]):
+                it=QTableWidgetItem(val); it.setData(Qt.UserRole,w); self._tbl.setItem(r,col,it)
+            self._tbl.setRowHeight(r,32)
+        for c in companies: self._f_company.addItem(c["name"],c["id"])
+
+    def _add(self):
+        name=self._f_name.text().strip(); cid=self._f_company.currentData()
+        if not name or not cid: self._status.setText("Name and company required."); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;"); return
+        try:
+            from models.warehouse import create_warehouse
+            create_warehouse(name,cid); self._f_name.clear(); self._reload()
+            self._status.setText(f"Warehouse '{name}' added."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+    def _delete(self):
+        row=self._tbl.currentRow()
+        if row<0: self._status.setText("Select a warehouse first."); return
+        w=self._tbl.item(row,0).data(Qt.UserRole)
+        if QMessageBox.question(self,"Delete",f"Delete '{w['name']}'?",QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes: return
+        try:
+            from models.warehouse import delete_warehouse
+            delete_warehouse(w["id"]); self._reload()
+            self._status.setText("Deleted."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+
+class CostCenterDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Cost Centers"); self.setMinimumSize(560,420)
+        self.setStyleSheet(f"QDialog {{ background-color:{WHITE}; }}")
+        self._build(); self._reload()
+
+    def _build(self):
+        lay=QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(20,16,20,16)
+        hdr=QWidget(); hdr.setFixedHeight(44); hdr.setStyleSheet(f"background-color:{NAVY}; border-radius:5px;")
+        hl=QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0)
+        hl.addWidget(QLabel("Cost Centers",styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
+        lay.addWidget(hdr)
+        self._tbl=QTableWidget(0,2); self._tbl.setHorizontalHeaderLabels(["Name","Company"])
+        self._tbl.horizontalHeader().setStretchLastSection(True); self._tbl.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
+        self._tbl.verticalHeader().setVisible(False); self._tbl.setAlternatingRowColors(True)
+        self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers); self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._tbl.setStyleSheet(_settings_table_style()); lay.addWidget(self._tbl,1); lay.addWidget(hr())
+        fr=QHBoxLayout(); fr.setSpacing(8)
+        self._f_name=QLineEdit(); self._f_name.setPlaceholderText("Cost center name *"); self._f_name.setFixedHeight(34)
+        self._f_company=QComboBox(); self._f_company.setFixedHeight(34)
+        fr.addWidget(self._f_name,2); fr.addWidget(QLabel("Company:",styleSheet="background:transparent;"),0); fr.addWidget(self._f_company,1)
+        lay.addLayout(fr)
+        br=QHBoxLayout(); br.setSpacing(8)
+        self._status=QLabel(""); self._status.setStyleSheet(f"font-size:12px;color:{SUCCESS};background:transparent;")
+        add_btn=navy_btn("Add",height=34,color=SUCCESS,hover=SUCCESS_H); del_btn=navy_btn("Delete",height=34,color=DANGER,hover=DANGER_H); cls_btn=navy_btn("Close",height=34)
+        add_btn.clicked.connect(self._add); del_btn.clicked.connect(self._delete); cls_btn.clicked.connect(self.accept)
+        br.addWidget(self._status,1); br.addWidget(add_btn); br.addWidget(del_btn); br.addWidget(cls_btn)
+        lay.addLayout(br)
+
+    def _reload(self):
+        self._tbl.setRowCount(0); self._f_company.clear()
+        try:
+            from models.cost_center import get_all_cost_centers
+            from models.company import get_all_companies
+            rows=get_all_cost_centers(); companies=get_all_companies()
+        except Exception: rows=[]; companies=[]
+        for cc in rows:
+            r=self._tbl.rowCount(); self._tbl.insertRow(r)
+            for col,val in enumerate([cc["name"],cc.get("company_name","")]):
+                it=QTableWidgetItem(val); it.setData(Qt.UserRole,cc); self._tbl.setItem(r,col,it)
+            self._tbl.setRowHeight(r,32)
+        for c in companies: self._f_company.addItem(c["name"],c["id"])
+
+    def _add(self):
+        name=self._f_name.text().strip(); cid=self._f_company.currentData()
+        if not name or not cid: self._status.setText("Name and company required."); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;"); return
+        try:
+            from models.cost_center import create_cost_center
+            create_cost_center(name,cid); self._f_name.clear(); self._reload()
+            self._status.setText(f"Cost center '{name}' added."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+    def _delete(self):
+        row=self._tbl.currentRow()
+        if row<0: self._status.setText("Select a cost center first."); return
+        cc=self._tbl.item(row,0).data(Qt.UserRole)
+        if QMessageBox.question(self,"Delete",f"Delete '{cc['name']}'?",QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes: return
+        try:
+            from models.cost_center import delete_cost_center
+            delete_cost_center(cc["id"]); self._reload()
+            self._status.setText("Deleted."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+
+class PriceListDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Price Lists"); self.setMinimumSize(480,380)
+        self.setStyleSheet(f"QDialog {{ background-color:{WHITE}; }}")
+        self._build(); self._reload()
+
+    def _build(self):
+        lay=QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(20,16,20,16)
+        hdr=QWidget(); hdr.setFixedHeight(44); hdr.setStyleSheet(f"background-color:{NAVY}; border-radius:5px;")
+        hl=QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0)
+        hl.addWidget(QLabel("Price Lists",styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
+        lay.addWidget(hdr)
+        self._tbl=QTableWidget(0,2); self._tbl.setHorizontalHeaderLabels(["Name","Selling"])
+        self._tbl.horizontalHeader().setStretchLastSection(True); self._tbl.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
+        self._tbl.verticalHeader().setVisible(False); self._tbl.setAlternatingRowColors(True)
+        self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers); self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._tbl.setStyleSheet(_settings_table_style()); lay.addWidget(self._tbl,1); lay.addWidget(hr())
+        fr=QHBoxLayout(); fr.setSpacing(8)
+        self._f_name=QLineEdit(); self._f_name.setPlaceholderText("Price list name *"); self._f_name.setFixedHeight(34)
+        self._f_selling=QComboBox(); self._f_selling.addItems(["Selling","Not Selling"]); self._f_selling.setFixedHeight(34)
+        fr.addWidget(self._f_name,2); fr.addWidget(self._f_selling,1)
+        lay.addLayout(fr)
+        br=QHBoxLayout(); br.setSpacing(8)
+        self._status=QLabel(""); self._status.setStyleSheet(f"font-size:12px;color:{SUCCESS};background:transparent;")
+        add_btn=navy_btn("Add",height=34,color=SUCCESS,hover=SUCCESS_H); del_btn=navy_btn("Delete",height=34,color=DANGER,hover=DANGER_H); cls_btn=navy_btn("Close",height=34)
+        add_btn.clicked.connect(self._add); del_btn.clicked.connect(self._delete); cls_btn.clicked.connect(self.accept)
+        br.addWidget(self._status,1); br.addWidget(add_btn); br.addWidget(del_btn); br.addWidget(cls_btn)
+        lay.addLayout(br)
+
+    def _reload(self):
+        self._tbl.setRowCount(0)
+        try:
+            from models.price_list import get_all_price_lists
+            rows=get_all_price_lists()
+        except Exception: rows=[]
+        for pl in rows:
+            r=self._tbl.rowCount(); self._tbl.insertRow(r)
+            for col,val in enumerate([pl["name"],"Yes" if pl["selling"] else "No"]):
+                it=QTableWidgetItem(val); it.setData(Qt.UserRole,pl); self._tbl.setItem(r,col,it)
+            self._tbl.setRowHeight(r,32)
+
+    def _add(self):
+        name=self._f_name.text().strip(); selling=self._f_selling.currentIndex()==0
+        if not name: self._status.setText("Name required."); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;"); return
+        try:
+            from models.price_list import create_price_list
+            create_price_list(name,selling); self._f_name.clear(); self._reload()
+            self._status.setText(f"Price list '{name}' added."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+    def _delete(self):
+        row=self._tbl.currentRow()
+        if row<0: self._status.setText("Select a price list first."); return
+        pl=self._tbl.item(row,0).data(Qt.UserRole)
+        if QMessageBox.question(self,"Delete",f"Delete '{pl['name']}'?",QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes: return
+        try:
+            from models.price_list import delete_price_list
+            delete_price_list(pl["id"]); self._reload()
+            self._status.setText("Deleted."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+
+class CustomerDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Customers"); self.setMinimumSize(860,560)
+        self.setStyleSheet(f"QDialog {{ background-color:{WHITE}; }}")
+        self._build(); self._reload()
+
+    def _build(self):
+        lay=QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(20,16,20,16)
+        hdr=QWidget(); hdr.setFixedHeight(44); hdr.setStyleSheet(f"background-color:{NAVY}; border-radius:5px;")
+        hl=QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0)
+        hl.addWidget(QLabel("Customers",styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
+        lay.addWidget(hdr)
+
+        sr=QHBoxLayout(); sr.setSpacing(8)
+        self._search=QLineEdit(); self._search.setPlaceholderText("Search by name, trade name or phone…"); self._search.setFixedHeight(34)
+        self._search.textChanged.connect(self._do_search)
+        sr.addWidget(self._search)
+        lay.addLayout(sr)
+
+        self._tbl=QTableWidget(0,6)
+        self._tbl.setHorizontalHeaderLabels(["Name","Type","Group","Phone","City","Price List"])
+        hh=self._tbl.horizontalHeader(); hh.setSectionResizeMode(0,QHeaderView.Stretch)
+        for ci in [1,2,3,4,5]: hh.setSectionResizeMode(ci,QHeaderView.Fixed); self._tbl.setColumnWidth(ci,110)
+        self._tbl.verticalHeader().setVisible(False); self._tbl.setAlternatingRowColors(True)
+        self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers); self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._tbl.setStyleSheet(_settings_table_style()); lay.addWidget(self._tbl,1); lay.addWidget(hr())
+
+        form=QGridLayout(); form.setSpacing(8)
+        self._f_name  =QLineEdit(); self._f_name.setPlaceholderText("Customer name *"); self._f_name.setFixedHeight(32)
+        self._f_type  =QComboBox(); self._f_type.addItems(["","Individual","Company"]); self._f_type.setFixedHeight(32)
+        self._f_trade =QLineEdit(); self._f_trade.setPlaceholderText("Trade name"); self._f_trade.setFixedHeight(32)
+        self._f_phone =QLineEdit(); self._f_phone.setPlaceholderText("Phone"); self._f_phone.setFixedHeight(32)
+        self._f_email =QLineEdit(); self._f_email.setPlaceholderText("Email"); self._f_email.setFixedHeight(32)
+        self._f_city  =QLineEdit(); self._f_city.setPlaceholderText("City"); self._f_city.setFixedHeight(32)
+        self._f_house =QLineEdit(); self._f_house.setPlaceholderText("House No."); self._f_house.setFixedHeight(32)
+        self._f_group =QComboBox(); self._f_group.setFixedHeight(32)
+        self._f_wh    =QComboBox(); self._f_wh.setFixedHeight(32)
+        self._f_cc    =QComboBox(); self._f_cc.setFixedHeight(32)
+        self._f_pl    =QComboBox(); self._f_pl.setFixedHeight(32)
+
+        for lbl_txt, widget, r, c in [
+            ("Name *",       self._f_name,  0,0), ("Type",         self._f_type,  0,2),
+            ("Trade Name",   self._f_trade, 1,0), ("Phone",        self._f_phone, 1,2),
+            ("Email",        self._f_email, 2,0), ("City",         self._f_city,  2,2),
+            ("House No.",    self._f_house, 3,0), ("Group *",      self._f_group, 3,2),
+            ("Warehouse *",  self._f_wh,    4,0), ("Cost Center *",self._f_cc,    4,2),
+            ("Price List *", self._f_pl,    5,0),
+        ]:
+            form.addWidget(QLabel(lbl_txt,styleSheet="background:transparent;font-size:12px;"),r,c)
+            form.addWidget(widget,r,c+1)
+        lay.addLayout(form)
+
+        br=QHBoxLayout(); br.setSpacing(8)
+        self._status=QLabel(""); self._status.setStyleSheet(f"font-size:12px;color:{SUCCESS};background:transparent;")
+        add_btn=navy_btn("Add Customer",height=34,color=SUCCESS,hover=SUCCESS_H)
+        del_btn=navy_btn("Delete",height=34,color=DANGER,hover=DANGER_H)
+        cls_btn=navy_btn("Close",height=34)
+        add_btn.clicked.connect(self._add); del_btn.clicked.connect(self._delete); cls_btn.clicked.connect(self.accept)
+        br.addWidget(self._status,1); br.addWidget(add_btn); br.addWidget(del_btn); br.addWidget(cls_btn)
+        lay.addLayout(br)
+
+    def _reload(self):
+        self._tbl.setRowCount(0)
+        try:
+            from models.customer import get_all_customers
+            custs=get_all_customers()
+        except Exception: custs=[]
+        self._populate_combos()
+        self._populate_table(custs)
+
+    def _do_search(self, query):
+        if not query.strip(): self._reload(); return
+        try:
+            from models.customer import search_customers
+            custs=search_customers(query)
+        except Exception: custs=[]
+        self._populate_table(custs)
+
+    def _populate_table(self, custs):
+        self._tbl.setRowCount(0)
+        for c in custs:
+            r=self._tbl.rowCount(); self._tbl.insertRow(r)
+            for col,val in enumerate([
+                c["customer_name"], c.get("customer_type",""),
+                c.get("customer_group_name",""), c.get("custom_telephone_number",""),
+                c.get("custom_city",""), c.get("price_list_name",""),
+            ]):
+                it=QTableWidgetItem(str(val)); it.setData(Qt.UserRole,c); self._tbl.setItem(r,col,it)
+            self._tbl.setRowHeight(r,32)
+
+    def _populate_combos(self):
+        try:
+            from models.customer_group import get_all_customer_groups
+            from models.warehouse import get_all_warehouses
+            from models.cost_center import get_all_cost_centers
+            from models.price_list import get_all_price_lists
+            groups=get_all_customer_groups(); whs=get_all_warehouses()
+            ccs=get_all_cost_centers(); pls=get_all_price_lists()
+        except Exception: groups=[];whs=[];ccs=[];pls=[]
+        for cb in [self._f_group,self._f_wh,self._f_cc,self._f_pl]: cb.clear()
+        for g in groups: self._f_group.addItem(g["name"],g["id"])
+        for w in whs: self._f_wh.addItem(f"{w['name']} ({w.get('company_name','')})",w["id"])
+        for cc in ccs: self._f_cc.addItem(f"{cc['name']} ({cc.get('company_name','')})",cc["id"])
+        for pl in pls: self._f_pl.addItem(pl["name"],pl["id"])
+
+    def _add(self):
+        name=self._f_name.text().strip()
+        if not name: self._status.setText("Customer name required."); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;"); return
+        gid=self._f_group.currentData(); wid=self._f_wh.currentData(); ccid=self._f_cc.currentData(); plid=self._f_pl.currentData()
+        if not all([gid,wid,ccid,plid]): self._status.setText("Group, Warehouse, Cost Center and Price List are required."); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;"); return
+        try:
+            from models.customer import create_customer
+            create_customer(
+                customer_name=name, customer_group_id=gid,
+                custom_warehouse_id=wid, custom_cost_center_id=ccid,
+                default_price_list_id=plid,
+                customer_type=self._f_type.currentText() or None,
+                custom_trade_name=self._f_trade.text().strip(),
+                custom_telephone_number=self._f_phone.text().strip(),
+                custom_email_address=self._f_email.text().strip(),
+                custom_city=self._f_city.text().strip(),
+                custom_house_no=self._f_house.text().strip(),
+            )
+            for f in [self._f_name,self._f_trade,self._f_phone,self._f_email,self._f_city,self._f_house]: f.clear()
+            self._reload()
+            self._status.setText(f"Customer '{name}' added."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+    def _delete(self):
+        row=self._tbl.currentRow()
+        if row<0: self._status.setText("Select a customer first."); return
+        c=self._tbl.item(row,0).data(Qt.UserRole)
+        if QMessageBox.question(self,"Delete",f"Delete '{c['customer_name']}'?",QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes: return
+        try:
+            from models.customer import delete_customer
+            delete_customer(c["id"]); self._reload()
+            self._status.setText("Deleted."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
+        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
 
 # =============================================================================
 # HardwareDialog — Hardware Settings (Enhanced)
@@ -421,77 +886,6 @@ class HardwareDialog(_Base):
         except Exception as e:
             self._msg(f"Error saving settings: {str(e)}", error=True)
      
-def _test_printer(self, printer_name: str):
-        if printer_name == "(None)":
-            QMessageBox.information(self, "Test Print", "No printer selected.", QMessageBox.Ok)
-            return
-         
-        try:
-            printer = QPrinter(QPrinterInfo.printerInfo(printer_name))
-            if not printer.isValid():
-                raise Exception("Printer not found or invalid")
-
-            painter = QPainter(printer)
-            
-            # Safe font creation with explicit positive sizes
-            bold_font = QFont("Arial", 14)
-            bold_font.setBold(True)
-            normal_font = QFont("Arial", 10)
-
-            painter.setFont(bold_font)
-            painter.drawText(80, 120, "TEST PRINT from Havano POS")
-
-            painter.setFont(normal_font)
-            painter.drawText(80, 160, f"Printer : {printer_name}")
-            painter.drawText(80, 190, f"Date    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            painter.drawText(80, 220, "Status  : OK ✓")
-            painter.drawText(80, 260, "This is a test page from Havano POS System.")
-
-            painter.end()   # ← Always call this
-
-            QMessageBox.information(
-                self, 
-                "Test Print Success", 
-                f"Test page sent successfully to:\n{printer_name}\n\nCheck your printer!", 
-                QMessageBox.Ok
-            )
-
-        except Exception as e:
-            QMessageBox.warning(
-                self, 
-                "Test Print Failed", 
-                f"Could not print test page:\n{str(e)}\n\n"
-                "Make sure the printer is turned on and connected.", 
-                QMessageBox.Ok
-            )
-
-
-def _save(self):
-        try:
-            data = {
-                "main_printer": self._main_printer.currentText(),
-                "orders": {}
-            }
-            
-            for combo, name in self._station_widgets:
-                p_name = combo.currentText()
-                data["orders"][name] = {
-                    "active": p_name != "(None)",
-                    "printer": p_name
-                }
-            
-            _save_hw(data)
-            
-            QMessageBox.information(
-                self, 
-                "Settings Saved", 
-                "Hardware settings and printer assignments saved successfully.",
-                QMessageBox.Ok
-            )
-            self.accept()
-            
-        except Exception as e:
-            self._msg(f"Error saving settings: {str(e)}", error=True)
 
 # =============================================================================
 # SettingsDialog — Main Menu
