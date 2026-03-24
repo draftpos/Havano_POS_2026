@@ -1,218 +1,248 @@
-# import re
-
-# with open('database/db.py', encoding='utf-8') as f:
-#     content = f.read()
-
-# # Remove git conflict markers - keep HEAD version, discard incoming
-# fixed = re.sub(r'<<<<<<< HEAD\n', '', content)
-# fixed = re.sub(r'\n=======\n.*?\n>>>>>>> [^\n]+', '', fixed, flags=re.DOTALL)
-
-# with open('database/db.py', 'w', encoding='utf-8') as f:
-#     f.write(fixed)
-
-# print("Fixed. db.py is clean.")
-
+#!/usr/bin/env python3
 """
-migrate_users.py
-================
-Run once to create / upgrade the users table in SQL Server.
+migrate_sales_order.py
+======================
+Run this script ONCE to bring an existing database up to date with
+the latest sales_order schema.
 
 Usage:
-    python migrate_users.py
+    python migrate_sales_order.py
 
-What it does:
-  1. Creates the users table if it doesn't exist (with ALL columns)
-  2. Adds any missing columns to an existing table:
-       allow_discount, allow_receipt, allow_credit_note, allow_reprint
-  3. Reports what was done
+The script is safe to run multiple times — it skips columns / tables that
+already exist.
+
+Target: Microsoft SQL Server (T-SQL via pyodbc)
 """
 
 import sys
 import os
 
-# Allow running from the project root
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from database.db import get_connection
+# ---------------------------------------------------------------------------
+# Resolve DB connection the same way the app does
+# ---------------------------------------------------------------------------
+def _get_conn():
+    for mod in ("database.db", "models.db", "db"):
+        try:
+            import importlib
+            m  = importlib.import_module(mod)
+            fn = getattr(m, "get_connection", None)
+            if fn:
+                conn = fn()
+                print(f"  Using connection from: {mod}.get_connection()")
+                return conn
+        except Exception:
+            pass
 
+    raise RuntimeError(
+        "Could not find a database connection.\n"
+        "Make sure you run this script from the project root directory\n"
+        "or that models/db.py / database/db.py is importable."
+    )
+
+
+# ---------------------------------------------------------------------------
+# T-SQL helpers
+# ---------------------------------------------------------------------------
+
+def _table_exists_sql(table: str) -> str:
+    """Return a T-SQL IF block that creates the table only when it is missing."""
+    tables = {
+
+        "sales_order": """
+IF NOT EXISTS (
+    SELECT 1 FROM sys.objects
+    WHERE object_id = OBJECT_ID(N'{table}') AND type = N'U'
+)
+BEGIN
+    CREATE TABLE sales_order (
+        id              INT             PRIMARY KEY IDENTITY(1,1),
+        order_no        NVARCHAR(100)   NULL,
+        customer_id     INT             NULL,
+        customer_name   NVARCHAR(255)   NULL,
+        company         NVARCHAR(255)   NULL,
+        order_date      NVARCHAR(50)    NULL,
+        delivery_date   NVARCHAR(50)    NOT NULL DEFAULT '',
+        order_type      NVARCHAR(50)    NOT NULL DEFAULT 'Sales',
+        total           FLOAT           NOT NULL DEFAULT 0,
+        deposit_amount  FLOAT           NOT NULL DEFAULT 0,
+        deposit_method  NVARCHAR(100)   NOT NULL DEFAULT '',
+        balance_due     FLOAT           NOT NULL DEFAULT 0,
+        status          NVARCHAR(50)    NOT NULL DEFAULT 'Draft',
+        synced          INT             NOT NULL DEFAULT 0,
+        frappe_ref      NVARCHAR(255)   NOT NULL DEFAULT '',
+        created_at      NVARCHAR(50)    NULL
+    )
+END
+""".replace("{table}", table),
+
+        "sales_order_item": """
+IF NOT EXISTS (
+    SELECT 1 FROM sys.objects
+    WHERE object_id = OBJECT_ID(N'{table}') AND type = N'U'
+)
+BEGIN
+    CREATE TABLE sales_order_item (
+        id              INT     PRIMARY KEY IDENTITY(1,1),
+        sales_order_id  INT     NOT NULL REFERENCES sales_order(id),
+        item_code       NVARCHAR(100)   NULL,
+        item_name       NVARCHAR(255)   NULL,
+        qty             FLOAT   NOT NULL DEFAULT 1,
+        rate            FLOAT   NOT NULL DEFAULT 0,
+        amount          FLOAT   NOT NULL DEFAULT 0,
+        warehouse       NVARCHAR(255)   NOT NULL DEFAULT ''
+    )
+END
+""".replace("{table}", table),
+    }
+    return tables[table]
+
+
+def _column_exists(cur, table: str, column: str) -> bool:
+    """Return True if the column already exists in the table."""
+    cur.execute(
+        """
+        SELECT 1
+        FROM   sys.columns
+        WHERE  object_id = OBJECT_ID(?)
+          AND  name      = ?
+        """,
+        (table, column),
+    )
+    return cur.fetchone() is not None
+
+
+def _sql_type(defn: str) -> str:
+    """
+    Convert a simplified SQLite-style column definition to a T-SQL one.
+    e.g.  'TEXT DEFAULT '''  ->  "NVARCHAR(255) NOT NULL DEFAULT ''"
+          'REAL DEFAULT 0'   ->  'FLOAT NOT NULL DEFAULT 0'
+          'INTEGER NOT NULL DEFAULT 0' -> 'INT NOT NULL DEFAULT 0'
+    """
+    defn = defn.strip()
+    # Replace type keywords
+    defn = defn.replace("INTEGER", "INT")
+    defn = defn.replace("REAL",    "FLOAT")
+    # TEXT → NVARCHAR(255), but keep the rest of the definition
+    if defn.upper().startswith("TEXT"):
+        defn = "NVARCHAR(255)" + defn[4:]
+    return defn
+
+
+# ---------------------------------------------------------------------------
+# Migration steps
+# ---------------------------------------------------------------------------
+
+MIGRATIONS = [
+    # (description, table_key)
+    ("Create sales_order table (if not exists)",      "sales_order"),
+    ("Create sales_order_item table (if not exists)", "sales_order_item"),
+]
+
+# Columns to add if they're missing
+# (table, column_name, sqlite-style column definition)
+ALTER_COLUMNS = [
+    # ── sales_order ──────────────────────────────────────────────────────────
+    ("sales_order", "delivery_date", "TEXT DEFAULT ''"),
+    ("sales_order", "order_type",    "TEXT DEFAULT 'Sales'"),
+    ("sales_order", "frappe_ref",    "TEXT DEFAULT ''"),
+    ("sales_order", "synced",        "INTEGER NOT NULL DEFAULT 0"),
+    # ── sale ─────────────────────────────────────────────────────────────────
+    ("sale",        "discount_percent", "REAL DEFAULT 0"),
+    ("sale",        "discount_amount",  "REAL DEFAULT 0"),
+    # ── sale_items ───────────────────────────────────────────────────────────
+    ("sale_items",  "discount",         "REAL DEFAULT 0"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
 
 def run():
-    conn = get_connection()
-    cur  = conn.cursor()
+    print("=" * 60)
+    print("  Havano POS — Database Migration  (SQL Server / T-SQL)")
+    print("=" * 60)
 
-    # ── 1. Create table if missing ────────────────────────────────────────────
-    cur.execute("""
-        IF NOT EXISTS (
-            SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='users'
-        )
-        CREATE TABLE users (
-            id                 INT           IDENTITY(1,1) PRIMARY KEY,
-            username           NVARCHAR(80)  NOT NULL UNIQUE,
-            password           NVARCHAR(255) NOT NULL,
-            role               NVARCHAR(20)  NOT NULL DEFAULT 'cashier',
-            display_name       NVARCHAR(120) NULL,
-            email              NVARCHAR(120) NULL,
-            full_name          NVARCHAR(120) NULL,
-            first_name         NVARCHAR(80)  NULL,
-            last_name          NVARCHAR(80)  NULL,
-            pin                NVARCHAR(20)  NULL,
-            cost_center        NVARCHAR(140) NULL,
-            warehouse          NVARCHAR(140) NULL,
-            frappe_user        NVARCHAR(120) NULL,
-            synced_from_frappe BIT           NOT NULL DEFAULT 0,
-            active             BIT           NOT NULL DEFAULT 1,
-            allow_discount     BIT           NOT NULL DEFAULT 1,
-            allow_receipt      BIT           NOT NULL DEFAULT 1,
-            allow_credit_note  BIT           NOT NULL DEFAULT 1,
-            allow_reprint      BIT           NOT NULL DEFAULT 1
-        )
-    """)
-    conn.commit()
-    print("✅  users table: exists (or just created)")
+    try:
+        conn = _get_conn()
+    except RuntimeError as e:
+        print(f"\n❌  {e}")
+        sys.exit(1)
 
-    # ── 2. Add any missing columns (safe on existing tables) ──────────────────
-    upgrades = [
-        ("allow_discount",    "BIT NOT NULL DEFAULT 1"),
-        ("allow_receipt",     "BIT NOT NULL DEFAULT 1"),
-        ("allow_credit_note", "BIT NOT NULL DEFAULT 1"),
-        ("allow_reprint",     "BIT NOT NULL DEFAULT 1"),
-        ("pin",               "NVARCHAR(20) NULL"),
-        ("full_name",         "NVARCHAR(120) NULL"),
-        ("email",             "NVARCHAR(120) NULL"),
-        ("cost_center",       "NVARCHAR(140) NULL"),
-        ("warehouse",         "NVARCHAR(140) NULL"),
-        ("display_name",      "NVARCHAR(120) NULL"),
-        ("first_name",        "NVARCHAR(80) NULL"),
-        ("last_name",         "NVARCHAR(80) NULL"),
-        ("frappe_user",       "NVARCHAR(120) NULL"),
-        ("synced_from_frappe","BIT NOT NULL DEFAULT 0"),
-        ("active",            "BIT NOT NULL DEFAULT 1"),
-    ]
+    # Some pyodbc connections need autocommit off and explicit commits;
+    # others need autocommit on for DDL.  We set autocommit=True so that
+    # each DDL statement is its own transaction (SQL Server requires this
+    # for CREATE TABLE inside an IF block when using pyodbc).
+    try:
+        conn.autocommit = True
+    except AttributeError:
+        pass  # Not a pyodbc connection — ignore
 
-    for col, definition in upgrades:
+    cur     = conn.cursor()
+    ok      = 0
+    skipped = 0
+    errors  = 0
+
+    # ── 1. CREATE TABLE (IF NOT EXISTS equivalent) ───────────────────────────
+    for desc, table_key in MIGRATIONS:
+        sql = _table_exists_sql(table_key)
         try:
-            cur.execute(f"""
-                IF NOT EXISTS (
-                    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_NAME='users' AND COLUMN_NAME='{col}'
-                )
-                ALTER TABLE users ADD {col} {definition}
-            """)
-            conn.commit()
-            print(f"   + {col}")
-        except Exception as e:
-            print(f"   ! {col}: {e}")
+            cur.execute(sql.strip())
+            print(f"  ✔  {desc}")
+            ok += 1
+        except Exception as exc:
+            print(f"  ⚠  {desc} — {exc}")
+            errors += 1
 
-    # ── 3. Verify ─────────────────────────────────────────────────────────────
-    cur.execute("""
-        SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-        FROM   INFORMATION_SCHEMA.COLUMNS
-        WHERE  TABLE_NAME = 'users'
-        ORDER  BY ORDINAL_POSITION
-    """)
-    rows = cur.fetchall()
-    print("\n── Current users table columns ──────────────────────────")
-    for col_name, dtype, nullable in rows:
-        print(f"   {col_name:<25} {dtype:<15} {'NULL' if nullable=='YES' else 'NOT NULL'}")
-
-    conn.close()
-    print("\n✅  Migration complete.")
-
-
-if __name__ == "__main__":
-    run()
-    
-    
-    
-import pyodbc
-from database.db import get_connection
-
-def run_migrations():
-    print("🚀 Starting Database Migration...")
-    conn = get_connection()
-    cur = conn.cursor()
-
-    # SQL Server uses IDENTITY(1,1) instead of AUTOINCREMENT
-    # We check existence using information_schema
-    tables = {
-        "customer_groups": """
-            CREATE TABLE customer_groups (
-                id INT IDENTITY(1,1) PRIMARY KEY,
-                name NVARCHAR(255) UNIQUE NOT NULL
-            )""",
-        "warehouses": """
-            CREATE TABLE warehouses (
-                id INT IDENTITY(1,1) PRIMARY KEY,
-                name NVARCHAR(255) UNIQUE NOT NULL
-            )""",
-        "cost_centers": """
-            CREATE TABLE cost_centers (
-                id INT IDENTITY(1,1) PRIMARY KEY,
-                name NVARCHAR(255) UNIQUE NOT NULL
-            )""",
-        "price_lists": """
-            CREATE TABLE price_lists (
-                id INT IDENTITY(1,1) PRIMARY KEY,
-                name NVARCHAR(255) UNIQUE NOT NULL
-            )""",
-        "customers": """
-            CREATE TABLE customers (
-                id INT IDENTITY(1,1) PRIMARY KEY,
-                customer_name NVARCHAR(255) UNIQUE NOT NULL,
-                customer_type NVARCHAR(50) DEFAULT 'Individual',
-                customer_group_id INT,
-                custom_trade_name NVARCHAR(255),
-                custom_telephone_number NVARCHAR(50),
-                custom_email_address NVARCHAR(255),
-                custom_city NVARCHAR(100),
-                custom_house_no NVARCHAR(50),
-                custom_warehouse_id INT,
-                custom_cost_center_id INT,
-                default_price_list_id INT,
-                balance DECIMAL(18, 4) DEFAULT 0.0,
-                outstanding_amount DECIMAL(18, 4) DEFAULT 0.0,
-                loyalty_points INT DEFAULT 0,
-                CONSTRAINT FK_C_Group FOREIGN KEY (customer_group_id) REFERENCES customer_groups(id),
-                CONSTRAINT FK_C_WH FOREIGN KEY (custom_warehouse_id) REFERENCES warehouses(id),
-                CONSTRAINT FK_C_CC FOREIGN KEY (custom_cost_center_id) REFERENCES cost_centers(id),
-                CONSTRAINT FK_C_PL FOREIGN KEY (default_price_list_id) REFERENCES price_lists(id)
-            )"""
-    }
-
-    for table_name, create_sql in tables.items():
+    # ── 2. ALTER TABLE … ADD … (column-exists check via sys.columns) ─────────
+    for table, col, raw_defn in ALTER_COLUMNS:
         try:
-            # Check if table exists
-            cur.execute(f"SELECT 1 FROM information_schema.tables WHERE table_name = '{table_name}'")
-            if not cur.fetchone():
-                print(f"📦 Creating table: {table_name}...")
-                cur.execute(create_sql)
-                conn.commit()
+            exists = _column_exists(cur, table, col)
+        except Exception as exc:
+            print(f"  ⚠  Could not check {table}.{col}: {exc}")
+            errors += 1
+            continue
+
+        if exists:
+            print(f"  –  {table}.{col} already exists, skipping.")
+            skipped += 1
+            continue
+
+        tsql_defn = _sql_type(raw_defn)
+        sql = f"ALTER TABLE {table} ADD {col} {tsql_defn}"
+
+        try:
+            cur.execute(sql)
+            print(f"  ✔  Added {table}.{col}  ({tsql_defn})")
+            ok += 1
+        except Exception as exc:
+            msg = str(exc)
+            if "duplicate column" in msg.lower() or "already exists" in msg.lower():
+                print(f"  –  {table}.{col} already exists (caught on ALTER).")
+                skipped += 1
             else:
-                print(f"✅ Table already exists: {table_name}")
-        except Exception as e:
-            print(f"❌ Error creating {table_name}: {e}")
+                print(f"  ❌  Failed to add {table}.{col}: {msg}")
+                errors += 1
 
-    # Seed initial data for lookups so the sync service can find the IDs
-    seed_data = {
-        "warehouses": ["Stores - AT"],
-        "cost_centers": ["Main - AT"],
-        "price_lists": ["Standard Selling", "Standard Selling ZWG"]
-    }
+    print()
+    print(f"  Done.  ✔ {ok} applied  –  {skipped} skipped  ❌ {errors} errors")
 
-    for table, names in seed_data.items():
-        for name in names:
-            try:
-                cur.execute(f"SELECT 1 FROM {table} WHERE name = ?", (name,))
-                if not cur.fetchone():
-                    print(f"🌱 Seeding {table}: {name}")
-                    cur.execute(f"INSERT INTO {table} (name) VALUES (?)", (name,))
-                    conn.commit()
-            except Exception as e:
-                print(f"⚠️ Could not seed {name} in {table}: {e}")
+    if errors:
+        print("\n  Some steps failed. Check messages above.")
+        print("  If errors relate to tables that don't exist yet (e.g. 'sale'),")
+        print("  they will be created automatically on first app run.")
+    else:
+        print("\n  Migration complete — database is up to date.")
 
-    cur.close()
-    conn.close()
-    print("\n✨ Migration and Seeding Complete.")
+    try:
+        conn.close()
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
-    run_migrations()
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    run()

@@ -46,6 +46,24 @@ except Exception as _settings_import_err:
     _log.getLogger("main_window").warning(
         "settings_dialog import failed: %s", _settings_import_err)
 
+try:
+    from views.dialogs.laybye_confirm_dialog import LaybyeConfirmDialog
+    from views.dialogs.laybye_payment_dialog import LaybyePaymentDialog
+    _HAS_LAYBYE = True
+except ImportError:
+    _HAS_LAYBYE = False
+
+try:
+    from models.sales_order import (
+        create_sales_order as _create_sales_order,
+        ensure_tables as _ensure_so_tables,
+        get_unsynced_orders as _get_unsynced_so,
+    )
+    _ensure_so_tables()
+    _HAS_SALES_ORDER = True
+except Exception:
+    _HAS_SALES_ORDER = False
+
 # =============================================================================
 # COLOUR PALETTE
 # =============================================================================
@@ -816,7 +834,6 @@ class _InlineSettingsDialog(QDialog):
             ("🏷  Price Lists",    PriceListDialog(self)),
             ("👤  Customers",      CustomerDialog(self)),
             ("🔑  Users",          ManageUsersDialog(self, current_user=self.user)),
-            ("🛡  POS Rules",      self._page_pos_rules()),
         ]
 
         self._nav_btns = []
@@ -3813,8 +3830,6 @@ class OptionsDialog(QDialog):
                  self._do_company_defaults, color=NAVY_3, hov=NAVY_2)
         _opt_btn("📦", "Item Groups",
                  self._do_item_groups, color=NAVY_2, hov=NAVY_3)
-        _opt_btn("🛡", "POS Rules",
-                 self._do_pos_rules, color=ACCENT, hov=ACCENT_H)
 
         bl.addSpacing(8)
 
@@ -4114,7 +4129,7 @@ class POSView(QWidget):
     # NAV BAR
     # =========================================================================
     def _build_nav(self):
-        bar = QWidget(); bar.setFixedHeight(44)
+        bar = QWidget(); bar.setFixedHeight(48)
         bar.setStyleSheet(f"background-color: {WHITE}; border-bottom: 2px solid {BORDER};")
 
         layout = QHBoxLayout(bar)
@@ -4174,6 +4189,23 @@ class POSView(QWidget):
         self._unsynced_badge.setToolTip("Unsynced invoices / credit notes — click to view")
         self._unsynced_badge.clicked.connect(self._open_sales_list)
         layout.addWidget(self._unsynced_badge); layout.addSpacing(4)
+
+        # ── Laybye button ─────────────────────────────────────────────────────
+        laybye_btn = QPushButton("🏷  Laybye")
+        laybye_btn.setFixedHeight(32)
+        laybye_btn.setMinimumWidth(100)
+        laybye_btn.setCursor(Qt.PointingHandCursor)
+        laybye_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {AMBER}; color: {WHITE}; border: none;
+                border-radius: 4px; font-size: 12px; font-weight: bold; padding: 0 14px;
+            }}
+            QPushButton:hover   {{ background-color: {ORANGE}; }}
+            QPushButton:pressed {{ background-color: {NAVY_2}; }}
+        """)
+        laybye_btn.setToolTip("Save cart as a Laybye (Sales Order)")
+        laybye_btn.clicked.connect(self._on_laybye)
+        layout.addWidget(laybye_btn); layout.addSpacing(4)
 
         # ── Return mode indicator (only visible during a return/CN flow) ──────
         self._return_btn = _npb("↩  Return", self._process_return, color=DANGER, hov=DANGER_H)
@@ -4243,7 +4275,7 @@ class POSView(QWidget):
 
     # ── Invoice table ─────────────────────────────────────────────────────────
     # ── Invoice column labels — edit here to rename ──────────────────────────
-    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "Disc. %", "TAX", "Total $"]
+    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "Disc", "TAX", "Total $"]
 
     def _build_invoice_table(self):
         self.invoice_table = QTableWidget()
@@ -4352,10 +4384,10 @@ class POSView(QWidget):
         if self._block_signals:
             return
         try:
-            amount = float(self.invoice_table.item(r, 2).text() or "0")
-            qty    = float(self.invoice_table.item(r, 3).text() or "0")
-            disc   = float((self.invoice_table.item(r, 4).text() or "0").replace('%', '').strip())
-            total  = qty * amount * (1.0 - disc / 100.0)
+            amount      = float(self.invoice_table.item(r, 2).text() or "0")
+            qty         = float(self.invoice_table.item(r, 3).text() or "0")
+            disc_amount = float((self.invoice_table.item(r, 4).text() or "0").replace('%', '').strip())
+            total       = max(qty * amount - disc_amount, 0.0)
         except (ValueError, AttributeError):
             total = 0.0
         self._block_signals = True
@@ -6183,7 +6215,18 @@ class POSView(QWidget):
                 # Get current logged-in user context
                 cashier_id   = self.user.get("id") if isinstance(self.user, dict) else None
                 cashier_name = self.user.get("username", "") if isinstance(self.user, dict) else ""
-                
+
+                # Capture transaction-level discount BEFORE create_sale so it's persisted
+                discount_pct = getattr(self, "current_discount_percent", 0.0)
+                try:
+                    subtotal_raw = sum(
+                        float(self.invoice_table.item(r, 6).text() or "0")
+                        for r in range(self.invoice_table.rowCount())
+                    )
+                except Exception:
+                    subtotal_raw = total
+                discount_amt = round(subtotal_raw * (discount_pct / 100.0), 4)
+
                 # Save the sale to SQL Server
                 sale = create_sale(
                     items=items, 
@@ -6196,6 +6239,8 @@ class POSView(QWidget):
                     customer_contact=cust_contact,
                     company_name=company_name,
                     change_amount=change_out,
+                    discount_percent=discount_pct,
+                    discount_amount=discount_amt,
                 )
                 
                 # ── Store local payment entry for Frappe sync ──────────
@@ -6271,7 +6316,7 @@ class POSView(QWidget):
         """)
 
     def _refresh_unsynced_badge(self):
-        """Update the Unsynced badge: sales + credit notes pending sync."""
+        """Update the Unsynced badge: sales + credit notes + laybye orders pending sync."""
         try:
             from models.sale import get_all_sales
             sales    = get_all_sales()
@@ -6288,13 +6333,23 @@ class POSView(QWidget):
             cn_pending = int(row[0] or 0) if row else 0
         except Exception:
             cn_pending = 0
-        total_pending = unsynced + cn_pending
-        if cn_pending and unsynced:
-            text = f"⏳ Q: {unsynced} + {cn_pending} CN"
-        elif cn_pending:
-            text = f"⏳ Q: {cn_pending} CN"
-        else:
-            text = f"⏳ Q: {unsynced}"
+        # Laybye / Sales Orders pending sync
+        so_pending = 0
+        if _HAS_SALES_ORDER:
+            try:
+                so_pending = len(_get_unsynced_so())
+            except Exception:
+                so_pending = 0
+
+        total_pending = unsynced + cn_pending + so_pending
+
+        # Build label: show each component only when non-zero
+        parts = []
+        if unsynced:   parts.append(f"{unsynced} SI")
+        if cn_pending: parts.append(f"{cn_pending} CN")
+        if so_pending: parts.append(f"{so_pending} SO")
+        text = f"⏳ Q: {' + '.join(parts)}" if parts else "⏳ Q: 0"
+
         if total_pending == 0:
             bg, hov = NAVY_2, NAVY_3
         elif total_pending < 5:
@@ -6548,21 +6603,131 @@ class POSView(QWidget):
 
         print(f"[discount] can_disc={can_disc}  limit={limit}  current_val={current_val}")
 
-        # ── 6. Ask for the value ──────────────────────────────────────────────
-        val, ok = QInputDialog.getDouble(
-            self, "Apply Discount",
-            f"Discount % for this line  (0 – {limit}%):",
-            current_val, 0.0, float(limit), 2
-        )
-        print(f"[discount] dialog result: val={val}  ok={ok}")
+        # ── 6. Get line total for conversion ─────────────────────────────────
+        try:
+            line_price = float(self.invoice_table.item(row, 2).text() or "0")
+            line_qty   = float(self.invoice_table.item(row, 3).text() or "1")
+            line_total = line_price * line_qty
+        except (ValueError, AttributeError):
+            line_total = 0.0
 
-        if not ok:
+        # ── 7. Custom discount dialog ─────────────────────────────────────────
+        disc_dlg = QDialog(self)
+        disc_dlg.setWindowTitle("Apply Discount")
+        disc_dlg.setFixedSize(400, 260)
+        disc_dlg.setWindowFlags(
+            disc_dlg.windowFlags()
+            & ~Qt.WindowMinimizeButtonHint
+            & ~Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        disc_dlg.setStyleSheet(f"""
+            QDialog   {{ background: {WHITE}; }}
+            QLabel    {{ background: transparent; color: {DARK_TEXT}; }}
+            QLineEdit {{
+                background: {WHITE}; color: {DARK_TEXT};
+                border: 2px solid {BORDER}; border-radius: 6px;
+                padding: 8px 12px; font-size: 20px; font-weight: bold;
+            }}
+            QLineEdit:focus {{ border-color: {ACCENT}; }}
+        """)
+
+        dlg_lay = QVBoxLayout(disc_dlg)
+        dlg_lay.setContentsMargins(24, 20, 24, 20)
+        dlg_lay.setSpacing(12)
+
+        title_lbl = QLabel("🏷  Apply Discount")
+        title_lbl.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {NAVY};")
+        dlg_lay.addWidget(title_lbl)
+        dlg_lay.addWidget(hr())
+
+        # Toggle: Fixed Amount / Percentage
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(0)
+        btn_amt = QPushButton("Fixed Amount")
+        btn_pct = QPushButton("Percentage  %")
+        for b in (btn_amt, btn_pct):
+            b.setFixedHeight(34)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+
+        def _style_toggle():
+            on  = f"background:{ACCENT}; color:{WHITE}; border:none; font-weight:bold; font-size:12px;"
+            off = f"background:{LIGHT}; color:{DARK_TEXT}; border:1px solid {BORDER}; font-size:12px;"
+            btn_amt.setStyleSheet(f"QPushButton {{ {on if btn_amt.isChecked() else off} border-radius:0; border-top-left-radius:6px; border-bottom-left-radius:6px; padding:0 16px; }}")
+            btn_pct.setStyleSheet(f"QPushButton {{ {on if btn_pct.isChecked() else off} border-radius:0; border-top-right-radius:6px; border-bottom-right-radius:6px; padding:0 16px; }}")
+
+        btn_amt.setChecked(True)
+        _style_toggle()
+
+        def _pick_amt():
+            btn_amt.setChecked(True); btn_pct.setChecked(False); _style_toggle()
+            hint_lbl.setText(f"Enter discount amount  (line total: ${line_total:.2f})")
+
+        def _pick_pct():
+            btn_pct.setChecked(True); btn_amt.setChecked(False); _style_toggle()
+            hint_lbl.setText(f"Enter % between 0 and {limit}%  — will be converted to amount")
+
+        btn_amt.clicked.connect(_pick_amt)
+        btn_pct.clicked.connect(_pick_pct)
+        toggle_row.addWidget(btn_amt)
+        toggle_row.addWidget(btn_pct)
+        dlg_lay.addLayout(toggle_row)
+
+        disc_input = QLineEdit()
+        disc_input.setPlaceholderText("0")
+        disc_input.setText(f"{current_val:.2f}" if current_val else "")
+        disc_input.selectAll()
+        dlg_lay.addWidget(disc_input)
+
+        hint_lbl = QLabel(f"Enter discount amount  (line total: ${line_total:.2f})")
+        hint_lbl.setStyleSheet(f"font-size: 11px; color: {MUTED};")
+        dlg_lay.addWidget(hint_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        apply_btn  = navy_btn("Apply",  height=40, color=SUCCESS, hover=SUCCESS_H)
+        cancel_btn = navy_btn("Cancel", height=40, color=NAVY_2,  hover=NAVY_3)
+        btn_row.addStretch()
+        btn_row.addWidget(apply_btn)
+        btn_row.addWidget(cancel_btn)
+        dlg_lay.addLayout(btn_row)
+
+        apply_btn.clicked.connect(disc_dlg.accept)
+        cancel_btn.clicked.connect(disc_dlg.reject)
+        disc_input.returnPressed.connect(disc_dlg.accept)
+        disc_input.setFocus()
+
+        if disc_dlg.exec() != QDialog.Accepted:
             return
 
-        # ── 7. Write to col 4 and recalc ─────────────────────────────────────
-        disc_item = QTableWidgetItem(f"{val:.2f}%")
+        try:
+            raw = float(disc_input.text().strip() or "0")
+        except ValueError:
+            QMessageBox.warning(self, "Invalid", "Please enter a valid number.")
+            return
+
+        # Always store as a fixed amount figure
+        if btn_pct.isChecked():
+            # Convert % → amount
+            if raw < 0 or raw > float(limit):
+                QMessageBox.warning(self, "Out of Range", f"Percentage must be 0 – {limit}%.")
+                return
+            disc_amount = line_total * (raw / 100.0)
+            msg = f"Discount {raw:.2f}% (${disc_amount:.2f}) applied to row {row+1}." if raw > 0 else "Discount cleared."
+        else:
+            disc_amount = raw
+            if disc_amount < 0 or (line_total > 0 and disc_amount > line_total):
+                QMessageBox.warning(self, "Out of Range", f"Amount must be 0 – ${line_total:.2f}.")
+                return
+            msg = f"Discount ${disc_amount:.2f} applied to row {row+1}." if disc_amount > 0 else "Discount cleared."
+
+        print(f"[discount] dialog result: disc_amount={disc_amount:.2f}")
+
+        # ── 8. Write plain amount to col 4 and recalc ────────────────────────
+        disc_item = QTableWidgetItem(f"{disc_amount:.2f}")
         disc_item.setTextAlignment(Qt.AlignCenter)
-        if val > 0:
+        if disc_amount > 0:
             disc_item.setForeground(QColor("#e67e22"))
             bold = QFont(); bold.setBold(True)
             disc_item.setFont(bold)
@@ -6573,13 +6738,134 @@ class POSView(QWidget):
         self._recalc_row(row)
         self._recalc_totals()
 
-        msg = f"Discount {val:.2f}% applied to row {row+1}." if val > 0 else "Discount cleared."
         print(f"[discount] {msg}")
         if self.parent_window:
             self.parent_window._set_status(msg)
 
     def _quick_tender(self, _amount):
         pass  # no-op
+
+    # =========================================================================
+    # LAYBYE FLOW
+    # =========================================================================
+    def _on_laybye(self):
+        """
+        Full Laybye flow:
+          1. Collect current cart items.
+          2. Show LaybyeConfirmDialog — forces cashier to select a named customer.
+          3. Show LaybyePaymentDialog — deposit (optional) + delivery date + order type.
+          4. Save to sales_order table locally (synced=0).
+          5. Refresh unsynced badge → ERPNext sync picks it up in background.
+        """
+        if not _HAS_LAYBYE:
+            QMessageBox.warning(self, "Not Available",
+                                "Laybye dialogs could not be loaded.\n"
+                                "Ensure laybye_confirm_dialog.py and "
+                                "laybye_payment_dialog.py are in views/dialogs/.")
+            return
+
+        # ── 1. Collect cart ──────────────────────────────────────────────────
+        cart_items = self._collect_invoice_items()
+        if not cart_items:
+            QMessageBox.information(self, "Empty Cart",
+                                    "Add items to the cart before saving a Laybye.")
+            return
+
+        try:
+            cart_total = float(self._lbl_total.text() or "0")
+        except ValueError:
+            cart_total = sum(float(it.get("total", 0)) for it in cart_items)
+
+        if cart_total <= 0:
+            QMessageBox.information(self, "Zero Total",
+                                    "Cart total is zero — add items before saving a Laybye.")
+            return
+
+        # ── 2. Confirmation + customer selection ─────────────────────────────
+        # Pass the currently-selected customer (may be None / walk-in).
+        # LaybyeConfirmDialog will force the cashier to pick a real one.
+        confirm_dlg = LaybyeConfirmDialog(
+            parent=self,
+            cart_items=cart_items,
+            cart_total=cart_total,
+            customer=self._selected_customer,   # dict, not name string
+        )
+        if confirm_dlg.exec() != LaybyeConfirmDialog.Accepted:
+            return
+
+        # Customer is now guaranteed to be a real named customer
+        confirmed_customer = confirm_dlg.selected_customer
+
+        # ── 3. Deposit dialog ────────────────────────────────────────────────
+        deposit_dlg = LaybyePaymentDialog(
+            parent=self,
+            total=cart_total,
+            customer=confirmed_customer,
+        )
+        if deposit_dlg.exec() != LaybyePaymentDialog.Accepted:
+            return
+
+        deposit_amount = deposit_dlg.deposit_amount
+        deposit_method = deposit_dlg.deposit_method
+        company_name   = deposit_dlg.accepted_company_name
+        delivery_date  = deposit_dlg.delivery_date
+        order_type     = deposit_dlg.order_type
+
+        # ── 4. Save Sales Order to local DB ─────────────────────────────────
+        if not _HAS_SALES_ORDER:
+            QMessageBox.critical(self, "DB Error",
+                                 "models/sales_order.py not found — cannot save Laybye.")
+            return
+
+        # Map cart item keys to what create_sales_order expects
+        so_items = []
+        for it in cart_items:
+            so_items.append({
+                "item_code":  it.get("part_no", ""),
+                "item_name":  it.get("product_name", ""),
+                "qty":        it.get("qty", 1),
+                "rate":       it.get("price", 0.0),
+                "amount":     it.get("total", 0.0),
+            })
+
+        try:
+            order_id = _create_sales_order(
+                cart_items     = so_items,
+                total          = cart_total,
+                deposit_amount = deposit_amount,
+                deposit_method = deposit_method,
+                customer       = confirmed_customer,
+                company        = company_name,
+                delivery_date  = delivery_date,
+                order_type     = order_type,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed",
+                                 f"Could not save Laybye:\n{_friendly_db_error(e)}")
+            return
+
+        # ── 5. Feedback + clear cart ─────────────────────────────────────────
+        balance   = round(cart_total - deposit_amount, 2)
+        cust_name = (confirmed_customer or {}).get("customer_name", "")
+        QMessageBox.information(
+            self, "Laybye Saved ✔",
+            f"Laybye saved successfully!\n\n"
+            f"  Customer    :  {cust_name}\n"
+            f"  Order Total :  ${cart_total:.2f}\n"
+            f"  Deposit Paid:  ${deposit_amount:.2f}\n"
+            f"  Balance Due :  ${balance:.2f}\n"
+            f"  Delivery    :  {delivery_date}\n"
+            f"  Order Type  :  {order_type}\n\n"
+            "The order is queued for ERPNext sync."
+        )
+
+        self._refresh_unsynced_badge()
+        self._new_sale(confirm=False)
+        if self.parent_window:
+            self.parent_window._set_status(
+                f"Laybye #{order_id}  {cust_name}  "
+                f"Total ${cart_total:.2f}  Deposit ${deposit_amount:.2f}"
+            )
 
 
 # =============================================================================
@@ -6723,6 +7009,15 @@ class MainWindow(QMainWindow):
             logging.getLogger("MainWindow").warning(
                 "Credit note sync could not start: %s", _e)
 
+        # Sales Order (Laybye) sync — pushes unsynced SOs → ERPNext
+        try:
+            from services.sales_order_upload_service import start_so_upload_thread
+            self._so_upload_thread = start_so_upload_thread()
+        except Exception as _e:
+            import logging
+            logging.getLogger("MainWindow").warning(
+                "Sales Order upload service could not start: %s", _e)
+
     def switch_to_pos(self):
         self._stack.setCurrentIndex(0)
         self._set_status("POS mode  —  ready to sell.")
@@ -6775,6 +7070,8 @@ class MainWindow(QMainWindow):
             (None, None),
             ("🖨 Advanced Printing", lambda: AdvanceSettingsDialog(self).exec()),
             (None, None),
+            ("🛡 POS Rules",         lambda: POSRulesDialog(self).exec()),
+            (None, None),
             ("Products",             lambda: coming_soon(self, "Products")),
             ("Tax Settings",         lambda: coming_soon(self, "Tax Settings")),
             ("Printer Setup",        lambda: coming_soon(self, "Printer Setup")),
@@ -6790,10 +7087,21 @@ class MainWindow(QMainWindow):
         from views.dialogs.pos_reports import POSReportsDialog
         POSReportsDialog(self).exec()
 
+    def _release_instance_lock(self):
+        try:
+            self._instance_sock.close()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self._release_instance_lock()
+        super().closeEvent(event)
+
     def _logout(self):
         reply = QMessageBox.question(self, "Logout", "Logout and return to login screen?", QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.hide()
+            self._release_instance_lock()
             try:
                 from views.login_dialog import LoginDialog
                 dlg = LoginDialog()
