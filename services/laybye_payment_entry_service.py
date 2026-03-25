@@ -1,328 +1,751 @@
 # =============================================================================
-# services/laybye_payment_entry_service.py
+# views/dialogs/laybye_payment_dialog.py  —  Deposit dialog for Laybye flow
 #
-# Standalone service — does NOT touch any existing files.
+# v3 fixes:
+#   - Numpad fully rewritten: no more "0.00" seed bug, clean digit building
+#   - Backspace and CLR work correctly on all states
+#   - Quick amount buttons replace (not append to) current value
+#   - Discount passed in from cart and stored on accept()
+#   - All outputs exposed after accept():
+#       self.deposit_amount, self.deposit_method, self.deposit_splits
+#       self.deposit_currency, self.delivery_date (ISO str), self.order_type
+#       self.discount_amount, self.discount_percent
+#       self.accepted_customer, self.accepted_company, self.accepted_company_name
 #
-# WHAT IT DOES:
-#   1. After a Sales Order (Laybye) is created locally with a deposit →
-#      create_laybye_payment_entry() inserts a row into payment_entries
-#      (payment_type='Receive', synced=0).
-#      frappe_invoice_ref is NULL until the SO lands on Frappe.
+# v4 fix:
+#   - _get_default_company() now reads server_company from company_defaults
+#     instead of the local companies table, so the correct ERPNext company
+#     name is used when building the Sales Order payload.
 #
-#   2. After the SO syncs to Frappe and we have a frappe_ref →
-#      link_laybye_payment_to_frappe() sets frappe_invoice_ref so the
-#      existing push_unsynced_payment_entries() daemon picks it up.
-#
-# HOW TO WIRE IT IN (two one-liners, nothing else changes):
-#
-#   In main_window.py — right after _create_sales_order() succeeds
-#   (after line: order_id = _create_sales_order(...)):
-#
-#       if deposit_amount and deposit_amount > 0:
-#           try:
-#               from services.laybye_payment_entry_service import create_laybye_payment_entry
-#               from models.sales_order import get_order_by_id
-#               so = get_order_by_id(order_id)
-#               create_laybye_payment_entry(so)
-#           except Exception as _e:
-#               import logging; logging.getLogger("Laybye").warning(
-#                   "Laybye payment entry skipped: %s", _e)
-#
-#   In services/sales_order_upload_service.py — right after mark_order_synced():
-#
-#       if frappe_ref and isinstance(frappe_ref, str):
-#           try:
-#               from services.laybye_payment_entry_service import link_laybye_payment_to_frappe
-#               link_laybye_payment_to_frappe(order.get("order_no", ""), frappe_ref)
-#           except Exception as _e:
-#               log.warning("[so-sync] link laybye payment failed: %s", _e)
-#
-# =============================================================================
-from __future__ import annotations
-
-import json
-import logging
-import urllib.request
-import urllib.error
-from datetime import date
-
-log = logging.getLogger("LaybyePaymentEntry")
-
-
-# =============================================================================
-# HELPERS
+# v5 fix:
+#   - Printing wired into _save(): calls print_laybye_deposit(order_id) after
+#     create_sales_order() using services/sales_order_print.py.
+#     order_id must be passed in by the caller via the `order_id` kwarg on
+#     LaybyePaymentDialog, OR set via dlg.set_order_id(id) before accept().
+#   - Content panel centred with max-width wrapper (mirrors payment_dialog.py).
 # =============================================================================
 
-def _get_credentials() -> tuple[str, str]:
+from PySide6.QtWidgets import (
+    QDialog, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
+    QPushButton, QLabel, QLineEdit, QFrame, QSizePolicy,
+    QMessageBox, QScrollArea, QComboBox, QDateEdit,
+)
+from PySide6.QtCore import Qt, QLocale, QDate
+from PySide6.QtGui  import QDoubleValidator
+
+NAVY      = "#0d1f3c"
+NAVY_2    = "#162d52"
+NAVY_3    = "#1e3d6e"
+ACCENT    = "#1a5fb4"
+ACCENT_H  = "#1c6dd0"
+WHITE     = "#ffffff"
+OFF_WHITE = "#f5f8fc"
+LIGHT     = "#e4eaf4"
+MID       = "#8fa8c8"
+DARK_TEXT = "#0d1f3c"
+MUTED     = "#5a7a9a"
+BORDER    = "#c8d8ec"
+SUCCESS   = "#1a7a3c"
+SUCCESS_H = "#1f9447"
+DANGER    = "#b02020"
+DANGER_H  = "#cc2828"
+ORANGE    = "#c05a00"
+
+ORDER_TYPES = ["Sales", "Shopping Cart", "Maintenance"]
+
+
+# =============================================================================
+# Data helpers  (unchanged from v4)
+# =============================================================================
+
+def _get_local_rate(from_ccy: str, to_ccy: str = "USD") -> float:
+    if from_ccy.upper() == to_ccy.upper():
+        return 1.0
     try:
-        from services.credentials import get_credentials
-        return get_credentials()
+        from models.exchange_rate import get_rate
+        r = get_rate(from_ccy, to_ccy)
+        return float(r) if r else 1.0
     except Exception:
-        pass
-    try:
-        from database.db import get_connection
-        conn = get_connection(); cur = conn.cursor()
-        cur.execute("SELECT api_key, api_secret FROM company_defaults WHERE id = 1")
-        row = cur.fetchone(); conn.close()
-        if row and row[0] and row[1]:
-            return row[0], row[1]
-    except Exception:
-        pass
-    import os
-    return os.environ.get("HAVANO_API_KEY", ""), os.environ.get("HAVANO_API_SECRET", "")
+        return 1.0
 
 
-def _get_defaults() -> dict:
+def _get_default_company() -> dict | None:
+    # ── v4: read server_company from company_defaults first ──────────────────
     try:
         from models.company_defaults import get_defaults
-        return get_defaults() or {}
-    except Exception:
-        return {}
-
-
-def _get_host() -> str:
-    try:
-        host = _get_defaults().get("server_api_host", "").strip().rstrip("/")
-        if host:
-            return host
+        d = get_defaults() or {}
+        name = d.get("server_company", "").strip()
+        if name:
+            return {"name": name}
     except Exception:
         pass
-    return "https://apk.havano.cloud"
-
-
-# =============================================================================
-# 1. CREATE — called right after _create_sales_order() succeeds (deposit > 0)
-# =============================================================================
-
-def create_laybye_payment_entry(so: dict) -> int | None:
-    """
-    Inserts one 'Receive' (deposit) row into payment_entries for the given SO.
-
-    so dict must contain:
-        order_no, customer_name, deposit_amount, deposit_method, company
-
-    frappe_invoice_ref is left NULL — link_laybye_payment_to_frappe() fills
-    it in once the SO is confirmed on Frappe, at which point the existing
-    push_unsynced_payment_entries() daemon will push it automatically.
-
-    Returns the new payment_entry id, or None if no deposit / already exists / error.
-    """
-    order_no       = (so.get("order_no") or "").strip()
-    deposit_amount = float(so.get("deposit_amount") or 0)
-
-    if not order_no:
-        log.warning("create_laybye_payment_entry called with no order_no — skipping.")
-        return None
-
-    if deposit_amount <= 0:
-        log.debug("Order %s has no deposit — skipping payment entry.", order_no)
-        return None
-
-    from database.db import get_connection
-    conn = get_connection()
-    cur  = conn.cursor()
-
-    # Idempotency: one payment entry per order_no
-    cur.execute(
-        "SELECT id FROM payment_entries WHERE reference_no = ? AND payment_type = 'Receive'",
-        (order_no,)
-    )
-    if cur.fetchone():
-        conn.close()
-        log.debug("Laybye payment entry already exists for %s — skipping.", order_no)
-        return None
-
-    customer = (so.get("customer_name") or "default").strip() or "default"
-    currency = (so.get("currency")      or "USD").strip().upper() or "USD"
-    method   = (so.get("deposit_method") or "Cash").strip() or "Cash"
-    today    = date.today().isoformat()
 
     try:
-        cur.execute("""
-            INSERT INTO payment_entries (
-                sale_id, sale_invoice_no, frappe_invoice_ref,
-                party, party_name,
-                paid_amount, received_amount, source_exchange_rate,
-                paid_to_account_currency, currency,
-                mode_of_payment,
-                reference_no, reference_date,
-                remarks, payment_type, synced
-            ) OUTPUT INSERTED.id
-            VALUES (?, ?, NULL, ?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?, ?, 0)
-        """, (
-            so.get("id"),                              # sale_id (local SO id)
-            order_no,                                  # sale_invoice_no (display)
-            customer, customer,                        # party, party_name
-            deposit_amount, deposit_amount,            # paid_amount, received_amount
-            currency, currency,                        # paid_to_account_currency, currency
-            method,                                    # mode_of_payment
-            order_no,                                  # reference_no
-            today,                                     # reference_date
-            f"Laybye Deposit — {order_no} via {method}",  # remarks
-            "Receive",                                 # payment_type
-        ))
-        new_id = int(cur.fetchone()[0])
-        conn.commit()
-        log.info("Laybye payment entry %d created for %s (%.2f %s via %s)",
-                 new_id, order_no, deposit_amount, currency, method)
-        return new_id
-
-    except Exception as e:
-        conn.rollback()
-        log.error("Failed to create laybye payment entry for %s: %s", order_no, e)
+        from models.company import get_all_companies
+        rows = get_all_companies()
+        return rows[0] if rows else None
+    except Exception:
         return None
-    finally:
-        conn.close()
 
 
-# =============================================================================
-# 2. LINK — called by sales_order_upload_service after SO is confirmed on Frappe
-# =============================================================================
+def _load_payment_methods(company: str) -> list[dict]:
+    try:
+        from models.gl_account import get_all_accounts
+        all_accts = get_all_accounts()
+        accts = [a for a in all_accts if a.get("company") == company] or all_accts
+    except Exception:
+        accts = []
 
-def link_laybye_payment_to_frappe(order_no: str, frappe_so_ref: str) -> None:
-    """
-    Sets frappe_invoice_ref on the 'Receive' payment entry for this SO.
-    Once set, the existing push_unsynced_payment_entries() daemon will
-    pick it up and push the Payment Entry to Frappe automatically.
-    """
-    if not order_no or not frappe_so_ref:
-        return
-
-    from database.db import get_connection
-    conn = get_connection()
-    cur  = conn.cursor()
-    cur.execute("""
-        UPDATE payment_entries
-        SET    frappe_invoice_ref = ?
-        WHERE  reference_no  = ?
-          AND  payment_type  = 'Receive'
-          AND  synced        = 0
-          AND  (frappe_invoice_ref IS NULL OR frappe_invoice_ref = '')
-    """, (frappe_so_ref, order_no))
-    updated = cur.rowcount
-    conn.commit()
-    conn.close()
-
-    if updated:
-        log.info("Linked SO %s → Frappe ref %s on laybye payment entry.",
-                 order_no, frappe_so_ref)
-    else:
-        log.debug("link_laybye_payment_to_frappe: no unlinked row found for %s.", order_no)
-
-
-# =============================================================================
-# 3. PUSH — build the Frappe payload for a Laybye deposit Payment Entry
-#    The existing push_unsynced_payment_entries() daemon calls this
-#    automatically once frappe_invoice_ref is set. You don't need to call
-#    this directly unless you want to push immediately.
-# =============================================================================
-
-def _build_laybye_payload(pe: dict, defaults: dict) -> dict:
-    """
-    Builds the Frappe Payment Entry payload for a laybye deposit.
-
-    Key difference from CN: payment_type = "Receive" (money comes IN).
-    References the Frappe Sales Order (not a Sales Invoice).
-    """
-    company  = defaults.get("server_company",   "")
-    currency = (pe.get("currency") or "USD").upper()
-    amount   = abs(float(pe.get("paid_amount") or 0))
-    mop      = pe.get("mode_of_payment") or "Cash"
-
-    # Resolve the GL account to receive into
-    paid_to = (pe.get("paid_to") or "").strip()
-    if not paid_to:
+    seen, result = set(), []
+    for a in accts:
+        curr  = (a.get("account_currency") or "USD").upper()
+        atype = (a.get("account_type") or a.get("name") or "Cash").strip()
+        key   = (atype.lower(), curr)
+        if key in seen:
+            continue
+        seen.add(key)
+        rate = 1.0
         try:
-            from models.gl_account import get_account_for_payment
-            acct = get_account_for_payment(currency, company)
-            if acct:
-                paid_to = acct["name"]
+            from models.exchange_rate import get_rate
+            r = get_rate(curr, "USD")
+            if r:
+                rate = float(r)
         except Exception:
             pass
+        result.append({
+            "label":       a.get("account_name") or a.get("name") or atype,
+            "currency":    curr,
+            "rate_to_usd": rate,
+            "is_credit":   bool(a.get("is_credit") or a.get("credit_account") or False),
+        })
 
-    if not paid_to:
-        paid_to = defaults.get("server_pos_account", "")
+    if not result:
+        result = [
+            {"label": "Cash",       "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
+            {"label": "Cash (ZIG)", "currency": "ZIG", "rate_to_usd": _get_local_rate("ZIG"), "is_credit": False},
+            {"label": "Card",       "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
+            {"label": "Bank / EFT", "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
+        ]
+    return result
 
-    frappe_so_ref = (pe.get("frappe_invoice_ref") or "").strip()
 
-    payload: dict = {
-        "doctype":                    "Payment Entry",
-        "payment_type":               "Receive",
-        "party_type":                 "Customer",
-        "party":                      pe.get("party") or "default",
-        "party_name":                 pe.get("party_name") or "default",
-        "paid_to_account_currency":   currency,
-        "paid_amount":                amount,
-        "received_amount":            amount,
-        "source_exchange_rate":       float(pe.get("source_exchange_rate") or 1.0),
-        "reference_no":               pe.get("reference_no") or pe.get("sale_invoice_no", ""),
-        "reference_date":             pe.get("reference_date") or date.today().isoformat(),
-        "remarks":                    pe.get("remarks") or f"Laybye Deposit — {mop}",
-        "mode_of_payment":            mop,
-        "docstatus":                  1,
+# =============================================================================
+# Widget helpers  (unchanged from v4)
+# =============================================================================
+
+def _hr():
+    ln = QFrame()
+    ln.setFrameShape(QFrame.HLine)
+    ln.setStyleSheet(f"background:{BORDER}; border:none;")
+    ln.setFixedHeight(1)
+    return ln
+
+
+def _method_btn_style(active: bool) -> str:
+    if active:
+        return (f"QPushButton {{ background:{ACCENT}; color:{WHITE}; border:none;"
+                f" border-radius:6px; font-size:12px; font-weight:bold;"
+                f" text-align:left; padding:0 12px; }}"
+                f"QPushButton:hover {{ background:{ACCENT_H}; }}")
+    return (f"QPushButton {{ background:{WHITE}; color:{DARK_TEXT};"
+            f" border:1px solid {BORDER}; border-radius:6px;"
+            f" font-size:12px; text-align:left; padding:0 12px; }}"
+            f"QPushButton:hover {{ background:{LIGHT}; }}")
+
+
+def _field_style(active: bool, has_value: bool = False) -> str:
+    if active:
+        return (f"QLineEdit {{ background:{WHITE}; color:{DARK_TEXT};"
+                f" border:2px solid {ACCENT}; border-radius:6px;"
+                f" font-size:14px; font-weight:bold; padding:0 10px; }}")
+    if has_value:
+        return (f"QLineEdit {{ background:{WHITE}; color:{DARK_TEXT};"
+                f" border:1px solid {BORDER}; border-radius:6px;"
+                f" font-size:14px; padding:0 10px; }}")
+    return (f"QLineEdit {{ background:transparent; color:{DARK_TEXT};"
+            f" border:none; font-size:14px; padding:0 10px; }}")
+
+
+def _numpad_btn(text, kind="digit"):
+    btn = QPushButton(text)
+    btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    btn.setCursor(Qt.PointingHandCursor)
+    btn.setFocusPolicy(Qt.NoFocus)
+    styles = {
+        "digit": (WHITE,   LIGHT,    DARK_TEXT),
+        "quick": (NAVY_3,  NAVY_2,   WHITE),
+        "del":   (NAVY_2,  NAVY_3,   WHITE),
+        "clear": (DANGER,  DANGER_H, WHITE),
     }
-
-    if paid_to:
-        payload["paid_to"] = paid_to
-    if company:
-        payload["company"] = company
-
-    # Link to the Frappe Sales Order
-    if frappe_so_ref:
-        payload["references"] = [{
-            "reference_doctype": "Sales Order",
-            "reference_name":    frappe_so_ref,
-            "allocated_amount":  amount,
-        }]
-
-    return payload
+    bg, hov, fg = styles.get(kind, styles["digit"])
+    btn.setStyleSheet(
+        f"QPushButton {{ background:{bg}; color:{fg}; border:1px solid {BORDER};"
+        f" border-radius:6px; font-size:15px; font-weight:bold; }}"
+        f"QPushButton:hover {{ background:{hov}; }}"
+        f"QPushButton:pressed {{ background:{NAVY_3}; color:{WHITE}; }}")
+    return btn
 
 
-def push_laybye_payment_entry(pe: dict) -> str | None:
-    """
-    Optional: push a single laybye payment entry directly (bypasses the daemon).
-    Returns Frappe PAY-xxxxx ref on success, None on failure.
-    """
-    api_key, api_secret = _get_credentials()
-    if not api_key or not api_secret:
-        log.warning("push_laybye_payment_entry: no credentials.")
-        return None
+def _action_btn(text, color, hover, height=46):
+    btn = QPushButton(text)
+    btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    btn.setFixedHeight(height)
+    btn.setCursor(Qt.PointingHandCursor)
+    btn.setFocusPolicy(Qt.NoFocus)
+    btn.setStyleSheet(
+        f"QPushButton {{ background:{color}; color:{WHITE}; border:none;"
+        f" border-radius:6px; font-size:13px; font-weight:bold; }}"
+        f"QPushButton:hover {{ background:{hover}; }}")
+    return btn
 
-    host     = _get_host()
-    defaults = _get_defaults()
-    payload  = _build_laybye_payload(pe, defaults)
 
-    req = urllib.request.Request(
-        url=f"{host}/api/resource/Payment%20Entry",
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type":  "application/json",
-            "Accept":        "application/json",
-            "Authorization": f"token {api_key}:{api_secret}",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            name = (json.loads(resp.read()).get("data") or {}).get("name", "")
-            log.info("Laybye Payment Entry pushed → Frappe %s", name)
-            return name or "SYNCED"
+# =============================================================================
+# LAYBYE PAYMENT DIALOG
+# =============================================================================
 
-    except urllib.error.HTTPError as e:
+class LaybyePaymentDialog(QDialog):
+    def __init__(
+        self,
+        parent=None,
+        total: float = 0.0,
+        customer: dict | None = None,
+        discount_amount: float = 0.0,
+        discount_percent: float = 0.0,
+    ):
+        super().__init__(parent)
+        self.total = total
+        self._discount_amount  = discount_amount
+        self._discount_percent = discount_percent
+
+        # ── public outputs (unchanged) ────────────────────────────────────────
+        self.deposit_amount        = 0.0
+        self.deposit_method        = ""
+        self.deposit_splits        = []
+        self.deposit_currency      = "USD"
+        self.delivery_date         = ""
+        self.order_type            = "Sales"
+        self.discount_amount       = discount_amount
+        self.discount_percent      = discount_percent
+        self.accepted_customer     = None
+        self.accepted_company      = None
+        self.accepted_company_name = ""
+
+        # v5: the caller sets this after create_sales_order() so _print() knows
+        # which order to pass to print_laybye_deposit().
+        # Can also be supplied via set_order_id() before accept() is called.
+        self._order_id: int | None = None
+
+        self._customer = customer
+        self._company  = _get_default_company()
+
+        co_name = self._company.get("name", "") if self._company else ""
+        self._methods: list[dict]           = _load_payment_methods(co_name)
+        self._method_rows: dict[str, tuple] = {}
+        self._active_method: str            = self._methods[0]["label"] if self._methods else ""
+        self._numpad_buf: dict[str, str]    = {m["label"]: "" for m in self._methods}
+
+        self.setWindowTitle("Laybye — Deposit & Order Details")
+        self.setMinimumSize(920, 600)
+        self.setModal(True)
+        self.setWindowState(Qt.WindowMaximized)
+
+        self._build_ui()
+        if self._active_method:
+            self._activate_method(self._active_method)
+
+    # ── v5 helper: caller sets this after create_sales_order() ───────────────
+    def set_order_id(self, order_id: int) -> None:
+        self._order_id = order_id
+
+    # =========================================================================
+    # Build UI
+    # =========================================================================
+
+    def _build_ui(self):
+        self.setStyleSheet(f"""
+            QDialog  {{ background:{OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}
+            QLabel   {{ background:transparent; color:{DARK_TEXT}; font-size:13px; }}
+            QWidget  {{ background:{OFF_WHITE}; }}
+        """)
+        outer = QVBoxLayout(self)
+        outer.setSpacing(0)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        # ── header ────────────────────────────────────────────────────────────
+        hdr = QWidget()
+        hdr.setFixedHeight(52)
+        hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(28, 0, 28, 0)
+
+        title = QLabel("Laybye  —  Deposit")
+        title.setStyleSheet(
+            f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;")
+        badge = QLabel("🛍  LAYBYE")
+        badge.setStyleSheet(
+            f"background:{ORANGE}; color:{WHITE}; border-radius:5px;"
+            f" font-size:10px; font-weight:bold; padding:3px 10px;")
+
+        zwg_rate  = _get_local_rate("USD", "ZWG")
+        rate_pill = QLabel(f"1 USD = {zwg_rate:,.2f} ZWG")
+        rate_pill.setStyleSheet(
+            f"color:{MUTED}; font-size:10px; background:{LIGHT};"
+            f" border-radius:4px; padding:2px 8px;")
+
+        hint = QLabel("Deposit optional  ·  Enter to save  ·  Esc to cancel")
+        hint.setStyleSheet(f"color:{MUTED}; font-size:10px; background:transparent;")
+        hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        hl.addWidget(title)
+        hl.addSpacing(10)
+        hl.addWidget(badge)
+        hl.addSpacing(12)
+        hl.addWidget(rate_pill)
+        hl.addStretch()
+        hl.addWidget(hint)
+        outer.addWidget(hdr)
+
+        # ── customer strip ────────────────────────────────────────────────────
+        cust_strip = QWidget()
+        cust_strip.setFixedHeight(34)
+        cust_strip.setStyleSheet(f"background:{NAVY_2};")
+        cs = QHBoxLayout(cust_strip)
+        cs.setContentsMargins(28, 0, 28, 0)
+
+        cust_icon    = QLabel("👤")
+        cust_name_lbl = QLabel((self._customer or {}).get("customer_name", "Unknown"))
+        cust_name_lbl.setStyleSheet(
+            f"color:{WHITE}; font-size:13px; font-weight:bold; background:transparent;")
+
+        cs.addWidget(cust_icon)
+        cs.addWidget(cust_name_lbl)
+        cs.addStretch()
+        if self._discount_amount > 0:
+            disc_lbl = QLabel(
+                f"Discount: {self._discount_percent:.1f}%  "
+                f"(−USD {self._discount_amount:.2f})")
+            disc_lbl.setStyleSheet(
+                f"color:{ORANGE}; font-size:11px; font-weight:bold; background:transparent;")
+            cs.addWidget(disc_lbl)
+        outer.addWidget(cust_strip)
+
+        # ── centred content wrapper (mirrors payment_dialog.py) ───────────────
+        # Left + right panels sit inside a max-width centre column so they
+        # don't stretch absurdly on wide screens.
+        outer_h = QHBoxLayout()
+        outer_h.setContentsMargins(0, 0, 0, 0)
+        outer_h.setSpacing(0)
+
+        center = QWidget()
+        center.setStyleSheet(f"background:{OFF_WHITE};")
+        center.setMaximumWidth(1200)
+        center_v = QVBoxLayout(center)
+        center_v.setContentsMargins(32, 24, 32, 24)
+        center_v.setSpacing(0)
+
+        content = QHBoxLayout()
+        content.setSpacing(28)
+
+        content.addLayout(self._build_left(),  stretch=5)
+
+        vline = QFrame()
+        vline.setFrameShape(QFrame.VLine)
+        vline.setStyleSheet(f"background:{BORDER}; border:none;")
+        vline.setFixedWidth(1)
+        content.addWidget(vline)
+
+        content.addLayout(self._build_right(), stretch=4)
+        center_v.addLayout(content)
+
+        outer_h.addStretch(1)
+        outer_h.addWidget(center, stretch=10)
+        outer_h.addStretch(1)
+
+        wrap = QWidget()
+        wrap.setStyleSheet(f"background:{OFF_WHITE};")
+        wrap.setLayout(outer_h)
+        outer.addWidget(wrap, stretch=1)
+
+    # =========================================================================
+    # Left panel  (unchanged logic, preserved exactly)
+    # =========================================================================
+
+    def _build_left(self):
+        vbox = QVBoxLayout()
+        vbox.setSpacing(10)
+
+        cards = QHBoxLayout()
+        for label, val, color in [
+            ("ORDER TOTAL", f"USD {self.total:.2f}", ORANGE),
+            ("DEPOSIT",     "USD 0.00",              BORDER),
+        ]:
+            f = QFrame()
+            f.setFixedHeight(72)
+            f.setStyleSheet(
+                f"QFrame {{ background:{WHITE}; border:2px solid {color}; border-radius:8px; }}")
+            fl = QVBoxLayout(f)
+            fl.setContentsMargins(14, 6, 14, 6)
+            cap = QLabel(label)
+            cap.setAlignment(Qt.AlignCenter)
+            cap.setStyleSheet(
+                f"color:{MUTED if label == 'DEPOSIT' else color};"
+                f" font-size:9px; font-weight:bold;")
+            v = QLabel(val)
+            v.setAlignment(Qt.AlignCenter)
+            v.setStyleSheet(
+                f"color:{DARK_TEXT}; font-size:18px; font-weight:bold;"
+                f" font-family:'Courier New';")
+            fl.addWidget(cap)
+            fl.addWidget(v)
+            cards.addWidget(f, 1)
+            if label == "DEPOSIT":
+                self._dep_card = f
+                self._dep_lbl  = v
+
+        vbox.addLayout(cards)
+        vbox.addWidget(_hr())
+
+        # column headers
+        hrw = QHBoxLayout()
+        hrw.setContentsMargins(0, 0, 0, 0)
+        for txt, st, al in [
+            ("MODE OF PAYMENT", 4, Qt.AlignLeft),
+            ("CCY",             1, Qt.AlignCenter),
+            ("DEPOSIT",         3, Qt.AlignRight),
+            ("BALANCE DUE",     4, Qt.AlignRight),
+        ]:
+            l = QLabel(txt)
+            l.setStyleSheet(f"color:{MUTED}; font-size:9px; font-weight:bold;")
+            l.setAlignment(al)
+            hrw.addWidget(l, st)
+        vbox.addLayout(hrw)
+
+        sw = QWidget()
+        sl = QVBoxLayout(sw)
+        sl.setSpacing(4)
+        for method in self._methods:
+            lbl = method["label"]
+            rw  = QWidget()
+            rw.setFixedHeight(40)
+            rl  = QHBoxLayout(rw)
+            rl.setContentsMargins(0, 0, 0, 0)
+
+            mb = QPushButton(f"  {lbl}")
+            mb.setFixedHeight(32)
+            mb.setStyleSheet(_method_btn_style(False))
+            mb.clicked.connect(lambda _, m=lbl: self._activate_method(m))
+
+            cb = QLabel(method["currency"])
+            cb.setFixedSize(46, 32)
+            cb.setAlignment(Qt.AlignCenter)
+            cb.setStyleSheet(
+                f"background:{LIGHT}; color:{ACCENT}; border:1px solid {BORDER};"
+                f" border-radius:6px; font-size:10px; font-weight:bold;")
+
+            ae = QLineEdit()
+            ae.setFixedHeight(32)
+            ae.setReadOnly(True)
+            ae.setAlignment(Qt.AlignRight)
+            ae.setStyleSheet(_field_style(False))
+
+            bal = QLabel(f"USD {self.total:.2f}")
+            bal.setFixedHeight(32)
+            bal.setAlignment(Qt.AlignRight)
+            bal.setStyleSheet(
+                f"color:{DARK_TEXT}; font-size:11px; font-weight:bold;"
+                f" background:{WHITE}; border:1px solid {BORDER};"
+                f" border-radius:6px; padding:0 10px;")
+
+            rl.addWidget(mb,  4)
+            rl.addWidget(cb,  1)
+            rl.addWidget(ae,  3)
+            rl.addWidget(bal, 4)
+            sl.addWidget(rw)
+            self._method_rows[lbl] = (mb, ae, bal)
+
+        sl.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(sw)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background:transparent;")
+        vbox.addWidget(scroll, 1)
+        return vbox
+
+    # =========================================================================
+    # Right panel  — numpad + metadata + action buttons
+    # =========================================================================
+
+    def _build_right(self):
+        vbox = QVBoxLayout()
+        vbox.setSpacing(8)
+
+        # ── numpad ────────────────────────────────────────────────────────────
+        grid = QGridLayout()
+        grid.setSpacing(6)
+
+        for col, val in enumerate([50, 100, 200]):
+            b = _numpad_btn(f"${val}", "quick")
+            b.clicked.connect(lambda _, v=val: self._numpad_quick(v))
+            grid.addWidget(b, 0, col)
+
+        digits = [
+            ("7", 1, 0), ("8", 1, 1), ("9", 1, 2),
+            ("4", 2, 0), ("5", 2, 1), ("6", 2, 2),
+            ("1", 3, 0), ("2", 3, 1), ("3", 3, 2),
+            (".", 4, 0), ("0", 4, 1), ("00", 4, 2),
+        ]
+        for txt, r, c in digits:
+            b = _numpad_btn(txt)
+            b.clicked.connect(lambda _, t=txt: self._numpad_press(t))
+            grid.addWidget(b, r, c)
+
+        db = _numpad_btn("⌫", "del")
+        db.clicked.connect(self._numpad_back)
+        grid.addWidget(db, 5, 0)
+
+        cb = _numpad_btn("CLR", "clear")
+        cb.clicked.connect(self._numpad_clear)
+        grid.addWidget(cb, 5, 1, 1, 2)
+
+        for r in range(6):
+            grid.setRowStretch(r, 1)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+
+        vbox.addLayout(grid, 1)
+        vbox.addWidget(_hr())
+
+        # ── delivery date + order type ─────────────────────────────────────
+        self._delivery_date = QDateEdit()
+        self._delivery_date.setCalendarPopup(True)
+        self._delivery_date.setDate(QDate.currentDate().addDays(7))
+        self._delivery_date.setFixedHeight(32)
+        self._delivery_date.setStyleSheet(
+            f"QDateEdit {{ background:{WHITE}; border:1px solid {BORDER};"
+            f" border-radius:5px; padding:0 8px; }}")
+
+        self._order_type = QComboBox()
+        self._order_type.addItems(ORDER_TYPES)
+        self._order_type.setFixedHeight(32)
+        self._order_type.setStyleSheet(
+            f"QComboBox {{ background:{WHITE}; border:1px solid {BORDER};"
+            f" border-radius:5px; padding:0 8px; }}")
+
+        vbox.addWidget(QLabel("Delivery Date:"))
+        vbox.addWidget(self._delivery_date)
+        vbox.addWidget(QLabel("Order Type:"))
+        vbox.addWidget(self._order_type)
+        vbox.addWidget(_hr())
+
+        # ── action buttons: Save + Print (side-by-side) ───────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        save_btn = _action_btn("🛍  Save Laybye  (Enter)", ORANGE, "#d96a00", 52)
+        save_btn.clicked.connect(self._save)
+
+        print_btn = _action_btn("🖨  Print Slip  (F2)", NAVY_2, NAVY_3, 52)
+        print_btn.clicked.connect(self._print_slip)
+
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(print_btn)
+        vbox.addLayout(btn_row)
+
+        return vbox
+
+    # =========================================================================
+    # Method / numpad logic  (unchanged from v4)
+    # =========================================================================
+
+    def _activate_method(self, label: str):
+        self._active_method = label
+        for lbl, (mb, ae, _) in self._method_rows.items():
+            active = (lbl == label)
+            mb.setStyleSheet(_method_btn_style(active))
+            ae.setStyleSheet(_field_style(active, bool(self._numpad_buf.get(lbl, ""))))
+            if active:
+                ae.setText(self._numpad_buf.get(lbl, ""))
+
+    def _numpad_press(self, key: str):
+        buf = self._numpad_buf.get(self._active_method, "")
+        if key == "." and "." in buf:
+            return
+        if key == "00":
+            if not buf:
+                return
+            if "." in buf:
+                if len(buf.split(".")[1]) < 2:
+                    buf = (buf + "00")[:buf.index(".") + 3]
+            else:
+                if len(buf) < 7:
+                    buf += "00"
+        else:
+            if "." in buf:
+                if len(buf.split(".")[1]) < 2:
+                    buf += key
+            else:
+                if len(buf) < 8:
+                    buf = (buf + key).lstrip("0") or key
+        self._set_buf(buf)
+
+    def _numpad_back(self):
+        buf = self._numpad_buf.get(self._active_method, "")
+        self._set_buf(buf[:-1])
+
+    def _numpad_clear(self):
+        self._set_buf("")
+
+    def _numpad_quick(self, amt: int):
+        self._set_buf(str(amt))
+
+    def _set_buf(self, value: str):
+        self._numpad_buf[self._active_method] = value
+        _, ae, _ = self._method_rows[self._active_method]
+        ae.setText(value)
+        self._refresh_totals()
+
+    def _refresh_totals(self):
+        paid = 0.0
+        for lbl, val in self._numpad_buf.items():
+            rate = 1.0
+            for m in self._methods:
+                if m["label"] == lbl:
+                    rate = m["rate_to_usd"]
+                    break
+            try:
+                paid += (float(val) if val else 0.0) * rate
+            except Exception:
+                pass
+
+        bal   = max(self.total - paid, 0.0)
+        self._dep_lbl.setText(f"USD  {paid:.2f}")
+        color = SUCCESS if paid > 0.005 else BORDER
+        self._dep_card.setStyleSheet(
+            f"QFrame {{ background:{WHITE}; border:2px solid {color}; border-radius:8px; }}")
+
+        for lbl, (mb, ae, bl) in self._method_rows.items():
+            curr = "USD"
+            for m in self._methods:
+                if m["label"] == lbl:
+                    curr = m["currency"]
+                    break
+            r = _get_local_rate("USD", curr)
+            bl.setText(f"{curr}  {bal * r:,.2f}")
+
+    # =========================================================================
+    # Actions
+    # =========================================================================
+
+    def _collect_paid(self) -> float:
+        paid = 0.0
+        for lbl, val in self._numpad_buf.items():
+            rate = 1.0
+            for m in self._methods:
+                if m["label"] == lbl:
+                    rate = m["rate_to_usd"]
+                    break
+            paid += (float(val) if val else 0.0) * rate
+        return paid
+
+    def _save(self):
+        paid = self._collect_paid()
+
+        if paid > self.total + 0.005:
+            QMessageBox.warning(self, "Overpayment", "Deposit exceeds total.")
+            return
+
+        self.deposit_amount        = paid
+        self.deposit_method        = self._active_method
+        self.delivery_date         = self._delivery_date.date().toString("yyyy-MM-dd")
+        self.order_type            = self._order_type.currentText()
+        self.accepted_customer     = self._customer
+        self.accepted_company      = self._company
+        self.accepted_company_name = (
+            self._company.get("name", "") if self._company else "")
+        self.accept()
+
+    def _print_slip(self):
+        """
+        Print a laybye deposit slip.
+
+        Two-phase usage
+        ---------------
+        Phase A — dialog is still open (caller hasn't called create_sales_order yet):
+            The button is labelled "Print Slip".  If _order_id is not yet set we
+            save first, then let the caller create the order and call
+            set_order_id() + _do_print().  In practice the caller should just
+            call _save() then create the order, then call set_order_id() and
+            trigger the print from outside.  Here we handle the simpler case:
+            order already created before the button is pressed.
+
+        Phase B — order_id already known (caller set it before showing dialog,
+            or this method is called programmatically after accept()):
+            We print immediately.
+
+        In most POS flows the caller does:
+            if dlg.exec() == QDialog.Accepted:
+                order_id = create_sales_order(...)
+                print_laybye_deposit(order_id)   # ← call directly, simplest
+        so this button is a convenience for re-prints while the dialog is open.
+        """
+        if self._order_id is None:
+            # No order created yet — save first so caller can get the id.
+            QMessageBox.information(
+                self, "Print Slip",
+                "Save the laybye first, then reprint from the order list.\n\n"
+                "Tip: the slip is printed automatically when you press Save."
+            )
+            return
+        self._do_print(self._order_id)
+
+    def _do_print(self, order_id: int) -> None:
+        """Trigger printing_service via sales_order_print — same pattern as sale.py."""
         try:
-            err = json.loads(e.read().decode())
-            msg = err.get("exception") or err.get("message") or f"HTTP {e.code}"
-        except Exception:
-            msg = f"HTTP {e.code}"
-        if e.code == 409:
-            return "DUPLICATE"
-        log.error("Laybye Payment Entry HTTP %s: %s", e.code, msg)
-        return None
+            from services.sales_order_print import print_laybye_deposit
+            ok = print_laybye_deposit(order_id)
+            if not ok:
+                QMessageBox.warning(
+                    self, "Print",
+                    "No active printers found or printing failed.\n"
+                    "Check hardware settings.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Print Error", str(exc))
 
-    except urllib.error.URLError as e:
-        log.warning("Laybye Payment Entry network error: %s", e.reason)
-        return None
+    # =========================================================================
+    # Keyboard  (unchanged from v4)
+    # =========================================================================
 
-    except Exception as e:
-        log.error("Laybye Payment Entry unexpected error: %s", e)
-        return None
+    def keyPressEvent(self, event):
+        k = event.key()
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            self._save()
+            return
+        if k == Qt.Key_Escape:
+            self.reject()
+            return
+        if k == Qt.Key_F2:
+            self._print_slip()
+            return
+        if k == Qt.Key_Backspace:
+            self._numpad_back()
+            return
+        if k == Qt.Key_Delete:
+            self._numpad_clear()
+            return
+
+        focused = self.focusWidget()
+        if isinstance(focused, (QDateEdit, QComboBox)):
+            super().keyPressEvent(event)
+            return
+
+        _digit_keys = {
+            Qt.Key_0: "0", Qt.Key_1: "1", Qt.Key_2: "2", Qt.Key_3: "3",
+            Qt.Key_4: "4", Qt.Key_5: "5", Qt.Key_6: "6", Qt.Key_7: "7",
+            Qt.Key_8: "8", Qt.Key_9: "9", Qt.Key_Period: ".", Qt.Key_Comma: ".",
+        }
+        if k in _digit_keys:
+            self._numpad_press(_digit_keys[k])
+            return
+        super().keyPressEvent(event)

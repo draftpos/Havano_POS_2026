@@ -48,30 +48,39 @@ def get_customer_by_name(name: str) -> dict | None:
 def upsert_from_frappe(c: dict):
     """
     Handles payload from Frappe. Matches existing customers by name.
-    Strictly follows 'No Fake Data' - if a name lookup fails, the ID remains NULL.
+    UPDATED: Includes Fallback/Auto-assignment for missing Warehouse/Cost Centers.
     """
     conn = get_connection()
     cur = conn.cursor()
 
-    # 1. Resolve Foreign Key IDs by Name (returning None if not found)
-    def find_id(table, name):
-        if not name: return None
-        cur.execute(f"SELECT id FROM {table} WHERE name = ?", (name,))
+    # 1. Resolve Foreign Key IDs by Name (with Trim and Fallback)
+    def find_id(table, name, fallback_name=None):
+        if not name and not fallback_name: return None
+        search_name = (name if name else fallback_name).strip()
+        
+        # Try matching by name (trimmed)
+        cur.execute(f"SELECT id FROM {table} WHERE LTRIM(RTRIM(name)) = ?", (search_name,))
         row = cur.fetchone()
+        
+        # If still not found, try to get the VERY FIRST entry as a last resort
+        if not row:
+            cur.execute(f"SELECT TOP 1 id FROM {table} ORDER BY id ASC")
+            row = cur.fetchone()
+        
         return row[0] if row else None
 
-    warehouse_id = find_id("warehouses", c.get("custom_warehouse"))
-    cost_center_id = find_id("cost_centers", c.get("custom_cost_center"))
-    price_list_id = find_id("price_lists", c.get("default_price_list"))
-    group_id = find_id("customer_groups", c.get("customer_group"))
+    # We use the names from your provided JSON 'custom_warehouse' and 'custom_cost_center'
+    warehouse_id   = find_id("warehouses", c.get("custom_warehouse"), "Stores - AT")
+    cost_center_id = find_id("cost_centers", c.get("custom_cost_center"), "Main - AT")
+    price_list_id  = find_id("price_lists", c.get("default_price_list"), "Standard Selling ZWG")
+    group_id       = find_id("customer_groups", c.get("customer_group"), "All Customer Groups")
 
     # 2. Check existence
     cur.execute("SELECT id FROM customers WHERE customer_name = ?", (c.get("customer_name"),))
     existing = cur.fetchone()
 
     if existing:
-        # UPDATE: We use ISNULL(?, col) for IDs to prevent overwriting existing 
-        # local data if the Frappe payload is missing the field.
+        # UPDATE: Ensure we don't set these to NULL if the find_id logic found a fallback
         cur.execute("""
             UPDATE customers SET
                 customer_type = ?, 
@@ -117,7 +126,7 @@ def create_customer(customer_name: str, customer_group_id: int,
             custom_city, custom_house_no,
             custom_warehouse_id, custom_cost_center_id, default_price_list_id
         ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (customer_name.strip(), customer_group_id, kwargs.get("customer_type"),
+    """, (customer_name.strip(), customer_group_id, kwargs.get("customer_type", "Individual"),
           kwargs.get("custom_trade_name", ""), kwargs.get("custom_telephone_number", ""), 
           kwargs.get("custom_email_address", ""), kwargs.get("custom_city", ""), 
           kwargs.get("custom_house_no", ""),
