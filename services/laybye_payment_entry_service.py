@@ -1,751 +1,430 @@
 # =============================================================================
-# views/dialogs/laybye_payment_dialog.py  —  Deposit dialog for Laybye flow
+# services/laybye_payment_entry_service.py
 #
-# v3 fixes:
-#   - Numpad fully rewritten: no more "0.00" seed bug, clean digit building
-#   - Backspace and CLR work correctly on all states
-#   - Quick amount buttons replace (not append to) current value
-#   - Discount passed in from cart and stored on accept()
-#   - All outputs exposed after accept():
-#       self.deposit_amount, self.deposit_method, self.deposit_splits
-#       self.deposit_currency, self.delivery_date (ISO str), self.order_type
-#       self.discount_amount, self.discount_percent
-#       self.accepted_customer, self.accepted_company, self.accepted_company_name
+# Creates and syncs Payment Entries for Laybye (Sales Order) deposits.
 #
-# v4 fix:
-#   - _get_default_company() now reads server_company from company_defaults
-#     instead of the local companies table, so the correct ERPNext company
-#     name is used when building the Sales Order payload.
+# The POST payload is built to EXACTLY match the Flutter _syncSinglePaymentEntry
+# implementation:
 #
-# v5 fix:
-#   - Printing wired into _save(): calls print_laybye_deposit(order_id) after
-#     create_sales_order() using services/sales_order_print.py.
-#     order_id must be passed in by the caller via the `order_id` kwarg on
-#     LaybyePaymentDialog, OR set via dlg.set_order_id(id) before accept().
-#   - Content panel centred with max-width wrapper (mirrors payment_dialog.py).
+#   doctype            = 'Payment Entry'
+#   payment_type       = 'Receive'
+#   party_type         = 'Customer'
+#   party              = order.customer_id      (ERPNext customer name / id)
+#   party_name         = order.customer_name
+#   paid_to            = account_paid_to        (company cash/bank account)
+#   paid_to_account_currency   = account_currency
+#   paid_from_account_currency = account_currency
+#   paid_amount        = round(deposit_amount, decimals)
+#   paid_amount_after_tax      = same
+#   received_amount    = round(deposit_amount, decimals)   # same field, base ccy
+#   received_amount_after_tax  = same
+#   reference_no       = deposit_method (or '')
+#   reference_date     = today ISO
+#   remarks            = 'Laybye deposit — <order_no>'
+#   docstatus          = 1  (submit directly)
+#
+# If the sales order has a Frappe Sales Order ref (frappe_ref), a
+# 'references' block is added just like the Flutter code adds a Sales Invoice
+# reference when invoiceOnlineId is set.
 # =============================================================================
 
-from PySide6.QtWidgets import (
-    QDialog, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
-    QPushButton, QLabel, QLineEdit, QFrame, QSizePolicy,
-    QMessageBox, QScrollArea, QComboBox, QDateEdit,
-)
-from PySide6.QtCore import Qt, QLocale, QDate
-from PySide6.QtGui  import QDoubleValidator
+from __future__ import annotations
+import logging
+import requests
+from datetime import date, datetime
 
-NAVY      = "#0d1f3c"
-NAVY_2    = "#162d52"
-NAVY_3    = "#1e3d6e"
-ACCENT    = "#1a5fb4"
-ACCENT_H  = "#1c6dd0"
-WHITE     = "#ffffff"
-OFF_WHITE = "#f5f8fc"
-LIGHT     = "#e4eaf4"
-MID       = "#8fa8c8"
-DARK_TEXT = "#0d1f3c"
-MUTED     = "#5a7a9a"
-BORDER    = "#c8d8ec"
-SUCCESS   = "#1a7a3c"
-SUCCESS_H = "#1f9447"
-DANGER    = "#b02020"
-DANGER_H  = "#cc2828"
-ORANGE    = "#c05a00"
-
-ORDER_TYPES = ["Sales", "Shopping Cart", "Maintenance"]
+log = logging.getLogger("laybye_payment_entry_service")
 
 
-# =============================================================================
-# Data helpers  (unchanged from v4)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-def _get_local_rate(from_ccy: str, to_ccy: str = "USD") -> float:
-    if from_ccy.upper() == to_ccy.upper():
-        return 1.0
-    try:
-        from models.exchange_rate import get_rate
-        r = get_rate(from_ccy, to_ccy)
-        return float(r) if r else 1.0
-    except Exception:
-        return 1.0
+def _get_conn():
+    from database.db import get_connection
+    return get_connection()
 
 
-def _get_default_company() -> dict | None:
-    # ── v4: read server_company from company_defaults first ──────────────────
+def _get_credentials() -> tuple[str, str]:
+    """Return (api_key, api_secret) from company_defaults."""
     try:
         from models.company_defaults import get_defaults
         d = get_defaults() or {}
-        name = d.get("server_company", "").strip()
-        if name:
-            return {"name": name}
+        return d.get("api_key", ""), d.get("api_secret", "")
+    except Exception:
+        return "", ""
+
+
+def _get_host() -> str:
+    try:
+        from services.site_config import get_host_label
+        host = get_host_label()
+        if host and not host.startswith("http"):
+            host = "https://" + host
+        return host.rstrip("/")
+    except Exception:
+        return ""
+
+
+def _get_float_precision() -> int:
+    """Read float precision from company defaults (mirrors Flutter getFloatValue)."""
+    try:
+        from models.company_defaults import get_defaults
+        d = get_defaults() or {}
+        return int(d.get("float_precision", 2) or 2)
+    except Exception:
+        return 2
+
+
+def _get_account_paid_to(company: str, currency: str = "USD") -> tuple[str, str]:
+    """
+    Return (account_name, account_currency) for the company's default
+    cash/bank account that matches the given currency.
+    Falls back to the first cash account found.
+    """
+    try:
+        from models.gl_account import get_all_accounts
+        accounts = get_all_accounts()
+        # Prefer exact currency + company match
+        for a in accounts:
+            if (
+                a.get("company") == company
+                and (a.get("account_currency") or "USD").upper() == currency.upper()
+                and a.get("account_type", "").lower() in ("cash", "bank", "")
+            ):
+                return a.get("account_name") or a.get("name") or "", (a.get("account_currency") or "USD").upper()
+        # Any account for this company
+        for a in accounts:
+            if a.get("company") == company:
+                return a.get("account_name") or a.get("name") or "", (a.get("account_currency") or "USD").upper()
+        # Fallback: first account
+        if accounts:
+            a = accounts[0]
+            return a.get("account_name") or a.get("name") or "", (a.get("account_currency") or "USD").upper()
     except Exception:
         pass
+    return "", "USD"
+
+
+def _ensure_laybye_pe_table():
+    """
+    Ensure the laybye_payment_entries table exists for tracking sync state.
+
+    Columns:
+        id              INT PK IDENTITY
+        sales_order_id  INT  (FK → sales_order.id)
+        order_no        NVARCHAR(100)
+        customer_id     NVARCHAR(255)   (ERPNext customer name)
+        customer_name   NVARCHAR(255)
+        deposit_amount  FLOAT
+        deposit_method  NVARCHAR(100)
+        account_paid_to NVARCHAR(255)
+        account_currency NVARCHAR(20)
+        frappe_so_ref   NVARCHAR(255)   (ERPNext Sales Order name, if synced)
+        frappe_pe_ref   NVARCHAR(255)   (Payment Entry name returned by ERPNext)
+        status          NVARCHAR(50)    DEFAULT 'pending'
+        sync_attempts   INT             DEFAULT 0
+        created_at      NVARCHAR(50)
+        last_attempt_at NVARCHAR(50)
+        error_message   NVARCHAR(MAX)
+    """
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID('laybye_payment_entries') AND type = 'U'"
+    )
+    if cur.fetchone() is None:
+        cur.execute("""
+            CREATE TABLE laybye_payment_entries (
+                id               INT           PRIMARY KEY IDENTITY(1,1),
+                sales_order_id   INT           NOT NULL,
+                order_no         NVARCHAR(100) NOT NULL DEFAULT '',
+                customer_id      NVARCHAR(255) NOT NULL DEFAULT '',
+                customer_name    NVARCHAR(255) NOT NULL DEFAULT '',
+                deposit_amount   FLOAT         NOT NULL DEFAULT 0,
+                deposit_method   NVARCHAR(100) NOT NULL DEFAULT '',
+                account_paid_to  NVARCHAR(255) NOT NULL DEFAULT '',
+                account_currency NVARCHAR(20)  NOT NULL DEFAULT 'USD',
+                frappe_so_ref    NVARCHAR(255) NOT NULL DEFAULT '',
+                frappe_pe_ref    NVARCHAR(255) NOT NULL DEFAULT '',
+                status           NVARCHAR(50)  NOT NULL DEFAULT 'pending',
+                sync_attempts    INT           NOT NULL DEFAULT 0,
+                created_at       NVARCHAR(50)  NOT NULL DEFAULT '',
+                last_attempt_at  NVARCHAR(50)  NOT NULL DEFAULT '',
+                error_message    NVARCHAR(MAX) NOT NULL DEFAULT ''
+            )
+        """)
+        conn.commit()
+        log.info("Created table: laybye_payment_entries")
+    return conn
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def create_laybye_payment_entry(order: dict) -> int | None:
+    """
+    Queue a Payment Entry record for a Laybye deposit.
+    Called immediately after the Sales Order is saved locally.
+
+    Parameters
+    ----------
+    order : dict
+        A sales_order row (as returned by get_order_by_id), containing at
+        minimum: id, order_no, customer_id, customer_name, deposit_amount,
+        deposit_method, frappe_ref (may be empty).
+
+    Returns
+    -------
+    The new laybye_payment_entries.id, or None on failure.
+    """
+    if not order:
+        return None
+
+    deposit_amount = float(order.get("deposit_amount") or 0)
+    if deposit_amount <= 0:
+        log.info("Skipping PE queue — deposit_amount is 0 for order %s", order.get("order_no"))
+        return None
+
+    company = order.get("company") or ""
+    deposit_method = order.get("deposit_method") or ""
+
+    # Determine account_paid_to from GL accounts
+    account_paid_to, account_currency = _get_account_paid_to(company)
 
     try:
-        from models.company import get_all_companies
-        rows = get_all_companies()
-        return rows[0] if rows else None
-    except Exception:
+        conn = _ensure_laybye_pe_table()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO laybye_payment_entries
+                (sales_order_id, order_no, customer_id, customer_name,
+                 deposit_amount, deposit_method,
+                 account_paid_to, account_currency,
+                 frappe_so_ref, status, created_at)
+            OUTPUT INSERTED.id
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            int(order["id"]),
+            order.get("order_no") or "",
+            order.get("customer_id") or order.get("customer_name") or "",
+            order.get("customer_name") or "",
+            deposit_amount,
+            deposit_method,
+            account_paid_to,
+            account_currency,
+            order.get("frappe_ref") or "",
+            "pending",
+            datetime.now().isoformat(timespec="seconds"),
+        ))
+        pe_id = cur.fetchone()[0]
+        conn.commit()
+        log.info("Queued laybye PE id=%d for order %s deposit=%.2f",
+                 pe_id, order.get("order_no"), deposit_amount)
+        return pe_id
+    except Exception as exc:
+        log.error("create_laybye_payment_entry failed: %s", exc)
         return None
 
 
-def _load_payment_methods(company: str) -> list[dict]:
+def sync_laybye_payment_entries():
+    """
+    Background daemon call — push all pending laybye payment entries to ERPNext.
+    Matches the Flutter _syncSinglePaymentEntry payload EXACTLY.
+    """
     try:
-        from models.gl_account import get_all_accounts
-        all_accts = get_all_accounts()
-        accts = [a for a in all_accts if a.get("company") == company] or all_accts
-    except Exception:
-        accts = []
+        conn = _ensure_laybye_pe_table()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, sales_order_id, order_no, customer_id, customer_name,
+                   deposit_amount, deposit_method,
+                   account_paid_to, account_currency,
+                   frappe_so_ref, sync_attempts
+            FROM   laybye_payment_entries
+            WHERE  status IN ('pending', 'retry')
+            AND    sync_attempts < 5
+            ORDER  BY id ASC
+        """)
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description]
+        pending = [dict(zip(cols, r)) for r in rows]
+    except Exception as exc:
+        log.error("sync_laybye_payment_entries — DB read failed: %s", exc)
+        return
 
-    seen, result = set(), []
-    for a in accts:
-        curr  = (a.get("account_currency") or "USD").upper()
-        atype = (a.get("account_type") or a.get("name") or "Cash").strip()
-        key   = (atype.lower(), curr)
-        if key in seen:
-            continue
-        seen.add(key)
-        rate = 1.0
+    if not pending:
+        return
+
+    api_key, api_secret = _get_credentials()
+    host = _get_host()
+
+    if not api_key or not host:
+        log.warning("sync_laybye_payment_entries — missing credentials or host, skipping.")
+        return
+
+    for pe in pending:
+        _sync_single(pe, api_key, api_secret, host)
+
+
+def _sync_single(pe: dict, api_key: str, api_secret: str, host: str):
+    """
+    Push one pending laybye payment entry to ERPNext.
+
+    The payload is constructed to match the Flutter _syncSinglePaymentEntry
+    implementation field-for-field.
+    """
+    pe_id = pe["id"]
+    order_no = pe.get("order_no") or ""
+    conn = _get_conn()
+
+    # ── Increment sync attempts first (mirrors Flutter incrementSyncAttempts) ──
+    try:
+        conn.execute(
+            """
+            UPDATE laybye_payment_entries
+            SET    sync_attempts    = sync_attempts + 1,
+                   last_attempt_at  = ?
+            WHERE  id = ?
+            """,
+            (datetime.now().isoformat(timespec="seconds"), pe_id),
+        )
+        conn.commit()
+    except Exception as exc:
+        log.warning("Could not increment sync_attempts for PE %d: %s", pe_id, exc)
+
+    # ── Float precision (mirrors Flutter getFloatValue) ──────────────────────
+    decimals = _get_float_precision()
+
+    def _round(value: float) -> float:
+        return round(value, decimals)
+
+    deposit_amount   = float(pe.get("deposit_amount") or 0)
+    account_paid_to  = pe.get("account_paid_to") or ""
+    account_currency = (pe.get("account_currency") or "USD").upper()
+    customer_id      = pe.get("customer_id") or ""
+    customer_name    = pe.get("customer_name") or ""
+    deposit_method   = pe.get("deposit_method") or ""
+    frappe_so_ref    = pe.get("frappe_so_ref") or ""
+
+    # ── Build payload — EXACT mirror of Flutter _syncSinglePaymentEntry ───────
+    payment_data: dict = {
+        "doctype":                      "Payment Entry",
+        "payment_type":                 "Receive",
+        "party_type":                   "Customer",
+        "party":                        customer_id,
+        "party_name":                   customer_name,
+        "paid_to":                      account_paid_to,   # Company account receiving payment
+        "paid_to_account_currency":     account_currency,
+        "paid_from_account_currency":   account_currency,
+        "paid_amount":                  _round(deposit_amount),   # Amount in payment currency
+        "paid_amount_after_tax":        _round(deposit_amount),
+        "received_amount":              _round(deposit_amount),   # Amount in account currency
+        "received_amount_after_tax":    _round(deposit_amount),
+        "reference_no":                 deposit_method or "",
+        "reference_date":               date.today().isoformat(),
+        "remarks":                      f"Laybye deposit — {order_no}" if order_no else "Payment from POS",
+        "docstatus":                    1,   # Submit directly
+    }
+
+    # ── Add Sales Order reference if the SO has been synced to ERPNext ────────
+    # (mirrors Flutter: add 'references' block when invoiceOnlineId is set)
+    if frappe_so_ref:
+        # allocated_amount = deposit in base currency (mirrors Flutter baseAmount usage)
+        allocated_amount = _round(deposit_amount)
+        payment_data["references"] = [
+            {
+                "reference_doctype": "Sales Order",
+                "reference_name":    frappe_so_ref,
+                "allocated_amount":  allocated_amount,
+            }
+        ]
+        log.info("PE %d — allocated_amount: %.4f (SO ref: %s)", pe_id, allocated_amount, frappe_so_ref)
+
+    log.info("PE %d — payload: %s", pe_id, payment_data)
+
+    # ── POST to ERPNext ───────────────────────────────────────────────────────
+    url = f"{host}/api/resource/Payment Entry"
+    headers = {
+        "Authorization": f"token {api_key}:{api_secret}",
+        "Content-Type":  "application/json",
+    }
+
+    try:
+        response = requests.post(url, json=payment_data, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        frappe_pe_name = (data.get("data") or {}).get("name") or ""
+
+        # ── Mark as synced ────────────────────────────────────────────────────
+        conn.execute(
+            """
+            UPDATE laybye_payment_entries
+            SET    status          = 'synced',
+                   frappe_pe_ref   = ?,
+                   last_attempt_at = ?
+            WHERE  id = ?
+            """,
+            (frappe_pe_name, datetime.now().isoformat(timespec="seconds"), pe_id),
+        )
+        conn.commit()
+        log.info("PE %d synced → Frappe PE: %s", pe_id, frappe_pe_name)
+
+    except requests.HTTPError as exc:
+        body = ""
         try:
-            from models.exchange_rate import get_rate
-            r = get_rate(curr, "USD")
-            if r:
-                rate = float(r)
+            body = exc.response.text[:500]
         except Exception:
             pass
-        result.append({
-            "label":       a.get("account_name") or a.get("name") or atype,
-            "currency":    curr,
-            "rate_to_usd": rate,
-            "is_credit":   bool(a.get("is_credit") or a.get("credit_account") or False),
-        })
-
-    if not result:
-        result = [
-            {"label": "Cash",       "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
-            {"label": "Cash (ZIG)", "currency": "ZIG", "rate_to_usd": _get_local_rate("ZIG"), "is_credit": False},
-            {"label": "Card",       "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
-            {"label": "Bank / EFT", "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
-        ]
-    return result
-
-
-# =============================================================================
-# Widget helpers  (unchanged from v4)
-# =============================================================================
-
-def _hr():
-    ln = QFrame()
-    ln.setFrameShape(QFrame.HLine)
-    ln.setStyleSheet(f"background:{BORDER}; border:none;")
-    ln.setFixedHeight(1)
-    return ln
-
-
-def _method_btn_style(active: bool) -> str:
-    if active:
-        return (f"QPushButton {{ background:{ACCENT}; color:{WHITE}; border:none;"
-                f" border-radius:6px; font-size:12px; font-weight:bold;"
-                f" text-align:left; padding:0 12px; }}"
-                f"QPushButton:hover {{ background:{ACCENT_H}; }}")
-    return (f"QPushButton {{ background:{WHITE}; color:{DARK_TEXT};"
-            f" border:1px solid {BORDER}; border-radius:6px;"
-            f" font-size:12px; text-align:left; padding:0 12px; }}"
-            f"QPushButton:hover {{ background:{LIGHT}; }}")
-
-
-def _field_style(active: bool, has_value: bool = False) -> str:
-    if active:
-        return (f"QLineEdit {{ background:{WHITE}; color:{DARK_TEXT};"
-                f" border:2px solid {ACCENT}; border-radius:6px;"
-                f" font-size:14px; font-weight:bold; padding:0 10px; }}")
-    if has_value:
-        return (f"QLineEdit {{ background:{WHITE}; color:{DARK_TEXT};"
-                f" border:1px solid {BORDER}; border-radius:6px;"
-                f" font-size:14px; padding:0 10px; }}")
-    return (f"QLineEdit {{ background:transparent; color:{DARK_TEXT};"
-            f" border:none; font-size:14px; padding:0 10px; }}")
-
-
-def _numpad_btn(text, kind="digit"):
-    btn = QPushButton(text)
-    btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-    btn.setCursor(Qt.PointingHandCursor)
-    btn.setFocusPolicy(Qt.NoFocus)
-    styles = {
-        "digit": (WHITE,   LIGHT,    DARK_TEXT),
-        "quick": (NAVY_3,  NAVY_2,   WHITE),
-        "del":   (NAVY_2,  NAVY_3,   WHITE),
-        "clear": (DANGER,  DANGER_H, WHITE),
-    }
-    bg, hov, fg = styles.get(kind, styles["digit"])
-    btn.setStyleSheet(
-        f"QPushButton {{ background:{bg}; color:{fg}; border:1px solid {BORDER};"
-        f" border-radius:6px; font-size:15px; font-weight:bold; }}"
-        f"QPushButton:hover {{ background:{hov}; }}"
-        f"QPushButton:pressed {{ background:{NAVY_3}; color:{WHITE}; }}")
-    return btn
-
-
-def _action_btn(text, color, hover, height=46):
-    btn = QPushButton(text)
-    btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-    btn.setFixedHeight(height)
-    btn.setCursor(Qt.PointingHandCursor)
-    btn.setFocusPolicy(Qt.NoFocus)
-    btn.setStyleSheet(
-        f"QPushButton {{ background:{color}; color:{WHITE}; border:none;"
-        f" border-radius:6px; font-size:13px; font-weight:bold; }}"
-        f"QPushButton:hover {{ background:{hover}; }}")
-    return btn
-
-
-# =============================================================================
-# LAYBYE PAYMENT DIALOG
-# =============================================================================
-
-class LaybyePaymentDialog(QDialog):
-    def __init__(
-        self,
-        parent=None,
-        total: float = 0.0,
-        customer: dict | None = None,
-        discount_amount: float = 0.0,
-        discount_percent: float = 0.0,
-    ):
-        super().__init__(parent)
-        self.total = total
-        self._discount_amount  = discount_amount
-        self._discount_percent = discount_percent
-
-        # ── public outputs (unchanged) ────────────────────────────────────────
-        self.deposit_amount        = 0.0
-        self.deposit_method        = ""
-        self.deposit_splits        = []
-        self.deposit_currency      = "USD"
-        self.delivery_date         = ""
-        self.order_type            = "Sales"
-        self.discount_amount       = discount_amount
-        self.discount_percent      = discount_percent
-        self.accepted_customer     = None
-        self.accepted_company      = None
-        self.accepted_company_name = ""
-
-        # v5: the caller sets this after create_sales_order() so _print() knows
-        # which order to pass to print_laybye_deposit().
-        # Can also be supplied via set_order_id() before accept() is called.
-        self._order_id: int | None = None
-
-        self._customer = customer
-        self._company  = _get_default_company()
-
-        co_name = self._company.get("name", "") if self._company else ""
-        self._methods: list[dict]           = _load_payment_methods(co_name)
-        self._method_rows: dict[str, tuple] = {}
-        self._active_method: str            = self._methods[0]["label"] if self._methods else ""
-        self._numpad_buf: dict[str, str]    = {m["label"]: "" for m in self._methods}
-
-        self.setWindowTitle("Laybye — Deposit & Order Details")
-        self.setMinimumSize(920, 600)
-        self.setModal(True)
-        self.setWindowState(Qt.WindowMaximized)
-
-        self._build_ui()
-        if self._active_method:
-            self._activate_method(self._active_method)
-
-    # ── v5 helper: caller sets this after create_sales_order() ───────────────
-    def set_order_id(self, order_id: int) -> None:
-        self._order_id = order_id
-
-    # =========================================================================
-    # Build UI
-    # =========================================================================
-
-    def _build_ui(self):
-        self.setStyleSheet(f"""
-            QDialog  {{ background:{OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}
-            QLabel   {{ background:transparent; color:{DARK_TEXT}; font-size:13px; }}
-            QWidget  {{ background:{OFF_WHITE}; }}
-        """)
-        outer = QVBoxLayout(self)
-        outer.setSpacing(0)
-        outer.setContentsMargins(0, 0, 0, 0)
-
-        # ── header ────────────────────────────────────────────────────────────
-        hdr = QWidget()
-        hdr.setFixedHeight(52)
-        hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
-        hl = QHBoxLayout(hdr)
-        hl.setContentsMargins(28, 0, 28, 0)
-
-        title = QLabel("Laybye  —  Deposit")
-        title.setStyleSheet(
-            f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;")
-        badge = QLabel("🛍  LAYBYE")
-        badge.setStyleSheet(
-            f"background:{ORANGE}; color:{WHITE}; border-radius:5px;"
-            f" font-size:10px; font-weight:bold; padding:3px 10px;")
-
-        zwg_rate  = _get_local_rate("USD", "ZWG")
-        rate_pill = QLabel(f"1 USD = {zwg_rate:,.2f} ZWG")
-        rate_pill.setStyleSheet(
-            f"color:{MUTED}; font-size:10px; background:{LIGHT};"
-            f" border-radius:4px; padding:2px 8px;")
-
-        hint = QLabel("Deposit optional  ·  Enter to save  ·  Esc to cancel")
-        hint.setStyleSheet(f"color:{MUTED}; font-size:10px; background:transparent;")
-        hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-        hl.addWidget(title)
-        hl.addSpacing(10)
-        hl.addWidget(badge)
-        hl.addSpacing(12)
-        hl.addWidget(rate_pill)
-        hl.addStretch()
-        hl.addWidget(hint)
-        outer.addWidget(hdr)
-
-        # ── customer strip ────────────────────────────────────────────────────
-        cust_strip = QWidget()
-        cust_strip.setFixedHeight(34)
-        cust_strip.setStyleSheet(f"background:{NAVY_2};")
-        cs = QHBoxLayout(cust_strip)
-        cs.setContentsMargins(28, 0, 28, 0)
-
-        cust_icon    = QLabel("👤")
-        cust_name_lbl = QLabel((self._customer or {}).get("customer_name", "Unknown"))
-        cust_name_lbl.setStyleSheet(
-            f"color:{WHITE}; font-size:13px; font-weight:bold; background:transparent;")
-
-        cs.addWidget(cust_icon)
-        cs.addWidget(cust_name_lbl)
-        cs.addStretch()
-        if self._discount_amount > 0:
-            disc_lbl = QLabel(
-                f"Discount: {self._discount_percent:.1f}%  "
-                f"(−USD {self._discount_amount:.2f})")
-            disc_lbl.setStyleSheet(
-                f"color:{ORANGE}; font-size:11px; font-weight:bold; background:transparent;")
-            cs.addWidget(disc_lbl)
-        outer.addWidget(cust_strip)
-
-        # ── centred content wrapper (mirrors payment_dialog.py) ───────────────
-        # Left + right panels sit inside a max-width centre column so they
-        # don't stretch absurdly on wide screens.
-        outer_h = QHBoxLayout()
-        outer_h.setContentsMargins(0, 0, 0, 0)
-        outer_h.setSpacing(0)
-
-        center = QWidget()
-        center.setStyleSheet(f"background:{OFF_WHITE};")
-        center.setMaximumWidth(1200)
-        center_v = QVBoxLayout(center)
-        center_v.setContentsMargins(32, 24, 32, 24)
-        center_v.setSpacing(0)
-
-        content = QHBoxLayout()
-        content.setSpacing(28)
-
-        content.addLayout(self._build_left(),  stretch=5)
-
-        vline = QFrame()
-        vline.setFrameShape(QFrame.VLine)
-        vline.setStyleSheet(f"background:{BORDER}; border:none;")
-        vline.setFixedWidth(1)
-        content.addWidget(vline)
-
-        content.addLayout(self._build_right(), stretch=4)
-        center_v.addLayout(content)
-
-        outer_h.addStretch(1)
-        outer_h.addWidget(center, stretch=10)
-        outer_h.addStretch(1)
-
-        wrap = QWidget()
-        wrap.setStyleSheet(f"background:{OFF_WHITE};")
-        wrap.setLayout(outer_h)
-        outer.addWidget(wrap, stretch=1)
-
-    # =========================================================================
-    # Left panel  (unchanged logic, preserved exactly)
-    # =========================================================================
-
-    def _build_left(self):
-        vbox = QVBoxLayout()
-        vbox.setSpacing(10)
-
-        cards = QHBoxLayout()
-        for label, val, color in [
-            ("ORDER TOTAL", f"USD {self.total:.2f}", ORANGE),
-            ("DEPOSIT",     "USD 0.00",              BORDER),
-        ]:
-            f = QFrame()
-            f.setFixedHeight(72)
-            f.setStyleSheet(
-                f"QFrame {{ background:{WHITE}; border:2px solid {color}; border-radius:8px; }}")
-            fl = QVBoxLayout(f)
-            fl.setContentsMargins(14, 6, 14, 6)
-            cap = QLabel(label)
-            cap.setAlignment(Qt.AlignCenter)
-            cap.setStyleSheet(
-                f"color:{MUTED if label == 'DEPOSIT' else color};"
-                f" font-size:9px; font-weight:bold;")
-            v = QLabel(val)
-            v.setAlignment(Qt.AlignCenter)
-            v.setStyleSheet(
-                f"color:{DARK_TEXT}; font-size:18px; font-weight:bold;"
-                f" font-family:'Courier New';")
-            fl.addWidget(cap)
-            fl.addWidget(v)
-            cards.addWidget(f, 1)
-            if label == "DEPOSIT":
-                self._dep_card = f
-                self._dep_lbl  = v
-
-        vbox.addLayout(cards)
-        vbox.addWidget(_hr())
-
-        # column headers
-        hrw = QHBoxLayout()
-        hrw.setContentsMargins(0, 0, 0, 0)
-        for txt, st, al in [
-            ("MODE OF PAYMENT", 4, Qt.AlignLeft),
-            ("CCY",             1, Qt.AlignCenter),
-            ("DEPOSIT",         3, Qt.AlignRight),
-            ("BALANCE DUE",     4, Qt.AlignRight),
-        ]:
-            l = QLabel(txt)
-            l.setStyleSheet(f"color:{MUTED}; font-size:9px; font-weight:bold;")
-            l.setAlignment(al)
-            hrw.addWidget(l, st)
-        vbox.addLayout(hrw)
-
-        sw = QWidget()
-        sl = QVBoxLayout(sw)
-        sl.setSpacing(4)
-        for method in self._methods:
-            lbl = method["label"]
-            rw  = QWidget()
-            rw.setFixedHeight(40)
-            rl  = QHBoxLayout(rw)
-            rl.setContentsMargins(0, 0, 0, 0)
-
-            mb = QPushButton(f"  {lbl}")
-            mb.setFixedHeight(32)
-            mb.setStyleSheet(_method_btn_style(False))
-            mb.clicked.connect(lambda _, m=lbl: self._activate_method(m))
-
-            cb = QLabel(method["currency"])
-            cb.setFixedSize(46, 32)
-            cb.setAlignment(Qt.AlignCenter)
-            cb.setStyleSheet(
-                f"background:{LIGHT}; color:{ACCENT}; border:1px solid {BORDER};"
-                f" border-radius:6px; font-size:10px; font-weight:bold;")
-
-            ae = QLineEdit()
-            ae.setFixedHeight(32)
-            ae.setReadOnly(True)
-            ae.setAlignment(Qt.AlignRight)
-            ae.setStyleSheet(_field_style(False))
-
-            bal = QLabel(f"USD {self.total:.2f}")
-            bal.setFixedHeight(32)
-            bal.setAlignment(Qt.AlignRight)
-            bal.setStyleSheet(
-                f"color:{DARK_TEXT}; font-size:11px; font-weight:bold;"
-                f" background:{WHITE}; border:1px solid {BORDER};"
-                f" border-radius:6px; padding:0 10px;")
-
-            rl.addWidget(mb,  4)
-            rl.addWidget(cb,  1)
-            rl.addWidget(ae,  3)
-            rl.addWidget(bal, 4)
-            sl.addWidget(rw)
-            self._method_rows[lbl] = (mb, ae, bal)
-
-        sl.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(sw)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("background:transparent;")
-        vbox.addWidget(scroll, 1)
-        return vbox
-
-    # =========================================================================
-    # Right panel  — numpad + metadata + action buttons
-    # =========================================================================
-
-    def _build_right(self):
-        vbox = QVBoxLayout()
-        vbox.setSpacing(8)
-
-        # ── numpad ────────────────────────────────────────────────────────────
-        grid = QGridLayout()
-        grid.setSpacing(6)
-
-        for col, val in enumerate([50, 100, 200]):
-            b = _numpad_btn(f"${val}", "quick")
-            b.clicked.connect(lambda _, v=val: self._numpad_quick(v))
-            grid.addWidget(b, 0, col)
-
-        digits = [
-            ("7", 1, 0), ("8", 1, 1), ("9", 1, 2),
-            ("4", 2, 0), ("5", 2, 1), ("6", 2, 2),
-            ("1", 3, 0), ("2", 3, 1), ("3", 3, 2),
-            (".", 4, 0), ("0", 4, 1), ("00", 4, 2),
-        ]
-        for txt, r, c in digits:
-            b = _numpad_btn(txt)
-            b.clicked.connect(lambda _, t=txt: self._numpad_press(t))
-            grid.addWidget(b, r, c)
-
-        db = _numpad_btn("⌫", "del")
-        db.clicked.connect(self._numpad_back)
-        grid.addWidget(db, 5, 0)
-
-        cb = _numpad_btn("CLR", "clear")
-        cb.clicked.connect(self._numpad_clear)
-        grid.addWidget(cb, 5, 1, 1, 2)
-
-        for r in range(6):
-            grid.setRowStretch(r, 1)
-        for c in range(3):
-            grid.setColumnStretch(c, 1)
-
-        vbox.addLayout(grid, 1)
-        vbox.addWidget(_hr())
-
-        # ── delivery date + order type ─────────────────────────────────────
-        self._delivery_date = QDateEdit()
-        self._delivery_date.setCalendarPopup(True)
-        self._delivery_date.setDate(QDate.currentDate().addDays(7))
-        self._delivery_date.setFixedHeight(32)
-        self._delivery_date.setStyleSheet(
-            f"QDateEdit {{ background:{WHITE}; border:1px solid {BORDER};"
-            f" border-radius:5px; padding:0 8px; }}")
-
-        self._order_type = QComboBox()
-        self._order_type.addItems(ORDER_TYPES)
-        self._order_type.setFixedHeight(32)
-        self._order_type.setStyleSheet(
-            f"QComboBox {{ background:{WHITE}; border:1px solid {BORDER};"
-            f" border-radius:5px; padding:0 8px; }}")
-
-        vbox.addWidget(QLabel("Delivery Date:"))
-        vbox.addWidget(self._delivery_date)
-        vbox.addWidget(QLabel("Order Type:"))
-        vbox.addWidget(self._order_type)
-        vbox.addWidget(_hr())
-
-        # ── action buttons: Save + Print (side-by-side) ───────────────────────
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-
-        save_btn = _action_btn("🛍  Save Laybye  (Enter)", ORANGE, "#d96a00", 52)
-        save_btn.clicked.connect(self._save)
-
-        print_btn = _action_btn("🖨  Print Slip  (F2)", NAVY_2, NAVY_3, 52)
-        print_btn.clicked.connect(self._print_slip)
-
-        btn_row.addWidget(save_btn)
-        btn_row.addWidget(print_btn)
-        vbox.addLayout(btn_row)
-
-        return vbox
-
-    # =========================================================================
-    # Method / numpad logic  (unchanged from v4)
-    # =========================================================================
-
-    def _activate_method(self, label: str):
-        self._active_method = label
-        for lbl, (mb, ae, _) in self._method_rows.items():
-            active = (lbl == label)
-            mb.setStyleSheet(_method_btn_style(active))
-            ae.setStyleSheet(_field_style(active, bool(self._numpad_buf.get(lbl, ""))))
-            if active:
-                ae.setText(self._numpad_buf.get(lbl, ""))
-
-    def _numpad_press(self, key: str):
-        buf = self._numpad_buf.get(self._active_method, "")
-        if key == "." and "." in buf:
-            return
-        if key == "00":
-            if not buf:
-                return
-            if "." in buf:
-                if len(buf.split(".")[1]) < 2:
-                    buf = (buf + "00")[:buf.index(".") + 3]
-            else:
-                if len(buf) < 7:
-                    buf += "00"
-        else:
-            if "." in buf:
-                if len(buf.split(".")[1]) < 2:
-                    buf += key
-            else:
-                if len(buf) < 8:
-                    buf = (buf + key).lstrip("0") or key
-        self._set_buf(buf)
-
-    def _numpad_back(self):
-        buf = self._numpad_buf.get(self._active_method, "")
-        self._set_buf(buf[:-1])
-
-    def _numpad_clear(self):
-        self._set_buf("")
-
-    def _numpad_quick(self, amt: int):
-        self._set_buf(str(amt))
-
-    def _set_buf(self, value: str):
-        self._numpad_buf[self._active_method] = value
-        _, ae, _ = self._method_rows[self._active_method]
-        ae.setText(value)
-        self._refresh_totals()
-
-    def _refresh_totals(self):
-        paid = 0.0
-        for lbl, val in self._numpad_buf.items():
-            rate = 1.0
-            for m in self._methods:
-                if m["label"] == lbl:
-                    rate = m["rate_to_usd"]
-                    break
+        error_msg = f"HTTP {exc.response.status_code}: {body}"
+        log.error("PE %d HTTP error: %s", pe_id, error_msg)
+        _mark_failed(conn, pe_id, error_msg, pe.get("sync_attempts", 0) + 1)
+
+    except Exception as exc:
+        error_msg = str(exc)[:500]
+        log.error("PE %d sync error: %s", pe_id, error_msg)
+        _mark_failed(conn, pe_id, error_msg, pe.get("sync_attempts", 0) + 1)
+
+
+def _mark_failed(conn, pe_id: int, error_msg: str, attempts: int):
+    """Set status to 'retry' (< 5 attempts) or 'failed' (≥ 5)."""
+    status = "failed" if attempts >= 5 else "retry"
+    try:
+        conn.execute(
+            """
+            UPDATE laybye_payment_entries
+            SET    status          = ?,
+                   error_message   = ?,
+                   last_attempt_at = ?
+            WHERE  id = ?
+            """,
+            (status, error_msg, datetime.now().isoformat(timespec="seconds"), pe_id),
+        )
+        conn.commit()
+    except Exception as exc:
+        log.error("_mark_failed: could not update PE %d: %s", pe_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Background daemon (called from MainWindow startup)
+# ---------------------------------------------------------------------------
+
+def start_laybye_pe_sync_daemon():
+    """
+    Start a background thread that polls for pending laybye payment entries
+    every 60 seconds and pushes them to ERPNext.
+    """
+    import threading
+    import time
+
+    def _loop():
+        while True:
             try:
-                paid += (float(val) if val else 0.0) * rate
-            except Exception:
-                pass
+                sync_laybye_payment_entries()
+            except Exception as exc:
+                log.error("laybye_pe_sync_daemon error: %s", exc)
+            time.sleep(60)
 
-        bal   = max(self.total - paid, 0.0)
-        self._dep_lbl.setText(f"USD  {paid:.2f}")
-        color = SUCCESS if paid > 0.005 else BORDER
-        self._dep_card.setStyleSheet(
-            f"QFrame {{ background:{WHITE}; border:2px solid {color}; border-radius:8px; }}")
-
-        for lbl, (mb, ae, bl) in self._method_rows.items():
-            curr = "USD"
-            for m in self._methods:
-                if m["label"] == lbl:
-                    curr = m["currency"]
-                    break
-            r = _get_local_rate("USD", curr)
-            bl.setText(f"{curr}  {bal * r:,.2f}")
-
-    # =========================================================================
-    # Actions
-    # =========================================================================
-
-    def _collect_paid(self) -> float:
-        paid = 0.0
-        for lbl, val in self._numpad_buf.items():
-            rate = 1.0
-            for m in self._methods:
-                if m["label"] == lbl:
-                    rate = m["rate_to_usd"]
-                    break
-            paid += (float(val) if val else 0.0) * rate
-        return paid
-
-    def _save(self):
-        paid = self._collect_paid()
-
-        if paid > self.total + 0.005:
-            QMessageBox.warning(self, "Overpayment", "Deposit exceeds total.")
-            return
-
-        self.deposit_amount        = paid
-        self.deposit_method        = self._active_method
-        self.delivery_date         = self._delivery_date.date().toString("yyyy-MM-dd")
-        self.order_type            = self._order_type.currentText()
-        self.accepted_customer     = self._customer
-        self.accepted_company      = self._company
-        self.accepted_company_name = (
-            self._company.get("name", "") if self._company else "")
-        self.accept()
-
-    def _print_slip(self):
-        """
-        Print a laybye deposit slip.
-
-        Two-phase usage
-        ---------------
-        Phase A — dialog is still open (caller hasn't called create_sales_order yet):
-            The button is labelled "Print Slip".  If _order_id is not yet set we
-            save first, then let the caller create the order and call
-            set_order_id() + _do_print().  In practice the caller should just
-            call _save() then create the order, then call set_order_id() and
-            trigger the print from outside.  Here we handle the simpler case:
-            order already created before the button is pressed.
-
-        Phase B — order_id already known (caller set it before showing dialog,
-            or this method is called programmatically after accept()):
-            We print immediately.
-
-        In most POS flows the caller does:
-            if dlg.exec() == QDialog.Accepted:
-                order_id = create_sales_order(...)
-                print_laybye_deposit(order_id)   # ← call directly, simplest
-        so this button is a convenience for re-prints while the dialog is open.
-        """
-        if self._order_id is None:
-            # No order created yet — save first so caller can get the id.
-            QMessageBox.information(
-                self, "Print Slip",
-                "Save the laybye first, then reprint from the order list.\n\n"
-                "Tip: the slip is printed automatically when you press Save."
-            )
-            return
-        self._do_print(self._order_id)
-
-    def _do_print(self, order_id: int) -> None:
-        """Trigger printing_service via sales_order_print — same pattern as sale.py."""
-        try:
-            from services.sales_order_print import print_laybye_deposit
-            ok = print_laybye_deposit(order_id)
-            if not ok:
-                QMessageBox.warning(
-                    self, "Print",
-                    "No active printers found or printing failed.\n"
-                    "Check hardware settings.")
-        except Exception as exc:
-            QMessageBox.warning(self, "Print Error", str(exc))
-
-    # =========================================================================
-    # Keyboard  (unchanged from v4)
-    # =========================================================================
-
-    def keyPressEvent(self, event):
-        k = event.key()
-        if k in (Qt.Key_Return, Qt.Key_Enter):
-            self._save()
-            return
-        if k == Qt.Key_Escape:
-            self.reject()
-            return
-        if k == Qt.Key_F2:
-            self._print_slip()
-            return
-        if k == Qt.Key_Backspace:
-            self._numpad_back()
-            return
-        if k == Qt.Key_Delete:
-            self._numpad_clear()
-            return
-
-        focused = self.focusWidget()
-        if isinstance(focused, (QDateEdit, QComboBox)):
-            super().keyPressEvent(event)
-            return
-
-        _digit_keys = {
-            Qt.Key_0: "0", Qt.Key_1: "1", Qt.Key_2: "2", Qt.Key_3: "3",
-            Qt.Key_4: "4", Qt.Key_5: "5", Qt.Key_6: "6", Qt.Key_7: "7",
-            Qt.Key_8: "8", Qt.Key_9: "9", Qt.Key_Period: ".", Qt.Key_Comma: ".",
-        }
-        if k in _digit_keys:
-            self._numpad_press(_digit_keys[k])
-            return
-        super().keyPressEvent(event)
+    t = threading.Thread(target=_loop, daemon=True, name="laybye_pe_sync")
+    t.start()
+    log.info("Laybye Payment Entry sync daemon started.")
+    return t

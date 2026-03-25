@@ -1,18 +1,46 @@
 # =============================================================================
 # services/sales_order_print.py  —  Sales Order / Laybye receipt printing
 #
-# Drop-in alongside sale.py.  Zero changes to sale.py or payment_dialog.py.
+# Produces a receipt that is visually and structurally distinct from a normal
+# POS sales invoice:
+#
+#   doc_type = "sales_order"   → C# PrintingManager routes to the SO template
+#   receiptType                → "Sales Order"  |  "Laybye Deposit"
+#
+# What appears on the printed slip:
+#   ┌─────────────────────────────────────┐
+#   │        [Company Header]             │
+#   │   *** SALES ORDER ***               │  ← large heading, not "TAX INVOICE"
+#   │   Order No: SO-0042                 │
+#   │   Order Date: 2025-07-01            │
+#   │   Delivery Date: 2025-07-15         │  ← if set
+#   │   Status: Confirmed                 │
+#   │   Customer: John Doe                │
+#   ├─────────────────────────────────────┤
+#   │   # | Item          | Qty | Amount  │
+#   │   1 | Widget A      |   2 | 10.00   │
+#   │   2 | Widget B      |   1 |  5.00   │
+#   ├─────────────────────────────────────┤
+#   │   Order Total:   USD 15.00          │  ← multiCurrencyDetails rows
+#   │   Deposit Paid:  USD  5.00          │
+#   │   Balance Due:   USD 10.00          │
+#   ├─────────────────────────────────────┤
+#   │   Payment Method: EcoCash           │
+#   ├─────────────────────────────────────┤
+#   │   TERMS & CONDITIONS                │  ← salesOrderTerms block
+#   │   1. This Sales Order is not a ...  │
+#   │   2. Goods remain the property …    │
+#   │   …                                 │
+#   ├─────────────────────────────────────┤
+#   │   [footer text]                     │
+#   └─────────────────────────────────────┘
 #
 # Public API
 # ----------
-#   print_sales_order(order_id)          — print the full order receipt
-#   print_laybye_deposit(order_id)       — print a deposit confirmation slip
+#   print_sales_order(order_id)      — full Sales Order slip
+#   print_laybye_deposit(order_id)   — Laybye Deposit confirmation slip
 #
-# Both functions follow the exact same pattern used in sale.py:
-#   1. Load company defaults (company_defaults table)
-#   2. Build a ReceiptData object
-#   3. Resolve active printers from hardware_settings.json
-#   4. Call printing_service.print_receipt() for each printer
+# Both return True if at least one printer succeeded.
 # =============================================================================
 
 from __future__ import annotations
@@ -24,8 +52,22 @@ from datetime import datetime
 log = logging.getLogger("sales_order_print")
 
 
+# ---------------------------------------------------------------------------
+# Default terms printed on every Sales Order slip.
+# Override per-company by adding a `sales_order_terms` column to
+# company_defaults and populating it there.
+# ---------------------------------------------------------------------------
+_DEFAULT_SO_TERMS = (
+    "1. This Sales Order is not a tax invoice.\n"
+    "2. Goods remain the property of the seller until paid in full.\n"
+    "3. Laybye items are held for 30 days from order date.\n"
+    "4. Deposits are non-refundable unless goods are unavailable.\n"
+    "5. Full payment is required before goods are released."
+)
+
+
 # =============================================================================
-# Internal helpers  (mirrors sale.py helpers — no shared state)
+# Internal helpers
 # =============================================================================
 
 def _get_active_printers() -> list[str]:
@@ -52,7 +94,7 @@ def _get_company_defaults() -> dict:
         return {}
 
 
-def _format_order_date(raw: str) -> str:
+def _format_date(raw: str) -> str:
     """Return a printable date string from an ISO date/datetime."""
     if not raw:
         return datetime.today().strftime("%Y-%m-%d")
@@ -63,47 +105,64 @@ def _format_order_date(raw: str) -> str:
 
 
 # =============================================================================
-# Core builder  — constructs the ReceiptData for a sales order
+# Core builder
 # =============================================================================
 
 def _build_receipt(order: dict, receipt_type: str = "Sales Order") -> "ReceiptData":
     """
-    Map a sales_order dict (from get_order_by_id) to a ReceiptData object.
+    Map a sales_order dict (from get_order_by_id) to a ReceiptData object
+    with doc_type = "sales_order".
 
     receipt_type:
-        "Sales Order"  — full order, shows grand total
-        "Laybye Deposit" — deposit slip, shows deposit paid + balance due
+        "Sales Order"    — full order slip, shows the complete order total
+        "Laybye Deposit" — deposit confirmation, highlights deposit paid
+                           and outstanding balance
     """
-    from models.receipt import ReceiptData, Item
+    from models.receipt import ReceiptData, Item, MultiCurrencyDetail
 
     co = _get_company_defaults()
 
-    # ── Customer fields ───────────────────────────────────────────────────────
+    # ── Customer ─────────────────────────────────────────────────────────────
     customer_name    = order.get("customer_name") or "Walk-in Customer"
-    customer_contact = ""                           # sales_order has no contact col (yet)
+    customer_contact = order.get("customer_contact") or ""
 
-    # ── Money fields ──────────────────────────────────────────────────────────
+    # ── Dates ─────────────────────────────────────────────────────────────────
+    order_date    = _format_date(order.get("order_date", ""))
+    delivery_date = _format_date(order.get("delivery_date", "")) if order.get("delivery_date") else ""
+
+    # ── Money ─────────────────────────────────────────────────────────────────
     total          = float(order.get("total",          0))
     deposit_amount = float(order.get("deposit_amount", 0))
     balance_due    = float(order.get("balance_due",    0))
+    order_status   = order.get("status", "")
 
-    # For a deposit slip the "tendered" is the deposit; for a full order it is
-    # the total (full payment scenario).
+    # ── Terms — use company override if available, else default ───────────────
+    so_terms = co.get("sales_order_terms") or _DEFAULT_SO_TERMS
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    base_footer = co.get("footer_text") or "Thank you for your business!"
+
+    # ── Receipt-type-specific fields ──────────────────────────────────────────
     if receipt_type == "Laybye Deposit":
-        tendered = deposit_amount
-        change   = 0.0
-        footer   = (co.get("footer_text") or
-                    "Thank you!  Please keep this slip — "
-                    f"Balance due: USD {balance_due:.2f}")
+        # amountTendered = deposit paid today  (not the full order total)
+        tendered     = deposit_amount
+        change       = 0.0
+        # customerRef prints as a prominent reference line in the totals area
+        customer_ref = f"BALANCE DUE:  {order.get('currency', 'USD')} {balance_due:.2f}"
+        footer       = base_footer
     else:
-        tendered = total
-        change   = 0.0
-        footer   = co.get("footer_text") or "Thank you for your purchase!"
+        # Full Sales Order slip — tendered = full total
+        tendered     = total
+        change       = 0.0
+        customer_ref = ""
+        footer       = base_footer
 
     receipt = ReceiptData(
-        receiptType    = receipt_type,
+        # ── Routing: tells the C# PrintingManager to use the SO template ─────
+        doc_type    = "sales_order",
+        receiptType = receipt_type,        # "Sales Order"  |  "Laybye Deposit"
 
-        # Company info
+        # ── Company header ────────────────────────────────────────────────────
         companyName         = co.get("company_name", ""),
         companyAddress      = co.get("address_1",    ""),
         companyAddressLine1 = co.get("address_2",    ""),
@@ -111,31 +170,48 @@ def _build_receipt(order: dict, receipt_type: str = "Sales Order") -> "ReceiptDa
         tel                 = co.get("phone",         ""),
         tin                 = co.get("tin_number",    ""),
         vatNo               = co.get("vat_number",    ""),
-        deviceSerial        = co.get("zimra_serial_no", ""),
-        deviceId            = co.get("zimra_device_id", ""),
+        # Intentionally NOT setting deviceSerial / deviceId — this is not a
+        # fiscal document, so ZIMRA fields must stay blank.
+        deviceSerial        = "",
+        deviceId            = "",
 
-        # Order / invoice reference
+        # ── Order reference ───────────────────────────────────────────────────
         invoiceNo   = order.get("order_no", ""),
-        invoiceDate = _format_order_date(order.get("order_date", "")),
+        invoiceDate = order_date,
 
-        # Cashier / customer
-        cashierName     = "",          # sales orders are not tied to a cashier
+        # ── Cashier / customer ────────────────────────────────────────────────
+        cashierName     = "",            # not tied to a POS cashier
         customerName    = customer_name,
         customerContact = customer_contact,
+        customerRef     = customer_ref,  # "BALANCE DUE: USD X.XX" (deposit slip)
 
-        # Totals
-        grandTotal      = total,
-        subtotal        = total,       # no VAT breakdown on orders (add if needed)
-        totalVat        = 0.0,
-        amountTendered  = tendered,
-        change          = change,
-        discAmt         = 0.0,
+        # ── Totals ────────────────────────────────────────────────────────────
+        grandTotal     = total,          # full order value
+        subtotal       = total,
+        totalVat       = 0.0,            # SO is pre-invoice — no VAT line
+        amountTendered = tendered,       # deposit on deposit slip; total on SO
+        change         = change,
+        discAmt        = 0.0,
 
-        # Payment
-        paymentMode     = order.get("deposit_method", ""),
-        currency        = "USD",
-        footer          = footer,
+        # ── Payment ───────────────────────────────────────────────────────────
+        paymentMode = order.get("deposit_method", ""),
+        currency    = order.get("currency", "USD"),
+        footer      = footer,
+
+        # ── Sales-Order-specific ──────────────────────────────────────────────
+        deliveryDate    = delivery_date,
+        salesOrderTerms = so_terms,
+        orderStatus     = order_status,
     )
+
+    # ── Deposit / balance summary (multiCurrencyDetails rows) ─────────────────
+    # These always appear on both slip types so the customer can clearly see:
+    #   ORDER TOTAL  /  DEPOSIT PAID  /  BALANCE DUE
+    receipt.multiCurrencyDetails = [
+        MultiCurrencyDetail(key="Order Total",  value=round(total,          2)),
+        MultiCurrencyDetail(key="Deposit Paid", value=round(deposit_amount, 2)),
+        MultiCurrencyDetail(key="Balance Due",  value=round(balance_due,    2)),
+    ]
 
     # ── Line items ────────────────────────────────────────────────────────────
     for it in order.get("items", []):
@@ -162,12 +238,16 @@ def _build_receipt(order: dict, receipt_type: str = "Sales Order") -> "ReceiptDa
 
 def print_sales_order(order_id: int) -> bool:
     """
-    Print a full Sales Order receipt.
+    Print a full Sales Order slip.
 
-    Mirrors the pattern in sale.py create_sale():
-        order  = get_order_by_id(order_id)
-        receipt = _build_receipt(order, "Sales Order")
-        printing_service.print_receipt(receipt, printer_name=...)
+    The receipt will show:
+      • "SALES ORDER" heading (not "TAX INVOICE")
+      • Order No, Order Date, Delivery Date, Status
+      • Customer name
+      • Line items table
+      • Order Total / Deposit Paid / Balance Due summary
+      • Terms & Conditions block
+      • Company footer
 
     Returns True if at least one printer succeeded.
     """
@@ -193,7 +273,7 @@ def print_sales_order(order_id: int) -> bool:
                 log.info("✅ Sales Order %s printed → %s", order.get("order_no"), printer_name)
                 ok = True
             else:
-                log.warning("⚠️  Print failed on %s", printer_name)
+                log.warning("⚠️  Sales Order print failed on %s", printer_name)
         except Exception as exc:
             log.error("❌ Printer error on %s: %s", printer_name, exc)
     return ok
@@ -201,13 +281,19 @@ def print_sales_order(order_id: int) -> bool:
 
 def print_laybye_deposit(order_id: int) -> bool:
     """
-    Print a Laybye deposit confirmation slip.
+    Print a Laybye Deposit confirmation slip.
 
-    Same printer resolution + ReceiptData pipeline as print_sales_order(),
-    but receiptType = "Laybye Deposit" and amountTendered = deposit_amount.
-    The footer automatically shows the remaining balance.
+    The receipt will show:
+      • "LAYBYE DEPOSIT" heading
+      • Order No, Order Date, Customer name
+      • Line items table
+      • Order Total / Deposit Paid / Balance Due summary  ← always visible
+      • "BALANCE DUE: USD X.XX" reference line
+      • Terms & Conditions block
+      • Company footer
 
-    Call this right after LaybyePaymentDialog.accept() and create_sales_order().
+    Call this immediately after LaybyePaymentDialog.accept() and
+    create_sales_order() / add_deposit_payment().
 
     Returns True if at least one printer succeeded.
     """

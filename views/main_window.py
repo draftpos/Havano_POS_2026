@@ -58,11 +58,18 @@ try:
         create_sales_order as _create_sales_order,
         ensure_tables as _ensure_so_tables,
         get_unsynced_orders as _get_unsynced_so,
+        get_order_by_id as _get_order_by_id,
     )
     _ensure_so_tables()
     _HAS_SALES_ORDER = True
 except Exception:
     _HAS_SALES_ORDER = False
+
+try:
+    from services.sales_order_print import print_laybye_deposit as _print_laybye_deposit
+    _HAS_SO_PRINT = True
+except Exception:
+    _HAS_SO_PRINT = False
 
 # =============================================================================
 # COLOUR PALETTE
@@ -6099,65 +6106,83 @@ class POSView(QWidget):
         dlg.exec()
 
     def _print_receipt_for_sale(self, sale: dict):
-        """Render and show a receipt preview for any sale dict (used by reprint)."""
-        items     = sale.get("items", [])
-        total     = float(sale.get("total", 0))
-        inv_no    = sale.get("invoice_no", "")
-        cust_name = sale.get("customer_name", "") or "Walk-in"
-        cust_phone= sale.get("customer_contact", "")
-        date_str  = sale.get("invoice_date", "") or sale.get("date", "")
+        """Reprint a sales invoice via printing_service (same path as original print)."""
+        try:
+            from models.receipt import ReceiptData, Item
+            from models.company_defaults import get_defaults
+            from services.printing_service import printing_service
+            import json
+            from pathlib import Path
 
-        W = 40
-        lines = ["=" * W, "          HAVANO POS  —  REPRINT"]
-        if inv_no:
-            lines.append(f"  Invoice:   {inv_no}")
-        lines += [f"  Date:      {date_str}", f"  Customer:  {cust_name}"]
-        if cust_phone:
-            lines.append(f"  Phone:     {cust_phone}")
-        lines += ["-" * W]
+            co = get_defaults() or {}
 
-        subtotal = 0.0; total_disc = 0.0
-        for it in items:
-            name_str  = str(it.get("product_name", ""))[:24]
-            qty       = float(it.get("qty", 0))
-            price     = float(it.get("price", 0))
-            disc      = float(it.get("discount", 0))
-            line_tot  = float(it.get("total", 0))
-            subtotal   += qty * price
-            total_disc += qty * price * (disc / 100.0) if disc else 0.0
-            qty_str = f"{int(qty)}" if qty == int(qty) else f"{qty:.2f}"
-            lines.append(f"{name_str:<24} {qty_str:>3}x ${price:.2f}")
-            if disc:
-                lines.append(f"  Disc {disc:.0f}%               -${qty*price*(disc/100):.2f}")
-            lines.append(f"  {'─'*20}  ${line_tot:.2f}")
+            receipt = ReceiptData(
+                doc_type        = "receipt",
+                receiptType     = sale.get("receipt_type", "Invoice"),
+                companyName     = co.get("company_name", ""),
+                companyAddress  = co.get("address_1", ""),
+                companyAddressLine1 = co.get("address_2", ""),
+                companyEmail    = co.get("email", ""),
+                tel             = co.get("phone", ""),
+                tin             = co.get("tin_number", ""),
+                vatNo           = co.get("vat_number", ""),
+                deviceSerial    = co.get("zimra_serial_no", ""),
+                deviceId        = co.get("zimra_device_id", ""),
+                invoiceNo       = sale.get("invoice_no", ""),
+                invoiceDate     = sale.get("invoice_date", "") or sale.get("date", ""),
+                cashierName     = sale.get("cashier_name", ""),
+                customerName    = sale.get("customer_name", "") or "Walk-in",
+                customerContact = sale.get("customer_contact", ""),
+                grandTotal      = float(sale.get("total", 0)),
+                subtotal        = float(sale.get("subtotal", 0) or sale.get("total", 0)),
+                totalVat        = float(sale.get("total_vat", 0)),
+                amountTendered  = float(sale.get("tendered", 0) or sale.get("total", 0)),
+                change          = float(sale.get("change_amount", 0)),
+                discAmt         = float(sale.get("discount_amount", 0)),
+                paymentMode     = sale.get("method", "CASH"),
+                currency        = sale.get("currency", "USD"),
+                footer          = co.get("footer_text", "Thank you for your purchase!"),
+            )
 
-        lines += ["-" * W]
-        if total_disc > 0:
-            lines.append(f"  Subtotal:          ${subtotal:.2f}")
-            lines.append(f"  Discount:         -${total_disc:.2f}")
-        lines += [f"  TOTAL:             ${total:.2f}", "=" * W,
-                  "      Thank you for your purchase!", "=" * W]
+            for it in sale.get("items", []):
+                qty   = float(it.get("qty", 1))
+                price = float(it.get("price", 0))
+                total = float(it.get("total", 0) or qty * price)
+                receipt.items.append(Item(
+                    productName = it.get("product_name", "") or it.get("item_name", ""),
+                    productid   = it.get("part_no", "") or it.get("item_code", ""),
+                    qty         = qty,
+                    price       = price,
+                    amount      = total,
+                    tax_amount  = float(it.get("tax_amount", 0)),
+                ))
+            receipt.itemlist = receipt.items
 
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
-        from PySide6.QtGui import QFont
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Reprint — {inv_no}")
-        dlg.setMinimumSize(400, 520)
-        dlg.setStyleSheet(f"QDialog {{ background:{WHITE}; }}")
-        lay = QVBoxLayout(dlg); lay.setContentsMargins(16, 16, 16, 16); lay.setSpacing(10)
-        txt = QTextEdit(); txt.setReadOnly(True)
-        txt.setFont(QFont("Courier New", 10))
-        txt.setPlainText("\n".join(lines))
-        txt.setStyleSheet(f"QTextEdit {{ background:{WHITE}; color:{DARK_TEXT}; border:1px solid {BORDER}; border-radius:4px; }}")
-        lay.addWidget(txt, 1)
-        br = QHBoxLayout(); br.setSpacing(8)
-        close_btn = QPushButton("Close")
-        close_btn.setFixedHeight(36); close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setStyleSheet(f"QPushButton {{ background:{NAVY}; color:{WHITE}; border:none; border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }} QPushButton:hover {{ background:{NAVY_2}; }}")
-        close_btn.clicked.connect(dlg.accept)
-        br.addStretch(); br.addWidget(close_btn)
-        lay.addLayout(br)
-        dlg.exec()
+            # resolve printer
+            hw_file = Path("app_data/hardware_settings.json")
+            printers = []
+            try:
+                with open(hw_file, "r", encoding="utf-8") as f:
+                    hw = json.load(f)
+                if hw.get("main_printer") and hw["main_printer"] != "(None)":
+                    printers.append(hw["main_printer"])
+            except Exception:
+                pass
+
+            if not printers:
+                QMessageBox.warning(self, "No Printer", "No active printer configured in hardware settings.")
+                return
+
+            ok = False
+            for p in printers:
+                if printing_service.print_receipt(receipt, printer_name=p):
+                    ok = True
+            if ok:
+                QMessageBox.information(self, "Reprint", f"Invoice {sale.get('invoice_no', '')} sent to printer.")
+            else:
+                QMessageBox.warning(self, "Reprint Failed", "Printing failed. Check printer connection.")
+        except Exception as e:
+            QMessageBox.warning(self, "Reprint Error", f"Could not reprint:\n{e}")
 
     def _reprint_by_invoice_no(self):
         """Open the ReprintDialog — autocomplete invoice search then reprint."""
@@ -6848,11 +6873,18 @@ class POSView(QWidget):
         if deposit_amount and deposit_amount > 0:
             try:
                 from services.laybye_payment_entry_service import create_laybye_payment_entry
-                from models.sales_order import get_order_by_id
-                create_laybye_payment_entry(get_order_by_id(order_id))
+                create_laybye_payment_entry(_get_order_by_id(order_id))
             except Exception as _lpe:
                 import logging as _lg
                 _lg.getLogger("Laybye").warning("Laybye payment entry skipped: %s", _lpe)
+
+        # ── 4c. Print deposit slip ────────────────────────────────────────────────────────
+        if _HAS_SO_PRINT:
+            try:
+                _print_laybye_deposit(order_id)
+            except Exception as _pe:
+                import logging as _lg
+                _lg.getLogger("Laybye").warning("Laybye print failed: %s", _pe)
 
         # ── 5. Feedback + clear cart ─────────────────────────────────────────
         balance   = round(cart_total - deposit_amount, 2)
@@ -7575,19 +7607,13 @@ class CustomerPaymentDialog(QDialog):
             from database.db import get_connection
             conn = get_connection(); cur = conn.cursor()
             cur.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM customer_payments WHERE customer_id=?",
+                "SELECT ISNULL(outstanding_amount, 0) FROM customers WHERE id=?",
                 (self._customer["id"],)
             )
-            paid = float(cur.fetchone()[0])
-            # total invoiced
-            cur.execute(
-                "SELECT COALESCE(SUM(total),0) FROM sales WHERE customer_name=?",
-                (self._customer.get("customer_name",""),)
-            )
-            invoiced = float(cur.fetchone()[0])
+            row = cur.fetchone()
             conn.close()
-            balance  = invoiced - paid
-            color    = self._DANGER if balance > 0 else self._SUCCESS
+            balance = float(row[0]) if row else 0.0
+            color   = self._DANGER if balance > 0 else self._SUCCESS
             self._bal_lbl.setText(f"${balance:.2f}")
             self._bal_lbl.setStyleSheet(f"font-size:13px; font-weight:bold; color:{color};")
         except Exception:
@@ -7670,8 +7696,7 @@ class CustomerPaymentDialog(QDialog):
             f"color:{color}; font-size:20px; font-weight:bold;"
             f" font-family:'Courier New',monospace;"
         )
-
-    # ── save ──────────────────────────────────────────────────────────────
+# ── save ──────────────────────────────────────────────────────────────
     def _save(self):
         if not self._customer:
             QMessageBox.warning(self, "No Customer",
@@ -7684,7 +7709,7 @@ class CustomerPaymentDialog(QDialog):
             self._active_field().setFocus()
             return
 
-        # Collect splits
+        # 1. Collect splits
         splits = []
         for m in self._methods:
             _, ae = self._method_rows[m["label"]]
@@ -7710,16 +7735,19 @@ class CustomerPaymentDialog(QDialog):
         acct_data    = self._acct_combo.currentData() or {}
         account_name = acct_data.get("label", method_label)
 
+        # Retrieve Cashier ID from parent hierarchy
         cashier_id = None
         try:
             p = self.parent()
             while p:
-                if hasattr(p, "user"):
-                    cashier_id = p.user.get("id"); break
+                if hasattr(p, "user") and p.user:
+                    cashier_id = p.user.get("id")
+                    break
                 p = p.parent()
         except Exception:
             pass
 
+        # 2. Save to Local DB
         try:
             from models.payment import create_customer_payment
             payment = create_customer_payment(
@@ -7737,7 +7765,7 @@ class CustomerPaymentDialog(QDialog):
             QMessageBox.warning(self, "Error", f"Could not save payment:\n{e}")
             return
 
-        # Post to Frappe
+        # 3. Post to Frappe (Background)
         frappe_status = "queued"
         try:
             from services.payment_entry_service import post_payment_entry_to_frappe
@@ -7746,71 +7774,120 @@ class CustomerPaymentDialog(QDialog):
         except Exception:
             frappe_status = "queued"
 
-        # Print receipt slip
-        self._print_payment_slip(payment, frappe_status)
+        # 4. Print Receipt Slip
+        # We pass the payment ID to ensure the printer pulls directly from the DB record
+        if payment and payment.get("id"):
+            self._print_payment_slip(payment["id"])
 
-        cname = self._customer.get("customer_name", "")
+        cname = self._customer.get("customer_name", "Customer")
         QMessageBox.information(
             self, "Payment Recorded",
             f"✅  USD {total_usd:.2f} payment recorded for {cname}.\n"
-            f"Frappe: {frappe_status}."
+            f"Frappe: {frappe_status}.\n"
+            f"Receipt sent to printer."
         )
         self.accept()
 
-    def _print_payment_slip(self, payment: dict, frappe_status: str = "queued"):
-        """Show a printable payment receipt slip."""
+   
+    def _print_payment_slip(self, payment, frappe_status: str = "queued"):
+        """
+        Show a printable payment receipt slip on screen and send to thermal printer.
+        'payment' can be a dictionary or a payment ID (int).
+        """
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
         from PySide6.QtGui import QFont
-        cname   = self._customer.get("customer_name", "") if self._customer else ""
-        amount  = float(payment.get("amount", 0))
-        method  = payment.get("method", "")
-        ref     = payment.get("reference", "") or ""
-        pdate   = payment.get("payment_date", self._date_edit.date().toString("dd/MM/yyyy"))
+        from PySide6.QtCore import Qt
+
+        # 1. Ensure we have a dictionary of data
+        payment_data = {}
+        payment_id = None
+
+        if isinstance(payment, int):
+            payment_id = payment
+            from models.payment import get_payment_by_id
+            payment_data = get_payment_by_id(payment_id) or {}
+        elif isinstance(payment, dict):
+            payment_data = payment
+            payment_id = payment.get("id")
+
+        # 2. Trigger the actual Thermal Printer (Logic from models/payment.py)
+        if payment_id:
+            try:
+                from models.payment import print_customer_payment
+                print_customer_payment(payment_id)
+            except Exception as e:
+                print(f"Thermal Print Error: {e}")
+
+        # 3. Prepare the On-Screen Preview Dialog
+        cname   = self._customer.get("customer_name", "") if self._customer else payment_data.get("customer_name", "Customer")
+        amount  = float(payment_data.get("amount", 0))
+        method  = payment_data.get("method", "")
+        ref     = payment_data.get("reference", "") or ""
+        pdate   = payment_data.get("payment_date") or self._date_edit.date().toString("yyyy-MM-dd")
         account = self._acct_combo.currentText()
+        p_id_str = f"PAY-{payment_id:05d}" if payment_id else "NEW"
 
         W = 40
         lines = [
             "=" * W,
-            "     HAVANO POS — PAYMENT RECEIPT",
-            f"  Date:     {pdate}",
-            f"  Customer: {cname}",
+            "      HAVANO POS — PAYMENT RECEIPT",
+            f"  Receipt No: {p_id_str}",
+            f"  Date:       {pdate}",
+            f"  Customer:   {cname}",
             "-" * W,
-            f"  Account:  {account}",
-            f"  Method:   {method}",
-            f"  Amount:   USD {amount:.2f}",
+            f"  Account:    {account}",
+            f"  Method:     {method}",
+            f"  Amount:     USD {amount:.2f}",
         ]
         if ref:
-            lines.append(f"  Ref:      {ref}")
+            lines.append(f"  Ref:        {ref}")
         lines += [
             "-" * W,
-            f"  Frappe:   {frappe_status.upper()}",
+            f"  Frappe:     {frappe_status.upper()}",
             "=" * W,
+            "\n   Thank you for your payment!",
         ]
 
+        # 4. Create and Show the Dialog
         dlg = QDialog(self)
-        dlg.setWindowTitle("Payment Receipt")
-        dlg.setMinimumSize(380, 380)
-        dlg.setStyleSheet(f"QDialog {{ background:{self._WHITE}; }}")
-        lay = QVBoxLayout(dlg); lay.setContentsMargins(16,16,16,16); lay.setSpacing(10)
-        txt = QTextEdit(); txt.setReadOnly(True)
+        dlg.setWindowTitle("Payment Receipt Preview")
+        dlg.setMinimumSize(380, 420)
+        # Use fallback colors if self._WHITE etc are not defined in your class
+        white = getattr(self, '_WHITE', '#FFFFFF')
+        navy = getattr(self, '_NAVY', '#001f3f')
+        border = getattr(self, '_BORDER', '#CCCCCC')
+        navy2 = getattr(self, '_NAVY_2', '#003366')
+
+        dlg.setStyleSheet(f"QDialog {{ background:{white}; }}")
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16,16,16,16)
+        lay.setSpacing(10)
+
+        txt = QTextEdit()
+        txt.setReadOnly(True)
         txt.setFont(QFont("Courier New", 10))
         txt.setPlainText("\n".join(lines))
         txt.setStyleSheet(
-            f"QTextEdit {{ background:{self._WHITE}; color:{self._NAVY};"
-            f" border:1px solid {self._BORDER}; border-radius:4px; }}"
+            f"QTextEdit {{ background:{white}; color:{navy};"
+            f" border:1px solid {border}; border-radius:4px; }}"
         )
         lay.addWidget(txt, 1)
-        br = QHBoxLayout(); br.setSpacing(8)
+
+        br = QHBoxLayout()
+        br.setSpacing(8)
         close_btn = QPushButton("Close")
-        close_btn.setFixedHeight(36); close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setFixedHeight(36)
+        close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(
-            f"QPushButton {{ background:{self._NAVY}; color:{self._WHITE}; border:none;"
+            f"QPushButton {{ background:{navy}; color:{white}; border:none;"
             f" border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }}"
-            f"QPushButton:hover {{ background:{self._NAVY_2}; }}"
+            f"QPushButton:hover {{ background:{navy2}; }}"
         )
         close_btn.clicked.connect(dlg.accept)
-        br.addStretch(); br.addWidget(close_btn)
+        br.addStretch()
+        br.addWidget(close_btn)
         lay.addLayout(br)
+
         dlg.exec()
 
     # ── keyboard ──────────────────────────────────────────────────────────
@@ -7842,181 +7919,259 @@ class CustomerPaymentDialog(QDialog):
             
             
 # =============================================================================
-# REPRINT DIALOG  —  autocomplete invoice search → reprint receipt
+# REPRINT DIALOG  —  two tabs: Sales Invoice  |  Sales Order
 # =============================================================================
 class ReprintDialog(QDialog):
     """
-    Autocomplete invoice search dialog for reprinting.
-    Type invoice number or customer name → select from dropdown → Reprint.
+    Two-tab reprint dialog.
+      Tab 1 — Sales Invoice : search by invoice number or customer name
+      Tab 2 — Sales Order   : search by order number or customer name
+    Select a record → click Reprint → sends straight to the configured printer.
+    """
+
+    # shared stylesheet pieces
+    _SEARCH_SS = f"""
+        QLineEdit {{
+            background:{WHITE}; color:{NAVY};
+            border:2px solid {BORDER}; border-radius:6px;
+            font-size:13px; padding:0 12px;
+        }}
+        QLineEdit:focus {{ border:2px solid {ACCENT}; }}
+    """
+    _LIST_SS = f"""
+        QListWidget {{
+            background:{WHITE}; border:2px solid {ACCENT};
+            border-top:none; border-radius:0 0 6px 6px;
+            font-size:13px; color:{NAVY}; outline:none;
+        }}
+        QListWidget::item                  {{ padding:7px 14px; min-height:28px; color:{NAVY}; }}
+        QListWidget::item:hover            {{ background:{LIGHT}; color:{NAVY}; }}
+        QListWidget::item:selected         {{ background:{ACCENT}; color:{WHITE}; }}
+        QListWidget::item:selected:active  {{ background:{ACCENT}; color:{WHITE}; }}
+        QListWidget::item:selected:!active {{ background:{ACCENT}; color:{WHITE}; }}
+    """
+    _BTN_REPRINT_SS = f"""
+        QPushButton {{ background:{ACCENT}; color:{WHITE}; border:none;
+            border-radius:6px; font-size:13px; font-weight:bold; }}
+        QPushButton:hover    {{ background:{ACCENT_H}; }}
+        QPushButton:disabled {{ background:{LIGHT}; color:{MUTED}; }}
+    """
+    _BTN_CANCEL_SS = f"""
+        QPushButton {{ background:{LIGHT}; color:{NAVY};
+            border:1px solid {BORDER}; border-radius:6px;
+            font-size:13px; font-weight:bold; }}
+        QPushButton:hover {{ background:{BORDER}; }}
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Reprint Invoice")
-        self.setMinimumSize(620, 200)
+        self.setWindowTitle("Reprint")
+        self.setMinimumSize(660, 240)
         self.setModal(True)
         self.setStyleSheet(
-            f"QDialog {{ background:{OFF_WHITE}; font-family:\'Segoe UI\',sans-serif; }}"
+            f"QDialog {{ background:{OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}"
         )
-        self._all_sales: list[dict] = []
-        self._selected_sale: dict | None = None
-        self._stimer = QTimer(self)
-        self._stimer.setSingleShot(True)
-        self._stimer.setInterval(200)
-        self._stimer.timeout.connect(self._run_search)
+
+        # ── data stores ───────────────────────────────────────────────────────
+        self._inv_sales: list[dict] = []   # all sales invoices
+        self._so_orders: list[dict] = []   # all sales orders
+
+        self._inv_selected: dict | None = None
+        self._so_selected:  dict | None = None
+
+        # ── debounce timers ───────────────────────────────────────────────────
+        self._inv_timer = QTimer(self); self._inv_timer.setSingleShot(True); self._inv_timer.setInterval(200)
+        self._so_timer  = QTimer(self); self._so_timer.setSingleShot(True);  self._so_timer.setInterval(200)
+        self._inv_timer.timeout.connect(self._inv_search)
+        self._so_timer.timeout.connect(self._so_search)
+
         self._build()
         QTimer.singleShot(0, self._preload)
+
+    # ── preload ───────────────────────────────────────────────────────────────
 
     def _preload(self):
         try:
             from models.sale import get_all_sales
-            self._all_sales = get_all_sales()
+            self._inv_sales = get_all_sales()
         except Exception:
-            self._all_sales = []
-        # If pre-filled text already in box, run search now
-        if self._search.text().strip():
-            self._run_search()
+            self._inv_sales = []
+
+        try:
+            from models.sales_order import get_all_sales_orders
+            self._so_orders = get_all_sales_orders()
+        except Exception:
+            self._so_orders = []
+
+        # run initial search if boxes are pre-filled
+        if self._inv_search_box.text().strip():
+            self._inv_search()
+        if self._so_search_box.text().strip():
+            self._so_search()
+
+    # ── build UI ──────────────────────────────────────────────────────────────
 
     def _build(self):
         root = QVBoxLayout(self)
         root.setSpacing(0); root.setContentsMargins(0, 0, 0, 0)
 
-        # header
+        # ── header ────────────────────────────────────────────────────────────
         hdr = QWidget(); hdr.setFixedHeight(52)
         hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
-        title = QLabel("🖨  Reprint Invoice")
+        title = QLabel("🖨  Reprint")
         title.setStyleSheet(f"color:{NAVY}; font-size:16px; font-weight:bold; background:transparent;")
-        sub = QLabel("Type invoice number or customer name")
+        sub = QLabel("Choose Sales Invoice or Sales Order")
         sub.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
         hl.addWidget(title); hl.addSpacing(12); hl.addWidget(sub); hl.addStretch()
         root.addWidget(hdr)
 
-        body = QWidget(); body.setStyleSheet(f"background:{OFF_WHITE};")
-        bl = QVBoxLayout(body); bl.setContentsMargins(24, 16, 24, 16); bl.setSpacing(6)
+        # ── tabs ──────────────────────────────────────────────────────────────
+        self._tabs = QTabWidget()
+        self._tabs.setStyleSheet(f"""
+            QTabWidget::pane   {{ border:none; background:{OFF_WHITE}; }}
+            QTabBar::tab       {{ background:{LIGHT}; color:{NAVY}; padding:8px 22px;
+                                  font-size:13px; font-weight:bold; border:none;
+                                  border-bottom:3px solid transparent; }}
+            QTabBar::tab:selected  {{ background:{OFF_WHITE}; border-bottom:3px solid {ACCENT}; }}
+            QTabBar::tab:hover     {{ background:{BORDER}; }}
+        """)
+        self._tabs.addTab(self._build_invoice_tab(), "🧾  Sales Invoice")
+        self._tabs.addTab(self._build_order_tab(),   "📋  Sales Order")
+        root.addWidget(self._tabs, 1)
+
+    def _build_invoice_tab(self) -> QWidget:
+        """Sales Invoice search + reprint panel."""
+        w  = QWidget(); w.setStyleSheet(f"background:{OFF_WHITE};")
+        bl = QVBoxLayout(w); bl.setContentsMargins(24, 16, 24, 16); bl.setSpacing(6)
 
         # search row
         sr = QHBoxLayout(); sr.setSpacing(8)
-        lbl = QLabel("Invoice / Customer:")
-        lbl.setFixedWidth(140)
+        lbl = QLabel("Invoice / Customer:"); lbl.setFixedWidth(140)
         lbl.setStyleSheet(f"color:{MUTED}; font-size:11px; font-weight:bold; background:transparent;")
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("Type invoice number or customer name\u2026")
-        self._search.setFixedHeight(38)
-        self._search.setStyleSheet(f"""
-            QLineEdit {{
-                background:{WHITE}; color:{NAVY};
-                border:2px solid {BORDER}; border-radius:6px;
-                font-size:13px; padding:0 12px;
-            }}
-            QLineEdit:focus {{ border:2px solid {ACCENT}; }}
-        """)
+        self._inv_search_box = QLineEdit()
+        self._inv_search_box.setPlaceholderText("Type invoice number or customer name…")
+        self._inv_search_box.setFixedHeight(38)
+        self._inv_search_box.setStyleSheet(self._SEARCH_SS)
         try:
             prefill = getattr(self.parent(), "_prev_invoice", "")
-            if prefill: self._search.setText(prefill)
+            if prefill: self._inv_search_box.setText(prefill)
         except Exception:
             pass
-        self._search.textChanged.connect(lambda _: self._stimer.start())
-        self._search.returnPressed.connect(self._on_enter)
-        sr.addWidget(lbl); sr.addWidget(self._search, 1)
+        self._inv_search_box.textChanged.connect(lambda _: self._inv_timer.start())
+        self._inv_search_box.returnPressed.connect(self._inv_on_enter)
+        sr.addWidget(lbl); sr.addWidget(self._inv_search_box, 1)
         bl.addLayout(sr)
 
         # autocomplete list
-        self._ac = QListWidget()
-        self._ac.setFixedHeight(0)
-        self._ac.setStyleSheet(f"""
-            QListWidget {{
-                background:{WHITE}; border:2px solid {ACCENT};
-                border-top:none; border-radius:0 0 6px 6px;
-                font-size:13px; color:{NAVY}; outline:none;
-            }}
-            QListWidget::item                  {{ padding:7px 14px; min-height:28px; color:{NAVY}; }}
-            QListWidget::item:hover            {{ background:{LIGHT}; color:{NAVY}; }}
-            QListWidget::item:selected         {{ background:{ACCENT}; color:{WHITE}; }}
-            QListWidget::item:selected:active  {{ background:{ACCENT}; color:{WHITE}; }}
-            QListWidget::item:selected:!active {{ background:{ACCENT}; color:{WHITE}; }}
-        """)
-        self._ac.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._ac.itemClicked.connect(self._on_item_clicked)       # single click → select
-        self._ac.itemActivated.connect(self._on_item_activated)   # double-click/Enter → reprint
+        self._inv_ac = QListWidget(); self._inv_ac.setFixedHeight(0)
+        self._inv_ac.setStyleSheet(self._LIST_SS)
+        self._inv_ac.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._inv_ac.itemClicked.connect(self._inv_item_clicked)
+        self._inv_ac.itemActivated.connect(self._inv_item_activated)
         ac_row = QHBoxLayout(); ac_row.setContentsMargins(148, 0, 0, 0)
-        ac_row.addWidget(self._ac)
+        ac_row.addWidget(self._inv_ac)
         bl.addLayout(ac_row)
 
         # buttons
         btn_row = QHBoxLayout(); btn_row.setSpacing(8)
-        bcancel = QPushButton("Cancel")
-        bcancel.setFixedHeight(40); bcancel.setFixedWidth(90)
-        bcancel.setCursor(Qt.PointingHandCursor)
-        bcancel.setStyleSheet(f"""
-            QPushButton {{ background:{LIGHT}; color:{NAVY};
-                border:1px solid {BORDER}; border-radius:6px; font-size:13px; font-weight:bold; }}
-            QPushButton:hover {{ background:{BORDER}; }}
-        """)
+        bcancel = QPushButton("Cancel"); bcancel.setFixedHeight(40); bcancel.setFixedWidth(90)
+        bcancel.setCursor(Qt.PointingHandCursor); bcancel.setStyleSheet(self._BTN_CANCEL_SS)
         bcancel.clicked.connect(self.reject)
-        self._btn_reprint = QPushButton("\U0001f5a8  Reprint")
-        self._btn_reprint.setFixedHeight(40)
-        self._btn_reprint.setEnabled(False)
-        self._btn_reprint.setCursor(Qt.PointingHandCursor)
-        self._btn_reprint.setStyleSheet(f"""
-            QPushButton {{ background:{ACCENT}; color:{WHITE}; border:none;
-                border-radius:6px; font-size:13px; font-weight:bold; }}
-            QPushButton:hover    {{ background:{ACCENT_H}; }}
-            QPushButton:disabled {{ background:{LIGHT}; color:{MUTED}; }}
-        """)
-        self._btn_reprint.clicked.connect(self._do_reprint)
-        btn_row.addWidget(bcancel); btn_row.addStretch(); btn_row.addWidget(self._btn_reprint)
+        self._inv_btn = QPushButton("🖨  Reprint Invoice")
+        self._inv_btn.setFixedHeight(40); self._inv_btn.setEnabled(False)
+        self._inv_btn.setCursor(Qt.PointingHandCursor)
+        self._inv_btn.setStyleSheet(self._BTN_REPRINT_SS)
+        self._inv_btn.clicked.connect(self._inv_do_reprint)
+        btn_row.addWidget(bcancel); btn_row.addStretch(); btn_row.addWidget(self._inv_btn)
         bl.addLayout(btn_row)
-        root.addWidget(body, 1)
+        return w
 
-    def _run_search(self):
-        q = self._search.text().strip().lower()
-        self._ac.clear(); self._selected_sale = None
-        self._btn_reprint.setEnabled(False)
-        if not q: self._ac.setFixedHeight(0); return
-        matches = [s for s in self._all_sales
+    def _build_order_tab(self) -> QWidget:
+        """Sales Order search + reprint panel."""
+        w  = QWidget(); w.setStyleSheet(f"background:{OFF_WHITE};")
+        bl = QVBoxLayout(w); bl.setContentsMargins(24, 16, 24, 16); bl.setSpacing(6)
+
+        # search row
+        sr = QHBoxLayout(); sr.setSpacing(8)
+        lbl = QLabel("Order No / Customer:"); lbl.setFixedWidth(140)
+        lbl.setStyleSheet(f"color:{MUTED}; font-size:11px; font-weight:bold; background:transparent;")
+        self._so_search_box = QLineEdit()
+        self._so_search_box.setPlaceholderText("Type order number or customer name…")
+        self._so_search_box.setFixedHeight(38)
+        self._so_search_box.setStyleSheet(self._SEARCH_SS)
+        self._so_search_box.textChanged.connect(lambda _: self._so_timer.start())
+        self._so_search_box.returnPressed.connect(self._so_on_enter)
+        sr.addWidget(lbl); sr.addWidget(self._so_search_box, 1)
+        bl.addLayout(sr)
+
+        # autocomplete list
+        self._so_ac = QListWidget(); self._so_ac.setFixedHeight(0)
+        self._so_ac.setStyleSheet(self._LIST_SS)
+        self._so_ac.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._so_ac.itemClicked.connect(self._so_item_clicked)
+        self._so_ac.itemActivated.connect(self._so_item_activated)
+        ac_row = QHBoxLayout(); ac_row.setContentsMargins(148, 0, 0, 0)
+        ac_row.addWidget(self._so_ac)
+        bl.addLayout(ac_row)
+
+        # buttons
+        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
+        bcancel = QPushButton("Cancel"); bcancel.setFixedHeight(40); bcancel.setFixedWidth(90)
+        bcancel.setCursor(Qt.PointingHandCursor); bcancel.setStyleSheet(self._BTN_CANCEL_SS)
+        bcancel.clicked.connect(self.reject)
+        self._so_btn = QPushButton("🖨  Reprint Sales Order")
+        self._so_btn.setFixedHeight(40); self._so_btn.setEnabled(False)
+        self._so_btn.setCursor(Qt.PointingHandCursor)
+        self._so_btn.setStyleSheet(self._BTN_REPRINT_SS)
+        self._so_btn.clicked.connect(self._so_do_reprint)
+        btn_row.addWidget(bcancel); btn_row.addStretch(); btn_row.addWidget(self._so_btn)
+        bl.addLayout(btn_row)
+        return w
+
+    # ── Sales Invoice search / select / reprint ───────────────────────────────
+
+    def _inv_search(self):
+        q = self._inv_search_box.text().strip().lower()
+        self._inv_ac.clear(); self._inv_selected = None; self._inv_btn.setEnabled(False)
+        if not q: self._inv_ac.setFixedHeight(0); return
+        matches = [s for s in self._inv_sales
                    if q in (s.get("invoice_no") or "").lower()
                    or q in (s.get("customer_name") or "").lower()][:15]
-        if not matches: self._ac.setFixedHeight(0); return
+        if not matches: self._inv_ac.setFixedHeight(0); return
         for s in matches:
-            inv = s.get('invoice_no', '')
-            cust = s.get('customer_name') or 'Walk-in'
-            amt = float(s.get('total', 0))
-            dt = s.get('invoice_date', '') or s.get('date', '')
-            label = f"{inv}   ·   {cust}   ·   ${amt:.2f}   ·   {dt}"
-            it = QListWidgetItem(label); it.setData(Qt.UserRole, s)
-            self._ac.addItem(it)
-        self._ac.setFixedHeight(min(len(matches), 6) * 42)
-        self._ac.setCurrentRow(0)   # so Enter/Down immediately activates first result
+            inv  = s.get("invoice_no", "")
+            cust = s.get("customer_name") or "Walk-in"
+            amt  = float(s.get("total", 0))
+            dt   = s.get("invoice_date", "") or s.get("date", "")
+            it = QListWidgetItem(f"{inv}   ·   {cust}   ·   ${amt:.2f}   ·   {dt}")
+            it.setData(Qt.UserRole, s); self._inv_ac.addItem(it)
+        self._inv_ac.setFixedHeight(min(len(matches), 6) * 42)
+        self._inv_ac.setCurrentRow(0)
 
-    def _on_item_clicked(self, item):
+    def _inv_item_clicked(self, item):
         s = item.data(Qt.UserRole)
-        self._selected_sale = s
-        self._search.setText(s.get("invoice_no", ""))
-        self._ac.setFixedHeight(0); self._ac.clear()
-        self._btn_reprint.setEnabled(True)
-        # Auto-fire reprint immediately on double-click or Enter selection
-        # (single click just selects and enables the button)
+        self._inv_selected = s
+        self._inv_search_box.setText(s.get("invoice_no", ""))
+        self._inv_ac.setFixedHeight(0); self._inv_ac.clear()
+        self._inv_btn.setEnabled(True)
 
-    def _on_item_activated(self, item):
-        """Double-click or Enter on list item — select AND immediately reprint."""
-        self._on_item_clicked(item)
-        self._do_reprint()
+    def _inv_item_activated(self, item):
+        self._inv_item_clicked(item); self._inv_do_reprint()
 
-    def _on_enter(self):
-        cur = self._ac.currentItem()
-        if cur and self._ac.isVisible() and self._ac.count():
-            # List is showing and has a selection — activate it
-            self._on_item_activated(cur)
-        elif self._selected_sale:
-            self._do_reprint()
+    def _inv_on_enter(self):
+        cur = self._inv_ac.currentItem()
+        if cur and self._inv_ac.count():
+            self._inv_item_activated(cur)
+        elif self._inv_selected:
+            self._inv_do_reprint()
         else:
-            self._run_search()
-            if self._ac.count() == 1:
-                self._on_item_activated(self._ac.item(0))
+            self._inv_search()
+            if self._inv_ac.count() == 1:
+                self._inv_item_activated(self._inv_ac.item(0))
 
-    def _do_reprint(self):
-        sale = self._selected_sale
+    def _inv_do_reprint(self):
+        sale = self._inv_selected
         if not sale: return
         try:
             from models.sale import get_sale_items
@@ -8029,22 +8184,90 @@ class ReprintDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not print:\n{e}")
 
+    # ── Sales Order search / select / reprint ─────────────────────────────────
+
+    def _so_search(self):
+        q = self._so_search_box.text().strip().lower()
+        self._so_ac.clear(); self._so_selected = None; self._so_btn.setEnabled(False)
+        if not q: self._so_ac.setFixedHeight(0); return
+        matches = [o for o in self._so_orders
+                   if q in (o.get("order_no") or "").lower()
+                   or q in (o.get("customer_name") or "").lower()][:15]
+        if not matches: self._so_ac.setFixedHeight(0); return
+        for o in matches:
+            ono  = o.get("order_no", "")
+            cust = o.get("customer_name") or "Walk-in"
+            amt  = float(o.get("total", 0))
+            bal  = float(o.get("balance_due", 0))
+            dt   = o.get("order_date", "")
+            it = QListWidgetItem(f"{ono}   ·   {cust}   ·   ${amt:.2f}   ·   Bal ${bal:.2f}   ·   {dt}")
+            it.setData(Qt.UserRole, o); self._so_ac.addItem(it)
+        self._so_ac.setFixedHeight(min(len(matches), 6) * 42)
+        self._so_ac.setCurrentRow(0)
+
+    def _so_item_clicked(self, item):
+        o = item.data(Qt.UserRole)
+        self._so_selected = o
+        self._so_search_box.setText(o.get("order_no", ""))
+        self._so_ac.setFixedHeight(0); self._so_ac.clear()
+        self._so_btn.setEnabled(True)
+
+    def _so_item_activated(self, item):
+        self._so_item_clicked(item); self._so_do_reprint()
+
+    def _so_on_enter(self):
+        cur = self._so_ac.currentItem()
+        if cur and self._so_ac.count():
+            self._so_item_activated(cur)
+        elif self._so_selected:
+            self._so_do_reprint()
+        else:
+            self._so_search()
+            if self._so_ac.count() == 1:
+                self._so_item_activated(self._so_ac.item(0))
+
+    def _so_do_reprint(self):
+        order = self._so_selected
+        if not order: return
+        try:
+            from models.sales_order import get_order_by_id
+            full_order = get_order_by_id(order["id"])
+            if not full_order:
+                QMessageBox.warning(self, "Error", "Could not load order details."); return
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not load order:\n{e}"); return
+        try:
+            from services.sales_order_print import print_sales_order
+            ok = print_sales_order(full_order["id"])
+            if ok:
+                QMessageBox.information(self, "Reprint", f"Sales Order {full_order.get('order_no', '')} sent to printer.")
+                self.accept()
+            else:
+                QMessageBox.warning(self, "Reprint Failed", "Printing failed. Check printer connection.")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not print:\n{e}")
+
+    # ── keyboard navigation ───────────────────────────────────────────────────
+
     def keyPressEvent(self, e):
         k = e.key()
+        # figure out which tab is active
+        idx = self._tabs.currentIndex()
+        ac       = self._inv_ac       if idx == 0 else self._so_ac
+        on_enter = self._inv_on_enter if idx == 0 else self._so_on_enter
+
         if k in (Qt.Key_Return, Qt.Key_Enter):
-            self._on_enter()
+            on_enter()
         elif k == Qt.Key_Escape:
             self.reject()
         elif k == Qt.Key_Down:
-            if self._ac.count():
-                self._ac.setCurrentRow(min(self._ac.currentRow() + 1, self._ac.count() - 1))
-                self._ac.setFocus()
-            else:
-                self._search.setFocus()
+            if ac.count():
+                ac.setCurrentRow(min(ac.currentRow() + 1, ac.count() - 1))
+                ac.setFocus()
         elif k == Qt.Key_Up:
-            if self._ac.count():
-                self._ac.setCurrentRow(max(self._ac.currentRow() - 1, 0))
-                self._ac.setFocus()
+            if ac.count():
+                ac.setCurrentRow(max(ac.currentRow() - 1, 0))
+                ac.setFocus()
         else:
             super().keyPressEvent(e)
 
