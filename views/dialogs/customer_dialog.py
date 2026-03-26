@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
@@ -548,3 +547,245 @@ class CreditNoteDialog(QDialog):
         # Emit signal so POSView can load it into the main table
         self.credit_note_ready.emit({**cn, "items_to_return": items_to_return})
         self.accept()
+
+
+# =============================================================================
+# QuickAddCustomerDialog  — small "New Customer" popup launched from + New
+# =============================================================================
+
+class QuickAddCustomerDialog(QDialog):
+    """
+    Lightweight 3-field popup: Name · Phone · City.
+    Everything else (warehouse, cost center, price list, group) is resolved
+    automatically from company_defaults (the logged-in user's context).
+    """
+
+    customer_created = Signal(dict)   # emits the new customer dict on success
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New Customer")
+        self.setFixedWidth(400)
+        self.setSizeGripEnabled(False)
+        self.setModal(True)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background: {WHITE};
+                font-family: 'Segoe UI', sans-serif;
+            }}
+            QLabel#section {{
+                color: {MUTED};
+                font-size: 10px;
+                font-weight: bold;
+                letter-spacing: 1px;
+                background: transparent;
+            }}
+        """)
+        self._build()
+
+    # -------------------------------------------------------------------------
+    def _field(self, placeholder: str, required: bool = False) -> QLineEdit:
+        le = QLineEdit()
+        le.setPlaceholderText(placeholder + (" *" if required else ""))
+        le.setFixedHeight(38)
+        le.setStyleSheet(f"""
+            QLineEdit {{
+                background: {OFF_WHITE};
+                color: {DARK_TEXT};
+                border: 1.5px solid {BORDER};
+                border-radius: 6px;
+                font-size: 13px;
+                padding: 0 10px;
+            }}
+            QLineEdit:focus {{ border: 1.5px solid {ACCENT}; background: {WHITE}; }}
+        """)
+        return le
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── header bar ────────────────────────────────────────────────────────
+        hdr = QWidget()
+        hdr.setFixedHeight(48)
+        hdr.setStyleSheet(f"background: {NAVY}; border-radius: 0px;")
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(20, 0, 20, 0)
+        title = QLabel("New Customer")
+        title.setStyleSheet(
+            f"color: {WHITE}; font-size: 15px; font-weight: bold; background: transparent;"
+        )
+        hl.addWidget(title)
+        hl.addStretch()
+        root.addWidget(hdr)
+
+        # ── form body ─────────────────────────────────────────────────────────
+        body = QWidget()
+        body.setStyleSheet(f"background: {WHITE};")
+        fl = QVBoxLayout(body)
+        fl.setContentsMargins(24, 20, 24, 8)
+        fl.setSpacing(10)
+
+        self._f_first = self._field("First name", required=True)
+        self._f_last  = self._field("Last name")
+        self._f_phone = self._field("Phone number")
+        self._f_city  = self._field("City")
+
+        for lbl_txt, widget in [
+            ("FIRST NAME",   self._f_first),
+            ("LAST NAME",    self._f_last),
+            ("PHONE NUMBER", self._f_phone),
+            ("CITY",         self._f_city),
+        ]:
+            lbl = QLabel(lbl_txt)
+            lbl.setObjectName("section")
+            fl.addWidget(lbl)
+            fl.addWidget(widget)
+
+        # ── status label ──────────────────────────────────────────────────────
+        self._status = QLabel("")
+        self._status.setStyleSheet(
+            f"color: {DANGER}; font-size: 11px; background: transparent;"
+        )
+        self._status.setAlignment(Qt.AlignCenter)
+        fl.addWidget(self._status)
+
+        root.addWidget(body)
+
+        # ── footer buttons ────────────────────────────────────────────────────
+        foot = QWidget()
+        foot.setStyleSheet(
+            f"background: {OFF_WHITE}; border-top: 1px solid {BORDER};"
+        )
+        bl = QHBoxLayout(foot)
+        bl.setContentsMargins(24, 12, 24, 16)
+        bl.setSpacing(10)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedHeight(36)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {WHITE}; color: {DARK_TEXT};
+                border: 1.5px solid {BORDER}; border-radius: 6px;
+                font-size: 13px; padding: 0 18px;
+            }}
+            QPushButton:hover {{ background: {LIGHT}; border-color: {ACCENT}; }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+
+        self._save_btn = QPushButton("Save Customer")
+        self._save_btn.setFixedHeight(36)
+        self._save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {SUCCESS}; color: {WHITE};
+                border: none; border-radius: 6px;
+                font-size: 13px; font-weight: bold; padding: 0 22px;
+            }}
+            QPushButton:hover {{ background: {SUCCESS_H}; }}
+            QPushButton:disabled {{ background: {BORDER}; color: {MUTED}; }}
+        """)
+        self._save_btn.clicked.connect(self._save)
+
+        bl.addWidget(cancel_btn)
+        bl.addStretch()
+        bl.addWidget(self._save_btn)
+        root.addWidget(foot)
+
+        # focus the first field
+        self._f_first.setFocus()
+
+    # -------------------------------------------------------------------------
+    def _save(self):
+        first = self._f_first.text().strip()
+        last  = self._f_last.text().strip()
+        phone = self._f_phone.text().strip()
+        city  = self._f_city.text().strip()
+
+        if not first:
+            self._status.setText("First name is required.")
+            self._f_first.setFocus()
+            return
+
+        # Build full customer_name from first + last
+        full_name = f"{first} {last}".strip()
+
+        self._save_btn.setEnabled(False)
+        self._status.setText("")
+
+        try:
+            print("\n" + "="*60)
+            print("[QuickAddCustomer] Starting save...")
+            print(f"  full_name='{full_name}'  phone='{phone}'  city='{city}'")
+
+            # Try to resolve FK IDs — all are optional (tables may be empty)
+            from models.company_defaults import get_defaults
+            defs = get_defaults()
+            print(f"[QuickAddCustomer] defaults: warehouse='{defs.get('server_warehouse')}'"
+                  f"  cost_center='{defs.get('server_cost_center')}'")
+
+            from database.db import get_connection
+            conn = get_connection()
+            cur  = conn.cursor()
+
+            def _find_id(table: str, name_val: str) -> int | None:
+                if not name_val:
+                    return None
+                cur.execute(
+                    f"SELECT id FROM {table} WHERE LTRIM(RTRIM(name)) = ?",
+                    (name_val.strip(),)
+                )
+                row = cur.fetchone()
+                if row:
+                    print(f"  [_find_id] {table} '{name_val}' → id={row[0]}")
+                    return row[0]
+                # fallback: first row
+                cur.execute(f"SELECT TOP 1 id, name FROM {table} ORDER BY id ASC")
+                fb = cur.fetchone()
+                print(f"  [_find_id] {table} '{name_val}' NOT FOUND → fallback={fb}")
+                return fb[0] if fb else None
+
+            warehouse_id   = _find_id("warehouses",      defs.get("server_warehouse", ""))
+            cost_center_id = _find_id("cost_centers",    defs.get("server_cost_center", ""))
+            price_list_id  = _find_id("price_lists",     "Standard Selling ZWG")
+            group_id       = _find_id("customer_groups", "All Customer Groups")
+            conn.close()
+
+            print(f"[QuickAddCustomer] IDs → warehouse={warehouse_id}  "
+                  f"cost_center={cost_center_id}  price_list={price_list_id}  group={group_id}")
+
+            # Direct INSERT — pass None for any FK that couldn't be resolved
+            conn2 = get_connection()
+            cur2  = conn2.cursor()
+            cur2.execute("""
+                INSERT INTO customers (
+                    customer_name, customer_group_id, customer_type,
+                    custom_trade_name, custom_telephone_number, custom_email_address,
+                    custom_city, custom_house_no,
+                    custom_warehouse_id, custom_cost_center_id, default_price_list_id
+                ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                full_name, group_id, "Individual",
+                "", phone, "",
+                city, "",
+                warehouse_id, cost_center_id, price_list_id,
+            ))
+            new_id = int(cur2.fetchone()[0])
+            conn2.commit()
+            conn2.close()
+
+            print(f"[QuickAddCustomer] SUCCESS: inserted id={new_id}  name='{full_name}'")
+            print("="*60 + "\n")
+
+            from models.customer import get_customer_by_id
+            new_cust = get_customer_by_id(new_id) or {"id": new_id, "customer_name": full_name}
+            self.customer_created.emit(new_cust)
+            self.accept()
+
+        except Exception as exc:
+            import traceback
+            print(f"[QuickAddCustomer] EXCEPTION:")
+            traceback.print_exc()
+            print("="*60 + "\n")
+            self._status.setText(f"Error: {exc}")
+            self._save_btn.setEnabled(True)

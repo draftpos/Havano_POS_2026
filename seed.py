@@ -1,46 +1,116 @@
-import logging
-from database.db import get_connection
+"""
+reset_database.py — drops all POS tables so the app rebuilds from scratch.
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("cleanup_service")
+Usage:
+    python reset_database.py
+"""
 
-def delete_all_sales_data():
-    """
-    Deletes all local sales orders, order items, and payment entry sync logs
-    to allow for a clean restart of the synchronization process.
-    """
-    conn = get_connection()
-    cur = conn.cursor()
-    
+import sys
+import json
+import pyodbc
+from pathlib import Path
+
+# ── same driver detection as db.py ────────────────────────────────────────────
+def _best_driver() -> str:
+    preferred = [
+        "ODBC Driver 18 for SQL Server",
+        "ODBC Driver 17 for SQL Server",
+        "ODBC Driver 13 for SQL Server",
+        "SQL Server",
+    ]
+    for d in preferred:
+        if d in pyodbc.drivers():
+            return d
+    raise RuntimeError("No SQL Server ODBC driver found.")
+
+def _get_connection():
+    path = Path("app_data/sql_settings.json")
+    if not path.exists():
+        print("ERROR: app_data/sql_settings.json not found.")
+        print("Make sure you run this script from your project root folder.")
+        sys.exit(1)
+
+    cfg  = json.loads(path.read_text(encoding="utf-8"))
+    drv  = _best_driver()
+
+    if cfg.get("auth_mode") == "windows":
+        conn_str = (
+            f"DRIVER={{{drv}}};"
+            f"SERVER={cfg['server']};"
+            f"DATABASE={cfg['database']};"
+            "Trusted_Connection=yes;"
+            "TrustServerCertificate=yes;"
+        )
+    else:
+        conn_str = (
+            f"DRIVER={{{drv}}};"
+            f"SERVER={cfg['server']};"
+            f"DATABASE={cfg['database']};"
+            f"UID={cfg['username']};"
+            f"PWD={cfg['password']};"
+            "TrustServerCertificate=yes;"
+        )
+
+    return pyodbc.connect(conn_str)
+
+
+# ── tables to drop (dependants first so FK constraints don't block) ───────────
+TABLES = [
+    "sale_items",
+    "sales",
+    "credit_note_items",
+    "credit_notes",
+    "customers",
+    "customer_groups",
+    "products",
+    "price_list_items",
+    "price_lists",
+    "warehouses",
+    "cost_centers",
+    "companies",
+    "users",
+    "company_defaults",
+]
+
+
+def reset():
+    conn = _get_connection()
+    cur  = conn.cursor()
+
+    print("\n" + "="*52)
+    print("   POS DATABASE RESET")
+    print("="*52)
+
+    # turn off all FK checks so we can drop in any order
     try:
-        log.info("Starting cleanup of sales and payment data...")
-
-        # 1. Delete Payment Entry sync logs
-        # This clears the queue of failed 417 errors you are seeing
-        cur.execute("DELETE FROM laybye_payment_entries")
-        log.info("Cleared 'laybye_payment_entries' table.")
-
-        # 2. Delete Sales Order Items first (due to Foreign Key constraints)
-        cur.execute("DELETE FROM sales_order_item")
-        log.info("Cleared 'sales_order_item' table.")
-
-        # 3. Delete the main Sales Orders
-        cur.execute("DELETE FROM sales_order")
-        log.info("Cleared 'sales_order' table.")
-
-        # Optional: Reset Identity counters to 1
-        cur.execute("DBCC CHECKIDENT ('sales_order', RESEED, 0)")
-        cur.execute("DBCC CHECKIDENT ('laybye_payment_entries', RESEED, 0)")
-
+        cur.execute("EXEC sp_MSforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT ALL'")
         conn.commit()
-        log.info("✅ Successfully deleted all local records. You can now restart the app.")
+    except Exception:
+        pass
 
-    except Exception as e:
-        conn.rollback()
-        log.error(f"❌ Cleanup failed: {str(e)}")
-    finally:
-        cur.close()
-        conn.close()
+    dropped = 0
+    for table in TABLES:
+        try:
+            cur.execute(f"""
+                IF OBJECT_ID('{table}', 'U') IS NOT NULL
+                    DROP TABLE [{table}]
+            """)
+            conn.commit()
+            print(f"  Dropped : {table}")
+            dropped += 1
+        except Exception as e:
+            print(f"  Skipped : {table}  ({e})")
+
+    conn.close()
+    print("="*52)
+    print(f"  Done - {dropped} table(s) dropped.")
+    print("  Launch the app normally to rebuild all tables.\n")
+
 
 if __name__ == "__main__":
-    delete_all_sales_data() 
+    print("\n  WARNING: This will permanently delete ALL data.")
+    confirm = input("  Type  YES  to continue: ").strip()
+    if confirm == "YES":
+        reset()
+    else:
+        print("  Aborted - nothing was changed.\n")

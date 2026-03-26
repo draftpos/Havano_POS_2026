@@ -20129,3 +20129,423 @@ Traceback (most recent call last):
 RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
 2026-03-26 07:36:14,276  [INFO]  Product sync — 0 inserted, 0 updated, 0 skipped.
 2026-03-26 07:36:14,276  [INFO]  Product sync — 0 inserted, 0 updated, 0 skipped.
+2026-03-26 07:40:49,113  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 07:46:04,849  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 07:51:20,613  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 07:56:36,343  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:01:52,057  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:07:07,795  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:12:23,532  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:17:39,297  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:22:55,090  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:28:10,878  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:33:26,667  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:38:42,468  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:43:58,189  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:49:13,944  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:54:29,800  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 08:59:45,702  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 09:05:01,468  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 09:10:17,245  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+2026-03-26 09:15:18,068  [INFO]  Havano Product Sync Service started.
+2026-03-26 09:15:18,072  [INFO]  Sync interval: 300s (5 min)  page_size: 500
+2026-03-26 09:15:34,349  [ERROR]  [sync] Cycle error: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 527, in _load_credentials
+    d = get_defaults() or {}
+        ^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\models\company_defaults.py", line 29, in get_defaults
+    conn = get_connection()
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\database\db.py", line 91, in get_connection
+    return pyodbc.connect(conn_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+pyodbc.OperationalError: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 926, in _run_sync
+    api_key, api_secret = _load_credentials()
+                          ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\Pos Pyside6\pos_system\services\product_sync_windows_service.py", line 530, in _load_credentials
+    raise RuntimeError(f"company_defaults unavailable: {e}")
+RuntimeError: company_defaults unavailable: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [2].  (2) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to .. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (2)')

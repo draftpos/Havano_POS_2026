@@ -580,15 +580,21 @@ class ProductSearchDialog(QDialog):
 # CUSTOMER SEARCH POPUP — Updated with Sync, Quick-Add & Database Linking
 # =============================================================================
 from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QWidget, QLabel, 
+    QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, 
+    QAbstractItemView, QMessageBox
+)
 
 class CustomerSearchPopup(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.selected_customer = None
         self.setWindowTitle("Select Customer")
-        self.setMinimumSize(850, 550)
+        self.setMinimumSize(950, 550) 
         self.setModal(True)
-        # Using WHITE variable from your global styles
+        # Force the dialog background to the WHITE variable
         self.setStyleSheet(f"QDialog {{ background-color: {WHITE}; }}")
         self._build()
 
@@ -629,32 +635,51 @@ class CustomerSearchPopup(QDialog):
         self._search.textChanged.connect(self._do_search)
         self._search.returnPressed.connect(self._pick)
 
-        # Requirement: Sync Button
         self._sync_btn = navy_btn("Sync Cloud", height=36, color=NAVY_2, hover=NAVY_3)
         self._sync_btn.clicked.connect(self._on_sync_clicked)
 
-        # Requirement: New Customer
+        # Requirement: New Customer Button
         add_btn = navy_btn("+ New", height=36, color=ACCENT, hover=ACCENT_H)
         add_btn.clicked.connect(self._quick_add_customer)
 
-        # FIX: Changed 'DARK' to 'NAVY' to prevent NameError
-        walk_in = navy_btn("Walk-in", height=36, color=NAVY, hover=NAVY_2)
-        walk_in.clicked.connect(self._walk_in)
-
+        # WALK-IN REMOVED FROM HERE
         sr.addWidget(self._search, 1)
         sr.addWidget(self._sync_btn)
         sr.addWidget(add_btn)
-        sr.addWidget(walk_in)
         lay.addLayout(sr)
 
         # --- Customer Table ---
-        self._tbl = QTableWidget(0, 4)
-        self._tbl.setHorizontalHeaderLabels(["Name", "Type", "Phone", "City"])
+        self._tbl = QTableWidget(0, 6)
+        self._tbl.setHorizontalHeaderLabels(["Name", "Type", "Phone", "City", "Laybye Bal", "Total Due"])
+        
+        # TABLE STYLING: Fixes the 'White on White' selection issue
+        self._tbl.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {WHITE};
+                color: {DARK_TEXT};
+                gridline-color: #eeeeee;
+                border: 1px solid #dddddd;
+            }}
+            QTableWidget::item:selected {{
+                background-color: {ACCENT};
+                color: {WHITE};
+            }}
+            QHeaderView::section {{
+                background-color: #f8f9fa;
+                padding: 5px;
+                border: 1px solid #dddddd;
+                font-weight: bold;
+                color: {DARK_TEXT};
+            }}
+        """)
+
         hh = self._tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Stretch)
-        for ci in [1, 2, 3]:
-            hh.setSectionResizeMode(ci, QHeaderView.Fixed)
-            self._tbl.setColumnWidth(ci, 120)
+        hh.setSectionResizeMode(0, QHeaderView.Stretch) 
+        
+        widths = {1: 80, 2: 110, 3: 100, 4: 110, 5: 110}
+        for col, width in widths.items():
+            hh.setSectionResizeMode(col, QHeaderView.Fixed)
+            self._tbl.setColumnWidth(col, width)
             
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.setAlternatingRowColors(True)
@@ -662,12 +687,6 @@ class CustomerSearchPopup(QDialog):
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._tbl.setSelectionMode(QAbstractItemView.SingleSelection)
         
-        # Ensure your table style helper is defined
-        try:
-            self._tbl.setStyleSheet(_settings_table_style())
-        except NameError:
-            pass 
-            
         self._tbl.doubleClicked.connect(self._pick)
         lay.addWidget(self._tbl, 1)
         
@@ -687,7 +706,6 @@ class CustomerSearchPopup(QDialog):
 
         self._load_all()
 
-    # --- Sync Logic ---
     def _on_sync_clicked(self):
         self._sync_btn.setEnabled(False)
         self._sync_btn.setText("Syncing...")
@@ -713,7 +731,7 @@ class CustomerSearchPopup(QDialog):
             self._thread = SyncThread(self)
             self._thread.finished.connect(self._on_sync_finished)
             self._thread.start()
-        except ImportError:
+        except (ImportError, Exception):
             self._status_lbl.setText("Error: Sync Service not found")
             self._sync_btn.setEnabled(True)
 
@@ -725,12 +743,12 @@ class CustomerSearchPopup(QDialog):
 
     def _quick_add_customer(self):
         try:
-            from views.dialogs.customer import CustomerDialog
-            dlg = CustomerDialog(self)
-            if dlg.exec() == QDialog.Accepted:
-                self._load_all()
+            from views.dialogs.customer_dialog import QuickAddCustomerDialog
+            dlg = QuickAddCustomerDialog(self)
+            dlg.customer_created.connect(lambda _: self._load_all())
+            dlg.exec()
         except ImportError:
-            QMessageBox.warning(self, "Error", "Customer Management module not found.")
+            QMessageBox.warning(self, "Error", "Customer dialog module not found.")
 
     def _load_all(self):
         try:
@@ -757,18 +775,36 @@ class CustomerSearchPopup(QDialog):
             r = self._tbl.rowCount()
             self._tbl.insertRow(r)
             
-            display_data = [
-                c.get("customer_name", ""),
-                c.get("customer_type", ""),
-                c.get("custom_telephone_number", ""),
-                c.get("custom_city", ""),
-            ]
-            
-            for col, val in enumerate(display_data):
-                it = QTableWidgetItem(str(val or ""))
-                # Crucial: Store the database dictionary in the item's UserRole
-                it.setData(Qt.UserRole, c) 
-                self._tbl.setItem(r, col, it)
+            # Text Color Guard: Ensures text is always visible (Black/Dark)
+            def create_item(text):
+                item = QTableWidgetItem(str(text or ""))
+                item.setForeground(QColor(DARK_TEXT)) 
+                return item
+
+            # Text columns
+            self._tbl.setItem(r, 0, create_item(c.get("customer_name", "")))
+            self._tbl.setItem(r, 1, create_item(c.get("customer_type", "")))
+            self._tbl.setItem(r, 2, create_item(c.get("custom_telephone_number", "")))
+            self._tbl.setItem(r, 3, create_item(c.get("custom_city", "")))
+
+            # Laybye Balance (Column 4)
+            l_bal = float(c.get("laybye_balance") or 0.0)
+            it_l = QTableWidgetItem(f"{l_bal:,.2f}")
+            it_l.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            # Readable Blue
+            it_l.setForeground(QColor("#0044cc")) if l_bal > 0 else it_l.setForeground(QColor(DARK_TEXT))
+            self._tbl.setItem(r, 4, it_l)
+
+            # Outstanding / Total Due (Column 5)
+            o_bal = float(c.get("outstanding_amount") or 0.0)
+            it_o = QTableWidgetItem(f"{o_bal:,.2f}")
+            it_o.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            # High Contrast Red
+            it_o.setForeground(QColor("#cc0000")) if o_bal > 0 else it_o.setForeground(QColor(DARK_TEXT))
+            self._tbl.setItem(r, 5, it_o)
+
+            # Store the dictionary in the first item
+            self._tbl.item(r, 0).setData(Qt.UserRole, c)
             self._tbl.setRowHeight(r, 38)
         
         if self._tbl.rowCount() > 0:
@@ -777,13 +813,10 @@ class CustomerSearchPopup(QDialog):
     def _pick(self):
         row = self._tbl.currentRow()
         if row < 0: return
-        # Retrieve the stored DB record
         self.selected_customer = self._tbl.item(row, 0).data(Qt.UserRole)
         self.accept()
 
-    def _walk_in(self):
-        self.selected_customer = None
-        self.accept()
+    # WALK-IN FUNCTION REMOVED FROM HERE
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_F10:
@@ -6914,16 +6947,41 @@ class POSView(QWidget):
 # MAIN WINDOW
 # =============================================================================
 class MainWindow(QMainWindow):
+    # Class-level socket — lives for the entire process lifetime.
+    # Never released on logout so re-login never drops the lock.
+    _instance_sock = None
+
+    @staticmethod
+    def _acquire_instance_lock() -> bool:
+        """
+        Bind the sentinel port once per process.
+        Returns True if this is the first (and only) instance.
+        Returns False if another EXE already owns the port.
+        Safe to call multiple times (re-login path): if already bound,
+        returns True immediately without touching the socket.
+        """
+        import socket as _socket
+        if MainWindow._instance_sock is not None:
+            return True   # already locked by this process
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 0)
+        try:
+            sock.bind(("127.0.0.1", 47634))
+            MainWindow._instance_sock = sock   # keep alive at class level
+            return True
+        except OSError:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return False
+
     def __init__(self, user=None):
         super().__init__()
 
-        # #33 — single instance: bind a local port; second launch shows warning and exits
-        import socket as _socket
-        self._instance_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        self._instance_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 0)
-        try:
-            self._instance_sock.bind(("127.0.0.1", 47634))
-        except OSError:
+        # Single-instance guard — works correctly across logout/re-login cycles
+        # because the socket lives at class level, not on self.
+        if not MainWindow._acquire_instance_lock():
             from PySide6.QtWidgets import QMessageBox as _MB
             _MB.warning(None, "Already Running",
                         "Havano POS is already open.\nPlease use the existing window.")
@@ -7060,6 +7118,98 @@ class MainWindow(QMainWindow):
             logging.getLogger("MainWindow").warning(
                 "Sales Order upload service could not start: %s", _e)
 
+        # ── One-shot startup sync (runs immediately in background on login) ──
+        # Fires once right after MainWindow opens so products, customers,
+        # users, accounts and exchange rates are all refreshed without the
+        # cashier having to click anything manually.
+        QTimer.singleShot(2000, self._run_startup_sync)   # 2 s delay lets the
+        # UI finish rendering before the network calls start.
+
+    # =========================================================================
+    # STARTUP SYNC — runs once on login, in a background thread so the UI
+    # stays fully responsive.  Every sync function is already daemon-safe;
+    # we just call them once up-front so the cashier never has to manually
+    # trigger "Sync Cloud".
+    # =========================================================================
+    def _run_startup_sync(self):
+        """
+        Called automatically 2 seconds after MainWindow opens.
+        Runs every sync in a single background QThread so none of them
+        block the UI.  Errors are logged and silently swallowed — the
+        periodic daemons will retry on their own schedules.
+        """
+        import logging
+        log = logging.getLogger("StartupSync")
+
+        from PySide6.QtCore import QThread
+
+        class _StartupSyncWorker(QThread):
+            def run(self_inner):                          # noqa: N805
+                log.info("[startup-sync] Starting full sync on login…")
+
+                # 1. Accounts + exchange rates  (needed first: other syncs
+                #    may depend on company_currency from defaults)
+                try:
+                    from services.accounts_sync_service import sync_accounts_and_rates
+                    r = sync_accounts_and_rates()
+                    log.info("[startup-sync] Accounts: %d  Rates: %d",
+                             r.get("accounts", 0), r.get("rates", 0))
+                except Exception as exc:
+                    log.warning("[startup-sync] Accounts/rates error: %s", exc)
+
+                # 2. Products  (largest payload — run second so accounts are
+                #    already in DB if any product logic needs them)
+                try:
+                    from services.sync_service import sync_products, _read_credentials
+                    api_key, api_secret = _read_credentials()
+                    if api_key and api_secret:
+                        r = sync_products(api_key=api_key, api_secret=api_secret)
+                        log.info(
+                            "[startup-sync] Products: %d inserted, %d updated, %d skipped",
+                            r.get("products_inserted", 0),
+                            r.get("products_updated",  0),
+                            r.get("skipped", 0),
+                        )
+                    else:
+                        log.warning("[startup-sync] No credentials — product sync skipped.")
+                except Exception as exc:
+                    log.warning("[startup-sync] Products error: %s", exc)
+
+                # 3. Customers
+                try:
+                    from services.customer_sync_service import sync_customers
+                    sync_customers()
+                    log.info("[startup-sync] Customers synced.")
+                except Exception as exc:
+                    log.warning("[startup-sync] Customers error: %s", exc)
+
+                # 4. Users
+                try:
+                    from services.user_sync_service import sync_users
+                    r = sync_users()
+                    log.info(
+                        "[startup-sync] Users: %d synced, %d skipped, %d errors",
+                        r.get("synced", 0), r.get("skipped", 0), r.get("errors", 0),
+                    )
+                except Exception as exc:
+                    log.warning("[startup-sync] Users error: %s", exc)
+
+                # 5. Invoice back-matching  (links Frappe SI names to local sales)
+                try:
+                    from services.invoice_sync_services import sync_invoices_from_frappe
+                    r = sync_invoices_from_frappe()
+                    log.info(
+                        "[startup-sync] Invoices: %d matched, %d already set, %d unmatched",
+                        r.get("matched", 0), r.get("already_set", 0), r.get("unmatched", 0),
+                    )
+                except Exception as exc:
+                    log.warning("[startup-sync] Invoices error: %s", exc)
+
+                log.info("[startup-sync] ✅ All startup syncs complete.")
+
+        self._startup_sync_thread = _StartupSyncWorker(self)
+        self._startup_sync_thread.start()
+
     def switch_to_pos(self):
         self._stack.setCurrentIndex(0)
         self._set_status("POS mode  —  ready to sell.")
@@ -7130,26 +7280,42 @@ class MainWindow(QMainWindow):
         POSReportsDialog(self).exec()
 
     def _release_instance_lock(self):
-        try:
-            self._instance_sock.close()
-        except Exception:
-            pass
+        # The class-level socket is intentionally kept alive for the whole
+        # process lifetime so that logout + re-login does NOT drop the lock
+        # and allow a second instance to start.  Do nothing here.
+        pass
 
     def closeEvent(self, event):
-        self._release_instance_lock()
+        # Only release the port lock when the application is genuinely closing
+        # (not during a logout/re-login cycle).  We detect a re-login by
+        # checking whether a next window was already created.
+        if not getattr(self, "_next_window", None):
+            # True exit — release so the OS port is freed immediately.
+            try:
+                if MainWindow._instance_sock is not None:
+                    MainWindow._instance_sock.close()
+                    MainWindow._instance_sock = None
+            except Exception:
+                pass
         super().closeEvent(event)
 
     def _logout(self):
-        reply = QMessageBox.question(self, "Logout", "Logout and return to login screen?", QMessageBox.Yes | QMessageBox.No)
+        reply = QMessageBox.question(
+            self, "Logout", "Logout and return to login screen?",
+            QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.hide()
-            self._release_instance_lock()
+            # Do NOT release the instance lock here.  The lock lives at class
+            # level for the whole process.  Releasing it would let a second
+            # EXE start before the login dialog finishes.
             try:
                 from views.login_dialog import LoginDialog
                 dlg = LoginDialog()
                 if dlg.exec() == QDialog.Accepted:
                     new_win = MainWindow(user=dlg.logged_in_user)
-                    new_win.show(); self._next_window = new_win
+                    new_win.show()
+                    # Keep a reference so the window is not garbage-collected.
+                    self._next_window = new_win
                 else:
                     QApplication.quit()
             except Exception:

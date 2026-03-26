@@ -159,7 +159,6 @@ def _next_order_no(cur) -> str:
 # =============================================================================
 # CRUD
 # =============================================================================
-
 def create_sales_order(
     cart_items:      list[dict],
     total:           float,
@@ -234,6 +233,14 @@ def create_sales_order(
         """, (order_id, item_code, item_name, qty, rate, amount, warehouse))
 
     conn.commit()
+    
+    # === NEW: Update Customer Stored Balance Right Away ===
+    if customer_id:
+        try:
+            sync_customer_laybye_balance(customer_id)
+        except Exception as e:
+            log.error("Failed to sync customer balance: %s", e)
+
     log.info("Laybye created: %s  id=%d  total=%.2f  deposit=%.2f  balance=%.2f",
              order_no, order_id, total, deposit_amount, balance_due)
 
@@ -254,8 +261,6 @@ def create_sales_order(
         conn.commit()
 
     return order_id
-
-
 # =============================================================================
 # Frappe Payment Entry sync
 # =============================================================================
@@ -518,38 +523,51 @@ def add_deposit_payment(order_id: int, amount: float, method: str):
     Record an additional deposit payment against an existing Sales Order.
     Reduces balance_due and updates deposit_amount.
     Automatically sets status to 'Completed' when balance reaches zero.
+    Also updates the customer's total balance in the customers table.
     """
     ensure_tables()
     conn = _get_conn()
     cur  = conn.cursor()
 
+    # 1. Get current order details including customer_id
     cur.execute(
-        "SELECT total, deposit_amount FROM sales_order WHERE id = ?", (order_id,))
+        "SELECT total, deposit_amount, customer_id FROM sales_order WHERE id = ?", 
+        (order_id,)
+    )
     row = cur.fetchone()
     if not row:
         raise ValueError(f"Sales order {order_id} not found.")
 
-    total, existing_deposit = row[0], row[1]
+    total, existing_deposit, customer_id = row[0], row[1], row[2]
+    
+    # 2. Calculate new totals
     new_deposit = round(existing_deposit + amount, 4)
     new_balance = round(max(total - new_deposit, 0.0), 4)
     new_status  = "Completed" if new_balance <= 0.005 else "Confirmed"
 
-    conn.execute(
+    # 3. Update the Sales Order
+    cur.execute(
         """
         UPDATE sales_order
-        SET    deposit_amount = ?,
-               deposit_method = ?,
-               balance_due    = ?,
-               status         = ?,
-               synced         = 0
-        WHERE  id = ?
+        SET     deposit_amount = ?,
+                deposit_method = ?,
+                balance_due    = ?,
+                status         = ?,
+                synced         = 0
+        WHERE   id = ?
         """,
         (new_deposit, method, new_balance, new_status, order_id))
     conn.commit()
 
+    # 4. === NEW: Update Customer Stored Balance Right Away ===
+    if customer_id:
+        try:
+            sync_customer_laybye_balance(customer_id)
+        except Exception as e:
+            log.error("Failed to sync customer balance after deposit: %s", e)
+
     log.info("Deposit added to order %d: +%.2f via %s  balance=%.2f",
              order_id, amount, method, new_balance)
-
 
 def get_order_by_id(order_id: int) -> dict | None:
     ensure_tables()
@@ -569,3 +587,23 @@ def get_order_by_id(order_id: int) -> dict | None:
     order_dict["items"] = [_dict_row(cur, r) for r in cur.fetchall()]
 
     return order_dict
+
+def sync_customer_laybye_balance(customer_id: int):
+    if not customer_id:
+        return
+    
+    conn = _get_conn()
+    cur = conn.cursor()
+    
+    # 1. Calculate sum from all laybyes that aren't finished or cancelled
+    cur.execute("""
+        SELECT COALESCE(SUM(balance_due), 0.0) 
+        FROM sales_order 
+        WHERE customer_id = ? AND status NOT IN ('Completed', 'Cancelled')
+    """, (customer_id,))
+    total_due = float(cur.fetchone()[0] or 0.0)
+    
+    # 2. UPDATE THE CORRECT COLUMN (laybye_balance)
+    cur.execute("UPDATE customers SET laybye_balance = ? WHERE id = ?", (total_due, customer_id))
+    conn.commit()
+    log.info("Synced Customer ID %d: New Laybye Balance = %.2f", customer_id, total_due)

@@ -1,89 +1,53 @@
 # =============================================================================
 # setup_database.py  —  Havano POS
 #
-# Derived from ALL model files. Safe to run on a fresh DB or an existing one.
-# Every CREATE TABLE and ALTER TABLE is guarded with IF NOT EXISTS checks.
+# Single source of truth for the database schema.
+# Derived 1-to-1 from script.sql (pos_db, 3/26/2026).
 #
-# Run after first install (or after a wipe):
+# SAFE to run on a FRESH database or an EXISTING one:
+#   • Creates any missing table.
+#   • Adds any missing column to existing tables (ALTER TABLE).
+#   • Never drops, truncates, or overwrites existing data.
+#
+# Called automatically by main.py on every startup AFTER a valid
+# DB connection is confirmed — so you never need to run it by hand
+# unless you wiped the DB with seed.py.
+#
+# To run manually:
 #   python setup_database.py
 #
-# Seeds one default admin user if the users table is empty:
-#   Username : admin
-#   Password : admin123
+# Seeds one default admin user when the users table is empty:
+#   Username : admin   Password : admin123
 # =============================================================================
 
 import sys
 import os
 import hashlib
-import pyodbc
 
 
 def _hash(pw: str) -> str:
     return hashlib.sha256(pw.encode()).hexdigest()
 
 
-def create_database_if_not_exists():
-    """Create the database if it doesn't exist"""
-    # Connection to master database — TrustServerCertificate avoids SSL chain errors
-    conn_str = (
-        "DRIVER={ODBC Driver 18 for SQL Server};"
-        "SERVER=localhost\\SQLEXPRESS;"
-        "Trusted_Connection=yes;"
-        "TrustServerCertificate=yes;"
-    )
-
-    try:
-        conn = pyodbc.connect(conn_str, autocommit=True)
-        cursor = conn.cursor()
-
-        # Check if database exists
-        cursor.execute("SELECT 1 FROM sys.databases WHERE name = 'POS_DB'")
-        if not cursor.fetchone():
-            print("Database POS_DB does not exist. Creating...")
-            cursor.execute("""
-                CREATE DATABASE [POS_DB]
-                CONTAINMENT = NONE
-                ON PRIMARY
-                (NAME = N'POS_DB',
-                 FILENAME = N'C:\\Program Files\\Microsoft SQL Server\\MSSQL16.SQLEXPRESS\\MSSQL\\DATA\\POS_DB.mdf',
-                 SIZE = 73728KB,
-                 MAXSIZE = UNLIMITED,
-                 FILEGROWTH = 65536KB)
-                LOG ON
-                (NAME = N'POS_DB_log',
-                 FILENAME = N'C:\\Program Files\\Microsoft SQL Server\\MSSQL16.SQLEXPRESS\\MSSQL\\DATA\\POS_DB_log.ldf',
-                 SIZE = 8192KB,
-                 MAXSIZE = 2048GB,
-                 FILEGROWTH = 65536KB)
-            """)
-            print("✓ Database POS_DB created successfully")
-        else:
-            print("Database POS_DB already exists")
-
-        conn.close()
-        return True
-
-    except Exception as e:
-        print(f"Error creating database: {e}")
-        return False
-
-
+# ---------------------------------------------------------------------------
+# run() is the only public entry-point.
+# main.py calls:  from setup_database import run; run()
+# ---------------------------------------------------------------------------
 def run():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-    # First, ensure the database exists
-    if not create_database_if_not_exists():
-        print("Failed to create database. Exiting.")
-        sys.exit(1)
 
     try:
         from database.db import get_connection
     except Exception as e:
-        print(f"[ERROR] Cannot import database.db: {e}")
-        print("Make sure you run this from the project root folder.")
-        sys.exit(1)
+        print(f"[setup_database] Cannot import database.db: {e}")
+        return
 
-    conn = get_connection()
+    try:
+        conn = get_connection()
+    except Exception as e:
+        print(f"[setup_database] Cannot open DB connection: {e}")
+        return
+
     cur = conn.cursor()
 
     # ------------------------------------------------------------------
@@ -92,7 +56,8 @@ def run():
     def table_exists(name: str) -> bool:
         try:
             cur.execute(
-                "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ?", (name,))
+                "SELECT 1 FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME=?", (name,))
             return cur.fetchone() is not None
         except Exception:
             return False
@@ -101,7 +66,8 @@ def run():
         try:
             cur.execute(
                 "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
-                "WHERE TABLE_NAME = ? AND COLUMN_NAME = ?", (table, col))
+                "WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME=? AND COLUMN_NAME=?",
+                (table, col))
             return cur.fetchone() is not None
         except Exception:
             return False
@@ -109,23 +75,22 @@ def run():
     def add_col(table: str, col: str, definition: str):
         if not col_exists(table, col):
             try:
-                cur.execute(f"ALTER TABLE [{table}] ADD [{col}] {definition}")
-                print(f"    + {table}.{col}")
+                cur.execute(
+                    f"ALTER TABLE [dbo].[{table}] ADD [{col}] {definition}")
+                print(f"    + added column  {table}.{col}")
             except Exception as e:
-                print(f"    ! Could not add {table}.{col}: {e}")
+                print(f"    ! could not add {table}.{col}: {e}")
 
     def fk_exists(name: str) -> bool:
         try:
-            cur.execute("SELECT 1 FROM sys.foreign_keys WHERE name = ?", (name,))
+            cur.execute(
+                "SELECT 1 FROM sys.foreign_keys WHERE name=?", (name,))
             return cur.fetchone() is not None
         except Exception:
             return False
 
-    def ok(name):
-        print(f"  [+] Created : {name}")
-
-    def skip(name):
-        print(f"  [ ] Exists  : {name}")
+    def ok(name):   print(f"  [+] created  : {name}")
+    def skip(name): print(f"  [ ] exists   : {name}")
 
     print("\n======================================")
     print("  Havano POS - Database Setup")
@@ -143,12 +108,15 @@ def run():
                 [default_currency] NVARCHAR(10)  NOT NULL DEFAULT 'USD',
                 [country]          NVARCHAR(80)  NOT NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC),
-                UNIQUE ([name])
+                UNIQUE NONCLUSTERED ([name] ASC)
             )
         """)
         ok("companies")
     else:
         skip("companies")
+        add_col("companies", "abbreviation",     "NVARCHAR(40)  NOT NULL DEFAULT ''")
+        add_col("companies", "default_currency", "NVARCHAR(10)  NOT NULL DEFAULT 'USD'")
+        add_col("companies", "country",          "NVARCHAR(80)  NOT NULL DEFAULT ''")
 
     # ==================================================================
     # 2. company_defaults
@@ -194,8 +162,9 @@ def run():
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
+        # Always seed one blank row so the app has a settings row to read
         try:
-            cur.execute("INSERT INTO company_defaults DEFAULT VALUES")
+            cur.execute("INSERT INTO [dbo].[company_defaults] DEFAULT VALUES")
         except Exception:
             pass
         ok("company_defaults")
@@ -213,8 +182,23 @@ def run():
             ("server_pos_account",       "NVARCHAR(255) NOT NULL DEFAULT ''"),
             ("server_taxes_and_charges", "NVARCHAR(255) NOT NULL DEFAULT ''"),
             ("server_walk_in_customer",  "NVARCHAR(255) NOT NULL DEFAULT 'default'"),
+            ("server_first_name",        "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("server_last_name",         "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("server_mobile",            "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("server_profile",           "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("server_vat_enabled",       "NVARCHAR(10)  NOT NULL DEFAULT ''"),
+            ("api_key",                  "NVARCHAR(200) NOT NULL DEFAULT ''"),
+            ("api_secret",               "NVARCHAR(200) NOT NULL DEFAULT ''"),
         ]:
             add_col("company_defaults", col, defn)
+        # Ensure at least one settings row exists
+        try:
+            cur.execute("SELECT COUNT(*) FROM [dbo].[company_defaults]")
+            if cur.fetchone()[0] == 0:
+                cur.execute(
+                    "INSERT INTO [dbo].[company_defaults] DEFAULT VALUES")
+        except Exception:
+            pass
 
     # ==================================================================
     # 3. customer_groups
@@ -226,12 +210,13 @@ def run():
                 [name]            NVARCHAR(120) NOT NULL,
                 [parent_group_id] INT           NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC),
-                UNIQUE ([name])
+                UNIQUE NONCLUSTERED ([name] ASC)
             )
         """)
         ok("customer_groups")
     else:
         skip("customer_groups")
+        add_col("customer_groups", "parent_group_id", "INT NULL")
 
     # ==================================================================
     # 4. price_lists
@@ -243,15 +228,16 @@ def run():
                 [name]    NVARCHAR(120) NOT NULL,
                 [selling] BIT           NULL DEFAULT 1,
                 PRIMARY KEY CLUSTERED ([id] ASC),
-                UNIQUE ([name])
+                UNIQUE NONCLUSTERED ([name] ASC)
             )
         """)
         ok("price_lists")
     else:
         skip("price_lists")
+        add_col("price_lists", "selling", "BIT NULL DEFAULT 1")
 
     # ==================================================================
-    # 5. warehouses  (depends on companies)
+    # 5. warehouses  (FK -> companies added after all tables exist)
     # ==================================================================
     if not table_exists("warehouses"):
         cur.execute("""
@@ -265,9 +251,10 @@ def run():
         ok("warehouses")
     else:
         skip("warehouses")
+        add_col("warehouses", "company_id", "INT NOT NULL DEFAULT 0")
 
     # ==================================================================
-    # 6. cost_centers  (depends on companies)
+    # 6. cost_centers  (FK -> companies added later)
     # ==================================================================
     if not table_exists("cost_centers"):
         cur.execute("""
@@ -281,9 +268,10 @@ def run():
         ok("cost_centers")
     else:
         skip("cost_centers")
+        add_col("cost_centers", "company_id", "INT NOT NULL DEFAULT 0")
 
     # ==================================================================
-    # 7. customers  (depends on customer_groups, warehouses, cost_centers, price_lists)
+    # 7. customers
     # ==================================================================
     if not table_exists("customers"):
         cur.execute("""
@@ -302,6 +290,7 @@ def run():
                 [default_price_list_id]   INT           NULL,
                 [balance]                 DECIMAL(18,2) NULL DEFAULT 0,
                 [outstanding_amount]      DECIMAL(18,2) NULL DEFAULT 0,
+                [laybye_balance]          DECIMAL(18,2) NULL DEFAULT 0,
                 [loyalty_points]          INT           NULL DEFAULT 0,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
@@ -309,6 +298,22 @@ def run():
         ok("customers")
     else:
         skip("customers")
+        for col, defn in [
+            ("customer_group_id",       "INT           NULL"),
+            ("customer_type",           "NVARCHAR(20)  NULL"),
+            ("custom_trade_name",       "NVARCHAR(120) NULL"),
+            ("custom_telephone_number", "NVARCHAR(120) NULL"),
+            ("custom_email_address",    "NVARCHAR(120) NULL"),
+            ("custom_city",             "NVARCHAR(120) NULL"),
+            ("custom_house_no",         "NVARCHAR(120) NULL"),
+            ("custom_warehouse_id",     "INT           NULL"),
+            ("custom_cost_center_id",   "INT           NULL"),
+            ("default_price_list_id",   "INT           NULL"),
+            ("balance",                 "DECIMAL(18,2) NULL DEFAULT 0"),
+            ("outstanding_amount",      "DECIMAL(18,2) NULL DEFAULT 0"),
+            ("loyalty_points",          "INT           NULL DEFAULT 0"),
+        ]:
+            add_col("customers", col, defn)
 
     # ==================================================================
     # 8. users
@@ -321,7 +326,7 @@ def run():
                 [password]             NVARCHAR(255) NOT NULL,
                 [display_name]         NVARCHAR(120) NULL,
                 [active]               BIT           NOT NULL DEFAULT 1,
-                [role]                 NVARCHAR(20)  NULL DEFAULT 'cashier',
+                [role]                 NVARCHAR(20)  NULL  DEFAULT 'cashier',
                 [email]                NVARCHAR(120) NULL,
                 [full_name]            NVARCHAR(120) NULL,
                 [first_name]           NVARCHAR(80)  NULL,
@@ -335,18 +340,26 @@ def run():
                 [allow_receipt]        BIT           NOT NULL DEFAULT 1,
                 [allow_credit_note]    BIT           NOT NULL DEFAULT 1,
                 [allow_reprint]        BIT           NOT NULL DEFAULT 1,
-                [company]              NVARCHAR(140) NULL DEFAULT '',
-                [max_discount_percent] INT           NULL DEFAULT 0,
+                [company]              NVARCHAR(140) NULL  DEFAULT '',
+                [max_discount_percent] INT           NULL  DEFAULT 0,
                 PRIMARY KEY CLUSTERED ([id] ASC),
-                UNIQUE ([username])
+                UNIQUE NONCLUSTERED ([username] ASC)
             )
         """)
         ok("users")
     else:
         skip("users")
         for col, defn in [
+            ("display_name",         "NVARCHAR(120) NULL"),
+            ("email",                "NVARCHAR(120) NULL"),
+            ("full_name",            "NVARCHAR(120) NULL"),
+            ("first_name",           "NVARCHAR(80)  NULL"),
+            ("last_name",            "NVARCHAR(80)  NULL"),
+            ("pin",                  "NVARCHAR(20)  NULL"),
             ("cost_center",          "NVARCHAR(140) NULL"),
             ("warehouse",            "NVARCHAR(140) NULL"),
+            ("frappe_user",          "NVARCHAR(120) NULL"),
+            ("synced_from_frappe",   "BIT           NOT NULL DEFAULT 0"),
             ("allow_discount",       "BIT           NOT NULL DEFAULT 1"),
             ("allow_receipt",        "BIT           NOT NULL DEFAULT 1"),
             ("allow_credit_note",    "BIT           NOT NULL DEFAULT 1"),
@@ -385,14 +398,16 @@ def run():
     else:
         skip("products")
         for col, defn in [
-            ("uom",               "NVARCHAR(20)  NULL"),
-            ("conversion_factor", "DECIMAL(12,4) NULL"),
+            ("active",            "BIT           NULL"),
+            ("image_path",        "NVARCHAR(500) NULL"),
             ("order_1",           "BIT           NOT NULL DEFAULT 0"),
             ("order_2",           "BIT           NOT NULL DEFAULT 0"),
             ("order_3",           "BIT           NOT NULL DEFAULT 0"),
             ("order_4",           "BIT           NOT NULL DEFAULT 0"),
             ("order_5",           "BIT           NOT NULL DEFAULT 0"),
             ("order_6",           "BIT           NOT NULL DEFAULT 0"),
+            ("uom",               "NVARCHAR(20)  NULL"),
+            ("conversion_factor", "DECIMAL(12,4) NULL"),
         ]:
             add_col("products", col, defn)
 
@@ -435,14 +450,16 @@ def run():
     else:
         skip("sales")
         for col, defn in [
+            ("company_name",      "NVARCHAR(120) NOT NULL DEFAULT ''"),
+            ("frappe_ref",        "NVARCHAR(80)  NULL"),
+            ("created_at",        "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
             ("payment_entry_ref", "NVARCHAR(80)  NULL"),
             ("payment_synced",    "BIT           NOT NULL DEFAULT 0"),
-            ("company_name",      "NVARCHAR(120) NOT NULL DEFAULT ''"),
         ]:
             add_col("sales", col, defn)
 
     # ==================================================================
-    # 11. sale_items
+    # 11. sale_items  (FK -> sales added later)
     # ==================================================================
     if not table_exists("sale_items"):
         cur.execute("""
@@ -472,6 +489,16 @@ def run():
         ok("sale_items")
     else:
         skip("sale_items")
+        for col, defn in [
+            ("remarks", "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+            ("order_1", "BIT           NOT NULL DEFAULT 0"),
+            ("order_2", "BIT           NOT NULL DEFAULT 0"),
+            ("order_3", "BIT           NOT NULL DEFAULT 0"),
+            ("order_4", "BIT           NOT NULL DEFAULT 0"),
+            ("order_5", "BIT           NOT NULL DEFAULT 0"),
+            ("order_6", "BIT           NOT NULL DEFAULT 0"),
+        ]:
+            add_col("sale_items", col, defn)
 
     # ==================================================================
     # 12. shifts
@@ -496,9 +523,16 @@ def run():
         ok("shifts")
     else:
         skip("shifts")
+        for col, defn in [
+            ("door_counter", "INT           NOT NULL DEFAULT 0"),
+            ("customers",    "INT           NOT NULL DEFAULT 0"),
+            ("notes",        "NVARCHAR(MAX) NULL"),
+            ("created_at",   "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("shifts", col, defn)
 
     # ==================================================================
-    # 13. shift_rows
+    # 13. shift_rows  (FK -> shifts added later)
     # ==================================================================
     if not table_exists("shift_rows"):
         cur.execute("""
@@ -549,7 +583,21 @@ def run():
         ok("payment_entries")
     else:
         skip("payment_entries")
-        add_col("payment_entries", "frappe_so_ref", "NVARCHAR(255) NULL")
+        for col, defn in [
+            ("frappe_invoice_ref",       "NVARCHAR(80)  NULL"),
+            ("party",                    "NVARCHAR(120) NULL"),
+            ("party_name",               "NVARCHAR(120) NULL"),
+            ("paid_to_account_currency", "NVARCHAR(10)  NULL"),
+            ("currency",                 "NVARCHAR(10)  NULL"),
+            ("paid_to",                  "NVARCHAR(255) NULL"),
+            ("mode_of_payment",          "NVARCHAR(80)  NULL"),
+            ("reference_no",             "NVARCHAR(80)  NULL"),
+            ("reference_date",           "DATE          NULL"),
+            ("remarks",                  "NVARCHAR(255) NULL"),
+            ("frappe_payment_ref",       "NVARCHAR(80)  NULL"),
+            ("frappe_so_ref",            "NVARCHAR(255) NULL"),
+        ]:
+            add_col("payment_entries", col, defn)
 
     # ==================================================================
     # 15. credit_notes
@@ -575,9 +623,11 @@ def run():
         ok("credit_notes")
     else:
         skip("credit_notes")
+        add_col("credit_notes", "frappe_ref",    "NVARCHAR(80) NULL")
+        add_col("credit_notes", "frappe_cn_ref", "NVARCHAR(80) NULL")
 
     # ==================================================================
-    # 16. credit_note_items
+    # 16. credit_note_items  (FK -> credit_notes added later)
     # ==================================================================
     if not table_exists("credit_note_items"):
         cur.execute("""
@@ -613,12 +663,18 @@ def run():
                 [account_currency] NVARCHAR(10)  NOT NULL DEFAULT 'USD',
                 [updated_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 PRIMARY KEY CLUSTERED ([id] ASC),
-                UNIQUE ([name])
+                UNIQUE NONCLUSTERED ([name] ASC)
             )
         """)
         ok("gl_accounts")
     else:
         skip("gl_accounts")
+        for col, defn in [
+            ("account_number",   "NVARCHAR(80)  NULL"),
+            ("account_currency", "NVARCHAR(10)  NOT NULL DEFAULT 'USD'"),
+            ("updated_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("gl_accounts", col, defn)
 
     # ==================================================================
     # 18. exchange_rates
@@ -633,12 +689,15 @@ def run():
                 [rate_date]     NVARCHAR(20)  NOT NULL,
                 [updated_at]    DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 PRIMARY KEY CLUSTERED ([id] ASC),
-                CONSTRAINT [UQ_exchange_rates] UNIQUE ([from_currency], [to_currency], [rate_date])
+                CONSTRAINT [UQ_exchange_rates]
+                    UNIQUE NONCLUSTERED ([from_currency],[to_currency],[rate_date])
             )
         """)
         ok("exchange_rates")
     else:
         skip("exchange_rates")
+        add_col("exchange_rates", "updated_at",
+                "DATETIME2(7) NOT NULL DEFAULT SYSDATETIME()")
 
     # ==================================================================
     # 19. item_groups
@@ -654,12 +713,20 @@ def run():
                 [created_at]        DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 [updated_at]        DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 PRIMARY KEY CLUSTERED ([id] ASC),
-                UNIQUE ([name])
+                UNIQUE NONCLUSTERED ([name] ASC)
             )
         """)
         ok("item_groups")
     else:
         skip("item_groups")
+        for col, defn in [
+            ("item_group_name",   "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("parent_item_group", "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("synced_from_api",   "BIT           NOT NULL DEFAULT 0"),
+            ("created_at",        "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+            ("updated_at",        "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("item_groups", col, defn)
 
     # ==================================================================
     # 20. customer_payments
@@ -683,6 +750,14 @@ def run():
         ok("customer_payments")
     else:
         skip("customer_payments")
+        for col, defn in [
+            ("reference",    "NVARCHAR(100) NULL"),
+            ("cashier_id",   "INT           NULL"),
+            ("currency",     "NVARCHAR(10)  NULL DEFAULT 'USD'"),
+            ("account_name", "NVARCHAR(100) NULL"),
+            ("payment_date", "DATE          NULL"),
+        ]:
+            add_col("customer_payments", col, defn)
 
     # ==================================================================
     # 21. product_uom_prices
@@ -695,7 +770,8 @@ def run():
                 [uom]     NVARCHAR(40)  NOT NULL,
                 [price]   DECIMAL(12,2) NOT NULL DEFAULT 0,
                 PRIMARY KEY CLUSTERED ([id] ASC),
-                CONSTRAINT [UQ_product_uom] UNIQUE ([part_no], [uom])
+                CONSTRAINT [UQ_product_uom]
+                    UNIQUE NONCLUSTERED ([part_no],[uom])
             )
         """)
         ok("product_uom_prices")
@@ -730,9 +806,20 @@ def run():
         ok("sales_order")
     else:
         skip("sales_order")
+        for col, defn in [
+            ("delivery_date",  "NVARCHAR(50)  NOT NULL DEFAULT ''"),
+            ("order_type",     "NVARCHAR(50)  NOT NULL DEFAULT 'Sales'"),
+            ("deposit_amount", "FLOAT         NOT NULL DEFAULT 0"),
+            ("deposit_method", "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("balance_due",    "FLOAT         NOT NULL DEFAULT 0"),
+            ("synced",         "INT           NOT NULL DEFAULT 0"),
+            ("frappe_ref",     "NVARCHAR(255) NOT NULL DEFAULT ''"),
+            ("created_at",     "NVARCHAR(50)  NULL"),
+        ]:
+            add_col("sales_order", col, defn)
 
     # ==================================================================
-    # 23. sales_order_item
+    # 23. sales_order_item  (FK -> sales_order added later)
     # ==================================================================
     if not table_exists("sales_order_item"):
         cur.execute("""
@@ -751,6 +838,15 @@ def run():
         ok("sales_order_item")
     else:
         skip("sales_order_item")
+        for col, defn in [
+            ("item_code", "NVARCHAR(100) NULL"),
+            ("item_name", "NVARCHAR(255) NULL"),
+            ("qty",       "FLOAT         NOT NULL DEFAULT 1"),
+            ("rate",      "FLOAT         NOT NULL DEFAULT 0"),
+            ("amount",    "FLOAT         NOT NULL DEFAULT 0"),
+            ("warehouse", "NVARCHAR(255) NOT NULL DEFAULT ''"),
+        ]:
+            add_col("sales_order_item", col, defn)
 
     # ==================================================================
     # 24. laybye_payment_entries
@@ -758,28 +854,45 @@ def run():
     if not table_exists("laybye_payment_entries"):
         cur.execute("""
             CREATE TABLE [dbo].[laybye_payment_entries] (
-                [id]              INT           IDENTITY(1,1) NOT NULL,
-                [sales_order_id]  INT           NOT NULL,
-                [order_no]        NVARCHAR(100) NOT NULL DEFAULT '',
-                [customer_id]     NVARCHAR(255) NOT NULL DEFAULT '',
-                [customer_name]   NVARCHAR(255) NOT NULL DEFAULT '',
-                [deposit_amount]  FLOAT         NOT NULL DEFAULT 0,
-                [deposit_method]  NVARCHAR(100) NOT NULL DEFAULT '',
-                [account_paid_to] NVARCHAR(255) NOT NULL DEFAULT '',
-                [account_currency]NVARCHAR(20)  NOT NULL DEFAULT 'USD',
-                [frappe_so_ref]   NVARCHAR(255) NOT NULL DEFAULT '',
-                [frappe_pe_ref]   NVARCHAR(255) NOT NULL DEFAULT '',
-                [status]          NVARCHAR(50)  NOT NULL DEFAULT 'pending',
-                [sync_attempts]   INT           NOT NULL DEFAULT 0,
-                [created_at]      NVARCHAR(50)  NOT NULL DEFAULT '',
-                [last_attempt_at] NVARCHAR(50)  NOT NULL DEFAULT '',
-                [error_message]   NVARCHAR(MAX) NOT NULL DEFAULT '',
+                [id]               INT           IDENTITY(1,1) NOT NULL,
+                [sales_order_id]   INT           NOT NULL,
+                [order_no]         NVARCHAR(100) NOT NULL DEFAULT '',
+                [customer_id]      NVARCHAR(255) NOT NULL DEFAULT '',
+                [customer_name]    NVARCHAR(255) NOT NULL DEFAULT '',
+                [deposit_amount]   FLOAT         NOT NULL DEFAULT 0,
+                [deposit_method]   NVARCHAR(100) NOT NULL DEFAULT '',
+                [account_paid_to]  NVARCHAR(255) NOT NULL DEFAULT '',
+                [account_currency] NVARCHAR(20)  NOT NULL DEFAULT 'USD',
+                [frappe_so_ref]    NVARCHAR(255) NOT NULL DEFAULT '',
+                [frappe_pe_ref]    NVARCHAR(255) NOT NULL DEFAULT '',
+                [status]           NVARCHAR(50)  NOT NULL DEFAULT 'pending',
+                [sync_attempts]    INT           NOT NULL DEFAULT 0,
+                [created_at]       NVARCHAR(50)  NOT NULL DEFAULT '',
+                [last_attempt_at]  NVARCHAR(50)  NOT NULL DEFAULT '',
+                [error_message]    NVARCHAR(MAX) NOT NULL DEFAULT '',
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
         ok("laybye_payment_entries")
     else:
         skip("laybye_payment_entries")
+        for col, defn in [
+            ("order_no",         "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("customer_id",      "NVARCHAR(255) NOT NULL DEFAULT ''"),
+            ("customer_name",    "NVARCHAR(255) NOT NULL DEFAULT ''"),
+            ("deposit_amount",   "FLOAT         NOT NULL DEFAULT 0"),
+            ("deposit_method",   "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("account_paid_to",  "NVARCHAR(255) NOT NULL DEFAULT ''"),
+            ("account_currency", "NVARCHAR(20)  NOT NULL DEFAULT 'USD'"),
+            ("frappe_so_ref",    "NVARCHAR(255) NOT NULL DEFAULT ''"),
+            ("frappe_pe_ref",    "NVARCHAR(255) NOT NULL DEFAULT ''"),
+            ("status",           "NVARCHAR(50)  NOT NULL DEFAULT 'pending'"),
+            ("sync_attempts",    "INT           NOT NULL DEFAULT 0"),
+            ("created_at",       "NVARCHAR(50)  NOT NULL DEFAULT ''"),
+            ("last_attempt_at",  "NVARCHAR(50)  NOT NULL DEFAULT ''"),
+            ("error_message",    "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+        ]:
+            add_col("laybye_payment_entries", col, defn)
 
     # ==================================================================
     # 25. pos_settings
@@ -817,6 +930,16 @@ def run():
         ok("shift_reports")
     else:
         skip("shift_reports")
+        for col, defn in [
+            ("cashier_name",   "NVARCHAR(100) NULL"),
+            ("shift_number",   "INT           NULL"),
+            ("total_expected", "DECIMAL(18,2) NULL"),
+            ("total_actual",   "DECIMAL(18,2) NULL"),
+            ("total_variance", "DECIMAL(18,2) NULL"),
+            ("report_date",    "DATE          NULL"),
+            ("created_at",     "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("shift_reports", col, defn)
 
     # ==================================================================
     # 27. shift_report_details
@@ -837,66 +960,93 @@ def run():
         ok("shift_report_details")
     else:
         skip("shift_report_details")
+        for col, defn in [
+            ("report_id",        "INT           NULL"),
+            ("payment_method",   "NVARCHAR(50)  NULL"),
+            ("amount_expected",  "DECIMAL(18,2) NULL"),
+            ("amount_available", "DECIMAL(18,2) NULL"),
+            ("variance",         "DECIMAL(18,2) NULL"),
+            ("created_at",       "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("shift_report_details", col, defn)
 
-    # ==================================================================
-    # Commit all DDL before adding FKs
-    # ==================================================================
+    # ------------------------------------------------------------------
+    # Commit all table DDL before foreign keys
+    # ------------------------------------------------------------------
     conn.commit()
 
     # ==================================================================
-    # Foreign key constraints  (matches the SQL script exactly)
+    # Foreign key constraints  (exactly matching script.sql)
     # ==================================================================
-    print("\nAdding foreign key constraints...")
+    print("\n  Adding foreign key constraints...")
 
     fk_defs = [
         ("FK_cost_centers_companies",
-         "ALTER TABLE [cost_centers] ADD CONSTRAINT [FK_cost_centers_companies] "
-         "FOREIGN KEY ([company_id]) REFERENCES [companies] ([id])"),
+         "ALTER TABLE [dbo].[cost_centers] WITH CHECK "
+         "ADD CONSTRAINT [FK_cost_centers_companies] "
+         "FOREIGN KEY ([company_id]) REFERENCES [dbo].[companies]([id])"),
 
         ("FK_warehouses_companies",
-         "ALTER TABLE [warehouses] ADD CONSTRAINT [FK_warehouses_companies] "
-         "FOREIGN KEY ([company_id]) REFERENCES [companies] ([id])"),
+         "ALTER TABLE [dbo].[warehouses] WITH CHECK "
+         "ADD CONSTRAINT [FK_warehouses_companies] "
+         "FOREIGN KEY ([company_id]) REFERENCES [dbo].[companies]([id])"),
 
         ("FK_customers_customer_groups",
-         "ALTER TABLE [customers] ADD CONSTRAINT [FK_customers_customer_groups] "
-         "FOREIGN KEY ([customer_group_id]) REFERENCES [customer_groups] ([id])"),
+         "ALTER TABLE [dbo].[customers] WITH CHECK "
+         "ADD CONSTRAINT [FK_customers_customer_groups] "
+         "FOREIGN KEY ([customer_group_id]) "
+         "REFERENCES [dbo].[customer_groups]([id])"),
 
         ("FK_customers_warehouses",
-         "ALTER TABLE [customers] ADD CONSTRAINT [FK_customers_warehouses] "
-         "FOREIGN KEY ([custom_warehouse_id]) REFERENCES [warehouses] ([id])"),
+         "ALTER TABLE [dbo].[customers] WITH CHECK "
+         "ADD CONSTRAINT [FK_customers_warehouses] "
+         "FOREIGN KEY ([custom_warehouse_id]) "
+         "REFERENCES [dbo].[warehouses]([id])"),
 
         ("FK_customers_cost_centers",
-         "ALTER TABLE [customers] ADD CONSTRAINT [FK_customers_cost_centers] "
-         "FOREIGN KEY ([custom_cost_center_id]) REFERENCES [cost_centers] ([id])"),
+         "ALTER TABLE [dbo].[customers] WITH CHECK "
+         "ADD CONSTRAINT [FK_customers_cost_centers] "
+         "FOREIGN KEY ([custom_cost_center_id]) "
+         "REFERENCES [dbo].[cost_centers]([id])"),
 
         ("FK_customers_price_lists",
-         "ALTER TABLE [customers] ADD CONSTRAINT [FK_customers_price_lists] "
-         "FOREIGN KEY ([default_price_list_id]) REFERENCES [price_lists] ([id])"),
+         "ALTER TABLE [dbo].[customers] WITH CHECK "
+         "ADD CONSTRAINT [FK_customers_price_lists] "
+         "FOREIGN KEY ([default_price_list_id]) "
+         "REFERENCES [dbo].[price_lists]([id])"),
 
         ("FK_sale_items_sales",
-         "ALTER TABLE [sale_items] ADD CONSTRAINT [FK_sale_items_sales] "
-         "FOREIGN KEY ([sale_id]) REFERENCES [sales] ([id]) ON DELETE CASCADE"),
+         "ALTER TABLE [dbo].[sale_items] WITH CHECK "
+         "ADD CONSTRAINT [FK_sale_items_sales] "
+         "FOREIGN KEY ([sale_id]) REFERENCES [dbo].[sales]([id]) "
+         "ON DELETE CASCADE"),
 
         ("FK_shift_rows_shifts",
-         "ALTER TABLE [shift_rows] ADD CONSTRAINT [FK_shift_rows_shifts] "
-         "FOREIGN KEY ([shift_id]) REFERENCES [shifts] ([id]) ON DELETE CASCADE"),
+         "ALTER TABLE [dbo].[shift_rows] WITH CHECK "
+         "ADD CONSTRAINT [FK_shift_rows_shifts] "
+         "FOREIGN KEY ([shift_id]) REFERENCES [dbo].[shifts]([id]) "
+         "ON DELETE CASCADE"),
 
         ("FK_credit_note_items_credit_notes",
-         "ALTER TABLE [credit_note_items] ADD CONSTRAINT [FK_credit_note_items_credit_notes] "
-         "FOREIGN KEY ([credit_note_id]) REFERENCES [credit_notes] ([id]) ON DELETE CASCADE"),
+         "ALTER TABLE [dbo].[credit_note_items] WITH CHECK "
+         "ADD CONSTRAINT [FK_credit_note_items_credit_notes] "
+         "FOREIGN KEY ([credit_note_id]) "
+         "REFERENCES [dbo].[credit_notes]([id]) ON DELETE CASCADE"),
 
         ("FK_sales_order_item_sales_order",
-         "ALTER TABLE [sales_order_item] ADD CONSTRAINT [FK_sales_order_item_sales_order] "
-         "FOREIGN KEY ([sales_order_id]) REFERENCES [sales_order] ([id])"),
+         "ALTER TABLE [dbo].[sales_order_item] WITH CHECK "
+         "ADD CONSTRAINT [FK_sales_order_item_sales_order] "
+         "FOREIGN KEY ([sales_order_id]) "
+         "REFERENCES [dbo].[sales_order]([id])"),
     ]
 
     for fk_name, fk_sql in fk_defs:
         if not fk_exists(fk_name):
             try:
                 cur.execute(fk_sql)
-                print(f"  + {fk_name}")
+                print(f"  [+] {fk_name}")
             except Exception as e:
-                print(f"  ! {fk_name}: {e}")
+                print(f"  [!] {fk_name}: {e}")
         else:
             print(f"  [ ] {fk_name} already exists")
 
@@ -904,27 +1054,30 @@ def run():
     print("\n  All tables and constraints ready.")
 
     # ==================================================================
-    # SEED: default admin user if users table is empty
+    # Seed: one default admin user when the users table is empty
     # ==================================================================
     try:
-        cur.execute("SELECT COUNT(*) FROM users")
+        cur.execute("SELECT COUNT(*) FROM [dbo].[users]")
         if cur.fetchone()[0] == 0:
             cur.execute("""
-                INSERT INTO users
-                    (username, password, role, display_name,
-                     full_name, active, synced_from_frappe,
-                     allow_discount, allow_receipt, allow_credit_note, allow_reprint)
-                VALUES (?, ?, 'admin', 'Administrator', 'Administrator', 1, 0, 1, 1, 1, 1)
+                INSERT INTO [dbo].[users]
+                    (username, password, role, display_name, full_name,
+                     active, synced_from_frappe,
+                     allow_discount, allow_receipt,
+                     allow_credit_note, allow_reprint,
+                     company, max_discount_percent)
+                VALUES (?, ?, 'admin', 'Administrator', 'Administrator',
+                        1, 0, 1, 1, 1, 1, '', 0)
             """, ("admin", _hash("admin123")))
             conn.commit()
             print("\n  [+] Default admin user created:")
             print("      Username : admin")
             print("      Password : admin123")
-            print("      ** Change this password after first login! **")
+            print("      *** Change this password after first login! ***")
         else:
-            print("\n  Users already present - skipping seed.")
+            print("\n  [ ] Users already present - skipping seed.")
     except Exception as e:
-        print(f"\n  ! Error seeding admin user: {e}")
+        print(f"\n  [!] Error seeding admin user: {e}")
 
     conn.close()
     print("\n======================================")
