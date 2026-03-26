@@ -4,9 +4,9 @@
 # =============================================================================
 
 from database.db import get_connection, fetchall_dicts, fetchone_dict
-
+from services.site_config import get_host as _get_host
 FRAPPE_API_URL = (
-    "https://apk.havano.cloud/api/resource/Item%20Group"
+    _get_host() + "/api/resource/Item%20Group"
     '?fields=["name","item_group_name","parent_item_group"]&limit_page_length=500'
 )
 
@@ -161,7 +161,7 @@ def delete_item_group(group_id: int) -> bool:
 def sync_from_api(api_key: str = "", api_secret: str = "",
                   prefetched: list = None) -> dict:
     """
-    Upserts Item Groups from apk.havano.cloud into the local item_groups table.
+    Upserts Item Groups from  into the local item_groups table.
 
     If `prefetched` is supplied (a list of dicts already fetched by the caller)
     the HTTP request is skipped — this is the normal path when called from

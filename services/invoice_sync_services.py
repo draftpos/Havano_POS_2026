@@ -31,15 +31,7 @@ def _get_credentials() -> tuple[str, str]:
     return "", ""
 
 
-def _get_host() -> str:
-    try:
-        from models.company_defaults import get_defaults
-        host = (get_defaults() or {}).get("server_api_host", "").strip().rstrip("/")
-        if host:
-            return host
-    except Exception:
-        pass
-    return "https://apk.havano.cloud"
+from services.site_config import get_host as _get_host
 
 
 def _fetch_frappe_invoices(api_key: str, api_secret: str, host: str) -> list[dict]:

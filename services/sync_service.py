@@ -479,12 +479,12 @@ import urllib.error
 import json
 
 from database.db import get_connection, fetchone_dict
+from services.site_config import get_host as _get_host
 
-API_BASE_URL     = "https://apk.havano.cloud"
+API_BASE_URL      = _get_host()
 PRODUCTS_ENDPOINT = f"{API_BASE_URL}/api/method/havano_pos_integration.api.get_products"
-PAGE_SIZE        = 100          # request up to 100 per page
-MAX_PAGES        = 200          # safety cap
-
+PAGE_SIZE         = 100          # request up to 100 per page
+MAX_PAGES         = 200          # safety cap
 
 # =============================================================================
 # PUBLIC — called by auth_service on login

@@ -30,8 +30,10 @@ DANGER_H  = "#cc2828"
 ROW_ALT   = "#edf3fb"
 AMBER     = "#b06000"
 
+
+from services.site_config import get_host as _get_host
 FRAPPE_API_URL = (
-    "https://apk.havano.cloud/api/resource/Item%20Group"
+    _get_host() + "/api/resource/Item%20Group"
     '?fields=["name","item_group_name","parent_item_group"]&limit_page_length=500'
 )
 
@@ -64,7 +66,7 @@ class SyncWorker(QThread):
             # Frappe uses "token key:secret" — NOT Basic auth
             headers["Authorization"] = f"token {api_key}:{api_secret}"
 
-        self.progress.emit("Fetching from apk.havano.cloud …")
+        self.progress.emit("Fetching from site …")
         try:
             req = urllib.request.Request(FRAPPE_API_URL, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -176,7 +178,7 @@ class ItemGroupDialog(QDialog):
             f"font-size:18px; font-weight:bold; color:{WHITE}; background:transparent;"
         )
 
-        self._api_badge = QLabel("● API: apk.havano.cloud")
+        self._api_badge = QLabel("● API: site")
         self._api_badge.setStyleSheet(
             f"font-size:11px; color:{MID}; background:transparent;"
         )
@@ -461,7 +463,7 @@ class ItemGroupDialog(QDialog):
 
         self._sync_btn.setEnabled(False)
         self._sync_btn.setText("Syncing …")
-        self._set_status("Connecting to apk.havano.cloud …")
+        self._set_status("Connecting to site …")
 
         self._sync_worker = SyncWorker()
         self._sync_worker.progress.connect(self._set_status)

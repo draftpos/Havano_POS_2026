@@ -39,9 +39,10 @@ SUCCESS   = "#1a7a3c"
 WARNING   = "#e67e22"
 CREAM     = "#f0e8d0"
 
-SITE_URL = "apk.havano.cloud"
 
 
+from services.site_config import get_host_label as _get_host_label
+SITE_URL = _get_host_label()
 # =============================================================================
 # Background user sync — runs after login, non-blocking
 # =============================================================================

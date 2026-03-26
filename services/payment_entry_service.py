@@ -139,7 +139,7 @@
 # # # # # # #             return host
 # # # # # # #     except Exception:
 # # # # # # #         pass
-# # # # # # #     return "https://apk.havano.cloud"
+# # # # # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # # # # def _get_defaults() -> dict:
@@ -787,7 +787,7 @@
 # # # # # #             return host
 # # # # # #     except Exception:
 # # # # # #         pass
-# # # # # #     return "https://apk.havano.cloud"
+# # # # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # # # def _get_defaults() -> dict:
@@ -1457,7 +1457,7 @@
 # # # # #             return host
 # # # # #     except Exception:
 # # # # #         pass
-# # # # #     return "https://apk.havano.cloud"
+# # # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # # def _get_defaults() -> dict:
@@ -2126,7 +2126,7 @@
 # # # #             return host
 # # # #     except Exception:
 # # # #         pass
-# # # #     return "https://apk.havano.cloud"
+# # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # def _get_defaults() -> dict:
@@ -2796,7 +2796,7 @@
 # # #             return host
 # # #     except Exception:
 # # #         pass
-# # #     return "https://apk.havano.cloud"
+# # #     return "https://erp1193.havano.cloud"
 
 
 # # # def _get_defaults() -> dict:
@@ -3483,7 +3483,7 @@
 # # # # # #             return host
 # # # # # #     except Exception:
 # # # # # #         pass
-# # # # # #     return "https://apk.havano.cloud"
+# # # # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # # # def _get_defaults() -> dict:
@@ -4131,7 +4131,7 @@
 # # # # #             return host
 # # # # #     except Exception:
 # # # # #         pass
-# # # # #     return "https://apk.havano.cloud"
+# # # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # # def _get_defaults() -> dict:
@@ -4801,7 +4801,7 @@
 # # # #             return host
 # # # #     except Exception:
 # # # #         pass
-# # # #     return "https://apk.havano.cloud"
+# # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # def _get_defaults() -> dict:
@@ -5470,7 +5470,7 @@
 # # #             return host
 # # #     except Exception:
 # # #         pass
-# # #     return "https://apk.havano.cloud"
+# # #     return "https://erp1193.havano.cloud"
 
 
 # # # def _get_defaults() -> dict:
@@ -6140,7 +6140,7 @@
 # #             return host
 # #     except Exception:
 # #         pass
-# #     return "https://apk.havano.cloud"
+# #     return "https://erp1193.havano.cloud"
 
 
 # # def _get_defaults() -> dict:
@@ -6861,7 +6861,7 @@
 # # # # #             return host
 # # # # #     except Exception:
 # # # # #         pass
-# # # # #     return "https://apk.havano.cloud"
+# # # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # # def _get_defaults() -> dict:
@@ -7509,7 +7509,7 @@
 # # # #             return host
 # # # #     except Exception:
 # # # #         pass
-# # # #     return "https://apk.havano.cloud"
+# # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # def _get_defaults() -> dict:
@@ -8179,7 +8179,7 @@
 # # #             return host
 # # #     except Exception:
 # # #         pass
-# # #     return "https://apk.havano.cloud"
+# # #     return "https://erp1193.havano.cloud"
 
 
 # # # def _get_defaults() -> dict:
@@ -8848,7 +8848,7 @@
 # #             return host
 # #     except Exception:
 # #         pass
-# #     return "https://apk.havano.cloud"
+# #     return "https://erp1193.havano.cloud"
 
 
 # # def _get_defaults() -> dict:
@@ -9518,7 +9518,7 @@
 #             return host
 #     except Exception:
 #         pass
-#     return "https://apk.havano.cloud"
+#     return "https://erp1193.havano.cloud"
 
 
 # def _get_defaults() -> dict:
@@ -10205,7 +10205,7 @@
 # # # # # #             return host
 # # # # # #     except Exception:
 # # # # # #         pass
-# # # # # #     return "https://apk.havano.cloud"
+# # # # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # # # def _get_defaults() -> dict:
@@ -10853,7 +10853,7 @@
 # # # # #             return host
 # # # # #     except Exception:
 # # # # #         pass
-# # # # #     return "https://apk.havano.cloud"
+# # # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # # def _get_defaults() -> dict:
@@ -11523,7 +11523,7 @@
 # # # #             return host
 # # # #     except Exception:
 # # # #         pass
-# # # #     return "https://apk.havano.cloud"
+# # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # def _get_defaults() -> dict:
@@ -12192,7 +12192,7 @@
 # # #             return host
 # # #     except Exception:
 # # #         pass
-# # #     return "https://apk.havano.cloud"
+# # #     return "https://erp1193.havano.cloud"
 
 
 # # # def _get_defaults() -> dict:
@@ -12862,7 +12862,7 @@
 # #             return host
 # #     except Exception:
 # #         pass
-# #     return "https://apk.havano.cloud"
+# #     return "https://erp1193.havano.cloud"
 
 
 # # def _get_defaults() -> dict:
@@ -13549,7 +13549,7 @@
 # # # # #             return host
 # # # # #     except Exception:
 # # # # #         pass
-# # # # #     return "https://apk.havano.cloud"
+# # # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # # def _get_defaults() -> dict:
@@ -14197,7 +14197,7 @@
 # # # #             return host
 # # # #     except Exception:
 # # # #         pass
-# # # #     return "https://apk.havano.cloud"
+# # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # def _get_defaults() -> dict:
@@ -14867,7 +14867,7 @@
 # # #             return host
 # # #     except Exception:
 # # #         pass
-# # #     return "https://apk.havano.cloud"
+# # #     return "https://erp1193.havano.cloud"
 
 
 # # # def _get_defaults() -> dict:
@@ -15536,7 +15536,7 @@
 # #             return host
 # #     except Exception:
 # #         pass
-# #     return "https://apk.havano.cloud"
+# #     return "https://erp1193.havano.cloud"
 
 
 # # def _get_defaults() -> dict:
@@ -16206,7 +16206,7 @@
 #             return host
 #     except Exception:
 #         pass
-#     return "https://apk.havano.cloud"
+#     return "https://erp1193.havano.cloud"
 
 
 # def _get_defaults() -> dict:
@@ -16927,7 +16927,7 @@
 # # # #             return host
 # # # #     except Exception:
 # # # #         pass
-# # # #     return "https://apk.havano.cloud"
+# # # #     return "https://erp1193.havano.cloud"
 
 
 # # # # def _get_defaults() -> dict:
@@ -17575,7 +17575,7 @@
 # # #             return host
 # # #     except Exception:
 # # #         pass
-# # #     return "https://apk.havano.cloud"
+# # #     return "https://erp1193.havano.cloud"
 
 
 # # # def _get_defaults() -> dict:
@@ -18245,7 +18245,7 @@
 # #             return host
 # #     except Exception:
 # #         pass
-# #     return "https://apk.havano.cloud"
+# #     return "https://erp1193.havano.cloud"
 
 
 # # def _get_defaults() -> dict:
@@ -18914,7 +18914,7 @@
 #             return host
 #     except Exception:
 #         pass
-#     return "https://apk.havano.cloud"
+#     return "https://erp1193.havano.cloud"
 
 
 # def _get_defaults() -> dict:
@@ -19576,15 +19576,7 @@ def _get_credentials() -> tuple[str, str]:
         pass
     return "", ""
 
-def _get_host() -> str:
-    try:
-        from models.company_defaults import get_defaults
-        host = (get_defaults() or {}).get("server_api_host", "").strip().rstrip("/")
-        if host:
-            return host
-    except Exception:
-        pass
-    return "https://apk.havano.cloud"
+from services.site_config import get_host as _get_host
 
 
 def _get_defaults() -> dict:

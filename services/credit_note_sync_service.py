@@ -80,7 +80,7 @@
 # #             return host
 # #     except Exception:
 # #         pass
-# #     return "https://apk.havano.cloud"
+# #     return "https://erp1193.havano.cloud"
 
 
 # # # =============================================================================
@@ -341,7 +341,7 @@
 #             return host
 #     except Exception:
 #         pass
-#     return "https://apk.havano.cloud"
+#     return "https://erp1193.havano.cloud"
 
 
 # # =============================================================================

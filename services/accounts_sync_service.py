@@ -45,16 +45,7 @@ def _get_credentials() -> tuple[str, str]:
         pass
     return "", ""
 
-def _get_host() -> str:
-    try:
-        from models.company_defaults import get_defaults
-        host = (get_defaults() or {}).get("server_api_host", "").strip().rstrip("/")
-        if host:
-            return host
-    except Exception:
-        pass
-    return "https://apk.havano.cloud"
-
+from services.site_config import get_host as _get_host
 
 def _get_defaults() -> dict:
     try:
@@ -80,6 +71,7 @@ def sync_accounts(api_key: str, api_secret: str, host: str) -> int:
     Fetches all GL accounts from Frappe and upserts them locally.
     Returns count of accounts synced.
     """
+    print(f"[accounts] Syncing accounts from {host}..., api_key={api_key[:4]}..., api_secret={'*' * len(api_secret)}")
     url = f"{host}/api/method/havano_pos_integration.api.get_account"
     try:
         data     = _get(url, api_key, api_secret)

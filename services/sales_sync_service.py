@@ -40,10 +40,8 @@ log = logging.getLogger("SalesSync")
 # ── Config ───────────────────────────────────────────────────────────────────
 SYNC_INTERVAL_SECONDS = 60          # run every 1 minute
 PAGE_SIZE             = 20          # invoices per fetch
-API_URL               = (
-    "https://apk.havano.cloud/api/method/"
-    "havano_pos_integration.api.get_sales_invoice"
-)
+from services.site_config import get_host as _get_host
+API_URL = _get_host() + "/api/method/havano_pos_integration.api.get_sales_invoice"
 
 # Items whose name contains these keywords are TAX rows — skip for sale_items
 TAX_KEYWORDS = ("tax", "vat", "levy", "duty", "charge")

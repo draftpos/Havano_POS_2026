@@ -61,15 +61,7 @@ def _get_defaults() -> dict:
         return {}
 
 
-def _get_host() -> str:
-    try:
-        host = _get_defaults().get("server_api_host", "").strip().rstrip("/")
-        if host:
-            return host
-    except Exception:
-        pass
-    return "https://apk.havano.cloud"
-
+from services.site_config import get_host as _get_host
 
 # =============================================================================
 # PAYMENT METHOD MAP + ACCOUNT RESOLVER
