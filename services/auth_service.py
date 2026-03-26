@@ -165,6 +165,9 @@ def _parse_online_success(data: dict, username: str) -> dict:
 
     user_block = data.get("user") or {}
     raw_username = (user_block.get("username") or data.get("full_name") or username)
+    raw_warehouse = (user_block.get("warehouse") or data.get("warehouse") or username)
+    raw_company   = (user_block.get("company") or data.get("company") or "")
+    raw_cost_center= (user_block.get("cost_center") or data.get("cost_center") or "")
     full_name    = user_block.get("full_name") or data.get("full_name") or raw_username
     roles        = user_block.get("roles") or []
 
@@ -172,6 +175,9 @@ def _parse_online_success(data: dict, username: str) -> dict:
         "id":           None,
         "username":     raw_username,
         "display_name": full_name,
+        "warehouse":    raw_warehouse,
+        "cost_center":  raw_cost_center,
+        "company":      raw_company, 
         "role":         _map_role(roles, raw_username),
     }
     return {

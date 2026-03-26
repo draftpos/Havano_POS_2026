@@ -7327,13 +7327,20 @@ class MainWindow(QMainWindow):
 # =============================================================================
 # CUSTOMER PAYMENT ENTRY DIALOG (Requirement 3)
 # =============================================================================
+# =============================================================================
+# CUSTOMER PAYMENT ENTRY DIALOG (Requirement 3)
+# Updated with simple Laybye vs Outstanding Balance toggle
+# Just deducts from customer.laybye_balance or customer.outstanding_amount
+# =============================================================================
 class CustomerPaymentDialog(QDialog):
     """
     Full customer payment entry dialog.
     - Customer search at top (pre-filled if selected on POS)
+    - Toggle between Laybye Payment and Outstanding Balance Payment
     - Payment methods pulled from GL accounts (same as PaymentDialog)
     - Numpad for amount entry
     - Saves to local DB + queues for Frappe sync
+    - Automatically deducts from customer.laybye_balance or customer.outstanding_amount
     """
 
     # ── colours (same palette as rest of main_window) ─────────────────────
@@ -7352,16 +7359,18 @@ class CustomerPaymentDialog(QDialog):
     _SUCCESS_H = "#1f9447"
     _DANGER    = "#b02020"
     _DANGER_H  = "#cc2828"
+    _AMBER     = "#c05a00"
+    _ORANGE    = "#b06000"
 
     def __init__(self, parent=None, customer=None):
         super().__init__(parent)
         self._customer   = customer   # always set — enforced by caller
         self._methods:    list[dict] = []
         self._active_method: str     = ""
-        self._method_rows: dict      = {}   # label → (btn, QLineEdit, due_lbl)
+        self._method_rows: dict      = {}   # label → (btn, QLineEdit)
 
         self.setWindowTitle("Customer Payment Entry")
-        self.setMinimumSize(820, 540)
+        self.setMinimumSize(820, 580)
         self.setModal(True)
         self.setWindowState(Qt.WindowMaximized)
         self.setStyleSheet(
@@ -7370,6 +7379,7 @@ class CustomerPaymentDialog(QDialog):
         )
         self._load_data()
         self._build_ui()
+        self._refresh_balances()
 
     # ── data loading ──────────────────────────────────────────────────────
     def _load_data(self):
@@ -7416,6 +7426,30 @@ class CustomerPaymentDialog(QDialog):
         if self._methods:
             self._active_method = self._methods[0]["label"]
 
+    def _refresh_balances(self):
+        """Refresh both outstanding and laybye balances from the customer record."""
+        if not self._customer:
+            return
+        
+        try:
+            from models.customer import get_customer_by_id
+            updated = get_customer_by_id(self._customer["id"])
+            if updated:
+                self._customer = updated
+            
+            outstanding = float(self._customer.get("outstanding_amount", 0))
+            laybye = float(self._customer.get("laybye_balance", 0))
+            
+            self._lbl_outstanding_bal.setText(f"${outstanding:.2f}")
+            color = self._DANGER if outstanding > 0 else self._SUCCESS
+            self._lbl_outstanding_bal.setStyleSheet(f"font-size:13px; font-weight:bold; color:{color};")
+            
+            self._lbl_laybye_bal.setText(f"${laybye:.2f}")
+            color = self._DANGER if laybye > 0 else self._SUCCESS
+            self._lbl_laybye_bal.setStyleSheet(f"font-size:13px; font-weight:bold; color:{color};")
+        except Exception as e:
+            print(f"Error refreshing balances: {e}")
+
     # ── UI ────────────────────────────────────────────────────────────────
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -7430,7 +7464,7 @@ class CustomerPaymentDialog(QDialog):
         hl.setContentsMargins(28, 0, 28, 0)
         title = QLabel("💰  Customer Payment Entry")
         title.setStyleSheet(f"color:{self._NAVY}; font-size:17px; font-weight:bold;")
-        hint = QLabel("Enter amount · select method · Save")
+        hint = QLabel("Select payment type · Enter amount · Save")
         hint.setStyleSheet(f"color:{self._MUTED}; font-size:10px;")
         hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         hl.addWidget(title)
@@ -7438,7 +7472,7 @@ class CustomerPaymentDialog(QDialog):
         hl.addWidget(hint)
         outer.addWidget(hdr)
 
-        # customer search bar (always visible at top)
+        # customer display bar
         outer.addWidget(self._build_customer_bar())
 
         # body — left (methods) + right (numpad)
@@ -7459,19 +7493,22 @@ class CustomerPaymentDialog(QDialog):
         outer.addWidget(body_w, stretch=1)
 
     def _build_customer_bar(self):
-        """Fixed customer display — customer is always selected before opening this dialog."""
+        """Fixed customer display with payment type toggle and balances."""
         bar = QWidget()
-        bar.setFixedHeight(58)
+        bar.setFixedHeight(90)
         bar.setStyleSheet(
             f"background:{self._LIGHT}; border-bottom:1px solid {self._BORDER};"
         )
-        bl = QHBoxLayout(bar)
-        bl.setContentsMargins(28, 0, 28, 0)
-        bl.setSpacing(16)
+        bl = QVBoxLayout(bar)
+        bl.setContentsMargins(28, 8, 28, 8)
+        bl.setSpacing(8)
 
+        # Top row: Customer info
+        top_row = QHBoxLayout()
+        
         icon = QLabel("👤")
         icon.setStyleSheet("font-size:20px; background:transparent;")
-        bl.addWidget(icon)
+        top_row.addWidget(icon)
 
         name = self._customer.get("customer_name", "Unknown") if self._customer else "Unknown"
         phone = self._customer.get("custom_telephone_number", "") if self._customer else ""
@@ -7481,23 +7518,122 @@ class CustomerPaymentDialog(QDialog):
         name_lbl.setStyleSheet(
             f"font-size:15px; font-weight:bold; color:{self._NAVY}; background:transparent;"
         )
-        bl.addWidget(name_lbl)
+        top_row.addWidget(name_lbl)
 
         if phone or group:
             detail = QLabel(f"{phone}{'  ·  ' if phone and group else ''}{group}")
             detail.setStyleSheet(f"font-size:11px; color:{self._MUTED}; background:transparent;")
-            bl.addWidget(detail)
+            top_row.addWidget(detail)
 
-        bl.addStretch()
-
+        top_row.addStretch()
+        
         badge = QLabel("PAYMENT ENTRY")
         badge.setStyleSheet(
             f"background:{self._ACCENT}; color:{self._WHITE}; border-radius:4px;"
             f" font-size:10px; font-weight:bold; padding:3px 10px;"
         )
-        bl.addWidget(badge)
+        top_row.addWidget(badge)
+        
+        bl.addLayout(top_row)
+
+        # Bottom row: Payment Type Toggle + Balances
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(20)
+
+        # Payment type toggle
+        payment_type_group = QWidget()
+        payment_type_group.setStyleSheet("background:transparent;")
+        pt_layout = QHBoxLayout(payment_type_group)
+        pt_layout.setSpacing(0)
+        pt_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._btn_outstanding = QPushButton("Outstanding Balance")
+        self._btn_laybye = QPushButton("Laybye Payment")
+
+        for btn in (self._btn_outstanding, self._btn_laybye):
+            btn.setCheckable(True)
+            btn.setFixedHeight(32)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #f0f0f0;
+                    color: #555;
+                    border: 1px solid #ccc;
+                    padding: 0 15px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QPushButton:checked {
+                    background: #1a5fb4;
+                    color: white;
+                    border: 1px solid #1a5fb4;
+                }
+            """)
+
+        self._btn_outstanding.setChecked(True)
+        self._btn_outstanding.clicked.connect(lambda: self._set_payment_type("outstanding"))
+        self._btn_laybye.clicked.connect(lambda: self._set_payment_type("laybye"))
+
+        pt_layout.addWidget(self._btn_outstanding)
+        pt_layout.addWidget(self._btn_laybye)
+        bottom_row.addWidget(payment_type_group)
+
+        # Separator
+        sep_line = QFrame()
+        sep_line.setFrameShape(QFrame.VLine)
+        sep_line.setStyleSheet(f"background:{self._BORDER};")
+        sep_line.setFixedWidth(1)
+        sep_line.setFixedHeight(32)
+        bottom_row.addWidget(sep_line)
+
+        # Balances display
+        balances_widget = QWidget()
+        balances_layout = QHBoxLayout(balances_widget)
+        balances_layout.setSpacing(20)
+        balances_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Outstanding balance display
+        outstanding_widget = QWidget()
+        out_layout = QHBoxLayout(outstanding_widget)
+        out_layout.setSpacing(6)
+        out_layout.setContentsMargins(0, 0, 0, 0)
+        out_label = QLabel("Outstanding:")
+        out_label.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
+        self._lbl_outstanding_bal = QLabel("$0.00")
+        self._lbl_outstanding_bal.setStyleSheet(f"font-size:12px; font-weight:bold; color:{self._NAVY};")
+        out_layout.addWidget(out_label)
+        out_layout.addWidget(self._lbl_outstanding_bal)
+        
+        # Laybye balance display
+        laybye_widget = QWidget()
+        laybye_layout = QHBoxLayout(laybye_widget)
+        laybye_layout.setSpacing(6)
+        laybye_layout.setContentsMargins(0, 0, 0, 0)
+        laybye_label = QLabel("Laybye:")
+        laybye_label.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
+        self._lbl_laybye_bal = QLabel("$0.00")
+        self._lbl_laybye_bal.setStyleSheet(f"font-size:12px; font-weight:bold; color:{self._NAVY};")
+        laybye_layout.addWidget(laybye_label)
+        laybye_layout.addWidget(self._lbl_laybye_bal)
+        
+        balances_layout.addWidget(outstanding_widget)
+        balances_layout.addWidget(laybye_widget)
+        bottom_row.addWidget(balances_widget)
+        
+        bottom_row.addStretch()
+        bl.addLayout(bottom_row)
 
         return bar
+
+    def _set_payment_type(self, ptype: str):
+        """Toggle between Outstanding Balance and Laybye payment modes."""
+        self._payment_type = ptype
+        if ptype == "laybye":
+            self._info_label.setText("💰  Enter amount to pay toward laybye balance")
+            self._info_label.setStyleSheet(f"color:{self._AMBER}; font-size:11px; margin-top:5px;")
+        else:
+            self._info_label.setText("💰  Enter amount to pay toward outstanding balance")
+            self._info_label.setStyleSheet(f"color:{self._ACCENT}; font-size:11px; margin-top:5px;")
 
     # ── left panel — payment methods ──────────────────────────────────────
     def _build_left(self):
@@ -7547,19 +7683,10 @@ class CustomerPaymentDialog(QDialog):
         acct_row.addWidget(self._acct_combo, 1)
         vbox.addLayout(acct_row)
 
-        # ── Balance display ───────────────────────────────────────────────────
-        bal_row = QHBoxLayout()
-        bal_lbl = QLabel("Balance:")
-        bal_lbl.setFixedWidth(80)
-        bal_lbl.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
-        self._bal_lbl = QLabel("—")
-        self._bal_lbl.setStyleSheet(
-            f"font-size:13px; font-weight:bold; color:{self._ACCENT};"
-        )
-        bal_row.addWidget(bal_lbl)
-        bal_row.addWidget(self._bal_lbl, 1)
-        vbox.addLayout(bal_row)
-        self._refresh_balance()
+        # Info label for payment type
+        self._info_label = QLabel("💰  Enter amount to pay toward outstanding balance")
+        self._info_label.setStyleSheet(f"color:{self._ACCENT}; font-size:11px; margin-top:5px;")
+        vbox.addWidget(self._info_label)
 
         # amount card
         cards = QHBoxLayout()
@@ -7762,28 +7889,6 @@ class CustomerPaymentDialog(QDialog):
         m = self._acct_combo.itemData(idx)
         if m and m["label"] in self._method_rows:
             self._activate(m["label"])
-        self._refresh_balance()
-
-    def _refresh_balance(self):
-        """Try to show the customer's outstanding balance from the local DB."""
-        if not self._customer:
-            self._bal_lbl.setText("—")
-            return
-        try:
-            from database.db import get_connection
-            conn = get_connection(); cur = conn.cursor()
-            cur.execute(
-                "SELECT ISNULL(outstanding_amount, 0) FROM customers WHERE id=?",
-                (self._customer["id"],)
-            )
-            row = cur.fetchone()
-            conn.close()
-            balance = float(row[0]) if row else 0.0
-            color   = self._DANGER if balance > 0 else self._SUCCESS
-            self._bal_lbl.setText(f"${balance:.2f}")
-            self._bal_lbl.setStyleSheet(f"font-size:13px; font-weight:bold; color:{color};")
-        except Exception:
-            self._bal_lbl.setText("—")
 
     # ── style helpers ─────────────────────────────────────────────────────
     def _method_style(self, active: bool) -> str:
@@ -7862,7 +7967,8 @@ class CustomerPaymentDialog(QDialog):
             f"color:{color}; font-size:20px; font-weight:bold;"
             f" font-family:'Courier New',monospace;"
         )
-# ── save ──────────────────────────────────────────────────────────────
+
+    # ── save ──────────────────────────────────────────────────────────────
     def _save(self):
         if not self._customer:
             QMessageBox.warning(self, "No Customer",
@@ -7874,6 +7980,33 @@ class CustomerPaymentDialog(QDialog):
             QMessageBox.warning(self, "No Amount", "Please enter the payment amount.")
             self._active_field().setFocus()
             return
+
+        # Get current balances
+        outstanding = float(self._customer.get("outstanding_amount", 0))
+        laybye = float(self._customer.get("laybye_balance", 0))
+
+        # Validate based on payment type
+        if self._payment_type == "laybye":
+            if laybye <= 0:
+                QMessageBox.warning(self, "No Laybye Balance",
+                                    "This customer has no laybye balance to pay.")
+                return
+            if total_usd > laybye:
+                QMessageBox.warning(self, "Amount Exceeds Balance",
+                                    f"Payment amount (${total_usd:.2f}) exceeds laybye balance (${laybye:.2f}).")
+                return
+        else:
+            # Outstanding balance payment - can overpay to create credit
+            if total_usd > outstanding and outstanding > 0:
+                reply = QMessageBox.question(
+                    self, "Amount Exceeds Balance",
+                    f"Payment amount (${total_usd:.2f}) exceeds outstanding balance (${outstanding:.2f}).\n"
+                    f"This will overpay and create a credit.\n\n"
+                    f"Continue?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
 
         # 1. Collect splits
         splits = []
@@ -7913,52 +8046,116 @@ class CustomerPaymentDialog(QDialog):
         except Exception:
             pass
 
-        # 2. Save to Local DB
+        # 2. Save to Local DB and update balances
+        payment_id = None
         try:
             from models.payment import create_customer_payment
-            payment = create_customer_payment(
-                customer_id  = self._customer["id"],
-                amount       = total_usd,
-                method       = method_label,
-                currency     = currency,
-                reference    = self._ref_input.text().strip(),
-                cashier_id   = cashier_id,
-                splits       = splits,
-                payment_date = payment_date,
-                account_name = account_name,
-            )
+            from database.db import get_connection
+
+            if self._payment_type == "laybye":
+                # Create payment (no sales_order_id for simple laybye payment)
+                payment = create_customer_payment(
+                    customer_id     = self._customer["id"],
+                    amount          = total_usd,
+                    method          = method_label,
+                    currency        = currency,
+                    reference       = self._ref_input.text().strip(),
+                    cashier_id      = cashier_id,
+                    splits          = splits,
+                    payment_date    = payment_date,
+                    account_name    = account_name,
+                    # No sales_order_id for simple laybye balance payment
+                )
+                payment_id = payment.get("id") if payment else None
+
+                # Update customer laybye_balance
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("""
+                    UPDATE customers 
+                    SET laybye_balance = COALESCE(laybye_balance, 0) - ?
+                    WHERE id = ?
+                """, (total_usd, self._customer["id"]))
+                conn.commit()
+                conn.close()
+
+            else:
+                # Outstanding balance payment - update customer outstanding_amount
+                payment = create_customer_payment(
+                    customer_id     = self._customer["id"],
+                    amount          = total_usd,
+                    method          = method_label,
+                    currency        = currency,
+                    reference       = self._ref_input.text().strip(),
+                    cashier_id      = cashier_id,
+                    splits          = splits,
+                    payment_date    = payment_date,
+                    account_name    = account_name,
+                )
+                payment_id = payment.get("id") if payment else None
+
+                # Update customer outstanding amount (can go negative for credit)
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("""
+                    UPDATE customers 
+                    SET outstanding_amount = COALESCE(outstanding_amount, 0) - ?
+                    WHERE id = ?
+                """, (total_usd, self._customer["id"]))
+                conn.commit()
+                conn.close()
+
+            # Refresh the customer data
+            from models.customer import get_customer_by_id
+            updated_customer = get_customer_by_id(self._customer["id"])
+            if updated_customer:
+                self._customer = updated_customer
+                self._refresh_balances()
+
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not save payment:\n{e}")
             return
 
         # 3. Post to Frappe (Background)
         frappe_status = "queued"
-        try:
-            from services.payment_entry_service import post_payment_entry_to_frappe
-            result = post_payment_entry_to_frappe(payment)
-            frappe_status = "posted" if result else "queued"
-        except Exception:
-            frappe_status = "queued"
+        if payment_id:
+            try:
+                from services.payment_entry_service import post_payment_entry_to_frappe
+                result = post_payment_entry_to_frappe(payment_id)
+                frappe_status = "posted" if result else "queued"
+            except Exception:
+                frappe_status = "queued"
 
         # 4. Print Receipt Slip
-        # We pass the payment ID to ensure the printer pulls directly from the DB record
-        if payment and payment.get("id"):
-            self._print_payment_slip(payment["id"])
+        if payment_id:
+            self._print_payment_slip(payment_id, frappe_status)
 
         cname = self._customer.get("customer_name", "Customer")
-        QMessageBox.information(
-            self, "Payment Recorded",
-            f"✅  USD {total_usd:.2f} payment recorded for {cname}.\n"
-            f"Frappe: {frappe_status}.\n"
-            f"Receipt sent to printer."
-        )
+        if self._payment_type == "laybye":
+            new_balance = laybye - total_usd
+            QMessageBox.information(
+                self, "Payment Recorded",
+                f"✅  USD {total_usd:.2f} laybye payment recorded for {cname}.\n"
+                f"Previous Laybye Balance: ${laybye:.2f}\n"
+                f"New Laybye Balance: ${new_balance:.2f}\n"
+                f"Frappe: {frappe_status}.\n"
+                f"Receipt sent to printer."
+            )
+        else:
+            new_balance = outstanding - total_usd
+            QMessageBox.information(
+                self, "Payment Recorded",
+                f"✅  USD {total_usd:.2f} payment recorded for {cname}.\n"
+                f"Previous Outstanding Balance: ${outstanding:.2f}\n"
+                f"New Outstanding Balance: ${new_balance:.2f}\n"
+                f"Frappe: {frappe_status}.\n"
+                f"Receipt sent to printer."
+            )
         self.accept()
 
-   
-    def _print_payment_slip(self, payment, frappe_status: str = "queued"):
+    def _print_payment_slip(self, payment_id, frappe_status: str = "queued"):
         """
         Show a printable payment receipt slip on screen and send to thermal printer.
-        'payment' can be a dictionary or a payment ID (int).
         """
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
         from PySide6.QtGui import QFont
@@ -7966,23 +8163,18 @@ class CustomerPaymentDialog(QDialog):
 
         # 1. Ensure we have a dictionary of data
         payment_data = {}
-        payment_id = None
-
-        if isinstance(payment, int):
-            payment_id = payment
+        try:
             from models.payment import get_payment_by_id
             payment_data = get_payment_by_id(payment_id) or {}
-        elif isinstance(payment, dict):
-            payment_data = payment
-            payment_id = payment.get("id")
+        except Exception:
+            pass
 
-        # 2. Trigger the actual Thermal Printer (Logic from models/payment.py)
-        if payment_id:
-            try:
-                from models.payment import print_customer_payment
-                print_customer_payment(payment_id)
-            except Exception as e:
-                print(f"Thermal Print Error: {e}")
+        # 2. Trigger the actual Thermal Printer
+        try:
+            from models.payment import print_customer_payment
+            print_customer_payment(payment_id)
+        except Exception as e:
+            print(f"Thermal Print Error: {e}")
 
         # 3. Prepare the On-Screen Preview Dialog
         cname   = self._customer.get("customer_name", "") if self._customer else payment_data.get("customer_name", "Customer")
@@ -7993,6 +8185,10 @@ class CustomerPaymentDialog(QDialog):
         account = self._acct_combo.currentText()
         p_id_str = f"PAY-{payment_id:05d}" if payment_id else "NEW"
 
+        # Get current balances
+        outstanding = float(self._customer.get("outstanding_amount", 0))
+        laybye = float(self._customer.get("laybye_balance", 0))
+
         W = 40
         lines = [
             "=" * W,
@@ -8000,6 +8196,16 @@ class CustomerPaymentDialog(QDialog):
             f"  Receipt No: {p_id_str}",
             f"  Date:       {pdate}",
             f"  Customer:   {cname}",
+        ]
+
+        if self._payment_type == "laybye":
+            lines.append(f"  Payment Type: LAYBYE PAYMENT")
+            lines.append(f"  Balance After: ${laybye:.2f}")
+        else:
+            lines.append(f"  Payment Type: OUTSTANDING BALANCE")
+            lines.append(f"  Balance After: ${outstanding:.2f}")
+
+        lines += [
             "-" * W,
             f"  Account:    {account}",
             f"  Method:     {method}",
@@ -8018,7 +8224,6 @@ class CustomerPaymentDialog(QDialog):
         dlg = QDialog(self)
         dlg.setWindowTitle("Payment Receipt Preview")
         dlg.setMinimumSize(380, 420)
-        # Use fallback colors if self._WHITE etc are not defined in your class
         white = getattr(self, '_WHITE', '#FFFFFF')
         navy = getattr(self, '_NAVY', '#001f3f')
         border = getattr(self, '_BORDER', '#CCCCCC')
@@ -8059,31 +8264,16 @@ class CustomerPaymentDialog(QDialog):
     # ── keyboard ──────────────────────────────────────────────────────────
     def keyPressEvent(self, event):
         k = event.key()
-        
-        # Keep your existing function keys
-        if k == Qt.Key_F2:
-            self._open_day_shift()
-        elif k == Qt.Key_F3:
-            self._reprint_by_invoice_no()
-            
-        # ADD THIS: Route F4 to your discount function
-        elif k == Qt.Key_F4:
-            self._on_discount_clicked()
-            
-        elif k == Qt.Key_F5:
-            self._open_payment()
-            
-        # Standard event handling
+        if k == Qt.Key_Escape:
+            self.reject()
         else:
             super().keyPressEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._refresh_balances()
         if self._active_method:
             self._activate(self._active_method)
-            
-            
-            
 # =============================================================================
 # REPRINT DIALOG  —  two tabs: Sales Invoice  |  Sales Order
 # =============================================================================

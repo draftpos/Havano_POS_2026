@@ -879,7 +879,7 @@ def _check_user_complete(user: dict) -> tuple[bool, str]:
         "cost_center": "Cost Center",
     }
     for field, label in required.items():
-        val = (user.get(field) or "").strip()
+        val = (user.get(field) or "")
         if not val:
             return False, f"Account incomplete: {label} not set.  Contact admin."
     return True, ""
