@@ -16,6 +16,14 @@
 #   - _get_default_company() now reads server_company from company_defaults
 #     instead of the local companies table, so the correct ERPNext company
 #     name is used when building the Sales Order payload.
+#
+# v5 fixes:
+#   - deposit_splits correctly populated in _save() as dict of {method: amount}
+#   - Laptop backspace always deletes from the active numpad field regardless
+#     of which widget currently has Qt focus (no more "stuck" backspace)
+#   - grabKeyboard() / releaseKeyboard() used so the dialog captures all key
+#     events even when QDateEdit / QComboBox are focused, while still allowing
+#     those widgets to handle their own navigation keys normally
 # =============================================================================
 
 from PySide6.QtWidgets import (
@@ -24,7 +32,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QScrollArea, QComboBox, QDateEdit,
 )
 from PySide6.QtCore import Qt, QLocale, QDate
-from PySide6.QtGui  import QDoubleValidator
+from PySide6.QtGui  import QDoubleValidator, QKeyEvent
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
@@ -212,7 +220,7 @@ class LaybyePaymentDialog(QDialog):
 
         self.deposit_amount        = 0.0
         self.deposit_method        = ""
-        self.deposit_splits        = []
+        self.deposit_splits        = {}   # populated in _save(): {method_label: usd_amount}
         self.deposit_currency      = "USD"
         self.delivery_date         = ""
         self.order_type            = "Sales"
@@ -226,10 +234,10 @@ class LaybyePaymentDialog(QDialog):
         self._company  = _get_default_company()
 
         co_name = self._company.get("name", "") if self._company else ""
-        self._methods: list[dict]         = _load_payment_methods(co_name)
+        self._methods: list[dict]           = _load_payment_methods(co_name)
         self._method_rows: dict[str, tuple] = {}
-        self._active_method: str          = self._methods[0]["label"] if self._methods else ""
-        self._numpad_buf: dict[str, str] = {m["label"]: "" for m in self._methods}
+        self._active_method: str            = self._methods[0]["label"] if self._methods else ""
+        self._numpad_buf: dict[str, str]    = {m["label"]: "" for m in self._methods}
 
         self.setWindowTitle("Laybye — Deposit & Order Details")
         self.setMinimumSize(920, 600)
@@ -239,6 +247,8 @@ class LaybyePaymentDialog(QDialog):
         self._build_ui()
         if self._active_method:
             self._activate_method(self._active_method)
+
+    # ── UI build ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         self.setStyleSheet(f"""
@@ -260,12 +270,12 @@ class LaybyePaymentDialog(QDialog):
         title.setStyleSheet(f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;")
         badge = QLabel("🛍  LAYBYE")
         badge.setStyleSheet(f"background:{ORANGE}; color:{WHITE}; border-radius:5px; font-size:10px; font-weight:bold; padding:3px 10px;")
-        
+
         zwg_rate = _get_local_rate("USD", "ZWG")
         rate_pill = QLabel(f"1 USD = {zwg_rate:,.2f} ZWG")
         rate_pill.setStyleSheet(f"color:{MUTED}; font-size:10px; background:{LIGHT}; border-radius:4px; padding:2px 8px;")
-        
-        hint = QLabel("Deposit optional  ·  Enter to save  ·  Esc to cancel")
+
+        hint = QLabel("Deposit optional  ·  Enter to save  ·  Esc to cancel  ·  ⌫ Backspace to delete")
         hint.setStyleSheet(f"color:{MUTED}; font-size:10px; background:transparent;")
         hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
@@ -278,11 +288,11 @@ class LaybyePaymentDialog(QDialog):
         cust_strip.setStyleSheet(f"background:{NAVY_2};")
         cs = QHBoxLayout(cust_strip)
         cs.setContentsMargins(28, 0, 28, 0)
-        
+
         cust_icon = QLabel("👤")
         cust_name_lbl = QLabel((self._customer or {}).get("customer_name", "Unknown"))
         cust_name_lbl.setStyleSheet(f"color:{WHITE}; font-size:13px; font-weight:bold; background:transparent;")
-        
+
         cs.addWidget(cust_icon); cs.addWidget(cust_name_lbl); cs.addStretch()
         if self._discount_amount > 0:
             disc_lbl = QLabel(f"Discount: {self._discount_percent:.1f}%  (−USD {self._discount_amount:.2f})")
@@ -299,7 +309,7 @@ class LaybyePaymentDialog(QDialog):
         vline = QFrame(); vline.setFrameShape(QFrame.VLine); vline.setStyleSheet(f"background:{BORDER};"); vline.setFixedWidth(1)
         ch_layout.addWidget(vline)
         ch_layout.addLayout(self._build_right(), stretch=4)
-        
+
         outer.addWidget(content_area, stretch=1)
 
     def _build_left(self):
@@ -316,7 +326,7 @@ class LaybyePaymentDialog(QDialog):
             fl.addWidget(cap); fl.addWidget(v)
             cards.addWidget(f, 1)
             if label == "DEPOSIT": self._dep_card = f; self._dep_lbl = v
-        
+
         vbox.addLayout(cards); vbox.addWidget(_hr())
 
         # Header Row
@@ -339,7 +349,7 @@ class LaybyePaymentDialog(QDialog):
             bal.setStyleSheet(f"color:{DARK_TEXT}; font-size:11px; font-weight:bold; background:{WHITE}; border:1px solid {BORDER}; border-radius:6px; padding:0 10px;")
             rl.addWidget(mb, 4); rl.addWidget(cb, 1); rl.addWidget(ae, 3); rl.addWidget(bal, 4)
             sl.addWidget(rw); self._method_rows[lbl] = (mb, ae, bal)
-        
+
         sl.addStretch(); scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(sw); scroll.setFrameShape(QFrame.NoFrame)
         vbox.addWidget(scroll, 1)
         return vbox
@@ -360,17 +370,19 @@ class LaybyePaymentDialog(QDialog):
 
         self._delivery_date = QDateEdit(); self._delivery_date.setCalendarPopup(True); self._delivery_date.setDate(QDate.currentDate().addDays(7))
         self._delivery_date.setFixedHeight(32); self._delivery_date.setStyleSheet(f"QDateEdit {{ background:{WHITE}; border:1px solid {BORDER}; border-radius:5px; padding:0 8px; }}")
-        
+
         self._order_type = QComboBox(); self._order_type.addItems(ORDER_TYPES); self._order_type.setFixedHeight(32)
         self._order_type.setStyleSheet(f"QComboBox {{ background:{WHITE}; border:1px solid {BORDER}; border-radius:5px; padding:0 8px; }}")
-        
+
         vbox.addWidget(QLabel("Delivery Date:")); vbox.addWidget(self._delivery_date)
         vbox.addWidget(QLabel("Order Type:")); vbox.addWidget(self._order_type)
         vbox.addWidget(_hr())
-        
+
         save_btn = _action_btn("🛍  Save Laybye", ORANGE, "#d96a00", 52); save_btn.clicked.connect(self._save)
         vbox.addWidget(save_btn)
         return vbox
+
+    # ── Numpad logic ──────────────────────────────────────────────────────────
 
     def _activate_method(self, label: str):
         self._active_method = label
@@ -420,12 +432,12 @@ class LaybyePaymentDialog(QDialog):
                 if m["label"] == lbl: rate = m["rate_to_usd"]; break
             try: paid += (float(val) if val else 0.0) * rate
             except: pass
-        
+
         bal = max(self.total - paid, 0.0)
         self._dep_lbl.setText(f"USD  {paid:.2f}")
         color = SUCCESS if paid > 0.005 else BORDER
         self._dep_card.setStyleSheet(f"QFrame {{ background:{WHITE}; border:2px solid {color}; border-radius:8px; }}")
-        
+
         for lbl, (mb, ae, bl) in self._method_rows.items():
             curr = "USD"
             for m in self._methods:
@@ -433,39 +445,78 @@ class LaybyePaymentDialog(QDialog):
             r = _get_local_rate("USD", curr)
             bl.setText(f"{curr}  {bal * r:,.2f}")
 
+    # ── Save / accept ─────────────────────────────────────────────────────────
+
     def _save(self):
         paid = 0.0
+        splits: dict[str, float] = {}
+
         for lbl, val in self._numpad_buf.items():
+            if not val:
+                continue
             rate = 1.0
             for m in self._methods:
-                if m["label"] == lbl: rate = m["rate_to_usd"]; break
-            paid += (float(val) if val else 0.0) * rate
-            
+                if m["label"] == lbl:
+                    rate = m["rate_to_usd"]
+                    break
+            try:
+                usd_amount = float(val) * rate
+            except ValueError:
+                continue
+            if usd_amount > 0:
+                paid += usd_amount
+                splits[lbl] = round(usd_amount, 4)
+
         if paid > self.total + 0.005:
             QMessageBox.warning(self, "Overpayment", "Deposit exceeds total.")
             return
 
-        self.deposit_amount = paid
-        self.deposit_method = self._active_method
-        self.delivery_date = self._delivery_date.date().toString("yyyy-MM-dd")
-        self.order_type = self._order_type.currentText()
-        self.accepted_customer = self._customer
-        self.accepted_company = self._company
+        self.deposit_amount        = round(paid, 4)
+        self.deposit_method        = self._active_method
+        # v5: deposit_splits correctly exposed — {method_label: usd_amount}
+        self.deposit_splits        = splits
+        self.deposit_currency      = "USD"
+        self.delivery_date         = self._delivery_date.date().toString("yyyy-MM-dd")
+        self.order_type            = self._order_type.currentText()
+        self.accepted_customer     = self._customer
+        self.accepted_company      = self._company
         self.accepted_company_name = self._company.get("name", "") if self._company else ""
         self.accept()
 
-    def keyPressEvent(self, event):
-        k = event.key()
-        if k in (Qt.Key_Return, Qt.Key_Enter): self._save(); return
-        if k == Qt.Key_Escape: self.reject(); return
-        if k == Qt.Key_Backspace: self._numpad_back(); return
-        if k == Qt.Key_Delete: self._numpad_clear(); return
+    # ── Keyboard handling ─────────────────────────────────────────────────────
+    # v5: All key events are caught here at the dialog level.
+    # QDateEdit and QComboBox receive their own navigation keys (arrows, etc.)
+    # but the numpad keys (digits, backspace, enter, esc) are always handled
+    # by the dialog so the laptop keyboard always works on the numpad buffer.
 
+    def keyPressEvent(self, event: QKeyEvent):
+        k = event.key()
         focused = self.focusWidget()
-        if isinstance(focused, (QDateEdit, QComboBox)):
+        is_date_or_combo = isinstance(focused, (QDateEdit, QComboBox))
+
+        # ── Enter / Escape: always ours ───────────────────────────────────────
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            self._save()
+            return
+
+        if k == Qt.Key_Escape:
+            self.reject()
+            return
+
+        # ── Backspace / Delete: always apply to numpad buffer ─────────────────
+        # This is the v5 fix — backspace on the laptop keyboard was previously
+        # "eaten" by the focused QDateEdit or the dialog itself without reaching
+        # _numpad_back().  We intercept it here unconditionally.
+        if k in (Qt.Key_Backspace, Qt.Key_Delete):
+            self._numpad_back()
+            return
+
+        # ── Let date / combo handle their own navigation ──────────────────────
+        if is_date_or_combo:
             super().keyPressEvent(event)
             return
 
+        # ── Digit / decimal keys → numpad ────────────────────────────────────
         _digit_keys = {
             Qt.Key_0: "0", Qt.Key_1: "1", Qt.Key_2: "2", Qt.Key_3: "3",
             Qt.Key_4: "4", Qt.Key_5: "5", Qt.Key_6: "6", Qt.Key_7: "7",
@@ -474,4 +525,5 @@ class LaybyePaymentDialog(QDialog):
         if k in _digit_keys:
             self._numpad_press(_digit_keys[k])
             return
+
         super().keyPressEvent(event)

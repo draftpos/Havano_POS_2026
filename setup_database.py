@@ -15,14 +15,66 @@
 import sys
 import os
 import hashlib
+import pyodbc
 
 
 def _hash(pw: str) -> str:
     return hashlib.sha256(pw.encode()).hexdigest()
 
 
+def create_database_if_not_exists():
+    """Create the database if it doesn't exist"""
+    # Connection to master database — TrustServerCertificate avoids SSL chain errors
+    conn_str = (
+        "DRIVER={ODBC Driver 18 for SQL Server};"
+        "SERVER=localhost\\SQLEXPRESS;"
+        "Trusted_Connection=yes;"
+        "TrustServerCertificate=yes;"
+    )
+
+    try:
+        conn = pyodbc.connect(conn_str, autocommit=True)
+        cursor = conn.cursor()
+
+        # Check if database exists
+        cursor.execute("SELECT 1 FROM sys.databases WHERE name = 'POS_DB'")
+        if not cursor.fetchone():
+            print("Database POS_DB does not exist. Creating...")
+            cursor.execute("""
+                CREATE DATABASE [POS_DB]
+                CONTAINMENT = NONE
+                ON PRIMARY
+                (NAME = N'POS_DB',
+                 FILENAME = N'C:\\Program Files\\Microsoft SQL Server\\MSSQL16.SQLEXPRESS\\MSSQL\\DATA\\POS_DB.mdf',
+                 SIZE = 73728KB,
+                 MAXSIZE = UNLIMITED,
+                 FILEGROWTH = 65536KB)
+                LOG ON
+                (NAME = N'POS_DB_log',
+                 FILENAME = N'C:\\Program Files\\Microsoft SQL Server\\MSSQL16.SQLEXPRESS\\MSSQL\\DATA\\POS_DB_log.ldf',
+                 SIZE = 8192KB,
+                 MAXSIZE = 2048GB,
+                 FILEGROWTH = 65536KB)
+            """)
+            print("✓ Database POS_DB created successfully")
+        else:
+            print("Database POS_DB already exists")
+
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"Error creating database: {e}")
+        return False
+
+
 def run():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    # First, ensure the database exists
+    if not create_database_if_not_exists():
+        print("Failed to create database. Exiting.")
+        sys.exit(1)
 
     try:
         from database.db import get_connection
@@ -32,29 +84,48 @@ def run():
         sys.exit(1)
 
     conn = get_connection()
-    cur  = conn.cursor()
+    cur = conn.cursor()
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     def table_exists(name: str) -> bool:
-        cur.execute(
-            "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ?", (name,))
-        return cur.fetchone() is not None
+        try:
+            cur.execute(
+                "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ?", (name,))
+            return cur.fetchone() is not None
+        except Exception:
+            return False
 
     def col_exists(table: str, col: str) -> bool:
-        cur.execute(
-            "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
-            "WHERE TABLE_NAME = ? AND COLUMN_NAME = ?", (table, col))
-        return cur.fetchone() is not None
+        try:
+            cur.execute(
+                "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_NAME = ? AND COLUMN_NAME = ?", (table, col))
+            return cur.fetchone() is not None
+        except Exception:
+            return False
 
     def add_col(table: str, col: str, definition: str):
         if not col_exists(table, col):
-            cur.execute(f"ALTER TABLE [{table}] ADD [{col}] {definition}")
-            print(f"    + {table}.{col}")
+            try:
+                cur.execute(f"ALTER TABLE [{table}] ADD [{col}] {definition}")
+                print(f"    + {table}.{col}")
+            except Exception as e:
+                print(f"    ! Could not add {table}.{col}: {e}")
 
-    def ok(name):   print(f"  [+] Created : {name}")
-    def skip(name): print(f"  [ ] Exists  : {name}")
+    def fk_exists(name: str) -> bool:
+        try:
+            cur.execute("SELECT 1 FROM sys.foreign_keys WHERE name = ?", (name,))
+            return cur.fetchone() is not None
+        except Exception:
+            return False
+
+    def ok(name):
+        print(f"  [+] Created : {name}")
+
+    def skip(name):
+        print(f"  [ ] Exists  : {name}")
 
     print("\n======================================")
     print("  Havano POS - Database Setup")
@@ -65,14 +136,17 @@ def run():
     # ==================================================================
     if not table_exists("companies"):
         cur.execute("""
-            CREATE TABLE companies (
-                id               INT           IDENTITY(1,1) PRIMARY KEY,
-                name             NVARCHAR(120) NOT NULL UNIQUE,
-                abbreviation     NVARCHAR(40)  NOT NULL DEFAULT '',
-                default_currency NVARCHAR(10)  NOT NULL DEFAULT 'USD',
-                country          NVARCHAR(80)  NOT NULL DEFAULT ''
+            CREATE TABLE [dbo].[companies] (
+                [id]               INT           IDENTITY(1,1) NOT NULL,
+                [name]             NVARCHAR(120) NOT NULL,
+                [abbreviation]     NVARCHAR(40)  NOT NULL,
+                [default_currency] NVARCHAR(10)  NOT NULL DEFAULT 'USD',
+                [country]          NVARCHAR(80)  NOT NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                UNIQUE ([name])
             )
-        """); ok("companies")
+        """)
+        ok("companies")
     else:
         skip("companies")
 
@@ -81,92 +155,81 @@ def run():
     # ==================================================================
     if not table_exists("company_defaults"):
         cur.execute("""
-            CREATE TABLE company_defaults (
-                id                       INT           IDENTITY(1,1) PRIMARY KEY,
-                company_name             NVARCHAR(255) NOT NULL DEFAULT '',
-                address_1                NVARCHAR(255) NOT NULL DEFAULT '',
-                address_2                NVARCHAR(255) NOT NULL DEFAULT '',
-                email                    NVARCHAR(100) NOT NULL DEFAULT '',
-                phone                    NVARCHAR(50)  NOT NULL DEFAULT '',
-                vat_number               NVARCHAR(50)  NOT NULL DEFAULT '',
-                tin_number               NVARCHAR(50)  NOT NULL DEFAULT '',
-                footer_text              NVARCHAR(MAX) NOT NULL DEFAULT '',
-                zimra_serial_no          NVARCHAR(80)  NOT NULL DEFAULT '',
-                zimra_device_id          NVARCHAR(80)  NOT NULL DEFAULT '',
-                zimra_api_key            NVARCHAR(255) NOT NULL DEFAULT '',
-                zimra_api_url            NVARCHAR(255) NOT NULL DEFAULT '',
-                invoice_prefix           NVARCHAR(20)  NOT NULL DEFAULT '',
-                invoice_start_number     NVARCHAR(20)  NOT NULL DEFAULT '0',
-                server_company           NVARCHAR(255) NOT NULL DEFAULT '',
-                server_warehouse         NVARCHAR(255) NOT NULL DEFAULT '',
-                server_cost_center       NVARCHAR(255) NOT NULL DEFAULT '',
-                server_username          NVARCHAR(255) NOT NULL DEFAULT '',
-                server_email             NVARCHAR(255) NOT NULL DEFAULT '',
-                server_role              NVARCHAR(80)  NOT NULL DEFAULT '',
-                server_full_name         NVARCHAR(255) NOT NULL DEFAULT '',
-                server_first_name        NVARCHAR(255) NOT NULL DEFAULT '',
-                server_last_name         NVARCHAR(255) NOT NULL DEFAULT '',
-                server_mobile            NVARCHAR(80)  NOT NULL DEFAULT '',
-                server_profile           NVARCHAR(255) NOT NULL DEFAULT '',
-                server_vat_enabled       NVARCHAR(20)  NOT NULL DEFAULT '',
-                server_company_currency  NVARCHAR(10)  NOT NULL DEFAULT 'USD',
-                server_api_host          NVARCHAR(255) NOT NULL DEFAULT '',
-                server_pos_account       NVARCHAR(255) NOT NULL DEFAULT '',
-                server_taxes_and_charges NVARCHAR(255) NOT NULL DEFAULT '',
-                server_walk_in_customer  NVARCHAR(255) NOT NULL DEFAULT 'default',
-                api_key                  NVARCHAR(255) NOT NULL DEFAULT '',
-                api_secret               NVARCHAR(255) NOT NULL DEFAULT '',
-                updated_at               DATETIME      NOT NULL DEFAULT GETDATE()
+            CREATE TABLE [dbo].[company_defaults] (
+                [id]                       INT           IDENTITY(1,1) NOT NULL,
+                [company_name]             NVARCHAR(200) NOT NULL DEFAULT '',
+                [address_1]                NVARCHAR(200) NOT NULL DEFAULT '',
+                [address_2]                NVARCHAR(200) NOT NULL DEFAULT '',
+                [email]                    NVARCHAR(200) NOT NULL DEFAULT '',
+                [phone]                    NVARCHAR(100) NOT NULL DEFAULT '',
+                [vat_number]               NVARCHAR(100) NOT NULL DEFAULT '',
+                [tin_number]               NVARCHAR(100) NOT NULL DEFAULT '',
+                [footer_text]              NVARCHAR(500) NOT NULL DEFAULT '',
+                [zimra_serial_no]          NVARCHAR(100) NOT NULL DEFAULT '',
+                [zimra_device_id]          NVARCHAR(100) NOT NULL DEFAULT '',
+                [zimra_api_key]            NVARCHAR(500) NOT NULL DEFAULT '',
+                [zimra_api_url]            NVARCHAR(300) NOT NULL DEFAULT '',
+                [server_company]           NVARCHAR(200) NOT NULL DEFAULT '',
+                [server_warehouse]         NVARCHAR(200) NOT NULL DEFAULT '',
+                [server_cost_center]       NVARCHAR(200) NOT NULL DEFAULT '',
+                [server_username]          NVARCHAR(200) NOT NULL DEFAULT '',
+                [server_email]             NVARCHAR(200) NOT NULL DEFAULT '',
+                [server_role]              NVARCHAR(100) NOT NULL DEFAULT '',
+                [server_full_name]         NVARCHAR(200) NOT NULL DEFAULT '',
+                [updated_at]               DATETIME      NOT NULL DEFAULT GETDATE(),
+                [server_first_name]        NVARCHAR(100) NOT NULL DEFAULT '',
+                [server_last_name]         NVARCHAR(100) NOT NULL DEFAULT '',
+                [server_mobile]            NVARCHAR(100) NOT NULL DEFAULT '',
+                [server_profile]           NVARCHAR(100) NOT NULL DEFAULT '',
+                [server_vat_enabled]       NVARCHAR(10)  NOT NULL DEFAULT '',
+                [api_key]                  NVARCHAR(200) NOT NULL DEFAULT '',
+                [api_secret]               NVARCHAR(200) NOT NULL DEFAULT '',
+                [invoice_prefix]           NVARCHAR(6)   NOT NULL DEFAULT '',
+                [invoice_start_number]     INT           NOT NULL DEFAULT 0,
+                [server_company_currency]  NVARCHAR(10)  NOT NULL DEFAULT 'USD',
+                [server_api_host]          NVARCHAR(255) NOT NULL DEFAULT '',
+                [server_pos_account]       NVARCHAR(255) NOT NULL DEFAULT '',
+                [server_taxes_and_charges] NVARCHAR(255) NOT NULL DEFAULT '',
+                [server_walk_in_customer]  NVARCHAR(255) NOT NULL DEFAULT 'default',
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
-        cur.execute("INSERT INTO company_defaults DEFAULT VALUES")
+        try:
+            cur.execute("INSERT INTO company_defaults DEFAULT VALUES")
+        except Exception:
+            pass
         ok("company_defaults")
     else:
         skip("company_defaults")
         for col, defn in [
-            ("zimra_serial_no",          "NVARCHAR(80)  NOT NULL DEFAULT ''"),
-            ("zimra_device_id",          "NVARCHAR(80)  NOT NULL DEFAULT ''"),
-            ("zimra_api_key",            "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("zimra_api_url",            "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("invoice_prefix",           "NVARCHAR(20)  NOT NULL DEFAULT ''"),
-            ("invoice_start_number",     "NVARCHAR(20)  NOT NULL DEFAULT '0'"),
-            ("server_company",           "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("server_warehouse",         "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("server_cost_center",       "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("server_username",          "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("server_email",             "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("server_role",              "NVARCHAR(80)  NOT NULL DEFAULT ''"),
-            ("server_full_name",         "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("server_first_name",        "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("server_last_name",         "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("server_mobile",            "NVARCHAR(80)  NOT NULL DEFAULT ''"),
-            ("server_profile",           "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("server_vat_enabled",       "NVARCHAR(20)  NOT NULL DEFAULT ''"),
+            ("zimra_serial_no",          "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("zimra_device_id",          "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("zimra_api_key",            "NVARCHAR(500) NOT NULL DEFAULT ''"),
+            ("zimra_api_url",            "NVARCHAR(300) NOT NULL DEFAULT ''"),
+            ("invoice_prefix",           "NVARCHAR(6)   NOT NULL DEFAULT ''"),
+            ("invoice_start_number",     "INT           NOT NULL DEFAULT 0"),
             ("server_company_currency",  "NVARCHAR(10)  NOT NULL DEFAULT 'USD'"),
             ("server_api_host",          "NVARCHAR(255) NOT NULL DEFAULT ''"),
             ("server_pos_account",       "NVARCHAR(255) NOT NULL DEFAULT ''"),
             ("server_taxes_and_charges", "NVARCHAR(255) NOT NULL DEFAULT ''"),
             ("server_walk_in_customer",  "NVARCHAR(255) NOT NULL DEFAULT 'default'"),
-            ("api_key",                  "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("api_secret",               "NVARCHAR(255) NOT NULL DEFAULT ''"),
         ]:
             add_col("company_defaults", col, defn)
-        cur.execute("""
-            IF NOT EXISTS (SELECT 1 FROM company_defaults)
-                INSERT INTO company_defaults DEFAULT VALUES
-        """)
 
     # ==================================================================
     # 3. customer_groups
     # ==================================================================
     if not table_exists("customer_groups"):
         cur.execute("""
-            CREATE TABLE customer_groups (
-                id              INT           IDENTITY(1,1) PRIMARY KEY,
-                name            NVARCHAR(120) NOT NULL UNIQUE,
-                parent_group_id INT           NULL
+            CREATE TABLE [dbo].[customer_groups] (
+                [id]              INT           IDENTITY(1,1) NOT NULL,
+                [name]            NVARCHAR(120) NOT NULL,
+                [parent_group_id] INT           NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                UNIQUE ([name])
             )
-        """); ok("customer_groups")
+        """)
+        ok("customer_groups")
     else:
         skip("customer_groups")
 
@@ -175,129 +238,155 @@ def run():
     # ==================================================================
     if not table_exists("price_lists"):
         cur.execute("""
-            CREATE TABLE price_lists (
-                id      INT           IDENTITY(1,1) PRIMARY KEY,
-                name    NVARCHAR(120) NOT NULL UNIQUE,
-                selling BIT           NOT NULL DEFAULT 1
+            CREATE TABLE [dbo].[price_lists] (
+                [id]      INT           IDENTITY(1,1) NOT NULL,
+                [name]    NVARCHAR(120) NOT NULL,
+                [selling] BIT           NULL DEFAULT 1,
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                UNIQUE ([name])
             )
-        """); ok("price_lists")
+        """)
+        ok("price_lists")
     else:
         skip("price_lists")
 
     # ==================================================================
-    # 5. warehouses
+    # 5. warehouses  (depends on companies)
     # ==================================================================
     if not table_exists("warehouses"):
         cur.execute("""
-            CREATE TABLE warehouses (
-                id         INT           IDENTITY(1,1) PRIMARY KEY,
-                name       NVARCHAR(120) NOT NULL,
-                company_id INT           NOT NULL
+            CREATE TABLE [dbo].[warehouses] (
+                [id]         INT           IDENTITY(1,1) NOT NULL,
+                [name]       NVARCHAR(120) NOT NULL,
+                [company_id] INT           NOT NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("warehouses")
+        """)
+        ok("warehouses")
     else:
         skip("warehouses")
 
     # ==================================================================
-    # 6. cost_centers
+    # 6. cost_centers  (depends on companies)
     # ==================================================================
     if not table_exists("cost_centers"):
         cur.execute("""
-            CREATE TABLE cost_centers (
-                id         INT           IDENTITY(1,1) PRIMARY KEY,
-                name       NVARCHAR(120) NOT NULL,
-                company_id INT           NOT NULL
+            CREATE TABLE [dbo].[cost_centers] (
+                [id]         INT           IDENTITY(1,1) NOT NULL,
+                [name]       NVARCHAR(120) NOT NULL,
+                [company_id] INT           NOT NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("cost_centers")
+        """)
+        ok("cost_centers")
     else:
         skip("cost_centers")
 
     # ==================================================================
-    # 7. customers
+    # 7. customers  (depends on customer_groups, warehouses, cost_centers, price_lists)
     # ==================================================================
     if not table_exists("customers"):
         cur.execute("""
-            CREATE TABLE customers (
-                id                      INT           IDENTITY(1,1) PRIMARY KEY,
-                customer_name           NVARCHAR(120) NOT NULL,
-                customer_type           NVARCHAR(50)  NULL,
-                customer_group_id       INT           NULL,
-                custom_warehouse_id     INT           NULL,
-                custom_cost_center_id   INT           NULL,
-                default_price_list_id   INT           NULL,
-                custom_trade_name       NVARCHAR(120) NULL,
-                custom_telephone_number NVARCHAR(50)  NULL,
-                custom_email_address    NVARCHAR(120) NULL,
-                custom_city             NVARCHAR(80)  NULL,
-                custom_house_no         NVARCHAR(40)  NULL,
-                balance                 DECIMAL(12,2) NOT NULL DEFAULT 0,
-                outstanding_amount      DECIMAL(12,2) NOT NULL DEFAULT 0,
-                loyalty_points          DECIMAL(12,2) NOT NULL DEFAULT 0
+            CREATE TABLE [dbo].[customers] (
+                [id]                      INT           IDENTITY(1,1) NOT NULL,
+                [customer_name]           NVARCHAR(120) NOT NULL,
+                [customer_group_id]       INT           NULL,
+                [customer_type]           NVARCHAR(20)  NULL,
+                [custom_trade_name]       NVARCHAR(120) NULL,
+                [custom_telephone_number] NVARCHAR(120) NULL,
+                [custom_email_address]    NVARCHAR(120) NULL,
+                [custom_city]             NVARCHAR(120) NULL,
+                [custom_house_no]         NVARCHAR(120) NULL,
+                [custom_warehouse_id]     INT           NULL,
+                [custom_cost_center_id]   INT           NULL,
+                [default_price_list_id]   INT           NULL,
+                [balance]                 DECIMAL(18,2) NULL DEFAULT 0,
+                [outstanding_amount]      DECIMAL(18,2) NULL DEFAULT 0,
+                [loyalty_points]          INT           NULL DEFAULT 0,
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("customers")
+        """)
+        ok("customers")
     else:
         skip("customers")
-        for col, defn in [
-            ("customer_type",           "NVARCHAR(50)  NULL"),
-            ("custom_trade_name",       "NVARCHAR(120) NULL"),
-            ("custom_telephone_number", "NVARCHAR(50)  NULL"),
-            ("custom_email_address",    "NVARCHAR(120) NULL"),
-            ("custom_city",             "NVARCHAR(80)  NULL"),
-            ("custom_house_no",         "NVARCHAR(40)  NULL"),
-            ("balance",                 "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("outstanding_amount",      "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("loyalty_points",          "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-        ]:
-            add_col("customers", col, defn)
-        # Fix any NOT NULL string columns that Frappe may send as NULL
-        for nullable_col in [
-            "custom_trade_name", "custom_telephone_number",
-            "custom_email_address", "custom_city", "custom_house_no",
-        ]:
-            cur.execute(f"""
-                IF EXISTS (
-                    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_NAME  = 'customers'
-                      AND COLUMN_NAME = '{nullable_col}'
-                      AND IS_NULLABLE = 'NO'
-                )
-                ALTER TABLE customers ALTER COLUMN [{nullable_col}] NVARCHAR(120) NULL
-            """)
-        print("    ~ customers nullable string columns enforced (Frappe sends NULL)")
 
     # ==================================================================
-    # 8. products
+    # 8. users
+    # ==================================================================
+    if not table_exists("users"):
+        cur.execute("""
+            CREATE TABLE [dbo].[users] (
+                [id]                   INT           IDENTITY(1,1) NOT NULL,
+                [username]             NVARCHAR(80)  NOT NULL,
+                [password]             NVARCHAR(255) NOT NULL,
+                [display_name]         NVARCHAR(120) NULL,
+                [active]               BIT           NOT NULL DEFAULT 1,
+                [role]                 NVARCHAR(20)  NULL DEFAULT 'cashier',
+                [email]                NVARCHAR(120) NULL,
+                [full_name]            NVARCHAR(120) NULL,
+                [first_name]           NVARCHAR(80)  NULL,
+                [last_name]            NVARCHAR(80)  NULL,
+                [pin]                  NVARCHAR(20)  NULL,
+                [cost_center]          NVARCHAR(140) NULL,
+                [warehouse]            NVARCHAR(140) NULL,
+                [frappe_user]          NVARCHAR(120) NULL,
+                [synced_from_frappe]   BIT           NOT NULL DEFAULT 0,
+                [allow_discount]       BIT           NOT NULL DEFAULT 1,
+                [allow_receipt]        BIT           NOT NULL DEFAULT 1,
+                [allow_credit_note]    BIT           NOT NULL DEFAULT 1,
+                [allow_reprint]        BIT           NOT NULL DEFAULT 1,
+                [company]              NVARCHAR(140) NULL DEFAULT '',
+                [max_discount_percent] INT           NULL DEFAULT 0,
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                UNIQUE ([username])
+            )
+        """)
+        ok("users")
+    else:
+        skip("users")
+        for col, defn in [
+            ("cost_center",          "NVARCHAR(140) NULL"),
+            ("warehouse",            "NVARCHAR(140) NULL"),
+            ("allow_discount",       "BIT           NOT NULL DEFAULT 1"),
+            ("allow_receipt",        "BIT           NOT NULL DEFAULT 1"),
+            ("allow_credit_note",    "BIT           NOT NULL DEFAULT 1"),
+            ("allow_reprint",        "BIT           NOT NULL DEFAULT 1"),
+            ("company",              "NVARCHAR(140) NULL DEFAULT ''"),
+            ("max_discount_percent", "INT           NULL DEFAULT 0"),
+        ]:
+            add_col("users", col, defn)
+
+    # ==================================================================
+    # 9. products
     # ==================================================================
     if not table_exists("products"):
         cur.execute("""
-            CREATE TABLE products (
-                id                INT           IDENTITY(1,1) PRIMARY KEY,
-                part_no           NVARCHAR(50)  NOT NULL DEFAULT '',
-                name              NVARCHAR(120) NOT NULL,
-                price             DECIMAL(12,2) NOT NULL DEFAULT 0,
-                stock             DECIMAL(12,4) NOT NULL DEFAULT 0,
-                category          NVARCHAR(80)  NOT NULL DEFAULT '',
-                image_path        NVARCHAR(500) NULL,
-                active            BIT           NULL DEFAULT NULL,
-                uom               NVARCHAR(40)  NOT NULL DEFAULT 'Unit',
-                conversion_factor DECIMAL(12,4) NOT NULL DEFAULT 1.0,
-                order_1           BIT           NOT NULL DEFAULT 0,
-                order_2           BIT           NOT NULL DEFAULT 0,
-                order_3           BIT           NOT NULL DEFAULT 0,
-                order_4           BIT           NOT NULL DEFAULT 0,
-                order_5           BIT           NOT NULL DEFAULT 0,
-                order_6           BIT           NOT NULL DEFAULT 0
+            CREATE TABLE [dbo].[products] (
+                [id]                INT           IDENTITY(1,1) NOT NULL,
+                [part_no]           NVARCHAR(50)  NOT NULL,
+                [name]              NVARCHAR(120) NOT NULL,
+                [price]             DECIMAL(12,2) NOT NULL,
+                [stock]             INT           NOT NULL,
+                [category]          NVARCHAR(80)  NOT NULL,
+                [active]            BIT           NULL,
+                [image_path]        NVARCHAR(500) NULL,
+                [order_1]           BIT           NOT NULL DEFAULT 0,
+                [order_2]           BIT           NOT NULL DEFAULT 0,
+                [order_3]           BIT           NOT NULL DEFAULT 0,
+                [order_4]           BIT           NOT NULL DEFAULT 0,
+                [order_5]           BIT           NOT NULL DEFAULT 0,
+                [order_6]           BIT           NOT NULL DEFAULT 0,
+                [uom]               NVARCHAR(20)  NULL,
+                [conversion_factor] DECIMAL(12,4) NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("products")
+        """)
+        ok("products")
     else:
         skip("products")
         for col, defn in [
-            ("part_no",           "NVARCHAR(50)  NOT NULL DEFAULT ''"),
-            ("category",          "NVARCHAR(80)  NOT NULL DEFAULT ''"),
-            ("image_path",        "NVARCHAR(500) NULL"),
-            ("active",            "BIT           NULL"),
-            ("uom",               "NVARCHAR(40)  NOT NULL DEFAULT 'Unit'"),
-            ("conversion_factor", "DECIMAL(12,4) NOT NULL DEFAULT 1.0"),
+            ("uom",               "NVARCHAR(20)  NULL"),
+            ("conversion_factor", "DECIMAL(12,4) NULL"),
             ("order_1",           "BIT           NOT NULL DEFAULT 0"),
             ("order_2",           "BIT           NOT NULL DEFAULT 0"),
             ("order_3",           "BIT           NOT NULL DEFAULT 0"),
@@ -306,115 +395,49 @@ def run():
             ("order_6",           "BIT           NOT NULL DEFAULT 0"),
         ]:
             add_col("products", col, defn)
-        # Fix active column if it was previously created as NOT NULL
-        cur.execute("""
-            IF EXISTS (
-                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_NAME  = 'products'
-                  AND COLUMN_NAME = 'active'
-                  AND IS_NULLABLE = 'NO'
-            )
-            ALTER TABLE products ALTER COLUMN active BIT NULL
-        """)
-        print("    ~ products.active ensured nullable (Frappe sends NULL for some products)")
-
-    # ==================================================================
-    # 9. users
-    # ==================================================================
-    if not table_exists("users"):
-        cur.execute("""
-            CREATE TABLE users (
-                id                 INT           IDENTITY(1,1) PRIMARY KEY,
-                username           NVARCHAR(80)  NOT NULL UNIQUE,
-                password           NVARCHAR(255) NOT NULL DEFAULT '',
-                role               NVARCHAR(20)  NOT NULL DEFAULT 'cashier',
-                display_name       NVARCHAR(120) NULL,
-                email              NVARCHAR(120) NULL,
-                full_name          NVARCHAR(120) NULL,
-                first_name         NVARCHAR(80)  NULL,
-                last_name          NVARCHAR(80)  NULL,
-                pin                NVARCHAR(20)  NULL,
-                cost_center        NVARCHAR(140) NULL,
-                warehouse          NVARCHAR(140) NULL,
-                frappe_user        NVARCHAR(120) NULL,
-                synced_from_frappe BIT           NOT NULL DEFAULT 0,
-                active             BIT           NOT NULL DEFAULT 1
-            )
-        """); ok("users")
-    else:
-        skip("users")
-        for col, defn in [
-            ("display_name",       "NVARCHAR(120) NULL"),
-            ("email",              "NVARCHAR(120) NULL"),
-            ("full_name",          "NVARCHAR(120) NULL"),
-            ("first_name",         "NVARCHAR(80)  NULL"),
-            ("last_name",          "NVARCHAR(80)  NULL"),
-            ("pin",                "NVARCHAR(20)  NULL"),
-            ("cost_center",        "NVARCHAR(140) NULL"),
-            ("warehouse",          "NVARCHAR(140) NULL"),
-            ("frappe_user",        "NVARCHAR(120) NULL"),
-            ("synced_from_frappe", "BIT           NOT NULL DEFAULT 0"),
-            ("active",             "BIT           NOT NULL DEFAULT 1"),
-        ]:
-            add_col("users", col, defn)
 
     # ==================================================================
     # 10. sales
     # ==================================================================
     if not table_exists("sales"):
         cur.execute("""
-            CREATE TABLE sales (
-                id                INT           IDENTITY(1,1) PRIMARY KEY,
-                invoice_number    INT           NOT NULL DEFAULT 0,
-                invoice_no        NVARCHAR(40)  NOT NULL DEFAULT '',
-                invoice_date      NVARCHAR(20)  NOT NULL DEFAULT '',
-                total             DECIMAL(12,2) NOT NULL DEFAULT 0,
-                tendered          DECIMAL(12,2) NOT NULL DEFAULT 0,
-                method            NVARCHAR(30)  NOT NULL DEFAULT 'Cash',
-                cashier_id        INT           NULL,
-                cashier_name      NVARCHAR(120) NOT NULL DEFAULT '',
-                customer_name     NVARCHAR(120) NOT NULL DEFAULT '',
-                customer_contact  NVARCHAR(80)  NOT NULL DEFAULT '',
-                company_name      NVARCHAR(120) NOT NULL DEFAULT '',
-                kot               NVARCHAR(40)  NOT NULL DEFAULT '',
-                currency          NVARCHAR(10)  NOT NULL DEFAULT 'USD',
-                subtotal          DECIMAL(12,2) NOT NULL DEFAULT 0,
-                total_vat         DECIMAL(12,2) NOT NULL DEFAULT 0,
-                discount_amount   DECIMAL(12,2) NOT NULL DEFAULT 0,
-                receipt_type      NVARCHAR(30)  NOT NULL DEFAULT 'Invoice',
-                footer            NVARCHAR(MAX) NOT NULL DEFAULT '',
-                created_at        DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
-                total_items       DECIMAL(12,4) NOT NULL DEFAULT 0,
-                change_amount     DECIMAL(12,2) NOT NULL DEFAULT 0,
-                synced            INT           NOT NULL DEFAULT 0,
-                frappe_ref        NVARCHAR(80)  NULL,
-                payment_entry_ref NVARCHAR(80)  NULL,
-                payment_synced    BIT           NOT NULL DEFAULT 0
+            CREATE TABLE [dbo].[sales] (
+                [id]                INT           IDENTITY(1,1) NOT NULL,
+                [invoice_number]    INT           NOT NULL,
+                [invoice_no]        NVARCHAR(40)  NOT NULL,
+                [invoice_date]      DATETIME2(7)  NOT NULL,
+                [total]             DECIMAL(12,2) NOT NULL,
+                [tendered]          DECIMAL(12,2) NOT NULL,
+                [method]            NVARCHAR(30)  NOT NULL,
+                [cashier_id]        INT           NULL,
+                [cashier_name]      NVARCHAR(120) NOT NULL,
+                [customer_name]     NVARCHAR(120) NOT NULL,
+                [customer_contact]  NVARCHAR(80)  NOT NULL,
+                [kot]               NVARCHAR(40)  NOT NULL,
+                [currency]          NVARCHAR(10)  NOT NULL,
+                [subtotal]          DECIMAL(12,2) NOT NULL,
+                [total_vat]         DECIMAL(12,2) NOT NULL,
+                [discount_amount]   DECIMAL(12,2) NOT NULL,
+                [receipt_type]      NVARCHAR(30)  NOT NULL,
+                [footer]            NVARCHAR(MAX) NOT NULL,
+                [synced]            BIT           NOT NULL DEFAULT 0,
+                [total_items]       DECIMAL(12,4) NOT NULL,
+                [change_amount]     DECIMAL(12,2) NOT NULL,
+                [company_name]      NVARCHAR(120) NOT NULL,
+                [frappe_ref]        NVARCHAR(80)  NULL,
+                [created_at]        DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
+                [payment_entry_ref] NVARCHAR(80)  NULL,
+                [payment_synced]    BIT           NOT NULL DEFAULT 0,
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("sales")
+        """)
+        ok("sales")
     else:
         skip("sales")
         for col, defn in [
-            ("invoice_number",    "INT           NOT NULL DEFAULT 0"),
-            ("invoice_no",        "NVARCHAR(40)  NOT NULL DEFAULT ''"),
-            ("invoice_date",      "NVARCHAR(20)  NOT NULL DEFAULT ''"),
-            ("tendered",          "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("cashier_name",      "NVARCHAR(120) NOT NULL DEFAULT ''"),
-            ("customer_contact",  "NVARCHAR(80)  NOT NULL DEFAULT ''"),
-            ("company_name",      "NVARCHAR(120) NOT NULL DEFAULT ''"),
-            ("kot",               "NVARCHAR(40)  NOT NULL DEFAULT ''"),
-            ("currency",          "NVARCHAR(10)  NOT NULL DEFAULT 'USD'"),
-            ("subtotal",          "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("total_vat",         "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("discount_amount",   "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("receipt_type",      "NVARCHAR(30)  NOT NULL DEFAULT 'Invoice'"),
-            ("footer",            "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
-            ("total_items",       "DECIMAL(12,4) NOT NULL DEFAULT 0"),
-            ("change_amount",     "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("synced",            "INT           NOT NULL DEFAULT 0"),
-            ("frappe_ref",        "NVARCHAR(80)  NULL"),
             ("payment_entry_ref", "NVARCHAR(80)  NULL"),
             ("payment_synced",    "BIT           NOT NULL DEFAULT 0"),
+            ("company_name",      "NVARCHAR(120) NOT NULL DEFAULT ''"),
         ]:
             add_col("sales", col, defn)
 
@@ -423,161 +446,133 @@ def run():
     # ==================================================================
     if not table_exists("sale_items"):
         cur.execute("""
-            CREATE TABLE sale_items (
-                id           INT           IDENTITY(1,1) PRIMARY KEY,
-                sale_id      INT           NOT NULL
-                                 REFERENCES sales(id) ON DELETE CASCADE,
-                part_no      NVARCHAR(50)  NOT NULL DEFAULT '',
-                product_name NVARCHAR(120) NOT NULL DEFAULT '',
-                qty          DECIMAL(12,4) NOT NULL DEFAULT 1,
-                price        DECIMAL(12,2) NOT NULL DEFAULT 0,
-                discount     DECIMAL(12,2) NOT NULL DEFAULT 0,
-                tax          NVARCHAR(20)  NOT NULL DEFAULT '',
-                total        DECIMAL(12,2) NOT NULL DEFAULT 0,
-                tax_type     NVARCHAR(20)  NOT NULL DEFAULT '',
-                tax_rate     DECIMAL(8,4)  NOT NULL DEFAULT 0,
-                tax_amount   DECIMAL(12,2) NOT NULL DEFAULT 0,
-                remarks      NVARCHAR(MAX) NOT NULL DEFAULT '',
-                order_1      BIT           NOT NULL DEFAULT 0,
-                order_2      BIT           NOT NULL DEFAULT 0,
-                order_3      BIT           NOT NULL DEFAULT 0,
-                order_4      BIT           NOT NULL DEFAULT 0,
-                order_5      BIT           NOT NULL DEFAULT 0,
-                order_6      BIT           NOT NULL DEFAULT 0
+            CREATE TABLE [dbo].[sale_items] (
+                [id]           INT           IDENTITY(1,1) NOT NULL,
+                [sale_id]      INT           NOT NULL,
+                [part_no]      NVARCHAR(50)  NOT NULL,
+                [product_name] NVARCHAR(120) NOT NULL,
+                [qty]          DECIMAL(12,4) NOT NULL,
+                [price]        DECIMAL(12,2) NOT NULL,
+                [discount]     DECIMAL(12,2) NOT NULL,
+                [tax]          NVARCHAR(20)  NOT NULL,
+                [total]        DECIMAL(12,2) NOT NULL,
+                [tax_type]     NVARCHAR(20)  NOT NULL,
+                [tax_rate]     DECIMAL(8,4)  NOT NULL,
+                [tax_amount]   DECIMAL(12,2) NOT NULL,
+                [remarks]      NVARCHAR(MAX) NOT NULL DEFAULT '',
+                [order_1]      BIT           NOT NULL DEFAULT 0,
+                [order_2]      BIT           NOT NULL DEFAULT 0,
+                [order_3]      BIT           NOT NULL DEFAULT 0,
+                [order_4]      BIT           NOT NULL DEFAULT 0,
+                [order_5]      BIT           NOT NULL DEFAULT 0,
+                [order_6]      BIT           NOT NULL DEFAULT 0,
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("sale_items")
+        """)
+        ok("sale_items")
     else:
         skip("sale_items")
-        for col, defn in [
-            ("part_no",    "NVARCHAR(50)  NOT NULL DEFAULT ''"),
-            ("discount",   "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("tax",        "NVARCHAR(20)  NOT NULL DEFAULT ''"),
-            ("tax_type",   "NVARCHAR(20)  NOT NULL DEFAULT ''"),
-            ("tax_rate",   "DECIMAL(8,4)  NOT NULL DEFAULT 0"),
-            ("tax_amount", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("remarks",    "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
-            ("order_1",    "BIT           NOT NULL DEFAULT 0"),
-            ("order_2",    "BIT           NOT NULL DEFAULT 0"),
-            ("order_3",    "BIT           NOT NULL DEFAULT 0"),
-            ("order_4",    "BIT           NOT NULL DEFAULT 0"),
-            ("order_5",    "BIT           NOT NULL DEFAULT 0"),
-            ("order_6",    "BIT           NOT NULL DEFAULT 0"),
-        ]:
-            add_col("sale_items", col, defn)
 
     # ==================================================================
     # 12. shifts
     # ==================================================================
     if not table_exists("shifts"):
         cur.execute("""
-            CREATE TABLE shifts (
-                id           INT           IDENTITY(1,1) PRIMARY KEY,
-                shift_number INT           NOT NULL DEFAULT 1,
-                station      INT           NOT NULL DEFAULT 1,
-                cashier_id   INT           NULL,
-                date         NVARCHAR(20)  NOT NULL DEFAULT '',
-                start_time   NVARCHAR(20)  NOT NULL DEFAULT '',
-                end_time     NVARCHAR(20)  NULL,
-                door_counter INT           NOT NULL DEFAULT 0,
-                customers    INT           NOT NULL DEFAULT 0,
-                notes        NVARCHAR(MAX) NOT NULL DEFAULT '',
-                created_at   DATETIME2     NOT NULL DEFAULT SYSDATETIME()
+            CREATE TABLE [dbo].[shifts] (
+                [id]           INT           IDENTITY(1,1) NOT NULL,
+                [shift_number] INT           NOT NULL,
+                [station]      INT           NOT NULL,
+                [cashier_id]   INT           NULL,
+                [date]         DATE          NOT NULL,
+                [start_time]   DATETIME2(7)  NOT NULL,
+                [end_time]     DATETIME2(7)  NULL,
+                [door_counter] INT           NOT NULL DEFAULT 0,
+                [customers]    INT           NOT NULL DEFAULT 0,
+                [notes]        NVARCHAR(MAX) NULL,
+                [created_at]   DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("shifts")
+        """)
+        ok("shifts")
     else:
         skip("shifts")
-        for col, defn in [
-            ("station",      "INT           NOT NULL DEFAULT 1"),
-            ("date",         "NVARCHAR(20)  NOT NULL DEFAULT ''"),
-            ("start_time",   "NVARCHAR(20)  NOT NULL DEFAULT ''"),
-            ("end_time",     "NVARCHAR(20)  NULL"),
-            ("door_counter", "INT           NOT NULL DEFAULT 0"),
-            ("customers",    "INT           NOT NULL DEFAULT 0"),
-            ("notes",        "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
-        ]:
-            add_col("shifts", col, defn)
 
     # ==================================================================
     # 13. shift_rows
     # ==================================================================
     if not table_exists("shift_rows"):
         cur.execute("""
-            CREATE TABLE shift_rows (
-                id          INT           IDENTITY(1,1) PRIMARY KEY,
-                shift_id    INT           NOT NULL
-                                REFERENCES shifts(id) ON DELETE CASCADE,
-                method      NVARCHAR(50)  NOT NULL DEFAULT '',
-                start_float DECIMAL(12,2) NOT NULL DEFAULT 0,
-                income      DECIMAL(12,2) NOT NULL DEFAULT 0,
-                counted     DECIMAL(12,2) NOT NULL DEFAULT 0
+            CREATE TABLE [dbo].[shift_rows] (
+                [id]          INT           IDENTITY(1,1) NOT NULL,
+                [shift_id]    INT           NOT NULL,
+                [method]      NVARCHAR(50)  NOT NULL,
+                [start_float] DECIMAL(12,2) NOT NULL,
+                [income]      DECIMAL(12,2) NOT NULL,
+                [counted]     DECIMAL(12,2) NOT NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("shift_rows")
+        """)
+        ok("shift_rows")
     else:
         skip("shift_rows")
-        for col, defn in [
-            ("method",      "NVARCHAR(50)  NOT NULL DEFAULT ''"),
-            ("start_float", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("income",      "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("counted",     "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-        ]:
-            add_col("shift_rows", col, defn)
 
     # ==================================================================
     # 14. payment_entries
     # ==================================================================
     if not table_exists("payment_entries"):
         cur.execute("""
-            CREATE TABLE payment_entries (
-                id                       INT           IDENTITY(1,1) PRIMARY KEY,
-                sale_id                  INT           NULL,
-                sale_invoice_no          NVARCHAR(80)  NULL,
-                frappe_invoice_ref       NVARCHAR(80)  NULL,
-                party                    NVARCHAR(120) NULL,
-                party_name               NVARCHAR(120) NULL,
-                paid_amount              DECIMAL(12,2) NOT NULL DEFAULT 0,
-                received_amount          DECIMAL(12,2) NOT NULL DEFAULT 0,
-                source_exchange_rate     DECIMAL(12,6) NOT NULL DEFAULT 1,
-                paid_to_account_currency NVARCHAR(10)  NULL,
-                currency                 NVARCHAR(10)  NULL,
-                paid_to                  NVARCHAR(255) NULL,
-                mode_of_payment          NVARCHAR(80)  NULL,
-                reference_no             NVARCHAR(80)  NULL,
-                reference_date           DATE          NULL,
-                remarks                  NVARCHAR(255) NULL,
-                payment_type             NVARCHAR(20)  NOT NULL DEFAULT 'Receive',
-                synced                   BIT           NOT NULL DEFAULT 0,
-                frappe_payment_ref       NVARCHAR(80)  NULL,
-                created_at               DATETIME2     NOT NULL DEFAULT SYSDATETIME()
+            CREATE TABLE [dbo].[payment_entries] (
+                [id]                       INT           IDENTITY(1,1) NOT NULL,
+                [sale_id]                  INT           NULL,
+                [sale_invoice_no]          NVARCHAR(80)  NULL,
+                [frappe_invoice_ref]       NVARCHAR(80)  NULL,
+                [party]                    NVARCHAR(120) NULL,
+                [party_name]               NVARCHAR(120) NULL,
+                [paid_amount]              DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [received_amount]          DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [source_exchange_rate]     DECIMAL(12,6) NOT NULL DEFAULT 1,
+                [paid_to_account_currency] NVARCHAR(10)  NULL,
+                [currency]                 NVARCHAR(10)  NULL,
+                [paid_to]                  NVARCHAR(255) NULL,
+                [mode_of_payment]          NVARCHAR(80)  NULL,
+                [reference_no]             NVARCHAR(80)  NULL,
+                [reference_date]           DATE          NULL,
+                [remarks]                  NVARCHAR(255) NULL,
+                [payment_type]             NVARCHAR(20)  NOT NULL DEFAULT 'Receive',
+                [synced]                   BIT           NOT NULL DEFAULT 0,
+                [frappe_payment_ref]       NVARCHAR(80)  NULL,
+                [created_at]               DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                [frappe_so_ref]            NVARCHAR(255) NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("payment_entries")
+        """)
+        ok("payment_entries")
     else:
         skip("payment_entries")
-        for col, defn in [
-            ("remarks",      "NVARCHAR(255) NULL"),
-            ("payment_type", "NVARCHAR(20)  NOT NULL DEFAULT 'Receive'"),
-        ]:
-            add_col("payment_entries", col, defn)
+        add_col("payment_entries", "frappe_so_ref", "NVARCHAR(255) NULL")
 
     # ==================================================================
     # 15. credit_notes
     # ==================================================================
     if not table_exists("credit_notes"):
         cur.execute("""
-            CREATE TABLE credit_notes (
-                id                  INT           IDENTITY(1,1) PRIMARY KEY,
-                cn_number           NVARCHAR(40)  NOT NULL DEFAULT '',
-                original_sale_id    INT           NOT NULL,
-                original_invoice_no NVARCHAR(40)  NOT NULL DEFAULT '',
-                frappe_ref          NVARCHAR(80)  NULL,
-                frappe_cn_ref       NVARCHAR(80)  NULL,
-                total               DECIMAL(12,2) NOT NULL DEFAULT 0,
-                currency            NVARCHAR(10)  NOT NULL DEFAULT 'USD',
-                cashier_name        NVARCHAR(120) NOT NULL DEFAULT '',
-                customer_name       NVARCHAR(120) NOT NULL DEFAULT '',
-                cn_status           NVARCHAR(20)  NOT NULL DEFAULT 'pending_sync',
-                created_at          DATETIME2     NOT NULL DEFAULT SYSDATETIME()
+            CREATE TABLE [dbo].[credit_notes] (
+                [id]                  INT           IDENTITY(1,1) NOT NULL,
+                [cn_number]           NVARCHAR(40)  NOT NULL DEFAULT '',
+                [original_sale_id]    INT           NOT NULL,
+                [original_invoice_no] NVARCHAR(40)  NOT NULL DEFAULT '',
+                [frappe_ref]          NVARCHAR(80)  NULL,
+                [frappe_cn_ref]       NVARCHAR(80)  NULL,
+                [total]               DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [currency]            NVARCHAR(10)  NOT NULL DEFAULT 'USD',
+                [cashier_name]        NVARCHAR(120) NOT NULL DEFAULT '',
+                [customer_name]       NVARCHAR(120) NOT NULL DEFAULT '',
+                [cn_status]           NVARCHAR(20)  NOT NULL DEFAULT 'pending_sync',
+                [created_at]          DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("credit_notes")
+        """)
+        ok("credit_notes")
     else:
         skip("credit_notes")
 
@@ -586,18 +581,19 @@ def run():
     # ==================================================================
     if not table_exists("credit_note_items"):
         cur.execute("""
-            CREATE TABLE credit_note_items (
-                id             INT           IDENTITY(1,1) PRIMARY KEY,
-                credit_note_id INT           NOT NULL
-                                   REFERENCES credit_notes(id) ON DELETE CASCADE,
-                part_no        NVARCHAR(50)  NOT NULL DEFAULT '',
-                product_name   NVARCHAR(120) NOT NULL DEFAULT '',
-                qty            DECIMAL(12,4) NOT NULL DEFAULT 0,
-                price          DECIMAL(12,2) NOT NULL DEFAULT 0,
-                total          DECIMAL(12,2) NOT NULL DEFAULT 0,
-                reason         NVARCHAR(255) NOT NULL DEFAULT 'Customer Return'
+            CREATE TABLE [dbo].[credit_note_items] (
+                [id]             INT           IDENTITY(1,1) NOT NULL,
+                [credit_note_id] INT           NOT NULL,
+                [part_no]        NVARCHAR(50)  NOT NULL DEFAULT '',
+                [product_name]   NVARCHAR(120) NOT NULL DEFAULT '',
+                [qty]            DECIMAL(12,4) NOT NULL DEFAULT 0,
+                [price]          DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [total]          DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [reason]         NVARCHAR(255) NOT NULL DEFAULT 'Customer Return',
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("credit_note_items")
+        """)
+        ok("credit_note_items")
     else:
         skip("credit_note_items")
 
@@ -606,44 +602,41 @@ def run():
     # ==================================================================
     if not table_exists("gl_accounts"):
         cur.execute("""
-            CREATE TABLE gl_accounts (
-                id               INT           IDENTITY(1,1) PRIMARY KEY,
-                name             NVARCHAR(140) NOT NULL UNIQUE,
-                account_name     NVARCHAR(140) NOT NULL DEFAULT '',
-                account_number   NVARCHAR(80)  NULL,
-                company          NVARCHAR(120) NOT NULL DEFAULT '',
-                parent_account   NVARCHAR(140) NOT NULL DEFAULT '',
-                account_type     NVARCHAR(80)  NOT NULL DEFAULT '',
-                account_currency NVARCHAR(10)  NOT NULL DEFAULT 'USD',
-                updated_at       DATETIME2     NOT NULL DEFAULT SYSDATETIME()
+            CREATE TABLE [dbo].[gl_accounts] (
+                [id]               INT           IDENTITY(1,1) NOT NULL,
+                [name]             NVARCHAR(140) NOT NULL,
+                [account_name]     NVARCHAR(140) NOT NULL DEFAULT '',
+                [account_number]   NVARCHAR(80)  NULL,
+                [company]          NVARCHAR(120) NOT NULL DEFAULT '',
+                [parent_account]   NVARCHAR(140) NOT NULL DEFAULT '',
+                [account_type]     NVARCHAR(80)  NOT NULL DEFAULT '',
+                [account_currency] NVARCHAR(10)  NOT NULL DEFAULT 'USD',
+                [updated_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                UNIQUE ([name])
             )
-        """); ok("gl_accounts")
+        """)
+        ok("gl_accounts")
     else:
         skip("gl_accounts")
-        for col, defn in [
-            ("account_name",   "NVARCHAR(140) NOT NULL DEFAULT ''"),
-            ("account_number", "NVARCHAR(80)  NULL"),
-            ("parent_account", "NVARCHAR(140) NOT NULL DEFAULT ''"),
-            ("updated_at",     "DATETIME2     NOT NULL DEFAULT SYSDATETIME()"),
-        ]:
-            add_col("gl_accounts", col, defn)
 
     # ==================================================================
     # 18. exchange_rates
     # ==================================================================
     if not table_exists("exchange_rates"):
         cur.execute("""
-            CREATE TABLE exchange_rates (
-                id            INT           IDENTITY(1,1) PRIMARY KEY,
-                from_currency NVARCHAR(10)  NOT NULL,
-                to_currency   NVARCHAR(10)  NOT NULL,
-                rate          DECIMAL(18,6) NOT NULL DEFAULT 1,
-                rate_date     NVARCHAR(20)  NOT NULL,
-                updated_at    DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
-                CONSTRAINT UQ_exchange_rates
-                    UNIQUE (from_currency, to_currency, rate_date)
+            CREATE TABLE [dbo].[exchange_rates] (
+                [id]            INT           IDENTITY(1,1) NOT NULL,
+                [from_currency] NVARCHAR(10)  NOT NULL,
+                [to_currency]   NVARCHAR(10)  NOT NULL,
+                [rate]          DECIMAL(18,6) NOT NULL DEFAULT 1,
+                [rate_date]     NVARCHAR(20)  NOT NULL,
+                [updated_at]    DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                CONSTRAINT [UQ_exchange_rates] UNIQUE ([from_currency], [to_currency], [rate_date])
             )
-        """); ok("exchange_rates")
+        """)
+        ok("exchange_rates")
     else:
         skip("exchange_rates")
 
@@ -652,85 +645,286 @@ def run():
     # ==================================================================
     if not table_exists("item_groups"):
         cur.execute("""
-            CREATE TABLE item_groups (
-                id                INT           IDENTITY(1,1) PRIMARY KEY,
-                name              NVARCHAR(100) NOT NULL UNIQUE,
-                item_group_name   NVARCHAR(100) NOT NULL DEFAULT '',
-                parent_item_group NVARCHAR(100) NOT NULL DEFAULT '',
-                synced_from_api   BIT           NOT NULL DEFAULT 0,
-                created_at        DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
-                updated_at        DATETIME2     NOT NULL DEFAULT SYSDATETIME()
+            CREATE TABLE [dbo].[item_groups] (
+                [id]                INT           IDENTITY(1,1) NOT NULL,
+                [name]              NVARCHAR(100) NOT NULL,
+                [item_group_name]   NVARCHAR(100) NOT NULL DEFAULT '',
+                [parent_item_group] NVARCHAR(100) NOT NULL DEFAULT '',
+                [synced_from_api]   BIT           NOT NULL DEFAULT 0,
+                [created_at]        DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                [updated_at]        DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                UNIQUE ([name])
             )
-        """); ok("item_groups")
+        """)
+        ok("item_groups")
     else:
         skip("item_groups")
-        for col, defn in [
-            ("item_group_name",   "NVARCHAR(100) NOT NULL DEFAULT ''"),
-            ("parent_item_group", "NVARCHAR(100) NOT NULL DEFAULT ''"),
-            ("synced_from_api",   "BIT           NOT NULL DEFAULT 0"),
-            ("updated_at",        "DATETIME2     NOT NULL DEFAULT SYSDATETIME()"),
-        ]:
-            add_col("item_groups", col, defn)
 
     # ==================================================================
     # 20. customer_payments
     # ==================================================================
     if not table_exists("customer_payments"):
         cur.execute("""
-            CREATE TABLE customer_payments (
-                id          INT           IDENTITY(1,1) PRIMARY KEY,
-                customer_id INT           NOT NULL,
-                amount      DECIMAL(12,2) NOT NULL DEFAULT 0,
-                method      NVARCHAR(30)  NOT NULL DEFAULT '',
-                reference   NVARCHAR(100) NULL,
-                cashier_id  INT           NULL,
-                created_at  DATETIME2     NOT NULL DEFAULT SYSDATETIME()
+            CREATE TABLE [dbo].[customer_payments] (
+                [id]           INT           IDENTITY(1,1) NOT NULL,
+                [customer_id]  INT           NOT NULL,
+                [amount]       DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [method]       NVARCHAR(30)  NOT NULL DEFAULT '',
+                [reference]    NVARCHAR(100) NULL,
+                [cashier_id]   INT           NULL,
+                [created_at]   DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                [currency]     NVARCHAR(10)  NULL DEFAULT 'USD',
+                [account_name] NVARCHAR(100) NULL,
+                [payment_date] DATE          NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC)
             )
-        """); ok("customer_payments")
+        """)
+        ok("customer_payments")
     else:
         skip("customer_payments")
-
 
     # ==================================================================
     # 21. product_uom_prices
     # ==================================================================
     if not table_exists("product_uom_prices"):
         cur.execute("""
-            CREATE TABLE product_uom_prices (
-                id      INT           IDENTITY(1,1) PRIMARY KEY,
-                part_no NVARCHAR(50)  NOT NULL,
-                uom     NVARCHAR(40)  NOT NULL,
-                price   DECIMAL(12,2) NOT NULL DEFAULT 0,
-                CONSTRAINT UQ_product_uom UNIQUE (part_no, uom)
+            CREATE TABLE [dbo].[product_uom_prices] (
+                [id]      INT           IDENTITY(1,1) NOT NULL,
+                [part_no] NVARCHAR(50)  NOT NULL,
+                [uom]     NVARCHAR(40)  NOT NULL,
+                [price]   DECIMAL(12,2) NOT NULL DEFAULT 0,
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                CONSTRAINT [UQ_product_uom] UNIQUE ([part_no], [uom])
             )
-        """); ok("product_uom_prices")
+        """)
+        ok("product_uom_prices")
     else:
         skip("product_uom_prices")
 
     # ==================================================================
-    # Commit all DDL
+    # 22. sales_order
+    # ==================================================================
+    if not table_exists("sales_order"):
+        cur.execute("""
+            CREATE TABLE [dbo].[sales_order] (
+                [id]             INT           IDENTITY(1,1) NOT NULL,
+                [order_no]       NVARCHAR(100) NULL,
+                [customer_id]    INT           NULL,
+                [customer_name]  NVARCHAR(255) NULL,
+                [company]        NVARCHAR(255) NULL,
+                [order_date]     NVARCHAR(50)  NULL,
+                [delivery_date]  NVARCHAR(50)  NOT NULL DEFAULT '',
+                [order_type]     NVARCHAR(50)  NOT NULL DEFAULT 'Sales',
+                [total]          FLOAT         NOT NULL DEFAULT 0,
+                [deposit_amount] FLOAT         NOT NULL DEFAULT 0,
+                [deposit_method] NVARCHAR(100) NOT NULL DEFAULT '',
+                [balance_due]    FLOAT         NOT NULL DEFAULT 0,
+                [status]         NVARCHAR(50)  NOT NULL DEFAULT 'Draft',
+                [synced]         INT           NOT NULL DEFAULT 0,
+                [frappe_ref]     NVARCHAR(255) NOT NULL DEFAULT '',
+                [created_at]     NVARCHAR(50)  NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("sales_order")
+    else:
+        skip("sales_order")
+
+    # ==================================================================
+    # 23. sales_order_item
+    # ==================================================================
+    if not table_exists("sales_order_item"):
+        cur.execute("""
+            CREATE TABLE [dbo].[sales_order_item] (
+                [id]             INT           IDENTITY(1,1) NOT NULL,
+                [sales_order_id] INT           NOT NULL,
+                [item_code]      NVARCHAR(100) NULL,
+                [item_name]      NVARCHAR(255) NULL,
+                [qty]            FLOAT         NOT NULL DEFAULT 1,
+                [rate]           FLOAT         NOT NULL DEFAULT 0,
+                [amount]         FLOAT         NOT NULL DEFAULT 0,
+                [warehouse]      NVARCHAR(255) NOT NULL DEFAULT '',
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("sales_order_item")
+    else:
+        skip("sales_order_item")
+
+    # ==================================================================
+    # 24. laybye_payment_entries
+    # ==================================================================
+    if not table_exists("laybye_payment_entries"):
+        cur.execute("""
+            CREATE TABLE [dbo].[laybye_payment_entries] (
+                [id]              INT           IDENTITY(1,1) NOT NULL,
+                [sales_order_id]  INT           NOT NULL,
+                [order_no]        NVARCHAR(100) NOT NULL DEFAULT '',
+                [customer_id]     NVARCHAR(255) NOT NULL DEFAULT '',
+                [customer_name]   NVARCHAR(255) NOT NULL DEFAULT '',
+                [deposit_amount]  FLOAT         NOT NULL DEFAULT 0,
+                [deposit_method]  NVARCHAR(100) NOT NULL DEFAULT '',
+                [account_paid_to] NVARCHAR(255) NOT NULL DEFAULT '',
+                [account_currency]NVARCHAR(20)  NOT NULL DEFAULT 'USD',
+                [frappe_so_ref]   NVARCHAR(255) NOT NULL DEFAULT '',
+                [frappe_pe_ref]   NVARCHAR(255) NOT NULL DEFAULT '',
+                [status]          NVARCHAR(50)  NOT NULL DEFAULT 'pending',
+                [sync_attempts]   INT           NOT NULL DEFAULT 0,
+                [created_at]      NVARCHAR(50)  NOT NULL DEFAULT '',
+                [last_attempt_at] NVARCHAR(50)  NOT NULL DEFAULT '',
+                [error_message]   NVARCHAR(MAX) NOT NULL DEFAULT '',
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("laybye_payment_entries")
+    else:
+        skip("laybye_payment_entries")
+
+    # ==================================================================
+    # 25. pos_settings
+    # ==================================================================
+    if not table_exists("pos_settings"):
+        cur.execute("""
+            CREATE TABLE [dbo].[pos_settings] (
+                [setting_key]   NVARCHAR(80)  NOT NULL,
+                [setting_value] NVARCHAR(255) NOT NULL DEFAULT '0',
+                PRIMARY KEY CLUSTERED ([setting_key] ASC)
+            )
+        """)
+        ok("pos_settings")
+    else:
+        skip("pos_settings")
+
+    # ==================================================================
+    # 26. shift_reports
+    # ==================================================================
+    if not table_exists("shift_reports"):
+        cur.execute("""
+            CREATE TABLE [dbo].[shift_reports] (
+                [id]             INT           IDENTITY(1,1) NOT NULL,
+                [cashier_id]     INT           NULL,
+                [cashier_name]   NVARCHAR(100) NULL,
+                [shift_number]   INT           NULL,
+                [total_expected] DECIMAL(18,2) NULL,
+                [total_actual]   DECIMAL(18,2) NULL,
+                [total_variance] DECIMAL(18,2) NULL,
+                [report_date]    DATE          NULL,
+                [created_at]     DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("shift_reports")
+    else:
+        skip("shift_reports")
+
+    # ==================================================================
+    # 27. shift_report_details
+    # ==================================================================
+    if not table_exists("shift_report_details"):
+        cur.execute("""
+            CREATE TABLE [dbo].[shift_report_details] (
+                [id]               INT           IDENTITY(1,1) NOT NULL,
+                [report_id]        INT           NULL,
+                [payment_method]   NVARCHAR(50)  NULL,
+                [amount_expected]  DECIMAL(18,2) NULL,
+                [amount_available] DECIMAL(18,2) NULL,
+                [variance]         DECIMAL(18,2) NULL,
+                [created_at]       DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("shift_report_details")
+    else:
+        skip("shift_report_details")
+
+    # ==================================================================
+    # Commit all DDL before adding FKs
     # ==================================================================
     conn.commit()
-    print("\n  All tables ready.")
+
+    # ==================================================================
+    # Foreign key constraints  (matches the SQL script exactly)
+    # ==================================================================
+    print("\nAdding foreign key constraints...")
+
+    fk_defs = [
+        ("FK_cost_centers_companies",
+         "ALTER TABLE [cost_centers] ADD CONSTRAINT [FK_cost_centers_companies] "
+         "FOREIGN KEY ([company_id]) REFERENCES [companies] ([id])"),
+
+        ("FK_warehouses_companies",
+         "ALTER TABLE [warehouses] ADD CONSTRAINT [FK_warehouses_companies] "
+         "FOREIGN KEY ([company_id]) REFERENCES [companies] ([id])"),
+
+        ("FK_customers_customer_groups",
+         "ALTER TABLE [customers] ADD CONSTRAINT [FK_customers_customer_groups] "
+         "FOREIGN KEY ([customer_group_id]) REFERENCES [customer_groups] ([id])"),
+
+        ("FK_customers_warehouses",
+         "ALTER TABLE [customers] ADD CONSTRAINT [FK_customers_warehouses] "
+         "FOREIGN KEY ([custom_warehouse_id]) REFERENCES [warehouses] ([id])"),
+
+        ("FK_customers_cost_centers",
+         "ALTER TABLE [customers] ADD CONSTRAINT [FK_customers_cost_centers] "
+         "FOREIGN KEY ([custom_cost_center_id]) REFERENCES [cost_centers] ([id])"),
+
+        ("FK_customers_price_lists",
+         "ALTER TABLE [customers] ADD CONSTRAINT [FK_customers_price_lists] "
+         "FOREIGN KEY ([default_price_list_id]) REFERENCES [price_lists] ([id])"),
+
+        ("FK_sale_items_sales",
+         "ALTER TABLE [sale_items] ADD CONSTRAINT [FK_sale_items_sales] "
+         "FOREIGN KEY ([sale_id]) REFERENCES [sales] ([id]) ON DELETE CASCADE"),
+
+        ("FK_shift_rows_shifts",
+         "ALTER TABLE [shift_rows] ADD CONSTRAINT [FK_shift_rows_shifts] "
+         "FOREIGN KEY ([shift_id]) REFERENCES [shifts] ([id]) ON DELETE CASCADE"),
+
+        ("FK_credit_note_items_credit_notes",
+         "ALTER TABLE [credit_note_items] ADD CONSTRAINT [FK_credit_note_items_credit_notes] "
+         "FOREIGN KEY ([credit_note_id]) REFERENCES [credit_notes] ([id]) ON DELETE CASCADE"),
+
+        ("FK_sales_order_item_sales_order",
+         "ALTER TABLE [sales_order_item] ADD CONSTRAINT [FK_sales_order_item_sales_order] "
+         "FOREIGN KEY ([sales_order_id]) REFERENCES [sales_order] ([id])"),
+    ]
+
+    for fk_name, fk_sql in fk_defs:
+        if not fk_exists(fk_name):
+            try:
+                cur.execute(fk_sql)
+                print(f"  + {fk_name}")
+            except Exception as e:
+                print(f"  ! {fk_name}: {e}")
+        else:
+            print(f"  [ ] {fk_name} already exists")
+
+    conn.commit()
+    print("\n  All tables and constraints ready.")
 
     # ==================================================================
     # SEED: default admin user if users table is empty
     # ==================================================================
-    cur.execute("SELECT COUNT(*) FROM users")
-    if cur.fetchone()[0] == 0:
-        cur.execute("""
-            INSERT INTO users
-                (username, password, role, display_name,
-                 full_name, active, synced_from_frappe)
-            VALUES (?, ?, 'admin', 'Administrator', 'Administrator', 1, 0)
-        """, ("admin", _hash("admin123")))
-        conn.commit()
-        print("\n  [+] Default admin user created:")
-        print("      Username : admin")
-        print("      Password : admin123")
-        print("      ** Change this password after first login! **")
-    else:
-        print("\n  Users already present - skipping seed.")
+    try:
+        cur.execute("SELECT COUNT(*) FROM users")
+        if cur.fetchone()[0] == 0:
+            cur.execute("""
+                INSERT INTO users
+                    (username, password, role, display_name,
+                     full_name, active, synced_from_frappe,
+                     allow_discount, allow_receipt, allow_credit_note, allow_reprint)
+                VALUES (?, ?, 'admin', 'Administrator', 'Administrator', 1, 0, 1, 1, 1, 1)
+            """, ("admin", _hash("admin123")))
+            conn.commit()
+            print("\n  [+] Default admin user created:")
+            print("      Username : admin")
+            print("      Password : admin123")
+            print("      ** Change this password after first login! **")
+        else:
+            print("\n  Users already present - skipping seed.")
+    except Exception as e:
+        print(f"\n  ! Error seeding admin user: {e}")
 
     conn.close()
     print("\n======================================")

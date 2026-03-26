@@ -19834,21 +19834,31 @@ def create_split_payment_entries(sale: dict, splits: list[dict]) -> list[int]:
 
 
 def get_unsynced_payment_entries() -> list[dict]:
-    """Returns payment entries that are ready to push (synced=0)."""
+    """
+    Returns regular payment entries (Sales Receipts) that are ready to push (synced=0).
+    Filters out Credit Note payments ('Pay') so they don't block the queue.
+    """
     from database.db import get_connection, fetchall_dicts
-    conn = get_connection(); cur = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    # We add (pe.payment_type IS NULL OR pe.payment_type = 'Receive')
+    # This ensures old records (where type might be null) and new regular sales 
+    # are processed, but it EXCLUDES 'Pay' (Credit Notes).
     cur.execute("""
         SELECT pe.*, s.frappe_ref AS sale_frappe_ref
         FROM payment_entries pe
         LEFT JOIN sales s ON s.id = pe.sale_id
         WHERE pe.synced = 0
+          AND (pe.payment_type IS NULL OR pe.payment_type = 'Receive')
           AND (pe.frappe_invoice_ref IS NOT NULL
                OR s.frappe_ref IS NOT NULL)
         ORDER BY pe.id
     """)
-    rows = fetchall_dicts(cur); conn.close()
+    
+    rows = fetchall_dicts(cur)
+    conn.close()
     return rows
-
 
 def mark_payment_synced(pe_id: int, frappe_payment_ref: str = "") -> None:
     from database.db import get_connection
