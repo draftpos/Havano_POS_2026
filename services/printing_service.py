@@ -12,6 +12,7 @@ class PrintingService:
     def __init__(self):
         self.paper_width = 550
         self.margin = 10
+        self.page_break_threshold = 50  # pixels from bottom to trigger page break
 
     def print_kitchen_order(self, receipt: ReceiptData, printer_name: str = None) -> bool:
         """Prints simple KOT for kitchen - Qty + Name only"""
@@ -119,28 +120,75 @@ class PrintingService:
             return self._print_payment_receipt(receipt, printer_name=printer_name)
         return self._print_invoice_receipt(receipt, printer_name=printer_name)
 
+    def _calculate_required_height(self, receipt: ReceiptData, settings: AdvanceSettings) -> float:
+        """Calculate the total height needed for all content in pixels."""
+        fm = QFontMetrics(self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle))
+        height = 0
+
+        # Logo estimation
+        if settings.logoDirectory:
+            logo_full_path = Path("app_data/logos") / settings.logoDirectory
+            if logo_full_path.exists():
+                height += 150  # Estimated logo height
+
+        # Header section
+        height += 60 + 60 + 30 * 6  # Company name + address lines
+
+        # Invoice details section
+        height += 35 * 5  # Invoice, Date, Cashier, Customer info
+
+        # Items section
+        height += 40 + 24  # Header row + line
+        for item in receipt.items:
+            item_height = fm.height() + 6
+            text_rect = fm.boundingRect(0, 0, self.paper_width - self.margin * 2, 1000, 
+                                       Qt.TextWordWrap, item.productName or "")
+            item_height = max(item_height, text_rect.height()) + 4
+            height += item_height + 14  # Item + dot line
+
+        # Footer section
+        height += 40 * 5 + 50  # Totals + footer
+
+        return height
+
     def _print_invoice_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+        """Print invoice with dynamic multi-page support."""
         settings = AdvanceSettings.load_from_file()
 
+        painter = None
         try:
+            # Calculate required height
+            total_height_pixels = self._calculate_required_height(receipt, settings)
+            
+            # Convert to millimeters (203 DPI thermal printer standard)
+            dpi = 203
+            height_mm = (total_height_pixels / dpi) * 25.4 + 10  # +10mm buffer
+
             printer = QPrinter(QPrinter.HighResolution)
+            printer.setResolution(dpi)
+            
             if printer_name and printer_name != "(None)":
                 info = QPrinterInfo.printerInfo(printer_name)
                 if not info.isNull():
                     printer.setPrinterName(printer_name)
 
-            printer.setPageSize(QPageSize(QSizeF(100, 1000), QPageSize.Millimeter))
+            custom_size = QSizeF(80.0, height_mm)
+            printer.setPageSize(QPageSize(custom_size, QPageSize.Millimeter, "Receipt80mm", QPageSize.ExactMatch))
             printer.setFullPage(True)
             printer.setPageMargins(QMarginsF(0, 0, 0, 0))
 
             painter = QPainter(printer)
             rect = printer.pageRect(QPrinter.DevicePixel)
+            page_height = rect.height()
+            
             painter.translate(0, -rect.top())
             y = 0
+            page_num = 1
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
-            bold_font   = self._make_bold(normal_font)
+            bold_font = self._make_bold(normal_font)
 
+            # ─── LOGO ───
             if settings.logoDirectory:
                 logo_full_path = Path("app_data/logos") / settings.logoDirectory
                 if logo_full_path.exists():
@@ -151,6 +199,7 @@ class PrintingService:
                         painter.drawPixmap(x, y, scaled)
                         y += scaled.height() + 10
 
+            # ─── COMPANY HEADER ───
             painter.setFont(bold_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
                              Qt.AlignCenter, (receipt.companyName or "Havano POS").upper())
@@ -161,6 +210,7 @@ class PrintingService:
                 if line:
                     painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, line)
                     y += 30
+            
             city_state = f"{receipt.city} {receipt.state} {receipt.postcode}".strip()
             if city_state:
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, city_state)
@@ -182,7 +232,7 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 25
 
-            # ── UPDATED ALIGNMENT: Centered like the Sales Order ─────
+            # ─── INVOICE DETAILS ───
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30, Qt.AlignCenter, f"Invoice : {receipt.invoiceNo or 'N/A'}")
             y += 30
@@ -190,6 +240,7 @@ class PrintingService:
             y += 30
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30, Qt.AlignCenter, f"Cashier : {receipt.cashierName or 'Admin'}")
             y += 30
+            
             if receipt.customerName:
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, f"Customer : {receipt.customerName}")
                 y += 22
@@ -207,46 +258,77 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 24
 
+            # ─── ITEMS TABLE HEADER ───
             painter.setFont(normal_font)
             fm: QFontMetrics = painter.fontMetrics()
 
-            max_qty_w   = fm.horizontalAdvance("Qty")
+            max_qty_w = fm.horizontalAdvance("Qty")
             max_price_w = fm.horizontalAdvance("Price")
             max_total_w = fm.horizontalAdvance("Total")
+            
             for item in receipt.items:
-                max_qty_w   = max(max_qty_w,   fm.horizontalAdvance(f"{item.qty:.0f}"))
+                max_qty_w = max(max_qty_w, fm.horizontalAdvance(f"{item.qty:.0f}"))
                 max_price_w = max(max_price_w, fm.horizontalAdvance(f"{item.price:,.2f}"))
                 max_total_w = max(max_total_w, fm.horizontalAdvance(f"{item.amount:,.2f}"))
-            max_qty_w += 10; max_price_w += 14; max_total_w += 14
+            
+            max_qty_w += 10
+            max_price_w += 14
+            max_total_w += 14
 
             TOTAL_X = self.paper_width - self.margin - max_total_w
             PRICE_X = TOTAL_X - max_price_w - 10
-            QTY_X   = PRICE_X - max_qty_w - 10
+            QTY_X = PRICE_X - max_qty_w - 10
+
+            # Check if we need to start a new page for items
+            if y + 80 > page_height - self.page_break_threshold:
+                printer.newPage()
+                y = 0
 
             painter.setFont(bold_font)
-            painter.drawText(QTY_X,   y, max_qty_w,   24, Qt.AlignCenter, "Qty")
-            painter.drawText(PRICE_X, y, max_price_w, 24, Qt.AlignRight,  "Price")
-            painter.drawText(TOTAL_X, y, max_total_w, 24, Qt.AlignRight,  "Total")
+            painter.drawText(QTY_X, y, max_qty_w, 24, Qt.AlignCenter, "Qty")
+            painter.drawText(PRICE_X, y, max_price_w, 24, Qt.AlignRight, "Price")
+            painter.drawText(TOTAL_X, y, max_total_w, 24, Qt.AlignRight, "Total")
             y += 40
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 24
 
+            # ─── ITEMS ───
             painter.setFont(normal_font)
             line_h = fm.height() + 6
+            
             for item in receipt.items:
                 name = item.productName or ""
                 rect = fm.boundingRect(0, 0, self.paper_width - self.margin * 2, 1000, Qt.TextWordWrap, name)
+                item_height = rect.height() + line_h + 22
+
+                # Check if item fits on current page
+                if y + item_height > page_height - self.page_break_threshold:
+                    # Add footer to current page
+                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                    
+                    # Start new page
+                    printer.newPage()
+                    y = 0
+                    page_num += 1
+
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, rect.height(), Qt.TextWordWrap, name)
                 y += rect.height() + 4
-                painter.drawText(QTY_X,   y, max_qty_w,   line_h, Qt.AlignCenter, f"{item.qty:.0f}")
-                painter.drawText(PRICE_X, y, max_price_w, line_h, Qt.AlignRight,  f"{item.price:,.2f}")
-                painter.drawText(TOTAL_X, y, max_total_w, line_h, Qt.AlignRight,  f"{item.amount:,.2f}")
+                painter.drawText(QTY_X, y, max_qty_w, line_h, Qt.AlignCenter, f"{item.qty:.0f}")
+                painter.drawText(PRICE_X, y, max_price_w, line_h, Qt.AlignRight, f"{item.price:,.2f}")
+                painter.drawText(TOTAL_X, y, max_total_w, line_h, Qt.AlignRight, f"{item.amount:,.2f}")
                 y += line_h + 8
                 self._draw_dot_line(painter, self.margin, y, self.paper_width - self.margin * 2, ".")
                 y += 14
 
+            # ─── TOTALS SECTION ───
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 14
+
+            # Check if totals fit
+            totals_height = 90
+            if y + totals_height > page_height - self.page_break_threshold:
+                printer.newPage()
+                y = 0
 
             painter.setFont(normal_font)
             fm = painter.fontMetrics()
@@ -256,19 +338,20 @@ class PrintingService:
                 nonlocal y
                 text = f"{value:,.2f}"
                 w = fm.horizontalAdvance(text)
-                painter.drawText(self.margin, y, 200, line_h, Qt.AlignLeft,  label)
+                painter.drawText(self.margin, y, 200, line_h, Qt.AlignLeft, label)
                 painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
                 y += line_h
 
             draw_total("Subtotal", receipt.subtotal)
             if receipt.totalVat > 0:
                 draw_total("VAT", receipt.totalVat)
-            draw_total("GRAND TOTAL", receipt.grandTotal)
+            draw_total("Grand Total", receipt.grandTotal)
             y += 6
-            draw_total("Paid", receipt.amountTendered)
+            draw_total("Amount Tendered", receipt.amountTendered)
             draw_total("Change", receipt.change)
             y += 20
 
+            # ─── FOOTER ───
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
                              Qt.AlignCenter, receipt.footer or "Thank you for your purchase!")
@@ -277,11 +360,12 @@ class PrintingService:
                              Qt.AlignCenter, "Come again soon!")
 
             painter.end()
+            print(f"✅ INVOICE printed successfully ({page_num} pages) → {printer_name or 'Default'}")
             return True
 
         except Exception as e:
-            print(f"❌ Printing failed: {str(e)}")
-            if 'painter' in locals() and painter.isActive():
+            print(f"❌ Invoice printing failed: {str(e)}")
+            if painter and painter.isActive():
                 painter.end()
             return False
 
@@ -307,7 +391,7 @@ class PrintingService:
             y = 0
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
-            bold_font   = self._make_bold(normal_font)
+            bold_font = self._make_bold(normal_font)
 
             # ── LOGO ─────────────────────────────────────────────────────────
             if settings.logoDirectory:
@@ -415,6 +499,7 @@ class PrintingService:
             return False
 
     def print_sales_order_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+        """Print sales order with multi-page support."""
         settings = AdvanceSettings.load_from_file()
 
         painter = None
@@ -431,11 +516,12 @@ class PrintingService:
 
             painter = QPainter(printer)
             rect = printer.pageRect(QPrinter.DevicePixel)
+            page_height = rect.height()
             painter.translate(0, -rect.top())
             y = 0
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
-            bold_font   = self._make_bold(normal_font)
+            bold_font = self._make_bold(normal_font)
 
             if settings.logoDirectory:
                 logo_full_path = Path("app_data/logos") / settings.logoDirectory
@@ -480,34 +566,27 @@ class PrintingService:
                              Qt.AlignCenter, doc_heading)
             y += 60
 
-            # ── UPDATED ALIGNMENT: Centered like the heading with spacing ─────
             painter.setFont(normal_font)
-
-            # Order Number
             order_text = f"Order No  :  {receipt.invoiceNo or 'N/A'}"
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, order_text)
             y += 32
 
-            # Date
             order_date = receipt.invoiceDate or datetime.now().strftime("%Y-%m-%d")
             date_text = f"Order Date  :  {order_date}"
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, date_text)
             y += 32
 
-            # Delivery Date
             delivery_date = getattr(receipt, "deliveryDate", "")
             if delivery_date:
                 delivery_text = f"Delivery  :  {delivery_date}"
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, delivery_text)
                 y += 32
 
-            # Customer
             if receipt.customerName:
                 customer_text = f"Customer  :  {receipt.customerName}"
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, customer_text)
                 y += 32
 
-            # Customer Contact
             if receipt.customerContact:
                 contact_text = f"Contact  :  {receipt.customerContact}"
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, contact_text)
@@ -517,15 +596,20 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 20
 
+            # Check if items section fits
+            if y + 60 > page_height - self.page_break_threshold:
+                printer.newPage()
+                y = 0
+
             painter.setFont(normal_font)
             fm: QFontMetrics = painter.fontMetrics()
 
-            max_qty_w   = fm.horizontalAdvance("Qty")
+            max_qty_w = fm.horizontalAdvance("Qty")
             max_price_w = fm.horizontalAdvance("Price")
             max_total_w = fm.horizontalAdvance("Amount")
 
             for item in receipt.items:
-                max_qty_w   = max(max_qty_w,   fm.horizontalAdvance(f"{item.qty:.0f}"))
+                max_qty_w = max(max_qty_w, fm.horizontalAdvance(f"{item.qty:.0f}"))
                 max_price_w = max(max_price_w, fm.horizontalAdvance(f"{item.price:,.2f}"))
                 max_total_w = max(max_total_w, fm.horizontalAdvance(f"{item.amount:,.2f}"))
 
@@ -535,13 +619,13 @@ class PrintingService:
 
             TOTAL_X = self.paper_width - self.margin - max_total_w
             PRICE_X = TOTAL_X - max_price_w - 10
-            QTY_X   = PRICE_X - max_qty_w - 10
+            QTY_X = PRICE_X - max_qty_w - 10
 
             painter.setFont(bold_font)
-            painter.drawText(self.margin, y, QTY_X - self.margin, 24, Qt.AlignLeft,   "Item")
-            painter.drawText(QTY_X,       y, max_qty_w,           24, Qt.AlignCenter, "Qty")
-            painter.drawText(PRICE_X,     y, max_price_w,         24, Qt.AlignRight,  "Price")
-            painter.drawText(TOTAL_X,     y, max_total_w,         24, Qt.AlignRight,  "Amount")
+            painter.drawText(self.margin, y, QTY_X - self.margin, 24, Qt.AlignLeft, "Item")
+            painter.drawText(QTY_X, y, max_qty_w, 24, Qt.AlignCenter, "Qty")
+            painter.drawText(PRICE_X, y, max_price_w, 24, Qt.AlignRight, "Price")
+            painter.drawText(TOTAL_X, y, max_total_w, 24, Qt.AlignRight, "Amount")
             y += 30
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 18
@@ -550,16 +634,22 @@ class PrintingService:
             line_h = fm.height() + 6
 
             for item in receipt.items:
-                name   = item.productName or ""
+                name = item.productName or ""
                 name_w = QTY_X - self.margin - 6
-                rect   = fm.boundingRect(0, 0, name_w, 1000, Qt.TextWordWrap, name)
+                rect = fm.boundingRect(0, 0, name_w, 1000, Qt.TextWordWrap, name)
+                item_height = max(rect.height(), line_h) + 18
+
+                # Check if item fits
+                if y + item_height > page_height - self.page_break_threshold:
+                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                    printer.newPage()
+                    y = 0
+
                 painter.drawText(self.margin, y, name_w, rect.height(), Qt.TextWordWrap, name)
                 row_h = max(rect.height(), line_h)
-
-                painter.drawText(QTY_X,   y, max_qty_w,   row_h, Qt.AlignCenter, f"{item.qty:.0f}")
-                painter.drawText(PRICE_X, y, max_price_w, row_h, Qt.AlignRight,  f"{item.price:,.2f}")
-                painter.drawText(TOTAL_X, y, max_total_w, row_h, Qt.AlignRight,  f"{item.amount:,.2f}")
-
+                painter.drawText(QTY_X, y, max_qty_w, row_h, Qt.AlignCenter, f"{item.qty:.0f}")
+                painter.drawText(PRICE_X, y, max_price_w, row_h, Qt.AlignRight, f"{item.price:,.2f}")
+                painter.drawText(TOTAL_X, y, max_total_w, row_h, Qt.AlignRight, f"{item.amount:,.2f}")
                 y += row_h + 6
                 self._draw_dot_line(painter, self.margin, y, self.paper_width - self.margin * 2, ".")
                 y += 12
@@ -567,15 +657,20 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 14
 
+            # Totals section
+            if y + 80 > page_height - self.page_break_threshold:
+                printer.newPage()
+                y = 0
+
             painter.setFont(normal_font)
-            fm_n     = painter.fontMetrics()
+            fm_n = painter.fontMetrics()
             n_line_h = fm_n.height() + 6
 
             def draw_so_total(label: str, value: float):
                 nonlocal y
                 text = f"{receipt.currency or 'USD'} {value:,.2f}"
                 w = fm_n.horizontalAdvance(text)
-                painter.drawText(self.margin, y, 260, n_line_h, Qt.AlignLeft,  label)
+                painter.drawText(self.margin, y, 260, n_line_h, Qt.AlignLeft, label)
                 painter.drawText(self.paper_width - self.margin - w, y, w, n_line_h, Qt.AlignRight, text)
                 y += n_line_h
 
@@ -600,6 +695,11 @@ class PrintingService:
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                 y += 14
 
+                # Check if terms fit
+                if y + 80 > page_height - self.page_break_threshold:
+                    printer.newPage()
+                    y = 0
+
                 painter.setFont(bold_font)
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 26,
                                   Qt.AlignLeft, "TERMS & CONDITIONS")
@@ -613,8 +713,12 @@ class PrintingService:
                         continue
                     rect = fm_t.boundingRect(0, 0, self.paper_width - self.margin * 2,
                                              1000, Qt.TextWordWrap, term_line)
-                    painter.drawText(self.margin, y,
-                                     self.paper_width - self.margin * 2,
+                    
+                    if y + rect.height() > page_height - self.page_break_threshold:
+                        printer.newPage()
+                        y = 0
+
+                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2,
                                      rect.height(), Qt.TextWordWrap, term_line)
                     y += rect.height() + 4
 
