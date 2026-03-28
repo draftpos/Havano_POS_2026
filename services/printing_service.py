@@ -595,6 +595,12 @@ class PrintingService:
                 y += 26
 
             so_terms = getattr(receipt, "salesOrderTerms", "")
+            if not so_terms:
+                try:
+                    from models.company_defaults import get_defaults
+                    so_terms = get_defaults().get("terms_and_conditions", "")
+                except Exception:
+                    so_terms = ""
             if so_terms:
                 y += 6
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)

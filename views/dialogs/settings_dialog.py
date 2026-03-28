@@ -895,7 +895,8 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.user = user or {}
         self.setWindowTitle("Settings")
-        self.setFixedWidth(320)
+        self.setFixedWidth(340)
+        self.setMaximumHeight(700)
         self.setModal(True)
         self.setStyleSheet(f"QDialog {{ background:{WHITE}; }}")
         self._build()
@@ -909,33 +910,87 @@ class SettingsDialog(QDialog):
         cb = _btn("✕", color=NAVY_2, hover=DANGER, height=28, width=32)
         cb.clicked.connect(self.accept); hl.addWidget(cb); root.addWidget(hdr)
 
+        from PySide6.QtWidgets import QScrollArea, QFrame as _QFrame
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(_QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         menu = QWidget(); menu.setStyleSheet(f"background:{WHITE};")
         ml = QVBoxLayout(menu); ml.setSpacing(0); ml.setContentsMargins(0, 0, 0, 0)
 
-        items = [
+        def _section_divider(label_text):
+            """A small section label divider row."""
+            w = QWidget(); w.setStyleSheet(f"background:{NAVY_3};")
+            w.setFixedHeight(26)
+            llay = QHBoxLayout(w); llay.setContentsMargins(16, 0, 0, 0)
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet(f"font-size:9px; font-weight:800; color:rgba(255,255,255,0.7); letter-spacing:1.5px; background:transparent;")
+            llay.addWidget(lbl)
+            return w
+
+        def _open_company_defaults():
+            try:
+                from PySide6.QtWidgets import QVBoxLayout as _VL, QDialog as _D
+                from views.pages.company_defaults_page import CompanyDefaultsPage
+                dlg = _D(self); dlg.setWindowTitle("Company Defaults")
+                dlg.setMinimumSize(1000, 700)
+                dlg.setStyleSheet(f"QDialog {{ background: {WHITE}; }}")
+                lay = _VL(dlg); lay.setContentsMargins(0,0,0,0); lay.addWidget(CompanyDefaultsPage())
+                dlg.exec()
+            except Exception as e:
+                from PySide6.QtWidgets import QMessageBox as _MB
+                _MB.warning(self, "Error", f"Could not open Company Defaults:\n{e}")
+
+        def _open_adv_printing():
+            try:
+                from views.dialogs.advance_settings_dialog import AdvanceSettingsDialog
+                AdvanceSettingsDialog(self).exec()
+            except Exception as e:
+                from PySide6.QtWidgets import QMessageBox as _MB
+                _MB.warning(self, "Error", f"Could not open Advanced Printing:\n{e}")
+
+        def _add_items(item_list):
+            for icon, label, handler in item_list:
+                row = QPushButton(f"   {icon}   {label}")
+                row.setFixedHeight(44); row.setCursor(Qt.PointingHandCursor); row.setFocusPolicy(Qt.NoFocus)
+                row.setStyleSheet(f"""
+                    QPushButton {{
+                        background:{WHITE}; color:{DARK_TEXT}; border:none; border-bottom:1px solid {BORDER};
+                        font-size:13px; text-align:left; padding:0 16px;
+                    }}
+                    QPushButton:hover {{ background:{LIGHT}; color:{NAVY}; border-left:3px solid {ACCENT}; }}
+                """)
+                row.clicked.connect(handler)
+                ml.addWidget(row)
+
+        # ── MASTER DATA ───────────────────────────────────────────────────────
+        ml.addWidget(_section_divider("MASTER DATA"))
+        _add_items([
             ("🏢", "Companies",         lambda: CompanyDialog(self).exec()),
             ("👥", "Customer Groups",   lambda: CustomerGroupDialog(self).exec()),
             ("🏭", "Warehouses",        lambda: WarehouseDialog(self).exec()),
             ("💰", "Cost Centers",      lambda: CostCenterDialog(self).exec()),
             ("🏷", "Price Lists",       lambda: PriceListDialog(self).exec()),
             ("👤", "Customers",         lambda: CustomerDialog(self).exec()),
-            ("🔑", "Users",             lambda: UsersDialog(self, current_user=self.user).exec()),
-            ("🖨", "Hardware Settings", lambda: HardwareDialog(self).exec()),
-            ("🛡", "POS Rules",         lambda: POSRulesDialog(self).exec()),
-        ]
+        ])
 
-        for icon, label, handler in items:
-            row = QPushButton(f"   {icon}   {label}")
-            row.setFixedHeight(48); row.setCursor(Qt.PointingHandCursor); row.setFocusPolicy(Qt.NoFocus)
-            row.setStyleSheet(f"""
-                QPushButton {{
-                    background:{WHITE}; color:{DARK_TEXT}; border:none; border-bottom:1px solid {BORDER};
-                    font-size:13px; text-align:left; padding:0 16px;
-                }}
-                QPushButton:hover {{ background:{LIGHT}; color:{NAVY}; border-left:3px solid {ACCENT}; }}
-            """)
-            row.clicked.connect(handler); ml.addWidget(row)
-        root.addWidget(menu, 1)
+        # ── ADMIN ─────────────────────────────────────────────────────────────
+        ml.addWidget(_section_divider("ADMIN"))
+        _add_items([
+            ("🔑", "Users",              lambda: UsersDialog(self, current_user=self.user).exec()),
+            ("🏛", "Company Defaults",   _open_company_defaults),
+            ("🛡", "POS Rules",          lambda: POSRulesDialog(self).exec()),
+        ])
+
+        # ── HARDWARE & PRINTING ────────────────────────────────────────────────
+        ml.addWidget(_section_divider("HARDWARE & PRINTING"))
+        _add_items([
+            ("🖨", "Hardware Settings",  lambda: HardwareDialog(self).exec()),
+            ("🖨", "Advanced Printing",  _open_adv_printing),
+        ])
+
+        scroll_area.setWidget(menu)
+        root.addWidget(scroll_area, 1)
 
     def _switch(self, idx: int):
         mapping = {

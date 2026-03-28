@@ -53,9 +53,8 @@ log = logging.getLogger("sales_order_print")
 
 
 # ---------------------------------------------------------------------------
-# Default terms printed on every Sales Order slip.
-# Override per-company by adding a `sales_order_terms` column to
-# company_defaults and populating it there.
+# Default terms printed on every Sales Order slip if nothing is saved in
+# company_defaults.terms_and_conditions yet.
 # ---------------------------------------------------------------------------
 _DEFAULT_SO_TERMS = (
     "1. This Sales Order is not a tax invoice.\n"
@@ -136,8 +135,8 @@ def _build_receipt(order: dict, receipt_type: str = "Sales Order") -> "ReceiptDa
     balance_due    = float(order.get("balance_due",    0))
     order_status   = order.get("status", "")
 
-    # ── Terms — use company override if available, else default ───────────────
-    so_terms = co.get("sales_order_terms") or _DEFAULT_SO_TERMS
+    # ── Terms — use company_defaults.terms_and_conditions, else built-in default
+    so_terms = co.get("terms_and_conditions") or _DEFAULT_SO_TERMS
 
     # ── Footer ────────────────────────────────────────────────────────────────
     base_footer = co.get("footer_text") or "Thank you for your business!"

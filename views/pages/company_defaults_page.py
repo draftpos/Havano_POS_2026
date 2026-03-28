@@ -402,6 +402,34 @@ class CompanyDefaultsPage(QWidget):
         bot_row.addWidget(zimra_p, 1)
         bot_row.addWidget(login_p, 1)
 
+        # ── SECOND BOTTOM ROW — Terms & Conditions (full width) ───────────────
+        terms_w = QWidget()
+        terms_w.setStyleSheet(f"background:{WHITE};")
+        tl = QVBoxLayout(terms_w)
+        tl.setContentsMargins(36, 28, 36, 28)
+        tl.setSpacing(ROW_SP)
+
+        _section_header(tl, "Terms & Conditions (printed on Sales Orders)", top_margin=0)
+
+        self._terms = QTextEdit()
+        self._terms.setMinimumHeight(180)
+        self._terms.setPlaceholderText(
+            "Enter your sales order terms & conditions here.\n"
+            "Each line will be printed as a separate paragraph."
+        )
+        self._terms.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._terms.setStyleSheet(f"""
+            QTextEdit {{
+                background:{WHITE}; color:{DARK_TEXT};
+                border:1px solid {BORDER}; border-radius:6px;
+                padding:10px 12px; font-size:13px; line-height:1.5;
+            }}
+            QTextEdit:focus {{ border:2px solid {ACCENT}; }}
+        """)
+        tl.addWidget(self._terms, 1)
+
+        root.addWidget(terms_w)
+
         bot_w = QWidget()
         bot_w.setLayout(bot_row)
         root.addWidget(bot_w)
@@ -435,6 +463,7 @@ class CompanyDefaultsPage(QWidget):
             inp.setText(val)
 
         self._footer.setPlainText(data.get("footer_text", ""))
+        self._terms.setPlainText(data.get("terms_and_conditions", ""))
 
         for key, lbl in self._ro_labels.items():
             val = data.get(key, "")
@@ -452,8 +481,9 @@ class CompanyDefaultsPage(QWidget):
 
     def _save(self):
         data = {k: i.text().strip() for k, i in self._inputs.items()}
-        data["footer_text"]          = self._footer.toPlainText().strip()
-        data["invoice_prefix"]       = self._prefix_inp.text().strip().upper()
+        data["footer_text"]           = self._footer.toPlainText().strip()
+        data["terms_and_conditions"]  = self._terms.toPlainText().strip()
+        data["invoice_prefix"]        = self._prefix_inp.text().strip().upper()
         data["invoice_start_number"] = str(self._start_num.value())
 
         for key, lbl in self._ro_labels.items():

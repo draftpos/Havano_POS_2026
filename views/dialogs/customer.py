@@ -1,879 +1,3432 @@
+# # from __future__ import annotations
+
+# # from PySide6.QtWidgets import (
+# #     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+# #     QLabel, QLineEdit, QFrame, QTableWidget, QTableWidgetItem,
+# #     QHeaderView, QAbstractItemView, QMessageBox, QComboBox,
+# #     QSizePolicy, QDoubleSpinBox, QListWidget, QListWidgetItem,
+# # )
+# # from PySide6.QtCore import Qt, Signal, QTimer
+# # from PySide6.QtGui  import QColor
+
+# # NAVY      = "#0d1f3c"
+# # NAVY_2    = "#162d52"
+# # WHITE     = "#ffffff"
+# # OFF_WHITE = "#f5f8fc"
+# # LIGHT     = "#e4eaf4"
+# # BORDER    = "#c8d8ec"
+# # DARK_TEXT = "#0d1f3c"
+# # MUTED     = "#5a7a9a"
+# # ACCENT    = "#1a5fb4"
+# # ACCENT_H  = "#1c6dd0"
+# # SUCCESS   = "#1a7a3c"
+# # SUCCESS_H = "#1f9447"
+# # DANGER    = "#b02020"
+# # DANGER_H  = "#cc2828"
+# # AMBER     = "#b7770d"
+# # ORANGE    = "#c05a00"
+
+# # REASONS = [
+# #     "Customer Return",
+# #     "Damaged Goods",
+# #     "Wrong Item",
+# #     "Overcharge",
+# #     "Quality Issue",
+# #     "Other",
+# # ]
 
 
-"""
-views/dialogs/customer_dialog.py
-==================================
-Customer Management Dialog  —  Points #12 (Add Customer) + Offline Management.
+# # class CreditNoteDialog(QDialog):
+# #     """
+# #     Smart credit note dialog.
+# #     After confirmation emits credit_note_ready(cn_dict) so the caller
+# #     (POSView / OptionsDialog) can load it into the main table in return mode.
+# #     """
 
-Features:
-* Add new customer with auto-assigned cost centre, warehouse, price list
-* ALL fields editable (name, phone, email, TIN, VAT, city, address, etc.)
-* Customer list table with EDIT and DELETE buttons per row
-* Double-click row → populate form for editing
-* Saves locally first (offline-safe), then syncs to cloud in background
-* Edit mode: updates local DB and optionally pushes update to Frappe
-* Delete: removes from local DB
-"""
+# #     credit_note_ready = Signal(dict)   # emits the created CN dict
 
+# #     def __init__(self, parent=None):
+# #         super().__init__(parent)
+# #         self.setWindowTitle("Credit Note / Return")
+# #         self.setMinimumSize(860, 580)
+# #         self.setModal(True)
+# #         self.setWindowState(Qt.WindowMaximized)
+# #         self.setStyleSheet(
+# #             f"QDialog {{ background:{OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}"
+# #         )
+
+# #         self._sale:        dict | None = None
+# #         self._all_sales:   list[dict]  = []
+# #         self._search_timer = QTimer(self)
+# #         self._search_timer.setSingleShot(True)
+# #         self._search_timer.setInterval(200)      # 200 ms debounce
+# #         self._search_timer.timeout.connect(self._run_search)
+
+# #         self._build()
+# #         self._preload_sales()
+
+# #     # =========================================================================
+# #     # Preload
+# #     # =========================================================================
+
+# #     def _preload_sales(self):
+# #         """Load all sales once into memory for fast autocomplete."""
+# #         try:
+# #             from models.sale import get_all_sales
+# #             self._all_sales = get_all_sales()
+# #         except Exception:
+# #             self._all_sales = []
+
+# #     # =========================================================================
+# #     # Build UI
+# #     # =========================================================================
+
+# #     def _build(self):
+# #         root = QVBoxLayout(self)
+# #         root.setSpacing(0)
+# #         root.setContentsMargins(0, 0, 0, 0)
+
+# #         # ── header ────────────────────────────────────────────────────────────
+# #         hdr = QWidget()
+# #         hdr.setFixedHeight(52)
+# #         hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
+# #         hl  = QHBoxLayout(hdr)
+# #         hl.setContentsMargins(28, 0, 28, 0)
+# #         title = QLabel("Credit Note / Return")
+# #         title.setStyleSheet(
+# #             f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;"
+# #         )
+# #         sub = QLabel("Search for an invoice, select items to return, then confirm.")
+# #         sub.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
+# #         hl.addWidget(title)
+# #         hl.addSpacing(16)
+# #         hl.addWidget(sub)
+# #         hl.addStretch()
+# #         root.addWidget(hdr)
+
+# #         # ── body ──────────────────────────────────────────────────────────────
+# #         body = QWidget()
+# #         body.setStyleSheet(f"background:{OFF_WHITE};")
+# #         bl = QVBoxLayout(body)
+# #         bl.setContentsMargins(28, 18, 28, 18)
+# #         bl.setSpacing(12)
+
+# #         bl.addWidget(self._build_search_area())
+
+# #         self._banner = self._build_banner()
+# #         self._banner.setVisible(False)
+# #         bl.addWidget(self._banner)
+
+# #         self._items_frame = self._build_items_table()
+# #         self._items_frame.setVisible(False)
+# #         bl.addWidget(self._items_frame, stretch=1)
+
+# #         bl.addWidget(self._build_btns())
+# #         root.addWidget(body, stretch=1)
+
+# #     # ── Search area ──────────────────────────────────────────────────────────
+
+# #     def _build_search_area(self) -> QWidget:
+# #         wrap = QWidget()
+# #         wrap.setStyleSheet("background:transparent;")
+# #         vl = QVBoxLayout(wrap)
+# #         vl.setContentsMargins(0, 0, 0, 0)
+# #         vl.setSpacing(4)
+
+# #         row = QHBoxLayout()
+# #         row.setSpacing(8)
+
+# #         lbl = QLabel("Invoice / Customer:")
+# #         lbl.setFixedWidth(140)
+# #         lbl.setStyleSheet(
+# #             f"color:{MUTED}; font-size:11px; font-weight:bold; background:transparent;"
+# #         )
+
+# #         self._search = QLineEdit()
+# #         self._search.setPlaceholderText(
+# #             "Type invoice number or customer name…"
+# #         )
+# #         self._search.setFixedHeight(38)
+# #         self._search.setStyleSheet(f"""
+# #             QLineEdit {{
+# #                 background:{WHITE}; color:{DARK_TEXT};
+# #                 border:2px solid {BORDER}; border-radius:6px;
+# #                 font-size:13px; padding:0 12px;
+# #             }}
+# #             QLineEdit:focus {{ border:2px solid {ACCENT}; }}
+# #         """)
+# #         self._search.textChanged.connect(self._on_search_changed)
+# #         self._search.returnPressed.connect(self._run_search)
+
+# #         row.addWidget(lbl)
+# #         row.addWidget(self._search, 1)
+# #         vl.addLayout(row)
+
+# #         # Autocomplete dropdown (hidden until there are results)
+# #         self._ac_list = QListWidget()
+# #         self._ac_list.setFixedHeight(0)        # collapsed by default
+# #         self._ac_list.setStyleSheet(f"""
+# #             QListWidget {{
+# #                 background:{WHITE}; border:2px solid {ACCENT};
+# #                 border-top:none; border-radius:0 0 6px 6px;
+# #                 font-size:13px; color:{DARK_TEXT}; outline:none;
+# #             }}
+# #             QListWidget::item           {{ padding:7px 14px; min-height:28px; }}
+# #             QListWidget::item:selected  {{ background:{ACCENT}; color:{WHITE}; }}
+# #             QListWidget::item:hover     {{ background:{LIGHT}; }}
+# #         """)
+# #         self._ac_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+# #         self._ac_list.itemClicked.connect(self._on_ac_clicked)
+# #         # Indent to align under the QLineEdit
+# #         ac_row = QHBoxLayout()
+# #         ac_row.setContentsMargins(148, 0, 0, 0)   # 140 label + 8 spacing
+# #         ac_row.addWidget(self._ac_list)
+# #         vl.addLayout(ac_row)
+
+# #         return wrap
+
+# #     # ── Info banner ──────────────────────────────────────────────────────────
+
+# #     def _build_banner(self) -> QFrame:
+# #         f = QFrame()
+# #         f.setFixedHeight(58)
+# #         f.setStyleSheet(
+# #             f"QFrame {{ background:{WHITE}; border:1px solid {BORDER}; border-radius:8px; }}"
+# #         )
+# #         hl = QHBoxLayout(f)
+# #         hl.setContentsMargins(16, 0, 16, 0)
+# #         hl.setSpacing(28)
+
+# #         self._b_inv    = self._pill("INVOICE NO")
+# #         self._b_cust   = self._pill("CUSTOMER")
+# #         self._b_date   = self._pill("DATE")
+# #         self._b_total  = self._pill("TOTAL")
+# #         self._b_status = self._pill("FRAPPE STATUS")
+
+# #         for w in [self._b_inv, self._b_cust, self._b_date,
+# #                   self._b_total, self._b_status]:
+# #             hl.addWidget(w)
+# #         hl.addStretch()
+# #         return f
+
+# #     def _pill(self, cap: str) -> QWidget:
+# #         w  = QWidget(); w.setStyleSheet("background:transparent;")
+# #         vl = QVBoxLayout(w); vl.setContentsMargins(0, 4, 0, 4); vl.setSpacing(1)
+# #         c  = QLabel(cap)
+# #         c.setStyleSheet(
+# #             f"color:{MUTED}; font-size:8px; font-weight:bold;"
+# #             f" letter-spacing:0.8px; background:transparent;"
+# #         )
+# #         v  = QLabel("—")
+# #         v.setStyleSheet(
+# #             f"color:{DARK_TEXT}; font-size:12px; font-weight:bold; background:transparent;"
+# #         )
+# #         vl.addWidget(c); vl.addWidget(v)
+# #         w._val = v
+# #         return w
+
+# #     def _set_pill(self, pill: QWidget, text: str, color: str = DARK_TEXT):
+# #         pill._val.setText(text)
+# #         pill._val.setStyleSheet(
+# #             f"color:{color}; font-size:12px; font-weight:bold; background:transparent;"
+# #         )
+
+# #     # ── Items table ──────────────────────────────────────────────────────────
+
+# #     def _build_items_table(self) -> QFrame:
+# #         f  = QFrame(); f.setStyleSheet("QFrame{background:transparent;}")
+# #         vl = QVBoxLayout(f); vl.setContentsMargins(0, 0, 0, 0); vl.setSpacing(5)
+
+# #         cap = QLabel("Select items and quantities to return:")
+# #         cap.setStyleSheet(
+# #             f"color:{MUTED}; font-size:10px; font-weight:bold;"
+# #             f" letter-spacing:0.6px; background:transparent;"
+# #         )
+# #         vl.addWidget(cap)
+
+# #         self._tbl = QTableWidget(0, 6)
+# #         self._tbl.setHorizontalHeaderLabels(
+# #             ["✓", "ITEM", "UNIT PRICE", "ORIG QTY", "RETURN QTY", "REASON"]
+# #         )
+# #         hh = self._tbl.horizontalHeader()
+# #         hh.setSectionResizeMode(0, QHeaderView.Fixed);  self._tbl.setColumnWidth(0, 36)
+# #         hh.setSectionResizeMode(1, QHeaderView.Stretch)
+# #         hh.setSectionResizeMode(2, QHeaderView.Fixed);  self._tbl.setColumnWidth(2, 100)
+# #         hh.setSectionResizeMode(3, QHeaderView.Fixed);  self._tbl.setColumnWidth(3, 80)
+# #         hh.setSectionResizeMode(4, QHeaderView.Fixed);  self._tbl.setColumnWidth(4, 110)
+# #         hh.setSectionResizeMode(5, QHeaderView.Fixed);  self._tbl.setColumnWidth(5, 160)
+# #         self._tbl.verticalHeader().setVisible(False)
+# #         self._tbl.setAlternatingRowColors(True)
+# #         self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+# #         self._tbl.setSelectionMode(QAbstractItemView.NoSelection)
+# #         self._tbl.setStyleSheet(f"""
+# #             QTableWidget {{
+# #                 background:{WHITE}; border:1px solid {BORDER};
+# #                 gridline-color:{LIGHT}; font-size:12px; outline:none;
+# #             }}
+# #             QTableWidget::item           {{ padding:3px 8px; }}
+# #             QTableWidget::item:alternate {{ background:{OFF_WHITE}; }}
+# #             QHeaderView::section {{
+# #                 background:{NAVY}; color:{WHITE};
+# #                 padding:7px; border:none;
+# #                 border-right:1px solid {NAVY_2};
+# #                 font-size:10px; font-weight:bold;
+# #             }}
+# #         """)
+# #         # Check/uncheck on row click
+# #         self._tbl.cellClicked.connect(self._on_tbl_cell_clicked)
+# #         vl.addWidget(self._tbl, 1)
+# #         return f
+
+# #     # ── Bottom buttons ────────────────────────────────────────────────────────
+
+# #     def _build_btns(self) -> QWidget:
+# #         w  = QWidget(); w.setStyleSheet("background:transparent;")
+# #         hl = QHBoxLayout(w); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(10)
+
+# #         bcancel = QPushButton("Cancel")
+# #         bcancel.setFixedHeight(44); bcancel.setFixedWidth(100)
+# #         bcancel.setCursor(Qt.PointingHandCursor)
+# #         bcancel.setFocusPolicy(Qt.NoFocus)
+# #         bcancel.setStyleSheet(f"""
+# #             QPushButton {{ background:{LIGHT}; color:{DARK_TEXT};
+# #                            border:1px solid {BORDER}; border-radius:6px;
+# #                            font-size:13px; font-weight:bold; }}
+# #             QPushButton:hover {{ background:{BORDER}; }}
+# #         """)
+# #         bcancel.clicked.connect(self.reject)
+
+# #         self._btn_confirm = QPushButton("✅  Issue Credit Note")
+# #         self._btn_confirm.setFixedHeight(44)
+# #         self._btn_confirm.setEnabled(False)
+# #         self._btn_confirm.setCursor(Qt.PointingHandCursor)
+# #         self._btn_confirm.setFocusPolicy(Qt.NoFocus)
+# #         self._btn_confirm.setStyleSheet(f"""
+# #             QPushButton {{ background:{SUCCESS}; color:{WHITE}; border:none;
+# #                            border-radius:6px; font-size:13px; font-weight:bold; }}
+# #             QPushButton:hover    {{ background:{SUCCESS_H}; }}
+# #             QPushButton:disabled {{ background:{LIGHT}; color:{MUTED}; }}
+# #         """)
+# #         self._btn_confirm.clicked.connect(self._confirm)
+
+# #         hl.addWidget(bcancel)
+# #         hl.addStretch()
+# #         hl.addWidget(self._btn_confirm)
+# #         return w
+
+# #     # =========================================================================
+# #     # Autocomplete logic
+# #     # =========================================================================
+
+# #     def _on_search_changed(self, text: str):
+# #         self._search_timer.start()   # debounce
+
+# #     def _run_search(self):
+# #         query = self._search.text().strip().lower()
+# #         self._ac_list.clear()
+
+# #         if len(query) < 1:
+# #             self._ac_list.setFixedHeight(0)
+# #             return
+
+# #         matches = [
+# #             s for s in self._all_sales
+# #             if query in (s.get("invoice_no") or "").lower()
+# #             or query in (s.get("customer_name") or "").lower()
+# #         ][:15]   # cap at 15 results
+
+# #         if not matches:
+# #             self._ac_list.setFixedHeight(0)
+# #             return
+
+# #         for s in matches:
+# #             inv_no  = s.get("invoice_no", "")
+# #             cust    = s.get("customer_name") or "Walk-in"
+# #             total   = f"${float(s.get('total', 0)):.2f}"
+# #             date    = s.get("invoice_date", "")
+# #             label   = f"{inv_no}   ·   {cust}   ·   {total}   ·   {date}"
+# #             it = QListWidgetItem(label)
+# #             it.setData(Qt.UserRole, s)
+# #             self._ac_list.addItem(it)
+
+# #         row_h = 42
+# #         visible = min(len(matches), 6)
+# #         self._ac_list.setFixedHeight(visible * row_h)
+
+# #     def _on_ac_clicked(self, item: QListWidgetItem):
+# #         sale_stub = item.data(Qt.UserRole)
+# #         self._ac_list.setFixedHeight(0)
+# #         self._ac_list.clear()
+# #         self._search.setText(sale_stub.get("invoice_no", ""))
+# #         self._load_sale(sale_stub["id"])
+
+# #     # =========================================================================
+# #     # Load sale
+# #     # =========================================================================
+
+# #     def _load_sale(self, sale_id: int):
+# #         try:
+# #             from models.sale import get_sale_by_id
+# #             full = get_sale_by_id(sale_id)
+# #         except Exception as e:
+# #             QMessageBox.warning(self, "Error", f"Could not load sale:\n{e}")
+# #             return
+# #         if not full:
+# #             return
+
+# #         self._sale = full
+
+# #         # ── Banner ────────────────────────────────────────────────────────────
+# #         frappe_ref = full.get("frappe_ref", "")
+# #         synced     = full.get("synced", False)
+# #         if frappe_ref:
+# #             status_txt, status_col = frappe_ref, SUCCESS
+# #         elif synced:
+# #             status_txt, status_col = "Synced (no ref)", AMBER
+# #         else:
+# #             status_txt, status_col = "Not yet synced", AMBER
+
+# #         self._set_pill(self._b_inv,    full.get("invoice_no", "—"))
+# #         self._set_pill(self._b_cust,   full.get("customer_name") or "Walk-in")
+# #         self._set_pill(self._b_date,   full.get("invoice_date", "—"))
+# #         self._set_pill(self._b_total,  f"${full.get('total', 0):.2f}")
+# #         self._set_pill(self._b_status, status_txt, status_col)
+# #         self._banner.setVisible(True)
+
+# #         # ── Items ─────────────────────────────────────────────────────────────
+# #         self._populate_items(full.get("items", []))
+# #         self._items_frame.setVisible(True)
+# #         self._btn_confirm.setEnabled(True)
+
+# #     # =========================================================================
+# #     # Items table
+# #     # =========================================================================
+
+# #     def _populate_items(self, items: list[dict]):
+# #         self._tbl.setRowCount(0)
+# #         for item in items:
+# #             r = self._tbl.rowCount()
+# #             self._tbl.insertRow(r)
+# #             self._tbl.setRowHeight(r, 40)
+
+# #             # Col 0 — checkbox (checked by default)
+# #             chk = QTableWidgetItem()
+# #             chk.setCheckState(Qt.Checked)
+# #             chk.setTextAlignment(Qt.AlignCenter)
+# #             chk.setData(Qt.UserRole, item)
+# #             self._tbl.setItem(r, 0, chk)
+
+# #             # Col 1 — name
+# #             self._tbl.setItem(r, 1, QTableWidgetItem(item.get("product_name", "")))
+
+# #             # Col 2 — unit price
+# #             pi = QTableWidgetItem(f"${float(item.get('price', 0)):.2f}")
+# #             pi.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+# #             self._tbl.setItem(r, 2, pi)
+
+# #             # Col 3 — original qty
+# #             orig_qty = float(item.get("qty", 0))
+# #             oq = QTableWidgetItem(f"{orig_qty:.0f}")
+# #             oq.setTextAlignment(Qt.AlignCenter)
+# #             self._tbl.setItem(r, 3, oq)
+
+# #             # Col 4 — return qty spinbox
+# #             spin = QDoubleSpinBox()
+# #             spin.setMinimum(0.01)
+# #             spin.setMaximum(orig_qty)
+# #             spin.setValue(orig_qty)
+# #             spin.setDecimals(0)
+# #             spin.setFixedHeight(30)
+# #             spin.setStyleSheet(f"""
+# #                 QDoubleSpinBox {{
+# #                     background:{WHITE}; color:{DARK_TEXT};
+# #                     border:1px solid {BORDER}; border-radius:5px;
+# #                     font-size:12px; padding:0 6px;
+# #                 }}
+# #                 QDoubleSpinBox:focus {{ border:1px solid {ACCENT}; }}
+# #             """)
+# #             self._tbl.setCellWidget(r, 4, spin)
+
+# #             # Col 5 — reason combo
+# #             combo = QComboBox()
+# #             combo.addItems(REASONS)
+# #             combo.setFixedHeight(30)
+# #             combo.setStyleSheet(f"""
+# #                 QComboBox {{
+# #                     background:{WHITE}; color:{DARK_TEXT};
+# #                     border:1px solid {BORDER}; border-radius:5px;
+# #                     font-size:11px; padding:0 6px;
+# #                 }}
+# #                 QComboBox::drop-down {{ border:none; }}
+# #                 QComboBox QAbstractItemView {{
+# #                     background:{WHITE}; border:1px solid {BORDER};
+# #                     selection-background-color:{ACCENT}; selection-color:{WHITE};
+# #                 }}
+# #             """)
+# #             self._tbl.setCellWidget(r, 5, combo)
+
+# #     def _on_tbl_cell_clicked(self, row: int, col: int):
+# #         """Clicking anywhere on a row toggles the checkbox."""
+# #         chk = self._tbl.item(row, 0)
+# #         if chk:
+# #             new_state = Qt.Unchecked if chk.checkState() == Qt.Checked else Qt.Checked
+# #             chk.setCheckState(new_state)
+
+# #     # =========================================================================
+# #     # Confirm
+# #     # =========================================================================
+
+# #     def _confirm(self):
+# #         if not self._sale:
+# #             return
+
+# #         items_to_return = []
+# #         for r in range(self._tbl.rowCount()):
+# #             chk = self._tbl.item(r, 0)
+# #             if not chk or chk.checkState() != Qt.Checked:
+# #                 continue
+# #             orig_item = chk.data(Qt.UserRole)
+# #             spin      = self._tbl.cellWidget(r, 4)
+# #             combo     = self._tbl.cellWidget(r, 5)
+# #             qty       = float(spin.value()) if spin else float(orig_item.get("qty", 0))
+# #             if qty <= 0:
+# #                 continue
+# #             price = float(orig_item.get("price", 0))
+# #             items_to_return.append({
+# #                 **orig_item,
+# #                 "qty":    qty,
+# #                 "total":  round(qty * price, 2),
+# #                 "reason": combo.currentText() if combo else "Customer Return",
+# #             })
+
+# #         if not items_to_return:
+# #             QMessageBox.warning(
+# #                 self, "Nothing Selected",
+# #                 "Please check at least one item and set a return quantity."
+# #             )
+# #             return
+
+# #         total = sum(i["total"] for i in items_to_return)
+# #         reply = QMessageBox.question(
+# #             self, "Confirm Credit Note",
+# #             f"Issue credit note for {len(items_to_return)} item(s)\n"
+# #             f"Total: ${total:.2f}\n\n"
+# #             f"Original invoice: {self._sale.get('invoice_no', '')}",
+# #             QMessageBox.Yes | QMessageBox.No,
+# #             QMessageBox.No,
+# #         )
+# #         if reply != QMessageBox.Yes:
+# #             return
+
+# #         try:
+# #             from models.credit_note import create_credit_note
+# #             cn = create_credit_note(
+# #                 original_sale_id=self._sale["id"],
+# #                 items_to_return=items_to_return,
+# #                 currency=self._sale.get("currency", "USD"),
+# #                 customer_name=self._sale.get("customer_name", ""),
+# #             )
+# #         except Exception as e:
+# #             QMessageBox.critical(self, "Error", f"Could not create credit note:\n{e}")
+# #             return
+
+# #         # Status message
+# #         status = cn.get("cn_status", "")
+# #         if status == "ready":
+# #             extra = "Will be submitted to Frappe shortly."
+# #         elif status == "pending_sync":
+# #             extra = "Queued — will sync after the original invoice syncs."
+# #         else:
+# #             extra = "Recorded locally."
+
+# #         QMessageBox.information(
+# #             self, "Credit Note Issued",
+# #             f"✅  {cn['cn_number']} created.\n{extra}"
+# #         )
+
+# #         # Emit signal so POSView can load it into the main table
+# #         self.credit_note_ready.emit({**cn, "items_to_return": items_to_return})
+# #         self.accept()
+
+
+# # # =============================================================================
+# # # QuickAddCustomerDialog  — small "New Customer" popup launched from + New
+# # # =============================================================================
+
+# # class QuickAddCustomerDialog(QDialog):
+# #     """
+# #     Lightweight 3-field popup: Name · Phone · City.
+# #     Everything else (warehouse, cost center, price list, group) is resolved
+# #     automatically from company_defaults (the logged-in user's context).
+# #     """
+
+# #     customer_created = Signal(dict)   # emits the new customer dict on success
+
+# #     def __init__(self, parent=None):
+# #         super().__init__(parent)
+# #         self.setWindowTitle("New Customer")
+# #         self.setFixedWidth(400)
+# #         self.setSizeGripEnabled(False)
+# #         self.setModal(True)
+# #         self.setStyleSheet(f"""
+# #             QDialog {{
+# #                 background: {WHITE};
+# #                 font-family: 'Segoe UI', sans-serif;
+# #             }}
+# #             QLabel#section {{
+# #                 color: {MUTED};
+# #                 font-size: 10px;
+# #                 font-weight: bold;
+# #                 letter-spacing: 1px;
+# #                 background: transparent;
+# #             }}
+# #         """)
+# #         self._build()
+
+# #     # -------------------------------------------------------------------------
+# #     def _field(self, placeholder: str, required: bool = False) -> QLineEdit:
+# #         le = QLineEdit()
+# #         le.setPlaceholderText(placeholder + (" *" if required else ""))
+# #         le.setFixedHeight(38)
+# #         le.setStyleSheet(f"""
+# #             QLineEdit {{
+# #                 background: {OFF_WHITE};
+# #                 color: {DARK_TEXT};
+# #                 border: 1.5px solid {BORDER};
+# #                 border-radius: 6px;
+# #                 font-size: 13px;
+# #                 padding: 0 10px;
+# #             }}
+# #             QLineEdit:focus {{ border: 1.5px solid {ACCENT}; background: {WHITE}; }}
+# #         """)
+# #         return le
+
+# #     def _build(self):
+# #         root = QVBoxLayout(self)
+# #         root.setContentsMargins(0, 0, 0, 0)
+# #         root.setSpacing(0)
+
+# #         # ── header bar ────────────────────────────────────────────────────────
+# #         hdr = QWidget()
+# #         hdr.setFixedHeight(48)
+# #         hdr.setStyleSheet(f"background: {NAVY}; border-radius: 0px;")
+# #         hl = QHBoxLayout(hdr)
+# #         hl.setContentsMargins(20, 0, 20, 0)
+# #         title = QLabel("New Customer")
+# #         title.setStyleSheet(
+# #             f"color: {WHITE}; font-size: 15px; font-weight: bold; background: transparent;"
+# #         )
+# #         hl.addWidget(title)
+# #         hl.addStretch()
+# #         root.addWidget(hdr)
+
+# #         # ── form body ─────────────────────────────────────────────────────────
+# #         body = QWidget()
+# #         body.setStyleSheet(f"background: {WHITE};")
+# #         fl = QVBoxLayout(body)
+# #         fl.setContentsMargins(24, 20, 24, 8)
+# #         fl.setSpacing(10)
+
+# #         self._f_first = self._field("First name", required=True)
+# #         self._f_last  = self._field("Last name")
+# #         self._f_phone = self._field("Phone number")
+# #         self._f_city  = self._field("City")
+
+# #         for lbl_txt, widget in [
+# #             ("FIRST NAME",   self._f_first),
+# #             ("LAST NAME",    self._f_last),
+# #             ("PHONE NUMBER", self._f_phone),
+# #             ("CITY",         self._f_city),
+# #         ]:
+# #             lbl = QLabel(lbl_txt)
+# #             lbl.setObjectName("section")
+# #             fl.addWidget(lbl)
+# #             fl.addWidget(widget)
+
+# #         # ── status label ──────────────────────────────────────────────────────
+# #         self._status = QLabel("")
+# #         self._status.setStyleSheet(
+# #             f"color: {DANGER}; font-size: 11px; background: transparent;"
+# #         )
+# #         self._status.setAlignment(Qt.AlignCenter)
+# #         fl.addWidget(self._status)
+
+# #         root.addWidget(body)
+
+# #         # ── footer buttons ────────────────────────────────────────────────────
+# #         foot = QWidget()
+# #         foot.setStyleSheet(
+# #             f"background: {OFF_WHITE}; border-top: 1px solid {BORDER};"
+# #         )
+# #         bl = QHBoxLayout(foot)
+# #         bl.setContentsMargins(24, 12, 24, 16)
+# #         bl.setSpacing(10)
+
+# #         cancel_btn = QPushButton("Cancel")
+# #         cancel_btn.setFixedHeight(36)
+# #         cancel_btn.setStyleSheet(f"""
+# #             QPushButton {{
+# #                 background: {WHITE}; color: {DARK_TEXT};
+# #                 border: 1.5px solid {BORDER}; border-radius: 6px;
+# #                 font-size: 13px; padding: 0 18px;
+# #             }}
+# #             QPushButton:hover {{ background: {LIGHT}; border-color: {ACCENT}; }}
+# #         """)
+# #         cancel_btn.clicked.connect(self.reject)
+
+# #         self._save_btn = QPushButton("Save Customer")
+# #         self._save_btn.setFixedHeight(36)
+# #         self._save_btn.setStyleSheet(f"""
+# #             QPushButton {{
+# #                 background: {SUCCESS}; color: {WHITE};
+# #                 border: none; border-radius: 6px;
+# #                 font-size: 13px; font-weight: bold; padding: 0 22px;
+# #             }}
+# #             QPushButton:hover {{ background: {SUCCESS_H}; }}
+# #             QPushButton:disabled {{ background: {BORDER}; color: {MUTED}; }}
+# #         """)
+# #         self._save_btn.clicked.connect(self._save)
+
+# #         bl.addWidget(cancel_btn)
+# #         bl.addStretch()
+# #         bl.addWidget(self._save_btn)
+# #         root.addWidget(foot)
+
+# #         # focus the first field
+# #         self._f_first.setFocus()
+
+# #     # -------------------------------------------------------------------------
+# #     def _save(self):
+# #         first = self._f_first.text().strip()
+# #         last  = self._f_last.text().strip()
+# #         phone = self._f_phone.text().strip()
+# #         city  = self._f_city.text().strip()
+
+# #         if not first:
+# #             self._status.setText("First name is required.")
+# #             self._f_first.setFocus()
+# #             return
+
+# #         # Build full customer_name from first + last
+# #         full_name = f"{first} {last}".strip()
+
+# #         self._save_btn.setEnabled(False)
+# #         self._status.setText("")
+
+# #         try:
+# #             print("\n" + "="*60)
+# #             print("[QuickAddCustomer] Starting save...")
+# #             print(f"  full_name='{full_name}'  phone='{phone}'  city='{city}'")
+
+# #             # Try to resolve FK IDs — all are optional (tables may be empty)
+# #             from models.company_defaults import get_defaults
+# #             defs = get_defaults()
+# #             print(f"[QuickAddCustomer] defaults: warehouse='{defs.get('server_warehouse')}'"
+# #                   f"  cost_center='{defs.get('server_cost_center')}'")
+
+# #             from database.db import get_connection
+# #             conn = get_connection()
+# #             cur  = conn.cursor()
+
+# #             def _find_id(table: str, name_val: str) -> int | None:
+# #                 if not name_val:
+# #                     return None
+# #                 cur.execute(
+# #                     f"SELECT id FROM {table} WHERE LTRIM(RTRIM(name)) = ?",
+# #                     (name_val.strip(),)
+# #                 )
+# #                 row = cur.fetchone()
+# #                 if row:
+# #                     print(f"  [_find_id] {table} '{name_val}' → id={row[0]}")
+# #                     return row[0]
+# #                 # fallback: first row
+# #                 cur.execute(f"SELECT TOP 1 id, name FROM {table} ORDER BY id ASC")
+# #                 fb = cur.fetchone()
+# #                 print(f"  [_find_id] {table} '{name_val}' NOT FOUND → fallback={fb}")
+# #                 return fb[0] if fb else None
+
+# #             warehouse_id   = _find_id("warehouses",      defs.get("server_warehouse", ""))
+# #             cost_center_id = _find_id("cost_centers",    defs.get("server_cost_center", ""))
+# #             price_list_id  = _find_id("price_lists",     "Standard Selling ZWG")
+# #             group_id       = _find_id("customer_groups", "All Customer Groups")
+# #             conn.close()
+
+# #             print(f"[QuickAddCustomer] IDs → warehouse={warehouse_id}  "
+# #                   f"cost_center={cost_center_id}  price_list={price_list_id}  group={group_id}")
+
+# #             # Direct INSERT — pass None for any FK that couldn't be resolved
+# #             conn2 = get_connection()
+# #             cur2  = conn2.cursor()
+# #             cur2.execute("""
+# #                 INSERT INTO customers (
+# #                     customer_name, customer_group_id, customer_type,
+# #                     custom_trade_name, custom_telephone_number, custom_email_address,
+# #                     custom_city, custom_house_no,
+# #                     custom_warehouse_id, custom_cost_center_id, default_price_list_id
+# #                 ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+# #             """, (
+# #                 full_name, group_id, "Individual",
+# #                 "", phone, "",
+# #                 city, "",
+# #                 warehouse_id, cost_center_id, price_list_id,
+# #             ))
+# #             new_id = int(cur2.fetchone()[0])
+# #             conn2.commit()
+# #             conn2.close()
+
+# #             print(f"[QuickAddCustomer] SUCCESS: inserted id={new_id}  name='{full_name}'")
+# #             print("="*60 + "\n")
+
+# #             from models.customer import get_customer_by_id
+# #             new_cust = get_customer_by_id(new_id) or {"id": new_id, "customer_name": full_name}
+# #             self.customer_created.emit(new_cust)
+# #             self.accept()
+
+# #         except Exception as exc:
+# #             import traceback
+# #             print(f"[QuickAddCustomer] EXCEPTION:")
+# #             traceback.print_exc()
+# #             print("="*60 + "\n")
+# #             self._status.setText(f"Error: {exc}")
+# #             self._save_btn.setEnabled(True)
+# from __future__ import annotations
+
+# from PySide6.QtWidgets import (
+#     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+#     QLabel, QLineEdit, QFrame, QTableWidget, QTableWidgetItem,
+#     QHeaderView, QAbstractItemView, QMessageBox, QComboBox,
+#     QSizePolicy, QDoubleSpinBox, QListWidget, QListWidgetItem,
+# )
+# from PySide6.QtCore import Qt, Signal, QTimer
+# from PySide6.QtGui  import QColor
+
+# NAVY      = "#0d1f3c"
+# NAVY_2    = "#162d52"
+# WHITE     = "#ffffff"
+# OFF_WHITE = "#f5f8fc"
+# LIGHT     = "#e4eaf4"
+# BORDER    = "#c8d8ec"
+# DARK_TEXT = "#0d1f3c"
+# MUTED     = "#5a7a9a"
+# ACCENT    = "#1a5fb4"
+# ACCENT_H  = "#1c6dd0"
+# SUCCESS   = "#1a7a3c"
+# SUCCESS_H = "#1f9447"
+# DANGER    = "#b02020"
+# DANGER_H  = "#cc2828"
+# AMBER     = "#b7770d"
+# ORANGE    = "#c05a00"
+
+# REASONS = [
+#     "Customer Return",
+#     "Damaged Goods",
+#     "Wrong Item",
+#     "Overcharge",
+#     "Quality Issue",
+#     "Other",
+# ]
+
+
+# class CreditNoteDialog(QDialog):
+#     """
+#     Smart credit note dialog.
+#     After confirmation emits credit_note_ready(cn_dict) so the caller
+#     (POSView / OptionsDialog) can load it into the main table in return mode.
+#     """
+
+#     credit_note_ready = Signal(dict)   # emits the created CN dict
+
+#     def __init__(self, parent=None):
+#         super().__init__(parent)
+#         self.setWindowTitle("Credit Note / Return")
+#         self.setMinimumSize(860, 580)
+#         self.setModal(True)
+#         self.setWindowState(Qt.WindowMaximized)
+#         self.setStyleSheet(
+#             f"QDialog {{ background:{OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}"
+#         )
+
+#         self._sale:        dict | None = None
+#         self._all_sales:   list[dict]  = []
+#         self._search_timer = QTimer(self)
+#         self._search_timer.setSingleShot(True)
+#         self._search_timer.setInterval(200)      # 200 ms debounce
+#         self._search_timer.timeout.connect(self._run_search)
+
+#         self._build()
+#         self._preload_sales()
+
+#     # =========================================================================
+#     # Preload
+#     # =========================================================================
+
+#     def _preload_sales(self):
+#         """Load all sales once into memory for fast autocomplete."""
+#         try:
+#             from models.sale import get_all_sales
+#             self._all_sales = get_all_sales()
+#         except Exception:
+#             self._all_sales = []
+
+#     # =========================================================================
+#     # Build UI
+#     # =========================================================================
+
+#     def _build(self):
+#         root = QVBoxLayout(self)
+#         root.setSpacing(0)
+#         root.setContentsMargins(0, 0, 0, 0)
+
+#         # ── header ────────────────────────────────────────────────────────────
+#         hdr = QWidget()
+#         hdr.setFixedHeight(52)
+#         hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
+#         hl  = QHBoxLayout(hdr)
+#         hl.setContentsMargins(28, 0, 28, 0)
+#         title = QLabel("Credit Note / Return")
+#         title.setStyleSheet(
+#             f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;"
+#         )
+#         sub = QLabel("Search for an invoice, select items to return, then confirm.")
+#         sub.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
+#         hl.addWidget(title)
+#         hl.addSpacing(16)
+#         hl.addWidget(sub)
+#         hl.addStretch()
+#         root.addWidget(hdr)
+
+#         # ── body ──────────────────────────────────────────────────────────────
+#         body = QWidget()
+#         body.setStyleSheet(f"background:{OFF_WHITE};")
+#         bl = QVBoxLayout(body)
+#         bl.setContentsMargins(28, 18, 28, 18)
+#         bl.setSpacing(12)
+
+#         bl.addWidget(self._build_search_area())
+
+#         self._banner = self._build_banner()
+#         self._banner.setVisible(False)
+#         bl.addWidget(self._banner)
+
+#         self._items_frame = self._build_items_table()
+#         self._items_frame.setVisible(False)
+#         bl.addWidget(self._items_frame, stretch=1)
+
+#         bl.addWidget(self._build_btns())
+#         root.addWidget(body, stretch=1)
+
+#     # ── Search area ──────────────────────────────────────────────────────────
+
+#     def _build_search_area(self) -> QWidget:
+#         wrap = QWidget()
+#         wrap.setStyleSheet("background:transparent;")
+#         vl = QVBoxLayout(wrap)
+#         vl.setContentsMargins(0, 0, 0, 0)
+#         vl.setSpacing(4)
+
+#         row = QHBoxLayout()
+#         row.setSpacing(8)
+
+#         lbl = QLabel("Invoice / Customer:")
+#         lbl.setFixedWidth(140)
+#         lbl.setStyleSheet(
+#             f"color:{MUTED}; font-size:11px; font-weight:bold; background:transparent;"
+#         )
+
+#         self._search = QLineEdit()
+#         self._search.setPlaceholderText(
+#             "Type invoice number or customer name…"
+#         )
+#         self._search.setFixedHeight(38)
+#         self._search.setStyleSheet(f"""
+#             QLineEdit {{
+#                 background:{WHITE}; color:{DARK_TEXT};
+#                 border:2px solid {BORDER}; border-radius:6px;
+#                 font-size:13px; padding:0 12px;
+#             }}
+#             QLineEdit:focus {{ border:2px solid {ACCENT}; }}
+#         """)
+#         self._search.textChanged.connect(self._on_search_changed)
+#         self._search.returnPressed.connect(self._run_search)
+
+#         row.addWidget(lbl)
+#         row.addWidget(self._search, 1)
+#         vl.addLayout(row)
+
+#         # Autocomplete dropdown (hidden until there are results)
+#         self._ac_list = QListWidget()
+#         self._ac_list.setFixedHeight(0)        # collapsed by default
+#         self._ac_list.setStyleSheet(f"""
+#             QListWidget {{
+#                 background:{WHITE}; border:2px solid {ACCENT};
+#                 border-top:none; border-radius:0 0 6px 6px;
+#                 font-size:13px; color:{DARK_TEXT}; outline:none;
+#             }}
+#             QListWidget::item           {{ padding:7px 14px; min-height:28px; }}
+#             QListWidget::item:selected  {{ background:{ACCENT}; color:{WHITE}; }}
+#             QListWidget::item:hover     {{ background:{LIGHT}; }}
+#         """)
+#         self._ac_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+#         self._ac_list.itemClicked.connect(self._on_ac_clicked)
+#         # Indent to align under the QLineEdit
+#         ac_row = QHBoxLayout()
+#         ac_row.setContentsMargins(148, 0, 0, 0)   # 140 label + 8 spacing
+#         ac_row.addWidget(self._ac_list)
+#         vl.addLayout(ac_row)
+
+#         return wrap
+
+#     # ── Info banner ──────────────────────────────────────────────────────────
+
+#     def _build_banner(self) -> QFrame:
+#         f = QFrame()
+#         f.setFixedHeight(58)
+#         f.setStyleSheet(
+#             f"QFrame {{ background:{WHITE}; border:1px solid {BORDER}; border-radius:8px; }}"
+#         )
+#         hl = QHBoxLayout(f)
+#         hl.setContentsMargins(16, 0, 16, 0)
+#         hl.setSpacing(28)
+
+#         self._b_inv    = self._pill("INVOICE NO")
+#         self._b_cust   = self._pill("CUSTOMER")
+#         self._b_date   = self._pill("DATE")
+#         self._b_total  = self._pill("TOTAL")
+#         self._b_status = self._pill("FRAPPE STATUS")
+
+#         for w in [self._b_inv, self._b_cust, self._b_date,
+#                   self._b_total, self._b_status]:
+#             hl.addWidget(w)
+#         hl.addStretch()
+#         return f
+
+#     def _pill(self, cap: str) -> QWidget:
+#         w  = QWidget(); w.setStyleSheet("background:transparent;")
+#         vl = QVBoxLayout(w); vl.setContentsMargins(0, 4, 0, 4); vl.setSpacing(1)
+#         c  = QLabel(cap)
+#         c.setStyleSheet(
+#             f"color:{MUTED}; font-size:8px; font-weight:bold;"
+#             f" letter-spacing:0.8px; background:transparent;"
+#         )
+#         v  = QLabel("—")
+#         v.setStyleSheet(
+#             f"color:{DARK_TEXT}; font-size:12px; font-weight:bold; background:transparent;"
+#         )
+#         vl.addWidget(c); vl.addWidget(v)
+#         w._val = v
+#         return w
+
+#     def _set_pill(self, pill: QWidget, text: str, color: str = DARK_TEXT):
+#         pill._val.setText(text)
+#         pill._val.setStyleSheet(
+#             f"color:{color}; font-size:12px; font-weight:bold; background:transparent;"
+#         )
+
+#     # ── Items table ──────────────────────────────────────────────────────────
+
+#     def _build_items_table(self) -> QFrame:
+#         f  = QFrame(); f.setStyleSheet("QFrame{background:transparent;}")
+#         vl = QVBoxLayout(f); vl.setContentsMargins(0, 0, 0, 0); vl.setSpacing(5)
+
+#         cap = QLabel("Select items and quantities to return:")
+#         cap.setStyleSheet(
+#             f"color:{MUTED}; font-size:10px; font-weight:bold;"
+#             f" letter-spacing:0.6px; background:transparent;"
+#         )
+#         vl.addWidget(cap)
+
+#         self._tbl = QTableWidget(0, 6)
+#         self._tbl.setHorizontalHeaderLabels(
+#             ["✓", "ITEM", "UNIT PRICE", "ORIG QTY", "RETURN QTY", "REASON"]
+#         )
+#         hh = self._tbl.horizontalHeader()
+#         hh.setSectionResizeMode(0, QHeaderView.Fixed);  self._tbl.setColumnWidth(0, 36)
+#         hh.setSectionResizeMode(1, QHeaderView.Stretch)
+#         hh.setSectionResizeMode(2, QHeaderView.Fixed);  self._tbl.setColumnWidth(2, 100)
+#         hh.setSectionResizeMode(3, QHeaderView.Fixed);  self._tbl.setColumnWidth(3, 80)
+#         hh.setSectionResizeMode(4, QHeaderView.Fixed);  self._tbl.setColumnWidth(4, 110)
+#         hh.setSectionResizeMode(5, QHeaderView.Fixed);  self._tbl.setColumnWidth(5, 160)
+#         self._tbl.verticalHeader().setVisible(False)
+#         self._tbl.setAlternatingRowColors(True)
+#         self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+#         self._tbl.setSelectionMode(QAbstractItemView.NoSelection)
+#         self._tbl.setStyleSheet(f"""
+#             QTableWidget {{
+#                 background:{WHITE}; border:1px solid {BORDER};
+#                 gridline-color:{LIGHT}; font-size:12px; outline:none;
+#             }}
+#             QTableWidget::item           {{ padding:3px 8px; }}
+#             QTableWidget::item:alternate {{ background:{OFF_WHITE}; }}
+#             QHeaderView::section {{
+#                 background:{NAVY}; color:{WHITE};
+#                 padding:7px; border:none;
+#                 border-right:1px solid {NAVY_2};
+#                 font-size:10px; font-weight:bold;
+#             }}
+#         """)
+#         # Check/uncheck on row click
+#         self._tbl.cellClicked.connect(self._on_tbl_cell_clicked)
+#         vl.addWidget(self._tbl, 1)
+#         return f
+
+#     # ── Bottom buttons ────────────────────────────────────────────────────────
+
+#     def _build_btns(self) -> QWidget:
+#         w  = QWidget(); w.setStyleSheet("background:transparent;")
+#         hl = QHBoxLayout(w); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(10)
+
+#         bcancel = QPushButton("Cancel")
+#         bcancel.setFixedHeight(44); bcancel.setFixedWidth(100)
+#         bcancel.setCursor(Qt.PointingHandCursor)
+#         bcancel.setFocusPolicy(Qt.NoFocus)
+#         bcancel.setStyleSheet(f"""
+#             QPushButton {{ background:{LIGHT}; color:{DARK_TEXT};
+#                            border:1px solid {BORDER}; border-radius:6px;
+#                            font-size:13px; font-weight:bold; }}
+#             QPushButton:hover {{ background:{BORDER}; }}
+#         """)
+#         bcancel.clicked.connect(self.reject)
+
+#         self._btn_confirm = QPushButton("✅  Issue Credit Note")
+#         self._btn_confirm.setFixedHeight(44)
+#         self._btn_confirm.setEnabled(False)
+#         self._btn_confirm.setCursor(Qt.PointingHandCursor)
+#         self._btn_confirm.setFocusPolicy(Qt.NoFocus)
+#         self._btn_confirm.setStyleSheet(f"""
+#             QPushButton {{ background:{SUCCESS}; color:{WHITE}; border:none;
+#                            border-radius:6px; font-size:13px; font-weight:bold; }}
+#             QPushButton:hover    {{ background:{SUCCESS_H}; }}
+#             QPushButton:disabled {{ background:{LIGHT}; color:{MUTED}; }}
+#         """)
+#         self._btn_confirm.clicked.connect(self._confirm)
+
+#         hl.addWidget(bcancel)
+#         hl.addStretch()
+#         hl.addWidget(self._btn_confirm)
+#         return w
+
+#     # =========================================================================
+#     # Autocomplete logic
+#     # =========================================================================
+
+#     def _on_search_changed(self, text: str):
+#         self._search_timer.start()   # debounce
+
+#     def _run_search(self):
+#         query = self._search.text().strip().lower()
+#         self._ac_list.clear()
+
+#         if len(query) < 1:
+#             self._ac_list.setFixedHeight(0)
+#             return
+
+#         matches = [
+#             s for s in self._all_sales
+#             if query in (s.get("invoice_no") or "").lower()
+#             or query in (s.get("customer_name") or "").lower()
+#         ][:15]   # cap at 15 results
+
+#         if not matches:
+#             self._ac_list.setFixedHeight(0)
+#             return
+
+#         for s in matches:
+#             inv_no  = s.get("invoice_no", "")
+#             cust    = s.get("customer_name") or "Walk-in"
+#             total   = f"${float(s.get('total', 0)):.2f}"
+#             date    = s.get("invoice_date", "")
+#             label   = f"{inv_no}   ·   {cust}   ·   {total}   ·   {date}"
+#             it = QListWidgetItem(label)
+#             it.setData(Qt.UserRole, s)
+#             self._ac_list.addItem(it)
+
+#         row_h = 42
+#         visible = min(len(matches), 6)
+#         self._ac_list.setFixedHeight(visible * row_h)
+
+#     def _on_ac_clicked(self, item: QListWidgetItem):
+#         sale_stub = item.data(Qt.UserRole)
+#         self._ac_list.setFixedHeight(0)
+#         self._ac_list.clear()
+#         self._search.setText(sale_stub.get("invoice_no", ""))
+#         self._load_sale(sale_stub["id"])
+
+#     # =========================================================================
+#     # Load sale
+#     # =========================================================================
+
+#     def _load_sale(self, sale_id: int):
+#         try:
+#             from models.sale import get_sale_by_id
+#             full = get_sale_by_id(sale_id)
+#         except Exception as e:
+#             QMessageBox.warning(self, "Error", f"Could not load sale:\n{e}")
+#             return
+#         if not full:
+#             return
+
+#         self._sale = full
+
+#         # ── Banner ────────────────────────────────────────────────────────────
+#         frappe_ref = full.get("frappe_ref", "")
+#         synced     = full.get("synced", False)
+#         if frappe_ref:
+#             status_txt, status_col = frappe_ref, SUCCESS
+#         elif synced:
+#             status_txt, status_col = "Synced (no ref)", AMBER
+#         else:
+#             status_txt, status_col = "Not yet synced", AMBER
+
+#         self._set_pill(self._b_inv,    full.get("invoice_no", "—"))
+#         self._set_pill(self._b_cust,   full.get("customer_name") or "Walk-in")
+#         self._set_pill(self._b_date,   full.get("invoice_date", "—"))
+#         self._set_pill(self._b_total,  f"${full.get('total', 0):.2f}")
+#         self._set_pill(self._b_status, status_txt, status_col)
+#         self._banner.setVisible(True)
+
+#         # ── Items ─────────────────────────────────────────────────────────────
+#         self._populate_items(full.get("items", []))
+#         self._items_frame.setVisible(True)
+#         self._btn_confirm.setEnabled(True)
+
+#     # =========================================================================
+#     # Items table
+#     # =========================================================================
+
+#     def _populate_items(self, items: list[dict]):
+#         self._tbl.setRowCount(0)
+#         for item in items:
+#             r = self._tbl.rowCount()
+#             self._tbl.insertRow(r)
+#             self._tbl.setRowHeight(r, 40)
+
+#             # Col 0 — checkbox (checked by default)
+#             chk = QTableWidgetItem()
+#             chk.setCheckState(Qt.Checked)
+#             chk.setTextAlignment(Qt.AlignCenter)
+#             chk.setData(Qt.UserRole, item)
+#             self._tbl.setItem(r, 0, chk)
+
+#             # Col 1 — name
+#             self._tbl.setItem(r, 1, QTableWidgetItem(item.get("product_name", "")))
+
+#             # Col 2 — unit price
+#             pi = QTableWidgetItem(f"${float(item.get('price', 0)):.2f}")
+#             pi.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+#             self._tbl.setItem(r, 2, pi)
+
+#             # Col 3 — original qty
+#             orig_qty = float(item.get("qty", 0))
+#             oq = QTableWidgetItem(f"{orig_qty:.0f}")
+#             oq.setTextAlignment(Qt.AlignCenter)
+#             self._tbl.setItem(r, 3, oq)
+
+#             # Col 4 — return qty spinbox
+#             spin = QDoubleSpinBox()
+#             spin.setMinimum(0.01)
+#             spin.setMaximum(orig_qty)
+#             spin.setValue(orig_qty)
+#             spin.setDecimals(0)
+#             spin.setFixedHeight(30)
+#             spin.setStyleSheet(f"""
+#                 QDoubleSpinBox {{
+#                     background:{WHITE}; color:{DARK_TEXT};
+#                     border:1px solid {BORDER}; border-radius:5px;
+#                     font-size:12px; padding:0 6px;
+#                 }}
+#                 QDoubleSpinBox:focus {{ border:1px solid {ACCENT}; }}
+#             """)
+#             self._tbl.setCellWidget(r, 4, spin)
+
+#             # Col 5 — reason combo
+#             combo = QComboBox()
+#             combo.addItems(REASONS)
+#             combo.setFixedHeight(30)
+#             combo.setStyleSheet(f"""
+#                 QComboBox {{
+#                     background:{WHITE}; color:{DARK_TEXT};
+#                     border:1px solid {BORDER}; border-radius:5px;
+#                     font-size:11px; padding:0 6px;
+#                 }}
+#                 QComboBox::drop-down {{ border:none; }}
+#                 QComboBox QAbstractItemView {{
+#                     background:{WHITE}; border:1px solid {BORDER};
+#                     selection-background-color:{ACCENT}; selection-color:{WHITE};
+#                 }}
+#             """)
+#             self._tbl.setCellWidget(r, 5, combo)
+
+#     def _on_tbl_cell_clicked(self, row: int, col: int):
+#         """Clicking anywhere on a row toggles the checkbox."""
+#         chk = self._tbl.item(row, 0)
+#         if chk:
+#             new_state = Qt.Unchecked if chk.checkState() == Qt.Checked else Qt.Checked
+#             chk.setCheckState(new_state)
+
+#     # =========================================================================
+#     # Confirm
+#     # =========================================================================
+
+#     def _confirm(self):
+#         if not self._sale:
+#             return
+
+#         items_to_return = []
+#         for r in range(self._tbl.rowCount()):
+#             chk = self._tbl.item(r, 0)
+#             if not chk or chk.checkState() != Qt.Checked:
+#                 continue
+#             orig_item = chk.data(Qt.UserRole)
+#             spin      = self._tbl.cellWidget(r, 4)
+#             combo     = self._tbl.cellWidget(r, 5)
+#             qty       = float(spin.value()) if spin else float(orig_item.get("qty", 0))
+#             if qty <= 0:
+#                 continue
+#             price = float(orig_item.get("price", 0))
+#             items_to_return.append({
+#                 **orig_item,
+#                 "qty":    qty,
+#                 "total":  round(qty * price, 2),
+#                 "reason": combo.currentText() if combo else "Customer Return",
+#             })
+
+#         if not items_to_return:
+#             QMessageBox.warning(
+#                 self, "Nothing Selected",
+#                 "Please check at least one item and set a return quantity."
+#             )
+#             return
+
+#         total = sum(i["total"] for i in items_to_return)
+#         reply = QMessageBox.question(
+#             self, "Confirm Credit Note",
+#             f"Issue credit note for {len(items_to_return)} item(s)\n"
+#             f"Total: ${total:.2f}\n\n"
+#             f"Original invoice: {self._sale.get('invoice_no', '')}",
+#             QMessageBox.Yes | QMessageBox.No,
+#             QMessageBox.No,
+#         )
+#         if reply != QMessageBox.Yes:
+#             return
+
+#         try:
+#             from models.credit_note import create_credit_note
+#             cn = create_credit_note(
+#                 original_sale_id=self._sale["id"],
+#                 items_to_return=items_to_return,
+#                 currency=self._sale.get("currency", "USD"),
+#                 customer_name=self._sale.get("customer_name", ""),
+#             )
+#         except Exception as e:
+#             QMessageBox.critical(self, "Error", f"Could not create credit note:\n{e}")
+#             return
+
+#         # Status message
+#         status = cn.get("cn_status", "")
+#         if status == "ready":
+#             extra = "Will be submitted to Frappe shortly."
+#         elif status == "pending_sync":
+#             extra = "Queued — will sync after the original invoice syncs."
+#         else:
+#             extra = "Recorded locally."
+
+#         QMessageBox.information(
+#             self, "Credit Note Issued",
+#             f"✅  {cn['cn_number']} created.\n{extra}"
+#         )
+
+#         # Emit signal so POSView can load it into the main table
+#         self.credit_note_ready.emit({**cn, "items_to_return": items_to_return})
+#         self.accept()
+
+
+# # =============================================================================
+# # QuickAddCustomerDialog  — small "New Customer" popup launched from + New
+# # =============================================================================
+
+# class QuickAddCustomerDialog(QDialog):
+#     """
+#     Lightweight 3-field popup: Name · Phone · City.
+#     Everything else (warehouse, cost center, price list, group) is resolved
+#     automatically from company_defaults (the logged-in user's context).
+#     """
+
+#     customer_created = Signal(dict)   # emits the new customer dict on success
+
+#     def __init__(self, parent=None):
+#         super().__init__(parent)
+#         self.setWindowTitle("New Customer")
+#         self.setFixedWidth(400)
+#         self.setSizeGripEnabled(False)
+#         self.setModal(True)
+#         self.setStyleSheet(f"""
+#             QDialog {{
+#                 background: {WHITE};
+#                 font-family: 'Segoe UI', sans-serif;
+#             }}
+#             QLabel#section {{
+#                 color: {MUTED};
+#                 font-size: 10px;
+#                 font-weight: bold;
+#                 letter-spacing: 1px;
+#                 background: transparent;
+#             }}
+#         """)
+#         self._build()
+
+#     # -------------------------------------------------------------------------
+#     def _field(self, placeholder: str, required: bool = False) -> QLineEdit:
+#         le = QLineEdit()
+#         le.setPlaceholderText(placeholder + (" *" if required else ""))
+#         le.setFixedHeight(38)
+#         le.setStyleSheet(f"""
+#             QLineEdit {{
+#                 background: {OFF_WHITE};
+#                 color: {DARK_TEXT};
+#                 border: 1.5px solid {BORDER};
+#                 border-radius: 6px;
+#                 font-size: 13px;
+#                 padding: 0 10px;
+#             }}
+#             QLineEdit:focus {{ border: 1.5px solid {ACCENT}; background: {WHITE}; }}
+#         """)
+#         return le
+
+#     def _build(self):
+#         root = QVBoxLayout(self)
+#         root.setContentsMargins(0, 0, 0, 0)
+#         root.setSpacing(0)
+
+#         # ── header bar ────────────────────────────────────────────────────────
+#         hdr = QWidget()
+#         hdr.setFixedHeight(48)
+#         hdr.setStyleSheet(f"background: {NAVY}; border-radius: 0px;")
+#         hl = QHBoxLayout(hdr)
+#         hl.setContentsMargins(20, 0, 20, 0)
+#         title = QLabel("New Customer")
+#         title.setStyleSheet(
+#             f"color: {WHITE}; font-size: 15px; font-weight: bold; background: transparent;"
+#         )
+#         hl.addWidget(title)
+#         hl.addStretch()
+#         root.addWidget(hdr)
+
+#         # ── form body ─────────────────────────────────────────────────────────
+#         body = QWidget()
+#         body.setStyleSheet(f"background: {WHITE};")
+#         fl = QVBoxLayout(body)
+#         fl.setContentsMargins(24, 20, 24, 8)
+#         fl.setSpacing(10)
+
+#         self._f_first = self._field("First name", required=True)
+#         self._f_last  = self._field("Last name")
+#         self._f_phone = self._field("Phone number")
+#         self._f_city  = self._field("City")
+
+#         for lbl_txt, widget in [
+#             ("FIRST NAME",   self._f_first),
+#             ("LAST NAME",    self._f_last),
+#             ("PHONE NUMBER", self._f_phone),
+#             ("CITY",         self._f_city),
+#         ]:
+#             lbl = QLabel(lbl_txt)
+#             lbl.setObjectName("section")
+#             fl.addWidget(lbl)
+#             fl.addWidget(widget)
+
+#         # ── status label ──────────────────────────────────────────────────────
+#         self._status = QLabel("")
+#         self._status.setStyleSheet(
+#             f"color: {DANGER}; font-size: 11px; background: transparent;"
+#         )
+#         self._status.setAlignment(Qt.AlignCenter)
+#         fl.addWidget(self._status)
+
+#         root.addWidget(body)
+
+#         # ── footer buttons ────────────────────────────────────────────────────
+#         foot = QWidget()
+#         foot.setStyleSheet(
+#             f"background: {OFF_WHITE}; border-top: 1px solid {BORDER};"
+#         )
+#         bl = QHBoxLayout(foot)
+#         bl.setContentsMargins(24, 12, 24, 16)
+#         bl.setSpacing(10)
+
+#         cancel_btn = QPushButton("Cancel")
+#         cancel_btn.setFixedHeight(36)
+#         cancel_btn.setStyleSheet(f"""
+#             QPushButton {{
+#                 background: {WHITE}; color: {DARK_TEXT};
+#                 border: 1.5px solid {BORDER}; border-radius: 6px;
+#                 font-size: 13px; padding: 0 18px;
+#             }}
+#             QPushButton:hover {{ background: {LIGHT}; border-color: {ACCENT}; }}
+#         """)
+#         cancel_btn.clicked.connect(self.reject)
+
+#         self._save_btn = QPushButton("Save Customer")
+#         self._save_btn.setFixedHeight(36)
+#         self._save_btn.setStyleSheet(f"""
+#             QPushButton {{
+#                 background: {SUCCESS}; color: {WHITE};
+#                 border: none; border-radius: 6px;
+#                 font-size: 13px; font-weight: bold; padding: 0 22px;
+#             }}
+#             QPushButton:hover {{ background: {SUCCESS_H}; }}
+#             QPushButton:disabled {{ background: {BORDER}; color: {MUTED}; }}
+#         """)
+#         self._save_btn.clicked.connect(self._save)
+
+#         bl.addWidget(cancel_btn)
+#         bl.addStretch()
+#         bl.addWidget(self._save_btn)
+#         root.addWidget(foot)
+
+#         # focus the first field
+#         self._f_first.setFocus()
+
+#     # -------------------------------------------------------------------------
+#     def _save(self):
+#         first = self._f_first.text().strip()
+#         last  = self._f_last.text().strip()
+#         phone = self._f_phone.text().strip()
+#         city  = self._f_city.text().strip()
+
+#         if not first:
+#             self._status.setText("First name is required.")
+#             self._f_first.setFocus()
+#             return
+
+#         # Build full customer_name from first + last
+#         full_name = f"{first} {last}".strip()
+
+#         self._save_btn.setEnabled(False)
+#         self._status.setText("")
+
+#         try:
+#             print("\n" + "="*60)
+#             print("[QuickAddCustomer] Starting save...")
+#             print(f"  full_name='{full_name}'  phone='{phone}'  city='{city}'")
+
+#             # Try to resolve FK IDs — all are optional (tables may be empty)
+#             from models.company_defaults import get_defaults
+#             defs = get_defaults()
+#             print(f"[QuickAddCustomer] defaults: warehouse='{defs.get('server_warehouse')}'"
+#                   f"  cost_center='{defs.get('server_cost_center')}'")
+
+#             from database.db import get_connection
+#             conn = get_connection()
+#             cur  = conn.cursor()
+
+#             def _find_id(table: str, name_val: str) -> int | None:
+#                 if not name_val:
+#                     return None
+#                 cur.execute(
+#                     f"SELECT id FROM {table} WHERE LTRIM(RTRIM(name)) = ?",
+#                     (name_val.strip(),)
+#                 )
+#                 row = cur.fetchone()
+#                 if row:
+#                     print(f"  [_find_id] {table} '{name_val}' → id={row[0]}")
+#                     return row[0]
+#                 # fallback: first row
+#                 cur.execute(f"SELECT TOP 1 id, name FROM {table} ORDER BY id ASC")
+#                 fb = cur.fetchone()
+#                 print(f"  [_find_id] {table} '{name_val}' NOT FOUND → fallback={fb}")
+#                 return fb[0] if fb else None
+
+#             warehouse_id   = _find_id("warehouses",      defs.get("server_warehouse", ""))
+#             cost_center_id = _find_id("cost_centers",    defs.get("server_cost_center", ""))
+#             price_list_id  = _find_id("price_lists",     "Standard Selling ZWG")
+#             group_id       = _find_id("customer_groups", "All Customer Groups")
+#             conn.close()
+
+#             print(f"[QuickAddCustomer] IDs → warehouse={warehouse_id}  "
+#                   f"cost_center={cost_center_id}  price_list={price_list_id}  group={group_id}")
+
+#             # Direct INSERT — pass None for any FK that couldn't be resolved
+#             conn2 = get_connection()
+#             cur2  = conn2.cursor()
+#             cur2.execute("""
+#                 INSERT INTO customers (
+#                     customer_name, customer_group_id, customer_type,
+#                     custom_trade_name, custom_telephone_number, custom_email_address,
+#                     custom_city, custom_house_no,
+#                     custom_warehouse_id, custom_cost_center_id, default_price_list_id
+#                 ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#             """, (
+#                 full_name, group_id, "Individual",
+#                 "", phone, "",
+#                 city, "",
+#                 warehouse_id, cost_center_id, price_list_id,
+#             ))
+#             new_id = int(cur2.fetchone()[0])
+#             conn2.commit()
+#             conn2.close()
+
+#             print(f"[QuickAddCustomer] SUCCESS: inserted id={new_id}  name='{full_name}'")
+#             print("="*60 + "\n")
+
+#             from models.customer import get_customer_by_id
+#             new_cust = get_customer_by_id(new_id) or {"id": new_id, "customer_name": full_name}
+#             self.customer_created.emit(new_cust)
+
+#             # ── Push to Frappe in background (non-blocking) ───────────────────
+#             self._push_to_frappe(
+#                 full_name=full_name,
+#                 phone=phone,
+#                 city=city,
+#                 defs=defs,
+#             )
+
+#             self.accept()
+
+#         except Exception as exc:
+#             import traceback
+#             print(f"[QuickAddCustomer] EXCEPTION:")
+#             traceback.print_exc()
+#             print("="*60 + "\n")
+#             self._status.setText(f"Error: {exc}")
+#             self._save_btn.setEnabled(True)
+
+#     # -------------------------------------------------------------------------
+#     def _push_to_frappe(
+#         self,
+#         full_name: str,
+#         phone: str,
+#         city: str,
+#         defs: dict,
+#     ) -> None:
+#         """
+#         Pushes the newly created customer to Frappe via the REST API.
+#         Runs in a daemon thread so it never blocks the UI.
+
+#         Frappe endpoint (POST):
+#           /api/resource/Customer
+
+#         Payload mirrors the fields Frappe expects for a Customer doctype,
+#         enriched with the company context stored in company_defaults.
+#         """
+#         import threading, json, urllib.request, urllib.error
+
+#         def _worker():
+#             try:
+#                 from services.credentials import get_credentials
+#                 api_key, api_secret = get_credentials()
+#             except Exception:
+#                 # Fallback: read directly from DB (same logic as customer_sync_service)
+#                 try:
+#                     from database.db import get_connection
+#                     _conn = get_connection()
+#                     _cur  = _conn.cursor()
+#                     _cur.execute(
+#                         "SELECT api_key, api_secret FROM companies "
+#                         "WHERE id=(SELECT MIN(id) FROM companies)"
+#                     )
+#                     _row = _cur.fetchone()
+#                     _conn.close()
+#                     api_key    = str(_row[0]) if _row and _row[0] else ""
+#                     api_secret = str(_row[1]) if _row and _row[1] else ""
+#                 except Exception:
+#                     api_key = api_secret = ""
+
+#             if not api_key or not api_secret:
+#                 print("[QuickAddCustomer→Frappe] No credentials — skipping push.")
+#                 return
+
+#             try:
+#                 from services.site_config import get_host as _gh
+#                 base_url = _gh()
+#             except Exception as e:
+#                 print(f"[QuickAddCustomer→Frappe] Could not get host: {e}")
+#                 return
+
+#             # Build the Frappe Customer payload.
+#             # custom_warehouse / custom_cost_center come from company_defaults
+#             # (the values already set on login, matching server_warehouse / server_cost_center).
+#             payload = {
+                
+#     "name": full_name,
+#     "customer_name": full_name,
+#     "customer_type": "Individual",
+#     "customer_group": "All Customer Groups",
+#     "currency": "USD",
+#     "custom_customer_tin": "00000000",
+#     "custom_customer_vat": "11111111",
+#     "custom_trade_name": "dansohol",
+#     "custom_email_address": "no-email.havano.cloud",
+#     "custom_telephone_number": phone or "0000000000",
+#     "custom_house_no": "1",
+#     "custom_street": "Unknown",
+#     "custom_customer_address": "N/A",
+#     "custom_city": city or "N/A",
+#     "custom_province": "N/A",
+#     "default_warehouse": defs.get("server_warehouse", ""),
+#     "default_price_list": "Standard Selling",
+#     "default_cost_center": defs.get("server_cost_center", ""),
+#     "is_active": True,
+# }
+                
+
+#             # Strip empty strings so Frappe doesn't reject with validation errors
+#             payload = {k: v for k, v in payload.items() if v}
+
+#             url  = f"{base_url}/api/method/saas_api.www.api.create_customer"
+#             body = json.dumps(payload).encode()
+#             req  = urllib.request.Request(
+#                 url,
+#                 data=body,
+#                 method="POST",
+#             )
+#             req.add_header("Authorization",  f"token {api_key}:{api_secret}")
+#             req.add_header("Content-Type",   "application/json")
+#             req.add_header("Accept",         "application/json")
+
+#             print(f"[QuickAddCustomer→Frappe] POST {url}")
+#             print(f"[QuickAddCustomer→Frappe] Payload: {json.dumps(payload, indent=2)}")
+
+#             try:
+#                 with urllib.request.urlopen(req, timeout=20) as resp:
+#                     result = json.loads(resp.read().decode())
+#                     frappe_name = result.get("data", {}).get("name", "?")
+#                     print(
+#                         f"[QuickAddCustomer→Frappe] ✓ Created on Frappe: {frappe_name}"
+#                     )
+#             except urllib.error.HTTPError as http_err:
+#                 body_text = http_err.read().decode(errors="replace")
+#                 print(
+#                     f"[QuickAddCustomer→Frappe] HTTP {http_err.code}: {body_text}"
+#                 )
+#             except Exception as push_err:
+#                 print(f"[QuickAddCustomer→Frappe] Push failed: {push_err}")
+
+#         t = threading.Thread(target=_worker, daemon=True, name="FrappeCustomerPush")
+#         t.start()
+
+# from __future__ import annotations
+
+# from PySide6.QtWidgets import (
+#     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+#     QLabel, QLineEdit, QFrame, QTableWidget, QTableWidgetItem,
+#     QHeaderView, QAbstractItemView, QMessageBox, QComboBox,
+#     QSizePolicy, QDoubleSpinBox, QListWidget, QListWidgetItem,
+# )
+# from PySide6.QtCore import Qt, Signal, QTimer
+# from PySide6.QtGui  import QColor
+
+# NAVY      = "#0d1f3c"
+# NAVY_2    = "#162d52"
+# WHITE     = "#ffffff"
+# OFF_WHITE = "#f5f8fc"
+# LIGHT     = "#e4eaf4"
+# BORDER    = "#c8d8ec"
+# DARK_TEXT = "#0d1f3c"
+# MUTED     = "#5a7a9a"
+# ACCENT    = "#1a5fb4"
+# ACCENT_H  = "#1c6dd0"
+# SUCCESS   = "#1a7a3c"
+# SUCCESS_H = "#1f9447"
+# DANGER    = "#b02020"
+# DANGER_H  = "#cc2828"
+# AMBER     = "#b7770d"
+# ORANGE    = "#c05a00"
+
+# REASONS = [
+#     "Customer Return",
+#     "Damaged Goods",
+#     "Wrong Item",
+#     "Overcharge",
+#     "Quality Issue",
+#     "Other",
+# ]
+
+
+# class CreditNoteDialog(QDialog):
+#     """
+#     Smart credit note dialog.
+#     After confirmation emits credit_note_ready(cn_dict) so the caller
+#     (POSView / OptionsDialog) can load it into the main table in return mode.
+#     """
+
+#     credit_note_ready = Signal(dict)   # emits the created CN dict
+
+#     def __init__(self, parent=None):
+#         super().__init__(parent)
+#         self.setWindowTitle("Credit Note / Return")
+#         self.setMinimumSize(860, 580)
+#         self.setModal(True)
+#         self.setWindowState(Qt.WindowMaximized)
+#         self.setStyleSheet(
+#             f"QDialog {{ background:{OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}"
+#         )
+
+#         self._sale:        dict | None = None
+#         self._all_sales:   list[dict]  = []
+#         self._search_timer = QTimer(self)
+#         self._search_timer.setSingleShot(True)
+#         self._search_timer.setInterval(200)      # 200 ms debounce
+#         self._search_timer.timeout.connect(self._run_search)
+
+#         self._build()
+#         self._preload_sales()
+
+#     # =========================================================================
+#     # Preload
+#     # =========================================================================
+
+#     def _preload_sales(self):
+#         """Load all sales once into memory for fast autocomplete."""
+#         try:
+#             from models.sale import get_all_sales
+#             self._all_sales = get_all_sales()
+#         except Exception:
+#             self._all_sales = []
+
+#     # =========================================================================
+#     # Build UI
+#     # =========================================================================
+
+#     def _build(self):
+#         root = QVBoxLayout(self)
+#         root.setSpacing(0)
+#         root.setContentsMargins(0, 0, 0, 0)
+
+#         # ── header ────────────────────────────────────────────────────────────
+#         hdr = QWidget()
+#         hdr.setFixedHeight(52)
+#         hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
+#         hl  = QHBoxLayout(hdr)
+#         hl.setContentsMargins(28, 0, 28, 0)
+#         title = QLabel("Credit Note / Return")
+#         title.setStyleSheet(
+#             f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;"
+#         )
+#         sub = QLabel("Search for an invoice, select items to return, then confirm.")
+#         sub.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
+#         hl.addWidget(title)
+#         hl.addSpacing(16)
+#         hl.addWidget(sub)
+#         hl.addStretch()
+#         root.addWidget(hdr)
+
+#         # ── body ──────────────────────────────────────────────────────────────
+#         body = QWidget()
+#         body.setStyleSheet(f"background:{OFF_WHITE};")
+#         bl = QVBoxLayout(body)
+#         bl.setContentsMargins(28, 18, 28, 18)
+#         bl.setSpacing(12)
+
+#         bl.addWidget(self._build_search_area())
+
+#         self._banner = self._build_banner()
+#         self._banner.setVisible(False)
+#         bl.addWidget(self._banner)
+
+#         self._items_frame = self._build_items_table()
+#         self._items_frame.setVisible(False)
+#         bl.addWidget(self._items_frame, stretch=1)
+
+#         bl.addWidget(self._build_btns())
+#         root.addWidget(body, stretch=1)
+
+#     # ── Search area ──────────────────────────────────────────────────────────
+
+#     def _build_search_area(self) -> QWidget:
+#         wrap = QWidget()
+#         wrap.setStyleSheet("background:transparent;")
+#         vl = QVBoxLayout(wrap)
+#         vl.setContentsMargins(0, 0, 0, 0)
+#         vl.setSpacing(4)
+
+#         row = QHBoxLayout()
+#         row.setSpacing(8)
+
+#         lbl = QLabel("Invoice / Customer:")
+#         lbl.setFixedWidth(140)
+#         lbl.setStyleSheet(
+#             f"color:{MUTED}; font-size:11px; font-weight:bold; background:transparent;"
+#         )
+
+#         self._search = QLineEdit()
+#         self._search.setPlaceholderText(
+#             "Type invoice number or customer name…"
+#         )
+#         self._search.setFixedHeight(38)
+#         self._search.setStyleSheet(f"""
+#             QLineEdit {{
+#                 background:{WHITE}; color:{DARK_TEXT};
+#                 border:2px solid {BORDER}; border-radius:6px;
+#                 font-size:13px; padding:0 12px;
+#             }}
+#             QLineEdit:focus {{ border:2px solid {ACCENT}; }}
+#         """)
+#         self._search.textChanged.connect(self._on_search_changed)
+#         self._search.returnPressed.connect(self._run_search)
+
+#         row.addWidget(lbl)
+#         row.addWidget(self._search, 1)
+#         vl.addLayout(row)
+
+#         # Autocomplete dropdown (hidden until there are results)
+#         self._ac_list = QListWidget()
+#         self._ac_list.setFixedHeight(0)        # collapsed by default
+#         self._ac_list.setStyleSheet(f"""
+#             QListWidget {{
+#                 background:{WHITE}; border:2px solid {ACCENT};
+#                 border-top:none; border-radius:0 0 6px 6px;
+#                 font-size:13px; color:{DARK_TEXT}; outline:none;
+#             }}
+#             QListWidget::item           {{ padding:7px 14px; min-height:28px; }}
+#             QListWidget::item:selected  {{ background:{ACCENT}; color:{WHITE}; }}
+#             QListWidget::item:hover     {{ background:{LIGHT}; }}
+#         """)
+#         self._ac_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+#         self._ac_list.itemClicked.connect(self._on_ac_clicked)
+#         # Indent to align under the QLineEdit
+#         ac_row = QHBoxLayout()
+#         ac_row.setContentsMargins(148, 0, 0, 0)   # 140 label + 8 spacing
+#         ac_row.addWidget(self._ac_list)
+#         vl.addLayout(ac_row)
+
+#         return wrap
+
+#     # ── Info banner ──────────────────────────────────────────────────────────
+
+#     def _build_banner(self) -> QFrame:
+#         f = QFrame()
+#         f.setFixedHeight(58)
+#         f.setStyleSheet(
+#             f"QFrame {{ background:{WHITE}; border:1px solid {BORDER}; border-radius:8px; }}"
+#         )
+#         hl = QHBoxLayout(f)
+#         hl.setContentsMargins(16, 0, 16, 0)
+#         hl.setSpacing(28)
+
+#         self._b_inv    = self._pill("INVOICE NO")
+#         self._b_cust   = self._pill("CUSTOMER")
+#         self._b_date   = self._pill("DATE")
+#         self._b_total  = self._pill("TOTAL")
+#         self._b_status = self._pill("FRAPPE STATUS")
+
+#         for w in [self._b_inv, self._b_cust, self._b_date,
+#                   self._b_total, self._b_status]:
+#             hl.addWidget(w)
+#         hl.addStretch()
+#         return f
+
+#     def _pill(self, cap: str) -> QWidget:
+#         w  = QWidget(); w.setStyleSheet("background:transparent;")
+#         vl = QVBoxLayout(w); vl.setContentsMargins(0, 4, 0, 4); vl.setSpacing(1)
+#         c  = QLabel(cap)
+#         c.setStyleSheet(
+#             f"color:{MUTED}; font-size:8px; font-weight:bold;"
+#             f" letter-spacing:0.8px; background:transparent;"
+#         )
+#         v  = QLabel("—")
+#         v.setStyleSheet(
+#             f"color:{DARK_TEXT}; font-size:12px; font-weight:bold; background:transparent;"
+#         )
+#         vl.addWidget(c); vl.addWidget(v)
+#         w._val = v
+#         return w
+
+#     def _set_pill(self, pill: QWidget, text: str, color: str = DARK_TEXT):
+#         pill._val.setText(text)
+#         pill._val.setStyleSheet(
+#             f"color:{color}; font-size:12px; font-weight:bold; background:transparent;"
+#         )
+
+#     # ── Items table ──────────────────────────────────────────────────────────
+
+#     def _build_items_table(self) -> QFrame:
+#         f  = QFrame(); f.setStyleSheet("QFrame{background:transparent;}")
+#         vl = QVBoxLayout(f); vl.setContentsMargins(0, 0, 0, 0); vl.setSpacing(5)
+
+#         cap = QLabel("Select items and quantities to return:")
+#         cap.setStyleSheet(
+#             f"color:{MUTED}; font-size:10px; font-weight:bold;"
+#             f" letter-spacing:0.6px; background:transparent;"
+#         )
+#         vl.addWidget(cap)
+
+#         self._tbl = QTableWidget(0, 6)
+#         self._tbl.setHorizontalHeaderLabels(
+#             ["✓", "ITEM", "UNIT PRICE", "ORIG QTY", "RETURN QTY", "REASON"]
+#         )
+#         hh = self._tbl.horizontalHeader()
+#         hh.setSectionResizeMode(0, QHeaderView.Fixed);  self._tbl.setColumnWidth(0, 36)
+#         hh.setSectionResizeMode(1, QHeaderView.Stretch)
+#         hh.setSectionResizeMode(2, QHeaderView.Fixed);  self._tbl.setColumnWidth(2, 100)
+#         hh.setSectionResizeMode(3, QHeaderView.Fixed);  self._tbl.setColumnWidth(3, 80)
+#         hh.setSectionResizeMode(4, QHeaderView.Fixed);  self._tbl.setColumnWidth(4, 110)
+#         hh.setSectionResizeMode(5, QHeaderView.Fixed);  self._tbl.setColumnWidth(5, 160)
+#         self._tbl.verticalHeader().setVisible(False)
+#         self._tbl.setAlternatingRowColors(True)
+#         self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+#         self._tbl.setSelectionMode(QAbstractItemView.NoSelection)
+#         self._tbl.setStyleSheet(f"""
+#             QTableWidget {{
+#                 background:{WHITE}; border:1px solid {BORDER};
+#                 gridline-color:{LIGHT}; font-size:12px; outline:none;
+#             }}
+#             QTableWidget::item           {{ padding:3px 8px; }}
+#             QTableWidget::item:alternate {{ background:{OFF_WHITE}; }}
+#             QHeaderView::section {{
+#                 background:{NAVY}; color:{WHITE};
+#                 padding:7px; border:none;
+#                 border-right:1px solid {NAVY_2};
+#                 font-size:10px; font-weight:bold;
+#             }}
+#         """)
+#         # Check/uncheck on row click
+#         self._tbl.cellClicked.connect(self._on_tbl_cell_clicked)
+#         vl.addWidget(self._tbl, 1)
+#         return f
+
+#     # ── Bottom buttons ────────────────────────────────────────────────────────
+
+#     def _build_btns(self) -> QWidget:
+#         w  = QWidget(); w.setStyleSheet("background:transparent;")
+#         hl = QHBoxLayout(w); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(10)
+
+#         bcancel = QPushButton("Cancel")
+#         bcancel.setFixedHeight(44); bcancel.setFixedWidth(100)
+#         bcancel.setCursor(Qt.PointingHandCursor)
+#         bcancel.setFocusPolicy(Qt.NoFocus)
+#         bcancel.setStyleSheet(f"""
+#             QPushButton {{ background:{LIGHT}; color:{DARK_TEXT};
+#                            border:1px solid {BORDER}; border-radius:6px;
+#                            font-size:13px; font-weight:bold; }}
+#             QPushButton:hover {{ background:{BORDER}; }}
+#         """)
+#         bcancel.clicked.connect(self.reject)
+
+#         self._btn_confirm = QPushButton("✅  Issue Credit Note")
+#         self._btn_confirm.setFixedHeight(44)
+#         self._btn_confirm.setEnabled(False)
+#         self._btn_confirm.setCursor(Qt.PointingHandCursor)
+#         self._btn_confirm.setFocusPolicy(Qt.NoFocus)
+#         self._btn_confirm.setStyleSheet(f"""
+#             QPushButton {{ background:{SUCCESS}; color:{WHITE}; border:none;
+#                            border-radius:6px; font-size:13px; font-weight:bold; }}
+#             QPushButton:hover    {{ background:{SUCCESS_H}; }}
+#             QPushButton:disabled {{ background:{LIGHT}; color:{MUTED}; }}
+#         """)
+#         self._btn_confirm.clicked.connect(self._confirm)
+
+#         hl.addWidget(bcancel)
+#         hl.addStretch()
+#         hl.addWidget(self._btn_confirm)
+#         return w
+
+#     # =========================================================================
+#     # Autocomplete logic
+#     # =========================================================================
+
+#     def _on_search_changed(self, text: str):
+#         self._search_timer.start()   # debounce
+
+#     def _run_search(self):
+#         query = self._search.text().strip().lower()
+#         self._ac_list.clear()
+
+#         if len(query) < 1:
+#             self._ac_list.setFixedHeight(0)
+#             return
+
+#         matches = [
+#             s for s in self._all_sales
+#             if query in (s.get("invoice_no") or "").lower()
+#             or query in (s.get("customer_name") or "").lower()
+#         ][:15]   # cap at 15 results
+
+#         if not matches:
+#             self._ac_list.setFixedHeight(0)
+#             return
+
+#         for s in matches:
+#             inv_no  = s.get("invoice_no", "")
+#             cust    = s.get("customer_name") or "Walk-in"
+#             total   = f"${float(s.get('total', 0)):.2f}"
+#             date    = s.get("invoice_date", "")
+#             label   = f"{inv_no}   ·   {cust}   ·   {total}   ·   {date}"
+#             it = QListWidgetItem(label)
+#             it.setData(Qt.UserRole, s)
+#             self._ac_list.addItem(it)
+
+#         row_h = 42
+#         visible = min(len(matches), 6)
+#         self._ac_list.setFixedHeight(visible * row_h)
+
+#     def _on_ac_clicked(self, item: QListWidgetItem):
+#         sale_stub = item.data(Qt.UserRole)
+#         self._ac_list.setFixedHeight(0)
+#         self._ac_list.clear()
+#         self._search.setText(sale_stub.get("invoice_no", ""))
+#         self._load_sale(sale_stub["id"])
+
+#     # =========================================================================
+#     # Load sale
+#     # =========================================================================
+
+#     def _load_sale(self, sale_id: int):
+#         try:
+#             from models.sale import get_sale_by_id
+#             full = get_sale_by_id(sale_id)
+#         except Exception as e:
+#             QMessageBox.warning(self, "Error", f"Could not load sale:\n{e}")
+#             return
+#         if not full:
+#             return
+
+#         self._sale = full
+
+#         # ── Banner ────────────────────────────────────────────────────────────
+#         frappe_ref = full.get("frappe_ref", "")
+#         synced     = full.get("synced", False)
+#         if frappe_ref:
+#             status_txt, status_col = frappe_ref, SUCCESS
+#         elif synced:
+#             status_txt, status_col = "Synced (no ref)", AMBER
+#         else:
+#             status_txt, status_col = "Not yet synced", AMBER
+
+#         self._set_pill(self._b_inv,    full.get("invoice_no", "—"))
+#         self._set_pill(self._b_cust,   full.get("customer_name") or "Walk-in")
+#         self._set_pill(self._b_date,   full.get("invoice_date", "—"))
+#         self._set_pill(self._b_total,  f"${full.get('total', 0):.2f}")
+#         self._set_pill(self._b_status, status_txt, status_col)
+#         self._banner.setVisible(True)
+
+#         # ── Items ─────────────────────────────────────────────────────────────
+#         self._populate_items(full.get("items", []))
+#         self._items_frame.setVisible(True)
+#         self._btn_confirm.setEnabled(True)
+
+#     # =========================================================================
+#     # Items table
+#     # =========================================================================
+
+#     def _populate_items(self, items: list[dict]):
+#         self._tbl.setRowCount(0)
+#         for item in items:
+#             r = self._tbl.rowCount()
+#             self._tbl.insertRow(r)
+#             self._tbl.setRowHeight(r, 40)
+
+#             # Col 0 — checkbox (checked by default)
+#             chk = QTableWidgetItem()
+#             chk.setCheckState(Qt.Checked)
+#             chk.setTextAlignment(Qt.AlignCenter)
+#             chk.setData(Qt.UserRole, item)
+#             self._tbl.setItem(r, 0, chk)
+
+#             # Col 1 — name
+#             self._tbl.setItem(r, 1, QTableWidgetItem(item.get("product_name", "")))
+
+#             # Col 2 — unit price
+#             pi = QTableWidgetItem(f"${float(item.get('price', 0)):.2f}")
+#             pi.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+#             self._tbl.setItem(r, 2, pi)
+
+#             # Col 3 — original qty
+#             orig_qty = float(item.get("qty", 0))
+#             oq = QTableWidgetItem(f"{orig_qty:.0f}")
+#             oq.setTextAlignment(Qt.AlignCenter)
+#             self._tbl.setItem(r, 3, oq)
+
+#             # Col 4 — return qty spinbox
+#             spin = QDoubleSpinBox()
+#             spin.setMinimum(0.01)
+#             spin.setMaximum(orig_qty)
+#             spin.setValue(orig_qty)
+#             spin.setDecimals(0)
+#             spin.setFixedHeight(30)
+#             spin.setStyleSheet(f"""
+#                 QDoubleSpinBox {{
+#                     background:{WHITE}; color:{DARK_TEXT};
+#                     border:1px solid {BORDER}; border-radius:5px;
+#                     font-size:12px; padding:0 6px;
+#                 }}
+#                 QDoubleSpinBox:focus {{ border:1px solid {ACCENT}; }}
+#             """)
+#             self._tbl.setCellWidget(r, 4, spin)
+
+#             # Col 5 — reason combo
+#             combo = QComboBox()
+#             combo.addItems(REASONS)
+#             combo.setFixedHeight(30)
+#             combo.setStyleSheet(f"""
+#                 QComboBox {{
+#                     background:{WHITE}; color:{DARK_TEXT};
+#                     border:1px solid {BORDER}; border-radius:5px;
+#                     font-size:11px; padding:0 6px;
+#                 }}
+#                 QComboBox::drop-down {{ border:none; }}
+#                 QComboBox QAbstractItemView {{
+#                     background:{WHITE}; border:1px solid {BORDER};
+#                     selection-background-color:{ACCENT}; selection-color:{WHITE};
+#                 }}
+#             """)
+#             self._tbl.setCellWidget(r, 5, combo)
+
+#     def _on_tbl_cell_clicked(self, row: int, col: int):
+#         """Clicking anywhere on a row toggles the checkbox."""
+#         chk = self._tbl.item(row, 0)
+#         if chk:
+#             new_state = Qt.Unchecked if chk.checkState() == Qt.Checked else Qt.Checked
+#             chk.setCheckState(new_state)
+
+#     # =========================================================================
+#     # Confirm
+#     # =========================================================================
+
+#     def _confirm(self):
+#         if not self._sale:
+#             return
+
+#         items_to_return = []
+#         for r in range(self._tbl.rowCount()):
+#             chk = self._tbl.item(r, 0)
+#             if not chk or chk.checkState() != Qt.Checked:
+#                 continue
+#             orig_item = chk.data(Qt.UserRole)
+#             spin      = self._tbl.cellWidget(r, 4)
+#             combo     = self._tbl.cellWidget(r, 5)
+#             qty       = float(spin.value()) if spin else float(orig_item.get("qty", 0))
+#             if qty <= 0:
+#                 continue
+#             price = float(orig_item.get("price", 0))
+#             items_to_return.append({
+#                 **orig_item,
+#                 "qty":    qty,
+#                 "total":  round(qty * price, 2),
+#                 "reason": combo.currentText() if combo else "Customer Return",
+#             })
+
+#         if not items_to_return:
+#             QMessageBox.warning(
+#                 self, "Nothing Selected",
+#                 "Please check at least one item and set a return quantity."
+#             )
+#             return
+
+#         total = sum(i["total"] for i in items_to_return)
+#         reply = QMessageBox.question(
+#             self, "Confirm Credit Note",
+#             f"Issue credit note for {len(items_to_return)} item(s)\n"
+#             f"Total: ${total:.2f}\n\n"
+#             f"Original invoice: {self._sale.get('invoice_no', '')}",
+#             QMessageBox.Yes | QMessageBox.No,
+#             QMessageBox.No,
+#         )
+#         if reply != QMessageBox.Yes:
+#             return
+
+#         try:
+#             from models.credit_note import create_credit_note
+#             cn = create_credit_note(
+#                 original_sale_id=self._sale["id"],
+#                 items_to_return=items_to_return,
+#                 currency=self._sale.get("currency", "USD"),
+#                 customer_name=self._sale.get("customer_name", ""),
+#             )
+#         except Exception as e:
+#             QMessageBox.critical(self, "Error", f"Could not create credit note:\n{e}")
+#             return
+
+#         # Status message
+#         status = cn.get("cn_status", "")
+#         if status == "ready":
+#             extra = "Will be submitted to Frappe shortly."
+#         elif status == "pending_sync":
+#             extra = "Queued — will sync after the original invoice syncs."
+#         else:
+#             extra = "Recorded locally."
+
+#         QMessageBox.information(
+#             self, "Credit Note Issued",
+#             f"✅  {cn['cn_number']} created.\n{extra}"
+#         )
+
+#         # Emit signal so POSView can load it into the main table
+#         self.credit_note_ready.emit({**cn, "items_to_return": items_to_return})
+#         self.accept()
+
+
+# # =============================================================================
+# # QuickAddCustomerDialog  — small "New Customer" popup launched from + New
+# # =============================================================================
+
+# class QuickAddCustomerDialog(QDialog):
+#     """
+#     Lightweight 3-field popup: Name · Phone · City.
+#     Everything else (warehouse, cost center, price list, group) is resolved
+#     automatically from company_defaults (the logged-in user's context).
+#     """
+
+#     customer_created = Signal(dict)   # emits the new customer dict on success
+
+#     def __init__(self, parent=None):
+#         super().__init__(parent)
+#         self.setWindowTitle("New Customer")
+#         self.setFixedWidth(400)
+#         self.setSizeGripEnabled(False)
+#         self.setModal(True)
+#         self.setStyleSheet(f"""
+#             QDialog {{
+#                 background: {WHITE};
+#                 font-family: 'Segoe UI', sans-serif;
+#             }}
+#             QLabel#section {{
+#                 color: {MUTED};
+#                 font-size: 10px;
+#                 font-weight: bold;
+#                 letter-spacing: 1px;
+#                 background: transparent;
+#             }}
+#         """)
+#         self._build()
+
+#     # -------------------------------------------------------------------------
+#     def _field(self, placeholder: str, required: bool = False) -> QLineEdit:
+#         le = QLineEdit()
+#         le.setPlaceholderText(placeholder + (" *" if required else ""))
+#         le.setFixedHeight(38)
+#         le.setStyleSheet(f"""
+#             QLineEdit {{
+#                 background: {OFF_WHITE};
+#                 color: {DARK_TEXT};
+#                 border: 1.5px solid {BORDER};
+#                 border-radius: 6px;
+#                 font-size: 13px;
+#                 padding: 0 10px;
+#             }}
+#             QLineEdit:focus {{ border: 1.5px solid {ACCENT}; background: {WHITE}; }}
+#         """)
+#         return le
+
+#     def _build(self):
+#         root = QVBoxLayout(self)
+#         root.setContentsMargins(0, 0, 0, 0)
+#         root.setSpacing(0)
+
+#         # ── header bar ────────────────────────────────────────────────────────
+#         hdr = QWidget()
+#         hdr.setFixedHeight(48)
+#         hdr.setStyleSheet(f"background: {NAVY}; border-radius: 0px;")
+#         hl = QHBoxLayout(hdr)
+#         hl.setContentsMargins(20, 0, 20, 0)
+#         title = QLabel("New Customer")
+#         title.setStyleSheet(
+#             f"color: {WHITE}; font-size: 15px; font-weight: bold; background: transparent;"
+#         )
+#         hl.addWidget(title)
+#         hl.addStretch()
+#         root.addWidget(hdr)
+
+#         # ── form body ─────────────────────────────────────────────────────────
+#         body = QWidget()
+#         body.setStyleSheet(f"background: {WHITE};")
+#         fl = QVBoxLayout(body)
+#         fl.setContentsMargins(24, 20, 24, 8)
+#         fl.setSpacing(10)
+
+#         self._f_first = self._field("First name", required=True)
+#         self._f_last  = self._field("Last name")
+#         self._f_phone = self._field("Phone number")
+#         self._f_city  = self._field("City")
+
+#         for lbl_txt, widget in [
+#             ("FIRST NAME",   self._f_first),
+#             ("LAST NAME",    self._f_last),
+#             ("PHONE NUMBER", self._f_phone),
+#             ("CITY",         self._f_city),
+#         ]:
+#             lbl = QLabel(lbl_txt)
+#             lbl.setObjectName("section")
+#             fl.addWidget(lbl)
+#             fl.addWidget(widget)
+
+#         # ── status label ──────────────────────────────────────────────────────
+#         self._status = QLabel("")
+#         self._status.setStyleSheet(
+#             f"color: {DANGER}; font-size: 11px; background: transparent;"
+#         )
+#         self._status.setAlignment(Qt.AlignCenter)
+#         fl.addWidget(self._status)
+
+#         root.addWidget(body)
+
+#         # ── footer buttons ────────────────────────────────────────────────────
+#         foot = QWidget()
+#         foot.setStyleSheet(
+#             f"background: {OFF_WHITE}; border-top: 1px solid {BORDER};"
+#         )
+#         bl = QHBoxLayout(foot)
+#         bl.setContentsMargins(24, 12, 24, 16)
+#         bl.setSpacing(10)
+
+#         cancel_btn = QPushButton("Cancel")
+#         cancel_btn.setFixedHeight(36)
+#         cancel_btn.setStyleSheet(f"""
+#             QPushButton {{
+#                 background: {WHITE}; color: {DARK_TEXT};
+#                 border: 1.5px solid {BORDER}; border-radius: 6px;
+#                 font-size: 13px; padding: 0 18px;
+#             }}
+#             QPushButton:hover {{ background: {LIGHT}; border-color: {ACCENT}; }}
+#         """)
+#         cancel_btn.clicked.connect(self.reject)
+
+#         self._save_btn = QPushButton("Save Customer")
+#         self._save_btn.setFixedHeight(36)
+#         self._save_btn.setStyleSheet(f"""
+#             QPushButton {{
+#                 background: {SUCCESS}; color: {WHITE};
+#                 border: none; border-radius: 6px;
+#                 font-size: 13px; font-weight: bold; padding: 0 22px;
+#             }}
+#             QPushButton:hover {{ background: {SUCCESS_H}; }}
+#             QPushButton:disabled {{ background: {BORDER}; color: {MUTED}; }}
+#         """)
+#         self._save_btn.clicked.connect(self._save)
+
+#         bl.addWidget(cancel_btn)
+#         bl.addStretch()
+#         bl.addWidget(self._save_btn)
+#         root.addWidget(foot)
+
+#         # focus the first field
+#         self._f_first.setFocus()
+
+#     # -------------------------------------------------------------------------
+#     def _save(self):
+#         first = self._f_first.text().strip()
+#         last  = self._f_last.text().strip()
+#         phone = self._f_phone.text().strip()
+#         city  = self._f_city.text().strip()
+
+#         if not first:
+#             self._status.setText("First name is required.")
+#             self._f_first.setFocus()
+#             return
+
+#         # Build full customer_name from first + last
+#         full_name = f"{first} {last}".strip()
+
+#         self._save_btn.setEnabled(False)
+#         self._status.setText("")
+
+#         try:
+#             print("\n" + "="*60)
+#             print("[QuickAddCustomer] Starting save...")
+#             print(f"  full_name='{full_name}'  phone='{phone}'  city='{city}'")
+
+#             # Try to resolve FK IDs — all are optional (tables may be empty)
+#             from models.company_defaults import get_defaults
+#             defs = get_defaults()
+#             print(f"[QuickAddCustomer] defaults: warehouse='{defs.get('server_warehouse')}'"
+#                   f"  cost_center='{defs.get('server_cost_center')}'")
+
+#             from database.db import get_connection
+#             conn = get_connection()
+#             cur  = conn.cursor()
+
+#             def _find_id(table: str, name_val: str) -> int | None:
+#                 if not name_val:
+#                     return None
+#                 cur.execute(
+#                     f"SELECT id FROM {table} WHERE LTRIM(RTRIM(name)) = ?",
+#                     (name_val.strip(),)
+#                 )
+#                 row = cur.fetchone()
+#                 if row:
+#                     print(f"  [_find_id] {table} '{name_val}' → id={row[0]}")
+#                     return row[0]
+#                 # fallback: first row
+#                 cur.execute(f"SELECT TOP 1 id, name FROM {table} ORDER BY id ASC")
+#                 fb = cur.fetchone()
+#                 print(f"  [_find_id] {table} '{name_val}' NOT FOUND → fallback={fb}")
+#                 return fb[0] if fb else None
+
+#             warehouse_id   = _find_id("warehouses",      defs.get("server_warehouse", ""))
+#             cost_center_id = _find_id("cost_centers",    defs.get("server_cost_center", ""))
+#             price_list_id  = _find_id("price_lists",     "Standard Selling ZWG")
+#             group_id       = _find_id("customer_groups", "All Customer Groups")
+#             conn.close()
+
+#             print(f"[QuickAddCustomer] IDs → warehouse={warehouse_id}  "
+#                   f"cost_center={cost_center_id}  price_list={price_list_id}  group={group_id}")
+
+#             # Direct INSERT — pass None for any FK that couldn't be resolved
+#             conn2 = get_connection()
+#             cur2  = conn2.cursor()
+#             cur2.execute("""
+#                 INSERT INTO customers (
+#                     customer_name, customer_group_id, customer_type,
+#                     custom_trade_name, custom_telephone_number, custom_email_address,
+#                     custom_city, custom_house_no,
+#                     custom_warehouse_id, custom_cost_center_id, default_price_list_id
+#                 ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#             """, (
+#                 full_name, group_id, "Individual",
+#                 "", phone, "",
+#                 city, "",
+#                 warehouse_id, cost_center_id, price_list_id,
+#             ))
+#             new_id = int(cur2.fetchone()[0])
+#             conn2.commit()
+#             conn2.close()
+
+#             print(f"[QuickAddCustomer] SUCCESS: inserted id={new_id}  name='{full_name}'")
+#             print("="*60 + "\n")
+
+#             from models.customer import get_customer_by_id
+#             new_cust = get_customer_by_id(new_id) or {"id": new_id, "customer_name": full_name}
+#             self.customer_created.emit(new_cust)
+#             self.accept()
+
+#         except Exception as exc:
+#             import traceback
+#             print(f"[QuickAddCustomer] EXCEPTION:")
+#             traceback.print_exc()
+#             print("="*60 + "\n")
+#             self._status.setText(f"Error: {exc}")
+#             self._save_btn.setEnabled(True)
 from __future__ import annotations
 
-import json
-import urllib.request
-import urllib.error
-from typing import Optional
-
-from PySide6.QtCore  import Qt, QThread, Signal, QTimer
 from PySide6.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QLineEdit, QComboBox, QPushButton,
-    QFrame, QMessageBox, QSizePolicy,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QScrollArea, QTabWidget,
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QLabel, QLineEdit, QFrame, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView, QMessageBox, QComboBox,
+    QSizePolicy, QDoubleSpinBox, QListWidget, QListWidgetItem,
 )
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui  import QColor
 
-# ── Colour palette (mirrors main_window.py) ───────────────────────────────────
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
-NAVY_3    = "#1e3d6e"
-ACCENT    = "#1a5fb4"
-ACCENT_H  = "#1c6dd0"
 WHITE     = "#ffffff"
 OFF_WHITE = "#f5f8fc"
 LIGHT     = "#e4eaf4"
-MID       = "#8fa8c8"
+BORDER    = "#c8d8ec"
 DARK_TEXT = "#0d1f3c"
 MUTED     = "#5a7a9a"
-BORDER    = "#c8d8ec"
-ROW_ALT   = "#edf3fb"
+ACCENT    = "#1a5fb4"
+ACCENT_H  = "#1c6dd0"
 SUCCESS   = "#1a7a3c"
 SUCCESS_H = "#1f9447"
 DANGER    = "#b02020"
 DANGER_H  = "#cc2828"
-AMBER     = "#b06000"
+AMBER     = "#b7770d"
 ORANGE    = "#c05a00"
 
-
-# ── Shared widget helpers ─────────────────────────────────────────────────────
-
-def _navy_btn(text: str, height: int = 34,
-              color: str = NAVY, hover: str = NAVY_2,
-              width: int = None) -> QPushButton:
-    btn = QPushButton(text)
-    btn.setFixedHeight(height)
-    if width:
-        btn.setFixedWidth(width)
-    btn.setCursor(Qt.PointingHandCursor)
-    btn.setStyleSheet(f"""
-        QPushButton {{
-            background-color:{color}; color:{WHITE}; border:none;
-            border-radius:5px; font-size:12px; font-weight:bold; padding:0 14px;
-        }}
-        QPushButton:hover   {{ background-color:{hover}; }}
-        QPushButton:pressed {{ background-color:{NAVY_3}; }}
-        QPushButton:disabled {{ background-color:{MID}; color:rgba(255,255,255,0.5); }}
-    """)
-    return btn
+REASONS = [
+    "Customer Return",
+    "Damaged Goods",
+    "Wrong Item",
+    "Overcharge",
+    "Quality Issue",
+    "Other",
+]
 
 
-def _hr() -> QFrame:
-    line = QFrame()
-    line.setFrameShape(QFrame.HLine)
-    line.setStyleSheet(f"background-color:{BORDER}; border:none;")
-    line.setFixedHeight(1)
-    return line
-
-
-def _field(label: str, placeholder: str = "", fixed_height: int = 34) -> tuple:
-    """Return (QLabel, QLineEdit) styled for the form."""
-    lbl = QLabel(label)
-    lbl.setStyleSheet(
-        f"font-size:11px; font-weight:bold; color:{MUTED}; background:transparent;"
-    )
-    inp = QLineEdit()
-    inp.setPlaceholderText(placeholder)
-    inp.setFixedHeight(fixed_height)
-    inp.setStyleSheet(f"""
-        QLineEdit {{
-            background:{WHITE}; color:{DARK_TEXT};
-            border:1px solid {BORDER}; border-radius:5px;
-            font-size:13px; padding:0 10px;
-        }}
-        QLineEdit:focus {{ border:2px solid {ACCENT}; }}
-    """)
-    return lbl, inp
-
-
-def _combo(label: str, fixed_height: int = 34) -> tuple:
-    """Return (QLabel, QComboBox) styled for the form."""
-    lbl = QLabel(label)
-    lbl.setStyleSheet(
-        f"font-size:11px; font-weight:bold; color:{MUTED}; background:transparent;"
-    )
-    cb = QComboBox()
-    cb.setFixedHeight(fixed_height)
-    cb.setStyleSheet(f"""
-        QComboBox {{
-            background:{WHITE}; color:{DARK_TEXT};
-            border:1px solid {BORDER}; border-radius:5px;
-            font-size:13px; padding:0 10px;
-        }}
-        QComboBox:focus {{ border:2px solid {ACCENT}; }}
-        QComboBox::drop-down {{ border:none; width:20px; }}
-        QComboBox QAbstractItemView {{
-            background:{WHITE}; border:1px solid {BORDER};
-            selection-background-color:{ACCENT}; selection-color:{WHITE};
-        }}
-    """)
-    return lbl, cb
-
-
-def _table_style() -> str:
-    return f"""
-        QTableWidget {{
-            background-color:{WHITE}; color:{DARK_TEXT};
-            border:1px solid {BORDER}; gridline-color:{LIGHT};
-            font-size:13px; outline:none;
-        }}
-        QTableWidget::item           {{ padding:0 8px; }}
-        QTableWidget::item:selected  {{ background-color:{ACCENT}; color:{WHITE}; }}
-        QTableWidget::item:alternate {{ background-color:{ROW_ALT}; }}
-        QHeaderView::section {{
-            background-color:#f0e8d0; color:{NAVY};
-            padding:10px 8px; border:none;
-            border-right:1px solid {BORDER};
-            font-size:11px; font-weight:bold; letter-spacing:0.5px;
-        }}
+class CreditNoteDialog(QDialog):
+    """
+    Smart credit note dialog.
+    After confirmation emits credit_note_ready(cn_dict) so the caller
+    (POSView / OptionsDialog) can load it into the main table in return mode.
     """
 
-
-# ── Site-config / credential helpers ─────────────────────────────────────────
-
-from services.site_config import get_host as _get_host
-
-def _get_credentials() -> tuple[str, str]:
-    try:
-        from services.credentials import get_credentials  # type: ignore
-        return get_credentials()
-    except Exception:
-        pass
-    try:
-        from services.credit_note_sync_service import _get_credentials as _c  # type: ignore
-        return _c()
-    except Exception:
-        pass
-    try:
-        from database.db import get_connection  # type: ignore
-        conn = get_connection()
-        cur  = conn.cursor()
-        cur.execute(
-            "SELECT api_key, api_secret FROM companies "
-            "WHERE id=(SELECT MIN(id) FROM companies)"
-        )
-        row = cur.fetchone()
-        conn.close()
-        if row and row[0]:
-            return str(row[0]), str(row[1] or "")
-    except Exception:
-        pass
-    return "", ""
-
-
-# ── Background worker ─────────────────────────────────────────────────────────
-
-class _ApiWorker(QThread):
-    """POST to create_customer or update in a background thread."""
-
-    success = Signal(dict)
-    error   = Signal(str)
-
-    def __init__(self, payload: dict, endpoint: str = "create_customer", parent=None):
-        super().__init__(parent)
-        self._payload  = payload
-        self._endpoint = endpoint
-
-    def run(self):
-        host        = _get_host()
-        key, secret = _get_credentials()
-        url         = f"https://{host}/api/method/saas_api.www.api.{self._endpoint}"
-        body        = json.dumps(self._payload).encode("utf-8")
-        req         = urllib.request.Request(
-            url, data=body, method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        if key:
-            req.add_header("Authorization", f"token {key}:{secret}")
-
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                self.success.emit(json.loads(resp.read().decode("utf-8")))
-        except urllib.error.HTTPError as exc:
-            try:
-                raw  = exc.read().decode("utf-8")
-                data = json.loads(raw)
-                msg  = data.get("exc_value") or data.get("message") or raw
-            except Exception:
-                msg = str(exc)
-            self.error.emit(f"HTTP {exc.code}: {msg}")
-        except Exception as exc:
-            self.error.emit(str(exc))
-
-
-# ── Main dialog ───────────────────────────────────────────────────────────────
-
-class CustomerDialog(QDialog):
-    """
-    Full Customer Management dialog.
-
-    Modes:
-    - Add:  blank form → saves locally + syncs to cloud
-    - Edit: double-click row → form filled → "Update Customer" saves locally
-
-    After exec() == Accepted, `dlg.created_customer` holds the saved dict.
-    """
+    credit_note_ready = Signal(dict)   # emits the created CN dict
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.created_customer: Optional[dict] = None
-        self._worker:          Optional[_ApiWorker] = None
-        self._editing_id:      Optional[int]        = None  # None = Add mode
-
-        self.setWindowTitle("Customer Management")
-        self.setMinimumSize(1080, 680)
+        self.setWindowTitle("Credit Note / Return")
+        self.setMinimumSize(860, 580)
         self.setModal(True)
-        self.setStyleSheet(f"QDialog {{ background-color:{WHITE}; }}")
+        self.setWindowState(Qt.WindowMaximized)
+        self.setStyleSheet(
+            f"QDialog {{ background:{OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}"
+        )
+
+        self._sale:        dict | None = None
+        self._all_sales:   list[dict]  = []
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)      # 200 ms debounce
+        self._search_timer.timeout.connect(self._run_search)
+
         self._build()
-        self._populate_combos()
+        self._preload_sales()
 
     # =========================================================================
-    # BUILD UI
+    # Preload
+    # =========================================================================
+
+    def _preload_sales(self):
+        """Load all sales once into memory for fast autocomplete."""
+        try:
+            from models.sale import get_all_sales
+            self._all_sales = get_all_sales()
+        except Exception:
+            self._all_sales = []
+
+    # =========================================================================
+    # Build UI
     # =========================================================================
 
     def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setSpacing(0)
-        lay.setContentsMargins(0, 0, 0, 0)
+        root = QVBoxLayout(self)
+        root.setSpacing(0)
+        root.setContentsMargins(0, 0, 0, 0)
 
-        # ── Header bar ────────────────────────────────────────────────────────
+        # ── header ────────────────────────────────────────────────────────────
         hdr = QWidget()
-        hdr.setFixedHeight(50)
-        hdr.setStyleSheet(f"background-color:{NAVY};")
+        hdr.setFixedHeight(52)
+        hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
         hl  = QHBoxLayout(hdr)
-        hl.setContentsMargins(20, 0, 20, 0); hl.setSpacing(12)
-
-        self._mode_badge = QLabel("ADD NEW CUSTOMER")
-        self._mode_badge.setStyleSheet(
-            f"font-size:14px; font-weight:bold; color:{WHITE}; background:transparent;"
+        hl.setContentsMargins(28, 0, 28, 0)
+        title = QLabel("Credit Note / Return")
+        title.setStyleSheet(
+            f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;"
         )
-        self._hdr_status = QLabel("")
-        self._hdr_status.setStyleSheet(
-            f"font-size:11px; color:{MID}; background:transparent;"
-        )
-        hl.addWidget(self._mode_badge)
+        sub = QLabel("Search for an invoice, select items to return, then confirm.")
+        sub.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
+        hl.addWidget(title)
+        hl.addSpacing(16)
+        hl.addWidget(sub)
         hl.addStretch()
-        hl.addWidget(self._hdr_status)
-        lay.addWidget(hdr)
+        root.addWidget(hdr)
 
-        # ── Body: left form + right table ─────────────────────────────────────
+        # ── body ──────────────────────────────────────────────────────────────
         body = QWidget()
         body.setStyleSheet(f"background:{OFF_WHITE};")
-        bl = QHBoxLayout(body)
-        bl.setContentsMargins(0, 0, 0, 0)
-        bl.setSpacing(0)
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(28, 18, 28, 18)
+        bl.setSpacing(12)
 
-        # Left panel: form
-        form_panel = QWidget()
-        form_panel.setFixedWidth(430)
-        form_panel.setStyleSheet(f"background:{WHITE}; border-right:1px solid {BORDER};")
-        fl = QVBoxLayout(form_panel)
-        fl.setContentsMargins(20, 16, 20, 16)
-        fl.setSpacing(10)
+        bl.addWidget(self._build_search_area())
 
-        form_scroll = QScrollArea()
-        form_scroll.setWidgetResizable(True)
-        form_scroll.setStyleSheet(f"QScrollArea {{ border:none; background:{WHITE}; }}")
+        self._banner = self._build_banner()
+        self._banner.setVisible(False)
+        bl.addWidget(self._banner)
 
-        form_inner = QWidget()
-        form_inner.setStyleSheet(f"background:{WHITE};")
-        fi = QVBoxLayout(form_inner)
-        fi.setContentsMargins(0, 0, 0, 0)
-        fi.setSpacing(8)
+        self._items_frame = self._build_items_table()
+        self._items_frame.setVisible(False)
+        bl.addWidget(self._items_frame, stretch=1)
 
-        def _section_hdr(text):
-            lbl = QLabel(text)
-            lbl.setStyleSheet(
-                f"font-size:10px; font-weight:bold; color:{MUTED}; background:transparent;"
-                f" letter-spacing:1px; text-transform:uppercase; "
-                f" border-left:3px solid {ACCENT}; padding-left:6px; margin-top:6px;"
-            )
-            return lbl
+        bl.addWidget(self._build_btns())
+        root.addWidget(body, stretch=1)
 
-        def _row(*widgets):
-            row = QWidget(); row.setStyleSheet("background:transparent;")
-            rl  = QHBoxLayout(row); rl.setSpacing(8); rl.setContentsMargins(0, 0, 0, 0)
-            for w in widgets:
-                rl.addWidget(w, 1)
-            return row
+    # ── Search area ──────────────────────────────────────────────────────────
 
-        def _wrap(lbl, inp):
-            w = QWidget(); w.setStyleSheet("background:transparent;")
-            wl = QVBoxLayout(w); wl.setSpacing(3); wl.setContentsMargins(0, 0, 0, 0)
-            wl.addWidget(lbl); wl.addWidget(inp)
-            return w
+    def _build_search_area(self) -> QWidget:
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        vl = QVBoxLayout(wrap)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(4)
 
-        # ── Section: Identity ─────────────────────────────────────────────────
-        fi.addWidget(_section_hdr("Identity"))
+        row = QHBoxLayout()
+        row.setSpacing(8)
 
-        l1, self._f_name  = _field("Customer Name *", "Full customer name")
-        l2, self._f_trade = _field("Trade Name",       "Trading / store name")
-        fi.addWidget(_row(_wrap(l1, self._f_name), _wrap(l2, self._f_trade)))
+        lbl = QLabel("Invoice / Customer:")
+        lbl.setFixedWidth(140)
+        lbl.setStyleSheet(
+            f"color:{MUTED}; font-size:11px; font-weight:bold; background:transparent;"
+        )
 
-        l3, self._f_type  = _combo("Type")
-        self._f_type.addItems(["", "Company", "Individual"])
-        l4, self._f_group = _combo("Customer Group *")
-        fi.addWidget(_row(_wrap(l3, self._f_type), _wrap(l4, self._f_group)))
-
-        # ── Section: Contact ──────────────────────────────────────────────────
-        fi.addWidget(_section_hdr("Contact"))
-
-        l5, self._f_phone = _field("Phone",  "+263 …")
-        l6, self._f_email = _field("Email",  "email@example.com")
-        fi.addWidget(_row(_wrap(l5, self._f_phone), _wrap(l6, self._f_email)))
-
-        # ── Section: Address ──────────────────────────────────────────────────
-        fi.addWidget(_section_hdr("Address"))
-
-        l7, self._f_city  = _field("City",       "Harare")
-        l8, self._f_prov  = _field("Province",   "Harare Province")
-        fi.addWidget(_row(_wrap(l7, self._f_city), _wrap(l8, self._f_prov)))
-
-        l9,  self._f_street = _field("Street",   "5th Ave")
-        l10, self._f_house  = _field("House No.", "12")
-        fi.addWidget(_row(_wrap(l9, self._f_street), _wrap(l10, self._f_house)))
-
-        l11, self._f_addr = _field("Full Address (optional)", "Combine of above")
-        fi.addWidget(_wrap(l11, self._f_addr))
-
-        # ── Section: Tax ─────────────────────────────────────────────────────
-        fi.addWidget(_section_hdr("Tax / Registration"))
-
-        l12, self._f_tin = _field("TIN",  "Tax Identification Number")
-        l13, self._f_vat = _field("VAT",  "VAT Registration Number")
-        fi.addWidget(_row(_wrap(l12, self._f_tin), _wrap(l13, self._f_vat)))
-
-        # ── Section: Defaults (auto-assigned) ─────────────────────────────────
-        fi.addWidget(_section_hdr("Auto-assigned Defaults"))
-
-        l14, self._f_wh = _combo("Warehouse *")
-        l15, self._f_cc = _combo("Cost Centre *")
-        fi.addWidget(_row(_wrap(l14, self._f_wh), _wrap(l15, self._f_cc)))
-
-        l16, self._f_pl = _combo("Price List *")
-        fi.addWidget(_wrap(l16, self._f_pl))
-
-        fi.addStretch()
-        form_scroll.setWidget(form_inner)
-        fl.addWidget(form_scroll, 1)
-
-        # ── Form action buttons ───────────────────────────────────────────────
-        fl.addWidget(_hr())
-        self._status = QLabel("")
-        self._status.setStyleSheet(f"font-size:12px; color:{DANGER}; background:transparent;")
-        fl.addWidget(self._status)
-
-        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
-        self._save_btn  = _navy_btn("➕  Add Customer",  height=36, color=SUCCESS, hover=SUCCESS_H)
-        self._clear_btn = _navy_btn("Clear Form",        height=36, color=MUTED,   hover=NAVY_2)
-        self._save_btn.clicked.connect(self._on_save)
-        self._clear_btn.clicked.connect(self._clear_form)
-        btn_row.addWidget(self._save_btn)
-        btn_row.addWidget(self._clear_btn)
-        fl.addLayout(btn_row)
-
-        bl.addWidget(form_panel)
-
-        # Right panel: customer table
-        right_panel = QWidget()
-        right_panel.setStyleSheet(f"background:{OFF_WHITE};")
-        rl2 = QVBoxLayout(right_panel)
-        rl2.setContentsMargins(16, 14, 16, 14)
-        rl2.setSpacing(8)
-
-        # Search
-        srch_row = QHBoxLayout(); srch_row.setSpacing(8)
-        srch_lbl = QLabel("🔍  Search customers:")
-        srch_lbl.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
-        self._srch = QLineEdit()
-        self._srch.setPlaceholderText("Name, phone or city…")
-        self._srch.setFixedHeight(32)
-        self._srch.setStyleSheet(f"""
-            QLineEdit {{ background:{WHITE}; color:{DARK_TEXT};
-                border:1px solid {BORDER}; border-radius:5px;
-                font-size:13px; padding:0 10px; }}
+        self._search = QLineEdit()
+        self._search.setPlaceholderText(
+            "Type invoice number or customer name…"
+        )
+        self._search.setFixedHeight(38)
+        self._search.setStyleSheet(f"""
+            QLineEdit {{
+                background:{WHITE}; color:{DARK_TEXT};
+                border:2px solid {BORDER}; border-radius:6px;
+                font-size:13px; padding:0 12px;
+            }}
             QLineEdit:focus {{ border:2px solid {ACCENT}; }}
         """)
-        self._srch.textChanged.connect(self._filter_table)
-        srch_row.addWidget(srch_lbl); srch_row.addWidget(self._srch, 1)
-        rl2.addLayout(srch_row)
+        self._search.textChanged.connect(self._on_search_changed)
+        self._search.returnPressed.connect(self._run_search)
 
-        self._count_lbl = QLabel("Loading…")
-        self._count_lbl.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
-        rl2.addWidget(self._count_lbl)
+        row.addWidget(lbl)
+        row.addWidget(self._search, 1)
+        vl.addLayout(row)
 
-        # Table — 7 cols + Actions
-        self._tbl = QTableWidget(0, 8)
-        self._tbl.setHorizontalHeaderLabels([
-            "Name", "Trade Name", "Type", "Phone", "City",
-            "Price List", "Group", "Actions",
-        ])
+        # Autocomplete dropdown (hidden until there are results)
+        self._ac_list = QListWidget()
+        self._ac_list.setFixedHeight(0)        # collapsed by default
+        self._ac_list.setStyleSheet(f"""
+            QListWidget {{
+                background:{WHITE}; border:2px solid {ACCENT};
+                border-top:none; border-radius:0 0 6px 6px;
+                font-size:13px; color:{DARK_TEXT}; outline:none;
+            }}
+            QListWidget::item           {{ padding:7px 14px; min-height:28px; }}
+            QListWidget::item:selected  {{ background:{ACCENT}; color:{WHITE}; }}
+            QListWidget::item:hover     {{ background:{LIGHT}; }}
+        """)
+        self._ac_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._ac_list.itemClicked.connect(self._on_ac_clicked)
+        # Indent to align under the QLineEdit
+        ac_row = QHBoxLayout()
+        ac_row.setContentsMargins(148, 0, 0, 0)   # 140 label + 8 spacing
+        ac_row.addWidget(self._ac_list)
+        vl.addLayout(ac_row)
+
+        return wrap
+
+    # ── Info banner ──────────────────────────────────────────────────────────
+
+    def _build_banner(self) -> QFrame:
+        f = QFrame()
+        f.setFixedHeight(58)
+        f.setStyleSheet(
+            f"QFrame {{ background:{WHITE}; border:1px solid {BORDER}; border-radius:8px; }}"
+        )
+        hl = QHBoxLayout(f)
+        hl.setContentsMargins(16, 0, 16, 0)
+        hl.setSpacing(28)
+
+        self._b_inv    = self._pill("INVOICE NO")
+        self._b_cust   = self._pill("CUSTOMER")
+        self._b_date   = self._pill("DATE")
+        self._b_total  = self._pill("TOTAL")
+        self._b_status = self._pill("FRAPPE STATUS")
+
+        for w in [self._b_inv, self._b_cust, self._b_date,
+                  self._b_total, self._b_status]:
+            hl.addWidget(w)
+        hl.addStretch()
+        return f
+
+    def _pill(self, cap: str) -> QWidget:
+        w  = QWidget(); w.setStyleSheet("background:transparent;")
+        vl = QVBoxLayout(w); vl.setContentsMargins(0, 4, 0, 4); vl.setSpacing(1)
+        c  = QLabel(cap)
+        c.setStyleSheet(
+            f"color:{MUTED}; font-size:8px; font-weight:bold;"
+            f" letter-spacing:0.8px; background:transparent;"
+        )
+        v  = QLabel("—")
+        v.setStyleSheet(
+            f"color:{DARK_TEXT}; font-size:12px; font-weight:bold; background:transparent;"
+        )
+        vl.addWidget(c); vl.addWidget(v)
+        w._val = v
+        return w
+
+    def _set_pill(self, pill: QWidget, text: str, color: str = DARK_TEXT):
+        pill._val.setText(text)
+        pill._val.setStyleSheet(
+            f"color:{color}; font-size:12px; font-weight:bold; background:transparent;"
+        )
+
+    # ── Items table ──────────────────────────────────────────────────────────
+
+    def _build_items_table(self) -> QFrame:
+        f  = QFrame(); f.setStyleSheet("QFrame{background:transparent;}")
+        vl = QVBoxLayout(f); vl.setContentsMargins(0, 0, 0, 0); vl.setSpacing(5)
+
+        cap = QLabel("Select items and quantities to return:")
+        cap.setStyleSheet(
+            f"color:{MUTED}; font-size:10px; font-weight:bold;"
+            f" letter-spacing:0.6px; background:transparent;"
+        )
+        vl.addWidget(cap)
+
+        self._tbl = QTableWidget(0, 6)
+        self._tbl.setHorizontalHeaderLabels(
+            ["✓", "ITEM", "UNIT PRICE", "ORIG QTY", "RETURN QTY", "REASON"]
+        )
         hh = self._tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh.setSectionResizeMode(0, QHeaderView.Fixed);  self._tbl.setColumnWidth(0, 36)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        for ci in [2, 3, 4, 5, 6]:
-            hh.setSectionResizeMode(ci, QHeaderView.Fixed)
-            self._tbl.setColumnWidth(ci, 100)
-        hh.setSectionResizeMode(7, QHeaderView.Fixed)
-        self._tbl.setColumnWidth(7, 130)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed);  self._tbl.setColumnWidth(2, 100)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed);  self._tbl.setColumnWidth(3, 80)
+        hh.setSectionResizeMode(4, QHeaderView.Fixed);  self._tbl.setColumnWidth(4, 110)
+        hh.setSectionResizeMode(5, QHeaderView.Fixed);  self._tbl.setColumnWidth(5, 160)
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.setAlternatingRowColors(True)
         self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._tbl.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._tbl.setStyleSheet(_table_style())
-        self._tbl.doubleClicked.connect(self._on_row_double_clicked)
-        rl2.addWidget(self._tbl, 1)
+        self._tbl.setSelectionMode(QAbstractItemView.NoSelection)
+        self._tbl.setStyleSheet(f"""
+            QTableWidget {{
+                background:{WHITE}; border:1px solid {BORDER};
+                gridline-color:{LIGHT}; font-size:12px; outline:none;
+            }}
+            QTableWidget::item           {{ padding:3px 8px; }}
+            QTableWidget::item:alternate {{ background:{OFF_WHITE}; }}
+            QHeaderView::section {{
+                background:{NAVY}; color:{WHITE};
+                padding:7px; border:none;
+                border-right:1px solid {NAVY_2};
+                font-size:10px; font-weight:bold;
+            }}
+        """)
+        # Check/uncheck on row click
+        self._tbl.cellClicked.connect(self._on_tbl_cell_clicked)
+        vl.addWidget(self._tbl, 1)
+        return f
 
-        # Bottom bar
-        bb = QHBoxLayout(); bb.setSpacing(8)
-        self._sync_btn = _navy_btn("☁  Sync from Cloud", height=34, color=NAVY_2, hover=NAVY_3)
-        self._sync_btn.clicked.connect(self._on_sync)
-        close_btn = _navy_btn("Close", height=34, color=DANGER, hover=DANGER_H)
-        close_btn.clicked.connect(self.reject)
-        bb.addWidget(self._sync_btn)
-        bb.addStretch()
-        bb.addWidget(close_btn)
-        rl2.addLayout(bb)
+    # ── Bottom buttons ────────────────────────────────────────────────────────
 
-        bl.addWidget(right_panel, 1)
+    def _build_btns(self) -> QWidget:
+        w  = QWidget(); w.setStyleSheet("background:transparent;")
+        hl = QHBoxLayout(w); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(10)
 
-        lay.addWidget(body, 1)
+        bcancel = QPushButton("Cancel")
+        bcancel.setFixedHeight(44); bcancel.setFixedWidth(100)
+        bcancel.setCursor(Qt.PointingHandCursor)
+        bcancel.setFocusPolicy(Qt.NoFocus)
+        bcancel.setStyleSheet(f"""
+            QPushButton {{ background:{LIGHT}; color:{DARK_TEXT};
+                           border:1px solid {BORDER}; border-radius:6px;
+                           font-size:13px; font-weight:bold; }}
+            QPushButton:hover {{ background:{BORDER}; }}
+        """)
+        bcancel.clicked.connect(self.reject)
+
+        self._btn_confirm = QPushButton("✅  Issue Credit Note")
+        self._btn_confirm.setFixedHeight(44)
+        self._btn_confirm.setEnabled(False)
+        self._btn_confirm.setCursor(Qt.PointingHandCursor)
+        self._btn_confirm.setFocusPolicy(Qt.NoFocus)
+        self._btn_confirm.setStyleSheet(f"""
+            QPushButton {{ background:{SUCCESS}; color:{WHITE}; border:none;
+                           border-radius:6px; font-size:13px; font-weight:bold; }}
+            QPushButton:hover    {{ background:{SUCCESS_H}; }}
+            QPushButton:disabled {{ background:{LIGHT}; color:{MUTED}; }}
+        """)
+        self._btn_confirm.clicked.connect(self._confirm)
+
+        hl.addWidget(bcancel)
+        hl.addStretch()
+        hl.addWidget(self._btn_confirm)
+        return w
 
     # =========================================================================
-    # POPULATE COMBOS & TABLE
+    # Autocomplete logic
     # =========================================================================
 
-    def _populate_combos(self):
-        try:
-            from models.customer_group import get_all_customer_groups  # type: ignore
-            from models.warehouse      import get_all_warehouses        # type: ignore
-            from models.cost_center    import get_all_cost_centers      # type: ignore
-            from models.price_list     import get_all_price_lists       # type: ignore
-            groups = get_all_customer_groups()
-            whs    = get_all_warehouses()
-            ccs    = get_all_cost_centers()
-            pls    = get_all_price_lists()
-        except Exception:
-            groups = []; whs = []; ccs = []; pls = []
+    def _on_search_changed(self, text: str):
+        self._search_timer.start()   # debounce
 
-        for cb in [self._f_group, self._f_wh, self._f_cc, self._f_pl]:
-            cb.clear()
+    def _run_search(self):
+        query = self._search.text().strip().lower()
+        self._ac_list.clear()
 
-        for g in groups:
-            self._f_group.addItem(g["name"], g["id"])
-        for w in whs:
-            self._f_wh.addItem(f"{w['name']} ({w.get('company_name', '')})", w["id"])
-        for cc in ccs:
-            self._f_cc.addItem(f"{cc['name']} ({cc.get('company_name', '')})", cc["id"])
-        for pl in pls:
-            self._f_pl.addItem(pl["name"], pl["id"])
-
-        self._reload_table()
-
-    # ── All customers ─────────────────────────────────────────────────────────
-    def _reload_table(self):
-        try:
-            from models.customer import get_all_customers  # type: ignore
-            self._all_customers = get_all_customers()
-        except Exception:
-            self._all_customers = []
-        self._render_table(self._all_customers)
-
-    def _filter_table(self, query: str):
-        if not query.strip():
-            self._render_table(self._all_customers)
+        if len(query) < 1:
+            self._ac_list.setFixedHeight(0)
             return
-        ql = query.lower()
-        filtered = [
-            c for c in self._all_customers
-            if ql in (c.get("customer_name", "") or "").lower()
-            or ql in (c.get("custom_telephone_number", "") or "").lower()
-            or ql in (c.get("custom_city", "") or "").lower()
-            or ql in (c.get("custom_trade_name", "") or "").lower()
-        ]
-        self._render_table(filtered)
 
-    def _render_table(self, custs: list):
+        matches = [
+            s for s in self._all_sales
+            if query in (s.get("invoice_no") or "").lower()
+            or query in (s.get("customer_name") or "").lower()
+        ][:15]   # cap at 15 results
+
+        if not matches:
+            self._ac_list.setFixedHeight(0)
+            return
+
+        for s in matches:
+            inv_no  = s.get("invoice_no", "")
+            cust    = s.get("customer_name") or "Walk-in"
+            total   = f"${float(s.get('total', 0)):.2f}"
+            date    = s.get("invoice_date", "")
+            label   = f"{inv_no}   ·   {cust}   ·   {total}   ·   {date}"
+            it = QListWidgetItem(label)
+            it.setData(Qt.UserRole, s)
+            self._ac_list.addItem(it)
+
+        row_h = 42
+        visible = min(len(matches), 6)
+        self._ac_list.setFixedHeight(visible * row_h)
+
+    def _on_ac_clicked(self, item: QListWidgetItem):
+        sale_stub = item.data(Qt.UserRole)
+        self._ac_list.setFixedHeight(0)
+        self._ac_list.clear()
+        self._search.setText(sale_stub.get("invoice_no", ""))
+        self._load_sale(sale_stub["id"])
+
+    # =========================================================================
+    # Load sale
+    # =========================================================================
+
+    def _load_sale(self, sale_id: int):
+        try:
+            from models.sale import get_sale_by_id
+            full = get_sale_by_id(sale_id)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not load sale:\n{e}")
+            return
+        if not full:
+            return
+
+        self._sale = full
+
+        # ── Banner ────────────────────────────────────────────────────────────
+        frappe_ref = full.get("frappe_ref", "")
+        synced     = full.get("synced", False)
+        if frappe_ref:
+            status_txt, status_col = frappe_ref, SUCCESS
+        elif synced:
+            status_txt, status_col = "Synced (no ref)", AMBER
+        else:
+            status_txt, status_col = "Not yet synced", AMBER
+
+        self._set_pill(self._b_inv,    full.get("invoice_no", "—"))
+        self._set_pill(self._b_cust,   full.get("customer_name") or "Walk-in")
+        self._set_pill(self._b_date,   full.get("invoice_date", "—"))
+        self._set_pill(self._b_total,  f"${full.get('total', 0):.2f}")
+        self._set_pill(self._b_status, status_txt, status_col)
+        self._banner.setVisible(True)
+
+        # ── Items ─────────────────────────────────────────────────────────────
+        self._populate_items(full.get("items", []))
+        self._items_frame.setVisible(True)
+        self._btn_confirm.setEnabled(True)
+
+    # =========================================================================
+    # Items table
+    # =========================================================================
+
+    def _populate_items(self, items: list[dict]):
         self._tbl.setRowCount(0)
-        for c in custs:
+        for item in items:
             r = self._tbl.rowCount()
             self._tbl.insertRow(r)
-            for col, val in enumerate([
-                c.get("customer_name", ""),
-                c.get("custom_trade_name", ""),
-                c.get("customer_type", ""),
-                c.get("custom_telephone_number", ""),
-                c.get("custom_city", ""),
-                c.get("price_list_name", ""),
-                c.get("customer_group_name", ""),
-            ]):
-                it = QTableWidgetItem(str(val or ""))
-                it.setData(Qt.UserRole, c)
-                self._tbl.setItem(r, col, it)
+            self._tbl.setRowHeight(r, 40)
 
-            # Actions cell
-            act_w = QWidget(); act_w.setStyleSheet("background:transparent;")
-            act_l = QHBoxLayout(act_w); act_l.setContentsMargins(4, 2, 4, 2); act_l.setSpacing(4)
-            edit_btn = QPushButton("✏  Edit")
-            edit_btn.setFixedHeight(26)
-            edit_btn.setCursor(Qt.PointingHandCursor)
-            edit_btn.setStyleSheet(f"""
-                QPushButton {{ background:{ACCENT}; color:{WHITE}; border:none;
-                    border-radius:3px; font-size:11px; font-weight:bold; padding:0 8px; }}
-                QPushButton:hover {{ background:{ACCENT_H}; }}
+            # Col 0 — checkbox (checked by default)
+            chk = QTableWidgetItem()
+            chk.setCheckState(Qt.Checked)
+            chk.setTextAlignment(Qt.AlignCenter)
+            chk.setData(Qt.UserRole, item)
+            self._tbl.setItem(r, 0, chk)
+
+            # Col 1 — name
+            self._tbl.setItem(r, 1, QTableWidgetItem(item.get("product_name", "")))
+
+            # Col 2 — unit price
+            pi = QTableWidgetItem(f"${float(item.get('price', 0)):.2f}")
+            pi.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._tbl.setItem(r, 2, pi)
+
+            # Col 3 — original qty
+            orig_qty = float(item.get("qty", 0))
+            oq = QTableWidgetItem(f"{orig_qty:.0f}")
+            oq.setTextAlignment(Qt.AlignCenter)
+            self._tbl.setItem(r, 3, oq)
+
+            # Col 4 — return qty spinbox
+            spin = QDoubleSpinBox()
+            spin.setMinimum(0.01)
+            spin.setMaximum(orig_qty)
+            spin.setValue(orig_qty)
+            spin.setDecimals(0)
+            spin.setFixedHeight(30)
+            spin.setStyleSheet(f"""
+                QDoubleSpinBox {{
+                    background:{WHITE}; color:{DARK_TEXT};
+                    border:1px solid {BORDER}; border-radius:5px;
+                    font-size:12px; padding:0 6px;
+                }}
+                QDoubleSpinBox:focus {{ border:1px solid {ACCENT}; }}
             """)
-            del_btn = QPushButton("🗑")
-            del_btn.setFixedHeight(26)
-            del_btn.setCursor(Qt.PointingHandCursor)
-            del_btn.setStyleSheet(f"""
-                QPushButton {{ background:{DANGER}; color:{WHITE}; border:none;
-                    border-radius:3px; font-size:11px; font-weight:bold; padding:0 8px; }}
-                QPushButton:hover {{ background:{DANGER_H}; }}
+            self._tbl.setCellWidget(r, 4, spin)
+
+            # Col 5 — reason combo
+            combo = QComboBox()
+            combo.addItems(REASONS)
+            combo.setFixedHeight(30)
+            combo.setStyleSheet(f"""
+                QComboBox {{
+                    background:{WHITE}; color:{DARK_TEXT};
+                    border:1px solid {BORDER}; border-radius:5px;
+                    font-size:11px; padding:0 6px;
+                }}
+                QComboBox::drop-down {{ border:none; }}
+                QComboBox QAbstractItemView {{
+                    background:{WHITE}; border:1px solid {BORDER};
+                    selection-background-color:{ACCENT}; selection-color:{WHITE};
+                }}
             """)
-            edit_btn.clicked.connect(lambda _, cust=c: self._load_into_form(cust))
-            del_btn.clicked.connect(lambda _, cust=c: self._delete_customer(cust))
-            act_l.addWidget(edit_btn); act_l.addWidget(del_btn)
-            self._tbl.setCellWidget(r, 7, act_w)
-            self._tbl.setRowHeight(r, 36)
+            self._tbl.setCellWidget(r, 5, combo)
 
-        n = self._tbl.rowCount()
-        self._count_lbl.setText(f"{n} customer{'s' if n != 1 else ''}")
-
-    # =========================================================================
-    # FORM OPERATIONS
-    # =========================================================================
-
-    def _load_into_form(self, cust: dict):
-        """Load a customer dict into the form for editing."""
-        self._editing_id = cust.get("id")
-        self._mode_badge.setText("✏  EDIT CUSTOMER")
-        self._mode_badge.setStyleSheet(
-            f"font-size:14px; font-weight:bold; color:{AMBER}; background:transparent;"
-        )
-        self._save_btn.setText("💾  Update Customer")
-        self._save_btn.setStyleSheet(self._save_btn.styleSheet().replace(SUCCESS, AMBER).replace(SUCCESS_H, ORANGE))
-
-        self._f_name.setText(cust.get("customer_name", ""))
-        self._f_trade.setText(cust.get("custom_trade_name", ""))
-        self._f_phone.setText(cust.get("custom_telephone_number", ""))
-        self._f_email.setText(cust.get("custom_email_address", ""))
-        self._f_tin.setText(cust.get("custom_customer_tin", ""))
-        self._f_vat.setText(cust.get("custom_customer_vat", ""))
-        self._f_addr.setText(cust.get("custom_customer_address", ""))
-        self._f_prov.setText(cust.get("custom_province", ""))
-        self._f_street.setText(cust.get("custom_street", ""))
-        self._f_city.setText(cust.get("custom_city", ""))
-        self._f_house.setText(cust.get("custom_house_no", ""))
-
-        # type
-        idx = self._f_type.findText(cust.get("customer_type", ""))
-        if idx >= 0:
-            self._f_type.setCurrentIndex(idx)
-
-        # group
-        gname = cust.get("customer_group_name", "")
-        for i in range(self._f_group.count()):
-            if self._f_group.itemText(i) == gname:
-                self._f_group.setCurrentIndex(i); break
-
-        # warehouse, cost center, price list — best-effort by name
-        wh = cust.get("custom_warehouse_name", "")
-        for i in range(self._f_wh.count()):
-            if self._f_wh.itemText(i).startswith(wh):
-                self._f_wh.setCurrentIndex(i); break
-
-        cc = cust.get("custom_cost_center_name", "")
-        for i in range(self._f_cc.count()):
-            if self._f_cc.itemText(i).startswith(cc):
-                self._f_cc.setCurrentIndex(i); break
-
-        pl = cust.get("price_list_name", "")
-        for i in range(self._f_pl.count()):
-            if self._f_pl.itemText(i) == pl:
-                self._f_pl.setCurrentIndex(i); break
-
-        self._set_status("Editing customer — make changes then click Update.", color=AMBER)
-        self._f_name.setFocus()
-
-    def _clear_form(self):
-        """Reset form to Add mode."""
-        self._editing_id = None
-        self._mode_badge.setText("ADD NEW CUSTOMER")
-        self._mode_badge.setStyleSheet(
-            f"font-size:14px; font-weight:bold; color:{WHITE}; background:transparent;"
-        )
-        self._save_btn.setText("➕  Add Customer")
-        self._save_btn.setStyleSheet(
-            self._save_btn.styleSheet().replace(AMBER, SUCCESS).replace(ORANGE, SUCCESS_H)
-        )
-        for f in [self._f_name, self._f_trade, self._f_phone, self._f_email,
-                  self._f_city, self._f_house, self._f_tin, self._f_vat,
-                  self._f_addr, self._f_prov, self._f_street]:
-            f.clear()
-        self._f_type.setCurrentIndex(0)
-        self._set_status("")
-
-    def _on_row_double_clicked(self, index):
-        row = index.row()
-        item = self._tbl.item(row, 0)
-        if item:
-            self._load_into_form(item.data(Qt.UserRole))
+    def _on_tbl_cell_clicked(self, row: int, col: int):
+        """Clicking anywhere on a row toggles the checkbox."""
+        chk = self._tbl.item(row, 0)
+        if chk:
+            new_state = Qt.Unchecked if chk.checkState() == Qt.Checked else Qt.Checked
+            chk.setCheckState(new_state)
 
     # =========================================================================
-    # DELETE
+    # Confirm
     # =========================================================================
 
-    def _delete_customer(self, cust: dict):
-        name = cust.get("customer_name", "?")
+    def _confirm(self):
+        if not self._sale:
+            return
+
+        items_to_return = []
+        for r in range(self._tbl.rowCount()):
+            chk = self._tbl.item(r, 0)
+            if not chk or chk.checkState() != Qt.Checked:
+                continue
+            orig_item = chk.data(Qt.UserRole)
+            spin      = self._tbl.cellWidget(r, 4)
+            combo     = self._tbl.cellWidget(r, 5)
+            qty       = float(spin.value()) if spin else float(orig_item.get("qty", 0))
+            if qty <= 0:
+                continue
+            price = float(orig_item.get("price", 0))
+            items_to_return.append({
+                **orig_item,
+                "qty":    qty,
+                "total":  round(qty * price, 2),
+                "reason": combo.currentText() if combo else "Customer Return",
+            })
+
+        if not items_to_return:
+            QMessageBox.warning(
+                self, "Nothing Selected",
+                "Please check at least one item and set a return quantity."
+            )
+            return
+
+        total = sum(i["total"] for i in items_to_return)
         reply = QMessageBox.question(
-            self, "Delete Customer",
-            f"Delete customer '{name}' from the local database?\n\n"
-            "Note: this does NOT delete them from Frappe/cloud.",
+            self, "Confirm Credit Note",
+            f"Issue credit note for {len(items_to_return)} item(s)\n"
+            f"Total: ${total:.2f}\n\n"
+            f"Original invoice: {self._sale.get('invoice_no', '')}",
             QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
+
         try:
-            from models.customer import delete_customer  # type: ignore
-            delete_customer(cust["id"])
-            self._reload_table()
-            self._set_status(f"'{name}' deleted locally.", color=SUCCESS)
+            from models.credit_note import create_credit_note
+            cn = create_credit_note(
+                original_sale_id=self._sale["id"],
+                items_to_return=items_to_return,
+                currency=self._sale.get("currency", "USD"),
+                customer_name=self._sale.get("customer_name", ""),
+            )
         except Exception as e:
-            QMessageBox.warning(self, "Delete Error", f"Could not delete:\n{e}")
-
-    # =========================================================================
-    # STATUS HELPERS
-    # =========================================================================
-
-    def _set_status(self, msg: str, color: str = DANGER):
-        self._status.setText(msg)
-        self._status.setStyleSheet(
-            f"font-size:12px; color:{color}; background:transparent;"
-        )
-
-    def _set_busy(self, busy: bool):
-        self._save_btn.setEnabled(not busy)
-        self._save_btn.setText("⏳  Saving…" if busy else (
-            "💾  Update Customer" if self._editing_id else "➕  Add Customer"
-        ))
-        self._hdr_status.setText("Connecting to cloud…" if busy else "")
-
-    # =========================================================================
-    # VALIDATE & BUILD PAYLOAD
-    # =========================================================================
-
-    def _build_payload(self) -> Optional[dict]:
-        name = self._f_name.text().strip()
-        if not name:
-            self._set_status("Customer name is required.")
-            self._f_name.setFocus()
-            return None
-
-        gid  = self._f_group.currentData()
-        wid  = self._f_wh.currentData()
-        ccid = self._f_cc.currentData()
-        plid = self._f_pl.currentData()
-
-        if not all([gid, wid, ccid, plid]):
-            self._set_status("Group, Warehouse, Cost Centre and Price List are required.")
-            return None
-
-        wh_name = self._f_wh.currentText().split(" (")[0]
-        cc_name = self._f_cc.currentText().split(" (")[0]
-        pl_name = self._f_pl.currentText()
-
-        return {
-            "customer_name":           name,
-            "custom_trade_name":       self._f_trade.text().strip(),
-            "custom_customer_tin":     self._f_tin.text().strip(),
-            "custom_customer_vat":     self._f_vat.text().strip(),
-            "custom_customer_address": self._f_addr.text().strip(),
-            "custom_telephone_number": self._f_phone.text().strip(),
-            "custom_province":         self._f_prov.text().strip(),
-            "custom_street":           self._f_street.text().strip(),
-            "custom_city":             self._f_city.text().strip(),
-            "custom_house_no":         self._f_house.text().strip(),
-            "custom_email_address":    self._f_email.text().strip(),
-            "default_price_list":      pl_name,
-            "default_cost_center":     cc_name,
-            "default_warehouse":       wh_name,
-            # local IDs for DB
-            "_group_id": gid,
-            "_wh_id":    wid,
-            "_cc_id":    ccid,
-            "_pl_id":    plid,
-            "_type":     self._f_type.currentText() or None,
-        }
-
-    # =========================================================================
-    # SAVE / UPDATE
-    # =========================================================================
-
-    def _on_save(self):
-        payload = self._build_payload()
-        if payload is None:
+            QMessageBox.critical(self, "Error", f"Could not create credit note:\n{e}")
             return
 
-        if self._editing_id is not None:
-            self._do_local_update(payload)
+        # Status message
+        status = cn.get("cn_status", "")
+        if status == "ready":
+            extra = "Will be submitted to Frappe shortly."
+        elif status == "pending_sync":
+            extra = "Queued — will sync after the original invoice syncs."
         else:
-            self._do_add(payload)
+            extra = "Recorded locally."
 
-    def _do_local_update(self, payload: dict):
-        """Update existing customer in local DB only (offline-safe)."""
-        try:
-            from models.customer import update_customer  # type: ignore
-            update_customer(
-                customer_id             = self._editing_id,
-                customer_name           = payload["customer_name"],
-                customer_group_id       = payload["_group_id"],
-                custom_warehouse_id     = payload["_wh_id"],
-                custom_cost_center_id   = payload["_cc_id"],
-                default_price_list_id   = payload["_pl_id"],
-                customer_type           = payload["_type"],
-                custom_trade_name       = payload["custom_trade_name"],
-                custom_telephone_number = payload["custom_telephone_number"],
-                custom_email_address    = payload["custom_email_address"],
-                custom_city             = payload["custom_city"],
-                custom_house_no         = payload["custom_house_no"],
-                custom_customer_tin     = payload["custom_customer_tin"],
-                custom_customer_vat     = payload["custom_customer_vat"],
-                custom_customer_address = payload["custom_customer_address"],
-                custom_province         = payload["custom_province"],
-                custom_street           = payload["custom_street"],
-            )
-            name = payload["customer_name"]
-            self._reload_table()
-            self._clear_form()
-            self._set_status(f"'{name}' updated locally.", color=SUCCESS)
-            self.created_customer = payload
-        except AttributeError:
-            # models.customer.update_customer not yet implemented — graceful fallback
-            self._set_status(
-                "update_customer() not found in models.customer — "
-                "add it to your models to enable offline edit.", color=AMBER
-            )
-        except Exception as e:
-            self._set_status(f"Update error: {e}")
-
-    def _do_add(self, payload: dict):
-        """Save locally first, then push to cloud in background."""
-        # 1. Save locally so customer is available offline immediately
-        try:
-            from models.customer import create_customer  # type: ignore
-            create_customer(
-                customer_name           = payload["customer_name"],
-                customer_group_id       = payload["_group_id"],
-                custom_warehouse_id     = payload["_wh_id"],
-                custom_cost_center_id   = payload["_cc_id"],
-                default_price_list_id   = payload["_pl_id"],
-                customer_type           = payload["_type"],
-                custom_trade_name       = payload["custom_trade_name"],
-                custom_telephone_number = payload["custom_telephone_number"],
-                custom_email_address    = payload["custom_email_address"],
-                custom_city             = payload["custom_city"],
-                custom_house_no         = payload["custom_house_no"],
-            )
-            self._reload_table()
-            self._set_status(
-                f"'{payload['customer_name']}' saved locally. Syncing to cloud…",
-                color=SUCCESS,
-            )
-        except Exception as e:
-            self._set_status(f"Local save error: {e}")
-            # still try cloud
-
-        # 2. Push to cloud in background thread
-        self._set_busy(True)
-        clean_payload = {k: v for k, v in payload.items() if not k.startswith("_")}
-        self._worker = _ApiWorker(clean_payload, endpoint="create_customer", parent=self)
-        self._worker.success.connect(self._on_api_success)
-        self._worker.error.connect(self._on_api_error)
-        self._worker.start()
-
-    # =========================================================================
-    # API CALLBACKS
-    # =========================================================================
-
-    def _on_api_success(self, response: dict):
-        self._set_busy(False)
-        customer_data = response.get("message") or response.get("data") or response
-        if isinstance(customer_data, str):
-            customer_data = {"customer_name": customer_data}
-        self.created_customer = customer_data
-        name = customer_data.get("customer_name", "")
-        self._reload_table()
-        self._clear_form()
-        self._set_status(f"✅  '{name}' synced to cloud.", color=SUCCESS)
-
-    def _on_api_error(self, error_msg: str):
-        self._set_busy(False)
-        self._hdr_status.setText("")
-        # Don't overwrite the local-save success message aggressively
-        self._set_status(
-            f"Cloud sync failed (saved locally): {error_msg}", color=AMBER
+        QMessageBox.information(
+            self, "Credit Note Issued",
+            f"✅  {cn['cn_number']} created.\n{extra}"
         )
 
-    # =========================================================================
-    # CLOUD SYNC
-    # =========================================================================
+        # Emit signal so POSView can load it into the main table
+        self.credit_note_ready.emit({**cn, "items_to_return": items_to_return})
+        self.accept()
 
-    def _on_sync(self):
-        self._sync_btn.setEnabled(False)
-        self._sync_btn.setText("⏳  Syncing…")
-        self._hdr_status.setText("Syncing customers from cloud…")
 
-        class _SyncThread(QThread):
-            finished = Signal()
-            def run(self_t):
+# =============================================================================
+# QuickAddCustomerDialog  — small "New Customer" popup launched from + New
+# =============================================================================
+
+class QuickAddCustomerDialog(QDialog):
+    """
+    Lightweight 3-field popup: Name · Phone · City.
+    Everything else (warehouse, cost center, price list, group) is resolved
+    automatically from company_defaults (the logged-in user's context).
+    """
+
+    customer_created = Signal(dict)   # emits the new customer dict on success
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New Customer")
+        self.setFixedWidth(400)
+        self.setSizeGripEnabled(False)
+        self.setModal(True)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background: {WHITE};
+                font-family: 'Segoe UI', sans-serif;
+            }}
+            QLabel#section {{
+                color: {MUTED};
+                font-size: 10px;
+                font-weight: bold;
+                letter-spacing: 1px;
+                background: transparent;
+            }}
+        """)
+        self._build()
+
+    # -------------------------------------------------------------------------
+    def _field(self, placeholder: str, required: bool = False) -> QLineEdit:
+        le = QLineEdit()
+        le.setPlaceholderText(placeholder + (" *" if required else ""))
+        le.setFixedHeight(38)
+        le.setStyleSheet(f"""
+            QLineEdit {{
+                background: {OFF_WHITE};
+                color: {DARK_TEXT};
+                border: 1.5px solid {BORDER};
+                border-radius: 6px;
+                font-size: 13px;
+                padding: 0 10px;
+            }}
+            QLineEdit:focus {{ border: 1.5px solid {ACCENT}; background: {WHITE}; }}
+        """)
+        return le
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── header bar ────────────────────────────────────────────────────────
+        hdr = QWidget()
+        hdr.setFixedHeight(48)
+        hdr.setStyleSheet(f"background: {NAVY}; border-radius: 0px;")
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(20, 0, 20, 0)
+        title = QLabel("New Customer")
+        title.setStyleSheet(
+            f"color: {WHITE}; font-size: 15px; font-weight: bold; background: transparent;"
+        )
+        hl.addWidget(title)
+        hl.addStretch()
+        root.addWidget(hdr)
+
+        # ── form body ─────────────────────────────────────────────────────────
+        body = QWidget()
+        body.setStyleSheet(f"background: {WHITE};")
+        fl = QVBoxLayout(body)
+        fl.setContentsMargins(24, 20, 24, 8)
+        fl.setSpacing(10)
+
+        self._f_first = self._field("First name", required=True)
+        self._f_last  = self._field("Last name")
+        self._f_phone = self._field("Phone number")
+        self._f_city  = self._field("City")
+
+        for lbl_txt, widget in [
+            ("FIRST NAME",   self._f_first),
+            ("LAST NAME",    self._f_last),
+            ("PHONE NUMBER", self._f_phone),
+            ("CITY",         self._f_city),
+        ]:
+            lbl = QLabel(lbl_txt)
+            lbl.setObjectName("section")
+            fl.addWidget(lbl)
+            fl.addWidget(widget)
+
+        # ── status label ──────────────────────────────────────────────────────
+        self._status = QLabel("")
+        self._status.setStyleSheet(
+            f"color: {DANGER}; font-size: 11px; background: transparent;"
+        )
+        self._status.setAlignment(Qt.AlignCenter)
+        fl.addWidget(self._status)
+
+        root.addWidget(body)
+
+        # ── footer buttons ────────────────────────────────────────────────────
+        foot = QWidget()
+        foot.setStyleSheet(
+            f"background: {OFF_WHITE}; border-top: 1px solid {BORDER};"
+        )
+        bl = QHBoxLayout(foot)
+        bl.setContentsMargins(24, 12, 24, 16)
+        bl.setSpacing(10)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedHeight(36)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {WHITE}; color: {DARK_TEXT};
+                border: 1.5px solid {BORDER}; border-radius: 6px;
+                font-size: 13px; padding: 0 18px;
+            }}
+            QPushButton:hover {{ background: {LIGHT}; border-color: {ACCENT}; }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+
+        self._save_btn = QPushButton("Save Customer")
+        self._save_btn.setFixedHeight(36)
+        self._save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {SUCCESS}; color: {WHITE};
+                border: none; border-radius: 6px;
+                font-size: 13px; font-weight: bold; padding: 0 22px;
+            }}
+            QPushButton:hover {{ background: {SUCCESS_H}; }}
+            QPushButton:disabled {{ background: {BORDER}; color: {MUTED}; }}
+        """)
+        self._save_btn.clicked.connect(self._save)
+
+        bl.addWidget(cancel_btn)
+        bl.addStretch()
+        bl.addWidget(self._save_btn)
+        root.addWidget(foot)
+
+        # focus the first field
+        self._f_first.setFocus()
+
+    # -------------------------------------------------------------------------
+    def _save(self):
+        first = self._f_first.text().strip()
+        last  = self._f_last.text().strip()
+        phone = self._f_phone.text().strip()
+        city  = self._f_city.text().strip()
+
+        if not first:
+            self._status.setText("First name is required.")
+            self._f_first.setFocus()
+            return
+
+        # Build full customer_name from first + last
+        full_name = f"{first} {last}".strip()
+
+        self._save_btn.setEnabled(False)
+        self._status.setText("")
+
+        try:
+            print("\n" + "="*60)
+            print("[QuickAddCustomer] Starting save...")
+            print(f"  full_name='{full_name}'  phone='{phone}'  city='{city}'")
+
+            # Try to resolve FK IDs — all are optional (tables may be empty)
+            from models.company_defaults import get_defaults
+            defs = get_defaults()
+            print(f"[QuickAddCustomer] defaults: warehouse='{defs.get('server_warehouse')}'"
+                  f"  cost_center='{defs.get('server_cost_center')}'")
+
+            from database.db import get_connection
+            conn = get_connection()
+            cur  = conn.cursor()
+
+            def _find_id(table: str, name_val: str) -> int | None:
+                if not name_val:
+                    return None
+                cur.execute(
+                    f"SELECT id FROM {table} WHERE LTRIM(RTRIM(name)) = ?",
+                    (name_val.strip(),)
+                )
+                row = cur.fetchone()
+                if row:
+                    print(f"  [_find_id] {table} '{name_val}' → id={row[0]}")
+                    return row[0]
+                # fallback: first row
+                cur.execute(f"SELECT TOP 1 id, name FROM {table} ORDER BY id ASC")
+                fb = cur.fetchone()
+                print(f"  [_find_id] {table} '{name_val}' NOT FOUND → fallback={fb}")
+                return fb[0] if fb else None
+
+            warehouse_id   = _find_id("warehouses",      defs.get("server_warehouse", ""))
+            cost_center_id = _find_id("cost_centers",    defs.get("server_cost_center", ""))
+            price_list_id  = _find_id("price_lists",     "Standard Selling ZWG")
+            group_id       = _find_id("customer_groups", "All Customer Groups")
+            conn.close()
+
+            print(f"[QuickAddCustomer] IDs → warehouse={warehouse_id}  "
+                  f"cost_center={cost_center_id}  price_list={price_list_id}  group={group_id}")
+
+            # Direct INSERT — pass None for any FK that couldn't be resolved
+            conn2 = get_connection()
+            cur2  = conn2.cursor()
+            cur2.execute("""
+                INSERT INTO customers (
+                    customer_name, customer_group_id, customer_type,
+                    custom_trade_name, custom_telephone_number, custom_email_address,
+                    custom_city, custom_house_no,
+                    custom_warehouse_id, custom_cost_center_id, default_price_list_id,
+                    laybye_balance, frappe_synced
+                ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """, (
+                full_name, group_id, "Individual",
+                "", phone, "",
+                city, "",
+                warehouse_id, cost_center_id, price_list_id,
+            ))
+            new_id = int(cur2.fetchone()[0])
+            conn2.commit()
+            conn2.close()
+
+            print(f"[QuickAddCustomer] SUCCESS: inserted id={new_id}  name='{full_name}'")
+            print("="*60 + "\n")
+
+            from models.customer import get_customer_by_id
+            new_cust = get_customer_by_id(new_id) or {"id": new_id, "customer_name": full_name}
+            self.customer_created.emit(new_cust)
+
+            # ── Push to Frappe in background (non-blocking) ───────────────────
+            self._push_to_frappe(
+                full_name=full_name,
+                phone=phone,
+                city=city,
+                defs=defs,
+                customer_id=new_id,
+            )
+
+            # ── Backoff retry loop: keeps re-pushing until success or 6 attempts ──
+            from models.customer import schedule_frappe_sync_check
+            schedule_frappe_sync_check(
+                customer_id=new_id,
+                customer_name=full_name,
+                phone=phone,
+                city=city,
+                defs=defs,
+            )
+
+            self.accept()
+
+        except Exception as exc:
+            import traceback
+            print(f"[QuickAddCustomer] EXCEPTION:")
+            traceback.print_exc()
+            print("="*60 + "\n")
+            self._status.setText(f"Error: {exc}")
+            self._save_btn.setEnabled(True)
+
+    # -------------------------------------------------------------------------
+    def _push_to_frappe(
+        self,
+        full_name: str,
+        phone: str,
+        city: str,
+        defs: dict,
+        customer_id: int = 0,
+    ) -> None:
+        """
+        Pushes the newly created customer to Frappe via the REST API.
+        Runs in a daemon thread so it never blocks the UI.
+
+        Frappe endpoint (POST):
+          /api/resource/Customer
+
+        Payload mirrors the fields Frappe expects for a Customer doctype,
+        enriched with the company context stored in company_defaults.
+        """
+        import threading, json, urllib.request, urllib.error
+
+        _cid = customer_id  # capture for closure
+
+        def _worker():
+            try:
+                from services.credentials import get_credentials
+                api_key, api_secret = get_credentials()
+            except Exception:
+                # Fallback: read directly from DB (same logic as customer_sync_service)
                 try:
-                    from services.customer_sync_service import sync_customers  # type: ignore
-                    sync_customers()
-                except Exception as e:
-                    pass
-                self_t.finished.emit()
+                    from database.db import get_connection
+                    _conn = get_connection()
+                    _cur  = _conn.cursor()
+                    _cur.execute(
+                        "SELECT api_key, api_secret FROM companies "
+                        "WHERE id=(SELECT MIN(id) FROM companies)"
+                    )
+                    _row = _cur.fetchone()
+                    _conn.close()
+                    api_key    = str(_row[0]) if _row and _row[0] else ""
+                    api_secret = str(_row[1]) if _row and _row[1] else ""
+                except Exception:
+                    api_key = api_secret = ""
 
-        self._sync_thread = _SyncThread(self)
-        self._sync_thread.finished.connect(self._on_sync_done)
-        self._sync_thread.start()
+            if not api_key or not api_secret:
+                print("[QuickAddCustomer→Frappe] No credentials — skipping push.")
+                return
 
-    def _on_sync_done(self):
-        self._sync_btn.setEnabled(True)
-        self._sync_btn.setText("☁  Sync from Cloud")
-        self._hdr_status.setText("")
-        self._reload_table()
-        self._set_status("Sync complete.", color=SUCCESS)
+            try:
+                from services.site_config import get_host as _gh
+                base_url = _gh()
+            except Exception as e:
+                print(f"[QuickAddCustomer→Frappe] Could not get host: {e}")
+                return
 
-    # =========================================================================
-    # KEYBOARD
-    # =========================================================================
+            # Build the Frappe Customer payload.
+            # custom_warehouse / custom_cost_center come from company_defaults
+            # (the values already set on login, matching server_warehouse / server_cost_center).
+            payload = {
+                
+    "name": full_name,
+    "customer_name": full_name,
+    "customer_type": "Individual",
+    "customer_group": "All Customer Groups",
+    "currency": "USD",
+    "custom_customer_tin": "00000000",
+    "custom_customer_vat": "11111111",
+    "custom_trade_name": "dansohol",
+    "custom_email_address": "no-email.havano.cloud",
+    "custom_telephone_number": phone or "0000000000",
+    "custom_house_no": "1",
+    "custom_street": "Unknown",
+    "custom_customer_address": "N/A",
+    "custom_city": city or "N/A",
+    "custom_province": "N/A",
+    "default_warehouse": defs.get("server_warehouse", ""),
+    "default_price_list": "Standard Selling",
+    "default_cost_center": defs.get("server_cost_center", ""),
+    "is_active": True,
+}
+                
 
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            if self._save_btn.isEnabled():
-                self._on_save()
-        elif event.key() == Qt.Key_Escape:
-            if self._editing_id is not None:
-                self._clear_form()
-            else:
-                self.reject()
-        else:
-            super().keyPressEvent(event)
+            # Strip empty strings so Frappe doesn't reject with validation errors
+            payload = {k: v for k, v in payload.items() if v}
+
+            url  = f"{base_url}/api/method/saas_api.www.api.create_customer"
+            body = json.dumps(payload).encode()
+            req  = urllib.request.Request(
+                url,
+                data=body,
+                method="POST",
+            )
+            req.add_header("Authorization",  f"token {api_key}:{api_secret}")
+            req.add_header("Content-Type",   "application/json")
+            req.add_header("Accept",         "application/json")
+
+            print(f"[QuickAddCustomer→Frappe] POST {url}")
+            print(f"[QuickAddCustomer→Frappe] Payload: {json.dumps(payload, indent=2)}")
+
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    result = json.loads(resp.read().decode())
+                    frappe_name = result.get("data", {}).get("name", "?")
+                    print(
+                        f"[QuickAddCustomer→Frappe] ✓ Created on Frappe: {frappe_name}"
+                    )
+                    # Flag locally so the 30-second sync-check thread skips re-push
+                    try:
+                        from models.customer import mark_frappe_synced
+                        mark_frappe_synced(_cid)
+                    except Exception:
+                        pass
+            except urllib.error.HTTPError as http_err:
+                body_text = http_err.read().decode(errors="replace")
+                print(
+                    f"[QuickAddCustomer→Frappe] HTTP {http_err.code}: {body_text}"
+                )
+            except Exception as push_err:
+                print(f"[QuickAddCustomer→Frappe] Push failed: {push_err}")
+
+        t = threading.Thread(target=_worker, daemon=True, name="FrappeCustomerPush")
+        t.start()

@@ -91,7 +91,7 @@ def _get_exchange_rate(from_currency: str, to_currency: str,
                        api_key: str, api_secret: str, host: str) -> float:
     """
     Fetch exchange rate from Frappe's built-in currency exchange API.
-    Returns 0.0 if fetch fails so Frappe uses its own configured rate.
+    Returns 1.0 if fetch fails.
 
     Endpoint:
         GET /api/method/erpnext.setup.utils.get_exchange_rate
@@ -126,9 +126,9 @@ def _get_exchange_rate(from_currency: str, to_currency: str,
     except Exception as e:
         log.debug("Exchange rate fetch failed (%s→%s): %s", from_currency, to_currency, e)
 
-    log.warning("Could not fetch exchange rate %s→%s — Frappe will use its default.",
+    log.warning("Could not fetch exchange rate %s→%s — defaulting to 1.0.",
                 from_currency, to_currency)
-    return 0.0
+    return 1.0
 
 
 def _get_mop_account(mop_name: str, company: str,
@@ -213,7 +213,7 @@ def _build_payload(sale: dict, items: list[dict], defaults: dict,
     warehouse         = defaults.get("server_warehouse",         "")
     cost_center       = defaults.get("server_cost_center",       "")
     taxes_and_charges = defaults.get("server_taxes_and_charges", "")
-    walk_in           = defaults.get("server_walk_in_customer",  "default").strip() or "default"
+    walk_in           = defaults.get("server_walk_in_customer",  "").strip() or "default"
     host              = _get_host()
 
     customer = (sale.get("customer_name") or "").strip() or walk_in
@@ -224,19 +224,24 @@ def _build_payload(sale: dict, items: list[dict], defaults: dict,
 
     # ── posting_time: always HH:MM:SS string ─────────────────────────────────
     raw_time = sale.get("time") or ""
-    if isinstance(raw_time, (datetime,)):
+    if isinstance(raw_time, datetime):
         posting_time = raw_time.strftime("%H:%M:%S")
     else:
         t = str(raw_time).strip()
         # Pad to HH:MM:SS if needed (e.g. "14:30" → "14:30:00")
-        posting_time = t if len(t) == 8 else (t + ":00" if len(t) == 5 else datetime.now().strftime("%H:%M:%S"))
+        posting_time = (
+            t if len(t) == 8
+            else (t + ":00" if len(t) == 5
+                  else datetime.now().strftime("%H:%M:%S"))
+        )
 
     mode_of_payment = _METHOD_MAP.get(str(sale.get("method", "")).upper().strip(), "Cash")
     currency        = (sale.get("currency") or "USD").strip().upper()
     mop_account     = _get_mop_account(mode_of_payment, company, api_key, api_secret, host, currency)
 
     company_currency = defaults.get("server_company_currency", "USD").strip().upper() or "USD"
-    conversion_rate  = (
+    # Always fetch/compute conversion_rate — never omit it from the payload
+    conversion_rate = (
         _get_exchange_rate(currency, company_currency, posting_date, api_key, api_secret, host)
         if currency != company_currency else 1.0
     )
@@ -248,7 +253,12 @@ def _build_payload(sale: dict, items: list[dict], defaults: dict,
         rate      = float(it.get("price", 0))
         if not item_code or qty <= 0:
             continue
-        row: dict = {"item_code": item_code, "qty": qty, "rate": rate}
+        row: dict = {
+            "item_code": item_code,
+            "qty":       qty,
+            "rate":      rate,
+            "uom":       (it.get("uom") or "Nos"),   # required by Frappe validation
+        }
         if cost_center:
             row["cost_center"] = cost_center
         frappe_items.append(row)
@@ -260,17 +270,15 @@ def _build_payload(sale: dict, items: list[dict], defaults: dict,
         "customer":               customer,
         "posting_date":           posting_date,
         "posting_time":           posting_time,
+        "set_posting_time":       1,            # tell Frappe to honour our time
         "currency":               currency,
+        "conversion_rate":        conversion_rate,  # always present, same as mobile
         "is_pos":                 0,
-        "update_stock":           0,
-        "docstatus":              1,
+        "update_stock":           1,            # match mobile — write stock ledger
+        "docstatus":              1,            # submit directly, same as mobile
         "custom_sales_reference": _safe_str(sale.get("invoice_no", "")),
         "items":                  frappe_items,
     }
-
-    # Only include conversion_rate when it differs from 1 and was successfully fetched
-    if conversion_rate and conversion_rate != 1.0:
-        payload["conversion_rate"] = conversion_rate
 
     if company:           payload["company"]           = company
     if cost_center:       payload["cost_center"]       = cost_center
@@ -288,7 +296,7 @@ def _push_sale(sale: dict, api_key: str, api_secret: str,
                defaults: dict, host: str):
     """Returns Frappe doc name (str), True (permanent skip), or False (retry later)."""
     inv_no  = sale.get("invoice_no", str(sale["id"]))
-    walk_in = defaults.get("server_walk_in_customer", "default").strip() or "default"
+    walk_in = defaults.get("dansohol", "").strip() or "default"
 
     try:
         from models.sale import get_sale_items
@@ -304,6 +312,7 @@ def _push_sale(sale: dict, api_key: str, api_secret: str,
 
     url = f"{host}/api/resource/Sales%20Invoice"
 
+    # First attempt with resolved customer; second attempt falls back to walk-in
     attempts = [payload]
     if payload["customer"] != walk_in:
         attempts.append({**payload, "customer": walk_in})
@@ -315,9 +324,12 @@ def _push_sale(sale: dict, api_key: str, api_secret: str,
         "account is required",
     )
 
+    # Keywords that indicate the customer record itself is bad → retry with walk-in
+    _CUSTOMER_ERRORS = ("customer", "payment_terms", "nonetype", "none")
+
     for i, p in enumerate(attempts):
         try:
-            body = _dumps(p).encode("utf-8")   # ← uses _DateTimeEncoder
+            body = _dumps(p).encode("utf-8")
         except Exception as e:
             log.error("JSON serialisation failed for sale %s: %s", inv_no, e)
             return False
@@ -348,10 +360,12 @@ def _push_sale(sale: dict, api_key: str, api_secret: str,
             except Exception:
                 msg = f"HTTP {e.code}"
 
+            # 409 — already exists, treat as success
             if e.code == 409:
                 log.info("Sale %s already exists on Frappe (409) — marking synced.", inv_no)
                 return True
 
+            # Permanent data errors — stop retrying to avoid infinite loop
             if e.code == 417 and any(kw in msg.lower() for kw in _PERMANENT_ERRORS):
                 log.warning(
                     "⚠️  Sale %s — permanent Frappe data error (marked synced to stop loop).\n  %s",
@@ -359,11 +373,12 @@ def _push_sale(sale: dict, api_key: str, api_secret: str,
                 )
                 return True
 
-            if i == 0 and e.code in (417, 500) and any(
-                kw in msg.lower() for kw in ("customer", "payment_terms", "nonetype")
+            # Customer/payment_terms error — retry with walk-in on first attempt
+            if i == 0 and e.code in (403, 417, 500) and any(
+                kw in msg.lower() for kw in _CUSTOMER_ERRORS
             ):
-                log.warning("Sale %s — customer '%s' rejected, retrying with walk-in…",
-                            inv_no, p["customer"])
+                log.warning("Sale %s — customer '%s' rejected (HTTP %s), retrying with walk-in…",
+                            inv_no, p["customer"], e.code)
                 continue
 
             log.error("❌ Sale %s  HTTP %s: %s", inv_no, e.code, msg)

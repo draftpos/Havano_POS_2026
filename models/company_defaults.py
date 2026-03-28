@@ -10,6 +10,8 @@ _BLANK = {
     "email": "", "phone": "", "vat_number": "", "tin_number": "",
     # Editable — receipt footer
     "footer_text": "",
+    # Editable — terms & conditions (printed on sales orders)
+    "terms_and_conditions": "",
     # Editable — ZIMRA
     "zimra_serial_no": "", "zimra_device_id": "",
     "zimra_api_key": "", "zimra_api_url": "",
@@ -63,6 +65,7 @@ def save_defaults(data: dict) -> None:
                 vat_number            = ?,
                 tin_number            = ?,
                 footer_text           = ?,
+                terms_and_conditions  = ?,
                 zimra_serial_no       = ?,
                 zimra_device_id       = ?,
                 zimra_api_key         = ?,
@@ -92,6 +95,7 @@ def save_defaults(data: dict) -> None:
             str(data.get("vat_number",            "")),
             str(data.get("tin_number",            "")),
             str(data.get("footer_text",           "")),
+            str(data.get("terms_and_conditions",  "")),
             str(data.get("zimra_serial_no",       "")),
             str(data.get("zimra_device_id",       "")),
             str(data.get("zimra_api_key",         "")),

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -216,10 +215,22 @@ def _push_order(order: dict, api_key: str, api_secret: str,
             return True
 
         log.error("❌ Order %s  HTTP %s: %s", order_no, e.code, msg)
+        try:
+            from main_window import sync_error_bus
+            sync_error_bus.post_error("SalesOrderUpload", order_no, msg)
+        except Exception:
+            pass
         return False
 
     except urllib.error.URLError as e:
         log.warning("Network error pushing %s: %s", order_no, e.reason)
+        try:
+            from main_window import sync_error_bus
+            sync_error_bus.post_error(
+                "SalesOrderUpload", order_no,
+                f"Network error: {e.reason} — check server URL in Company Defaults.")
+        except Exception:
+            pass
         return False
 
     except Exception as e:

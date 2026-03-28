@@ -33,10 +33,6 @@
 #         against the local SQLite DB.  auth_failed=True (wrong password) skips
 #         the offline attempt so a bad password is rejected immediately.
 #
-#  X BUTTON — A frameless close button (×) is placed in the top-right corner
-#         of the card header.  Clicking it calls QApplication.quit(), consistent
-#         with #1 (closing the login dialog exits the app entirely).
-#
 # =============================================================================
 
 from PySide6.QtWidgets import (
@@ -230,7 +226,7 @@ class LoginDialog(QDialog):
         vl.setSpacing(0)
         vl.setContentsMargins(0, 0, 0, 0)
 
-        # ── Header ────────────────────────────────────────────────────────────
+        # ── Header with close button ───────────────────────────────────────────
         hdr = QWidget()
         hdr.setFixedHeight(148)
         hdr.setStyleSheet(f"""
@@ -241,36 +237,37 @@ class LoginDialog(QDialog):
                 border-top-right-radius: 20px;
             }}
         """)
-
-        # Use a relative-positioned layout so the X floats top-right
         hl = QVBoxLayout(hdr)
-        hl.setContentsMargins(0, 28, 0, 20)
+        hl.setContentsMargins(0, 12, 12, 20)
         hl.setSpacing(6)
 
-        # ── X close button (top-right corner of header) ───────────────────────
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(28, 28)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setToolTip("Quit application")
-        close_btn.setStyleSheet(f"""
+        # Top row with close button
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.addStretch()
+        
+        # Close button (X) - stays with existing styling
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(32, 32)
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.setStyleSheet(f"""
             QPushButton {{
-                background: transparent;
-                color: {MID};
+                background: rgba(255, 255, 255, 0.15);
+                color: {WHITE};
                 border: none;
-                border-radius: 14px;
-                font-size: 14px;
+                border-radius: 16px;
+                font-size: 16px;
                 font-weight: bold;
             }}
-            QPushButton:hover   {{ background: rgba(255,255,255,0.15); color: {WHITE}; }}
-            QPushButton:pressed {{ background: rgba(192,57,43,0.7);    color: {WHITE}; }}
+            QPushButton:hover {{
+                background: rgba(255, 255, 255, 0.25);
+            }}
+            QPushButton:pressed {{
+                background: rgba(255, 255, 255, 0.35);
+            }}
         """)
-        close_btn.clicked.connect(QApplication.quit)
-
-        # Absolute-position the button inside the header using a top row
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 10, 0)
-        top_row.addStretch()
-        top_row.addWidget(close_btn)
+        self.close_btn.clicked.connect(self._close_app)
+        top_row.addWidget(self.close_btn)
         hl.addLayout(top_row)
 
         logo_lbl = QLabel("H")
@@ -361,9 +358,10 @@ class LoginDialog(QDialog):
         el.setContentsMargins(28, 0, 28, 8)
         self.error_label = QLabel("")
         self.error_label.setAlignment(Qt.AlignCenter)
+        self.error_label.setWordWrap(True)
         self.error_label.setStyleSheet(f"""
             color:{WHITE}; background:{DANGER}; font-size:12px; font-weight:bold;
-            border-radius:8px; padding:6px 14px;
+            border-radius:8px; padding:8px 14px;
         """)
         self.error_label.hide()
         el.addWidget(self.error_label)
@@ -389,6 +387,11 @@ class LoginDialog(QDialog):
 
         root.addWidget(card)
         self._switch_mode(0)   # start on PIN tab
+
+    def _close_app(self):
+        """Close the application when the X button is clicked."""
+        # Call the close event which will quit the application
+        self.close()
 
     # =========================================================================
     # PIN page  (#19 — PIN login as primary method)
@@ -712,21 +715,235 @@ class LoginDialog(QDialog):
     # =========================================================================
     def _validate_and_accept(self, user: dict, source: str):
         """
-        Admin users bypass the completeness check so they can always log in
-        to fix misconfigured accounts.  All other roles must have company,
-        warehouse and cost_center set.
+        Admin users bypass the completeness check.
+        PIN logins pass even without company/warehouse/cost_center.
+        Email logins check completeness and, if the user has no PIN set,
+        prompt them to create one before proceeding.
         """
         role = str(user.get("role") or "").lower()
         print(f"[login] _validate_and_accept — role={role!r} source={source!r}")
+
         if role != "admin":
-            ok, reason = _check_user_complete(user)
+            ok, reason = _check_user_complete(user, source)
             print(f"[login] completeness check — ok={ok} reason={reason!r}")
             if not ok:
-                self._show_error(reason or "Account not fully configured — contact admin.")
+                self._show_error(reason)
                 self._shake()
                 self._pin_clear()
                 return
+
+        # After a successful email/online login, if the user has no PIN yet,
+        # ask them to set one now so they can use the PIN tab next time.
+        if source in ("online", "offline") and not (user.get("pin") or "").strip():
+            self._prompt_set_pin(user, source)
+            return
+
         self._accept_user(user, source)
+
+    # =========================================================================
+    # PIN setup prompt — shown after first email login when no PIN exists
+    # =========================================================================
+    def _prompt_set_pin(self, user: dict, source: str):
+        """
+        Shows a modal PIN-setup overlay so the user can set their 4-6 digit
+        PIN right after their first email login.  Saving the PIN calls
+        models.user.set_user_pin() which writes to the local DB only —
+        sync will never overwrite a non-empty local PIN.
+        """
+        self._pin_setup_user   = user
+        self._pin_setup_source = source
+        self._pin_setup_buf    = ""
+        self._pin_setup_step   = "enter"   # "enter" | "confirm"
+        self._pin_setup_first  = ""
+
+        # ── Overlay widget ────────────────────────────────────────────────────
+        overlay = QWidget(self)
+        overlay.setObjectName("pinSetupOverlay")
+        overlay.setGeometry(0, 0, self.width(), self.height())
+        overlay.setStyleSheet("""
+            QWidget#pinSetupOverlay {
+                background: rgba(13, 31, 60, 0.92);
+                border-radius: 20px;
+            }
+        """)
+
+        vl = QVBoxLayout(overlay)
+        vl.setContentsMargins(36, 48, 36, 36)
+        vl.setSpacing(16)
+
+        # Skip button (top-right)
+        skip_row = QHBoxLayout()
+        skip_row.addStretch()
+        skip_btn = QPushButton("Skip for now")
+        skip_btn.setCursor(Qt.PointingHandCursor)
+        skip_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {MID};
+                border: 1px solid {MUTED}; border-radius: 8px;
+                font-size: 11px; padding: 4px 12px;
+            }}
+            QPushButton:hover {{ color: {WHITE}; border-color: {WHITE}; }}
+        """)
+        skip_btn.clicked.connect(lambda: self._finish_pin_setup(overlay, save=False))
+        skip_row.addWidget(skip_btn)
+        vl.addLayout(skip_row)
+
+        # Icon + title
+        icon_lbl = QLabel("🔢")
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setStyleSheet("font-size: 36px; background: transparent;")
+        vl.addWidget(icon_lbl)
+
+        self._pin_setup_title = QLabel("Set Your PIN")
+        self._pin_setup_title.setAlignment(Qt.AlignCenter)
+        self._pin_setup_title.setStyleSheet(
+            f"color: {WHITE}; font-size: 20px; font-weight: 800; background: transparent;"
+        )
+        vl.addWidget(self._pin_setup_title)
+
+        self._pin_setup_sub = QLabel("Enter a 4–6 digit PIN for quick login next time.")
+        self._pin_setup_sub.setAlignment(Qt.AlignCenter)
+        self._pin_setup_sub.setWordWrap(True)
+        self._pin_setup_sub.setStyleSheet(
+            f"color: {MID}; font-size: 12px; background: transparent;"
+        )
+        vl.addWidget(self._pin_setup_sub)
+
+        # Dot indicator
+        dot_card = QWidget()
+        dot_card.setStyleSheet(f"""
+            background: rgba(255,255,255,0.08); border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.15);
+        """)
+        dot_card.setFixedHeight(52)
+        dcl = QHBoxLayout(dot_card)
+        self._pin_setup_dots = PinDots(6)
+        dcl.addStretch()
+        dcl.addWidget(self._pin_setup_dots)
+        dcl.addStretch()
+        vl.addWidget(dot_card)
+
+        # Error label for setup
+        self._pin_setup_err = QLabel("")
+        self._pin_setup_err.setAlignment(Qt.AlignCenter)
+        self._pin_setup_err.setStyleSheet(
+            f"color: {DANGER}; font-size: 12px; font-weight: bold; background: transparent;"
+        )
+        self._pin_setup_err.hide()
+        vl.addWidget(self._pin_setup_err)
+
+        # Numpad
+        grid_w = QWidget()
+        grid_w.setStyleSheet("background: transparent;")
+        grid = QGridLayout(grid_w)
+        grid.setSpacing(8)
+        grid.setContentsMargins(0, 0, 0, 0)
+
+        keys = [
+            ("1","d"),("2","d"),("3","d"),
+            ("4","d"),("5","d"),("6","d"),
+            ("7","d"),("8","d"),("9","d"),
+            ("⌫","b"),("0","d"),("✓","e"),
+        ]
+        for i, (label, kind) in enumerate(keys):
+            btn = QPushButton(label)
+            btn.setFixedSize(98, 46)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFont(QFont("Segoe UI", 15, QFont.Bold))
+            if kind == "d":
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: rgba(255,255,255,0.12); color: {WHITE};
+                        border: 1px solid rgba(255,255,255,0.2); border-radius: 10px;
+                        font-size: 17px; font-weight: bold;
+                    }}
+                    QPushButton:hover   {{ background: rgba(255,255,255,0.22); }}
+                    QPushButton:pressed {{ background: {ACCENT}; border-color: {ACCENT}; }}
+                """)
+                btn.clicked.connect(lambda _, d=label: self._pin_setup_press(d))
+            elif kind == "b":
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: rgba(255,255,255,0.07); color: {MID};
+                        border: 1px solid rgba(255,255,255,0.12); border-radius: 10px;
+                        font-size: 17px;
+                    }}
+                    QPushButton:hover {{ background: rgba(255,255,255,0.15); color: {WHITE}; }}
+                """)
+                btn.clicked.connect(self._pin_setup_backspace)
+            elif kind == "e":
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {ACCENT}; color: {WHITE};
+                        border: none; border-radius: 10px;
+                        font-size: 20px; font-weight: bold;
+                    }}
+                    QPushButton:hover   {{ background: {ACCENT_H}; }}
+                    QPushButton:pressed {{ background: {NAVY_2}; }}
+                """)
+                btn.clicked.connect(self._pin_setup_confirm)
+            grid.addWidget(btn, i // 3, i % 3)
+
+        vl.addWidget(grid_w)
+        overlay.show()
+        self._pin_setup_overlay = overlay
+
+    def _pin_setup_press(self, digit: str):
+        if len(self._pin_setup_buf) >= 6:
+            return
+        self._pin_setup_buf += digit
+        self._pin_setup_dots.set_filled(len(self._pin_setup_buf))
+        self._pin_setup_err.hide()
+
+    def _pin_setup_backspace(self):
+        self._pin_setup_buf = self._pin_setup_buf[:-1]
+        self._pin_setup_dots.set_filled(len(self._pin_setup_buf))
+
+    def _pin_setup_confirm(self):
+        buf = self._pin_setup_buf.strip()
+        if len(buf) < 4:
+            self._pin_setup_err.setText("PIN must be at least 4 digits.")
+            self._pin_setup_err.show()
+            return
+
+        if self._pin_setup_step == "enter":
+            # First entry — ask to confirm
+            self._pin_setup_first = buf
+            self._pin_setup_buf   = ""
+            self._pin_setup_step  = "confirm"
+            self._pin_setup_dots.set_filled(0)
+            self._pin_setup_title.setText("Confirm Your PIN")
+            self._pin_setup_sub.setText("Enter the same PIN again to confirm.")
+            self._pin_setup_err.hide()
+        else:
+            # Confirmation step
+            if buf != self._pin_setup_first:
+                self._pin_setup_buf  = ""
+                self._pin_setup_step = "enter"
+                self._pin_setup_first = ""
+                self._pin_setup_dots.set_filled(0)
+                self._pin_setup_title.setText("Set Your PIN")
+                self._pin_setup_sub.setText("PINs didn't match — try again.")
+                self._pin_setup_err.setText("PINs did not match.  Please start over.")
+                self._pin_setup_err.show()
+                return
+            # Save PIN
+            self._finish_pin_setup(self._pin_setup_overlay, save=True, pin=buf)
+
+    def _finish_pin_setup(self, overlay: QWidget, save: bool, pin: str = ""):
+        if save and pin:
+            user_id = self._pin_setup_user.get("id")
+            if user_id:
+                try:
+                    from models.user import set_user_pin
+                    set_user_pin(user_id, pin)
+                    self._pin_setup_user["pin"] = pin
+                    print(f"[login] ✅ PIN saved for user id={user_id}")
+                except Exception as e:
+                    print(f"[login] ⚠️  Could not save PIN: {e}")
+        overlay.hide()
+        overlay.deleteLater()
+        self._accept_user(self._pin_setup_user, self._pin_setup_source)
 
     # =========================================================================
     # Accept  (#27 — hide immediately so POS appears without the dialog behind)
@@ -750,159 +967,217 @@ class LoginDialog(QDialog):
         # #27 — hide the dialog immediately; MainWindow appears with nothing behind it
         self.hide()
 
-        # Background sync (non-blocking) — only when online credentials exist
-        if source != "pin":
+        # Background sync (non-blocking) — runs for ALL login sources
+        # (pin, online, offline) as long as stored API credentials exist.
+        # PIN logins reuse the credentials saved from the last email login.
+        try:
+            from services.credentials import get_credentials
+            k, s = get_credentials()
+            has_creds = bool(k and s)
+        except Exception:
+            has_creds = False
+
+        if has_creds:
             self._bg_sync = BackgroundSyncWorker()
             self._bg_sync.start()
+            print(f"[login] 🔄 Background sync started (source={source!r})")
+        else:
+            print("[login] ⚠️  No credentials found — sync skipped. Log in with email once.")
 
         self.accept()   # QDialog.Accepted — caller can read .logged_in_user
 
     # =========================================================================
-    # Helpers — kept exactly as they were in the original file
+    # Connectivity check
+    # =========================================================================
+    def _check_connectivity(self):
+        import urllib.request
+        try:
+            urllib.request.urlopen(f"https://{SITE_URL}", timeout=4)
+            self._set_status(f"Online — {SITE_URL}", "#27ae60")
+        except Exception:
+            self._set_status("Offline — local database only", WARNING)
+
+    def _set_status(self, msg: str, colour: str):
+        self._status_dot.setStyleSheet(
+            f"color:{colour}; font-size:7px; background:transparent;"
+        )
+        self._status_lbl.setStyleSheet(
+            f"color:{colour}; font-size:10px; background:transparent;"
+        )
+        self._status_lbl.setText(msg)
+
+    # =========================================================================
+    # Button helpers
+    # =========================================================================
+    def _set_btn_normal(self, btn: QPushButton):
+        btn.setEnabled(True)
+        btn.setText("Sign In  →")
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY}; color:{WHITE}; font-size:15px; font-weight:bold;
+                border-radius:12px; border:none;
+            }}
+            QPushButton:hover   {{ background:{NAVY_3}; }}
+            QPushButton:pressed {{ background:{ACCENT}; }}
+        """)
+
+    def _set_btn_loading(self, btn: QPushButton):
+        btn.setEnabled(False)
+        btn.setText("Signing in…")
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY_2}; color:{MID}; font-size:15px; font-weight:bold;
+                border-radius:12px; border:none;
+            }}
+        """)
+
+    def _set_btn_error(self, btn: QPushButton):
+        btn.setEnabled(True)
+        btn.setText("Try Again")
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{DANGER}; color:{WHITE}; font-size:15px; font-weight:bold;
+                border-radius:12px; border:none;
+            }}
+        """)
+
+    # =========================================================================
+    # Widget helpers
     # =========================================================================
     def _field_lbl(self, text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setStyleSheet(
             f"color:{MUTED}; font-size:10px; font-weight:bold; "
-            "background:transparent; letter-spacing:1px;"
+            "background:transparent; letter-spacing:1.4px;"
         )
         return lbl
 
     def _input(self, placeholder: str) -> QLineEdit:
-        w = QLineEdit()
-        w.setPlaceholderText(placeholder)
-        w.setFixedHeight(48)
-        w.setStyleSheet(f"""
+        inp = QLineEdit()
+        inp.setPlaceholderText(placeholder)
+        inp.setFixedHeight(48)
+        inp.setStyleSheet(f"""
             QLineEdit {{
                 background:{WHITE}; color:{NAVY};
                 border:1.5px solid {BORDER}; border-radius:12px;
-                padding:0 14px; font-size:14px;
+                padding:0 18px; font-size:14px;
             }}
             QLineEdit:focus {{ border:1.5px solid {ACCENT}; }}
             QLineEdit:hover {{ border:1.5px solid {MID}; }}
         """)
-        return w
-
-    def _set_btn_normal(self, btn: QPushButton):
-        btn.setText("Sign In  →")
-        btn.setEnabled(True)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{ACCENT}; color:{WHITE}; border:none;
-                border-radius:14px; font-size:15px; font-weight:bold;
-            }}
-            QPushButton:hover   {{ background:{ACCENT_H}; }}
-            QPushButton:pressed {{ background:{NAVY_2}; }}
-        """)
-
-    def _set_btn_loading(self, btn: QPushButton):
-        btn.setText("Signing in…")
-        btn.setEnabled(False)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{NAVY_2}; color:{MID}; border:none;
-                border-radius:14px; font-size:15px; font-weight:bold;
-            }}
-        """)
-
-    def _set_btn_error(self, btn: QPushButton):
-        btn.setText("Sign In  →")
-        btn.setEnabled(True)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{DANGER}; color:{WHITE}; border:none;
-                border-radius:14px; font-size:15px; font-weight:bold;
-            }}
-            QPushButton:hover   {{ background:#e04030; }}
-            QPushButton:pressed {{ background:#a02020; }}
-        """)
+        return inp
 
     def _show_error(self, msg: str):
-        self.error_label.setText(msg)
         self.error_label.setStyleSheet(f"""
             color:{WHITE}; background:{DANGER}; font-size:12px; font-weight:bold;
             border-radius:8px; padding:6px 14px;
         """)
+        self.error_label.setText(f"  {msg}  ")
         self.error_label.show()
 
     def _show_info(self, msg: str):
-        self.error_label.setText(msg)
+        """Shows a non-error (warning/info) message in the status area."""
         self.error_label.setStyleSheet(f"""
             color:{WHITE}; background:{WARNING}; font-size:12px; font-weight:bold;
             border-radius:8px; padding:6px 14px;
         """)
+        self.error_label.setText(f"  {msg}  ")
         self.error_label.show()
         QTimer.singleShot(3000, self.error_label.hide)
 
+    # =========================================================================
+    # Keyboard handling
+    # =========================================================================
+    def keyPressEvent(self, event):
+        key = event.key()
+
+        if self._stack.currentIndex() == 0:
+            # ── PIN tab ───────────────────────────────────────────────────────
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                self._login_pin()
+            elif Qt.Key_0 <= key <= Qt.Key_9:
+                self._pin_press(str(key - Qt.Key_0))
+            elif key in (Qt.Key_Backspace, Qt.Key_Delete):
+                self._pin_backspace()
+            elif key == Qt.Key_Escape:
+                self._pin_clear()
+            else:
+                super().keyPressEvent(event)
+        else:
+            # ── Email tab — QLineEdit returnPressed signals handle Enter ──────
+            super().keyPressEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.setFocus()
+        self.activateWindow()
+        self.raise_()
+
+    # =========================================================================
+    # Shake animation (wrong PIN / bad credentials)
+    # =========================================================================
     def _shake(self):
         pos = self.pos()
-        anim = QPropertyAnimation(self, b"pos", self)
-        anim.setDuration(320)
-        anim.setEasingCurve(QEasingCurve.OutElastic)
-        anim.setKeyValueAt(0.0,  pos)
-        anim.setKeyValueAt(0.15, pos + QPoint(-10, 0))
-        anim.setKeyValueAt(0.30, pos + QPoint(10,  0))
-        anim.setKeyValueAt(0.45, pos + QPoint(-8,  0))
-        anim.setKeyValueAt(0.60, pos + QPoint(8,   0))
-        anim.setKeyValueAt(0.75, pos + QPoint(-4,  0))
-        anim.setKeyValueAt(1.0,  pos)
-        anim.start(QPropertyAnimation.DeleteWhenStopped)
-
-    def keyPressEvent(self, event):
-        """Route physical keyboard digits to the PIN pad when on PIN tab."""
-        if self._stack.currentIndex() == 0:
-            key = event.text()
-            if key.isdigit():
-                self._pin_press(key)
-                return
-            if event.key() == Qt.Key_Backspace:
-                self._pin_backspace()
-                return
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                self._login_pin()
-                return
-        super().keyPressEvent(event)
-
-    def _check_connectivity(self):
-        """Ping the API host and update the status bar indicator."""
-        import socket
-        try:
-            socket.setdefaulttimeout(2)
-            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(
-                ("8.8.8.8", 53)
-            )
-            online = True
-        except Exception:
-            online = False
-
-        if online:
-            self._status_dot.setStyleSheet(
-                f"color:{SUCCESS}; font-size:7px; background:transparent;"
-            )
-            self._status_lbl.setText("Online")
-            self._status_lbl.setStyleSheet(
-                f"color:{SUCCESS}; font-size:10px; background:transparent;"
-            )
-        else:
-            self._status_dot.setStyleSheet(
-                f"color:{WARNING}; font-size:7px; background:transparent;"
-            )
-            self._status_lbl.setText("Offline — PIN login available")
-            self._status_lbl.setStyleSheet(
-                f"color:{WARNING}; font-size:10px; background:transparent;"
-            )
+        self.anim = QPropertyAnimation(self, b"pos")
+        self.anim.setDuration(280)
+        self.anim.setEasingCurve(QEasingCurve.OutElastic)
+        for t, dx in [(0, 0), (0.15, -12), (0.35, 12), (0.55, -8), (0.75, 8), (1, 0)]:
+            self.anim.setKeyValueAt(t, pos + QPoint(dx, 0))
+        self.anim.start()
 
 
 # =============================================================================
-# Utility — used by _validate_and_accept
+# Completeness check helper
 # =============================================================================
-def _check_user_complete(user: dict) -> tuple[bool, str]:
-    """Return (True, '') if the user record has all required fields set."""
-    missing = []
-    for field in ("company", "warehouse", "cost_center"):
-        val = user.get(field)
-        if not val or (isinstance(val, str) and not val.strip()):
-            missing.append(field.replace("_", " "))
+def _check_user_complete(user: dict, source: str = "") -> tuple[bool, str]:
+    """
+    Returns (True, "") if the user record has all required fields,
+    or (False, reason_string) if something is missing.
+
+    Rules:
+    - Disabled accounts are always blocked.
+    - PIN logins: only blocked if account is disabled — missing company/
+      warehouse/cost_center are NOT a blocker (those come from server defaults
+      set during an online email login).
+    - Email (online/offline) logins: company, warehouse and cost_center must
+      all be present; missing fields are listed explicitly in the error.
+    """
+    if not user.get("active", True):
+        return False, "Your account is disabled.  Please contact your administrator."
+
+    if source == "pin":
+        return True, ""
+
+    required = {
+        "company":     "Company",
+        "warehouse":   "Warehouse",
+        "cost_center": "Cost Center",
+    }
+    missing = [label for field, label in required.items()
+               if not (user.get(field) or "").strip()]
     if missing:
-        return False, f"Missing: {', '.join(missing)} — contact your admin."
+        fields = ",  ".join(missing)
+        return (
+            False,
+            f"Account incomplete — missing: {fields}.  Ask your administrator to update your server profile."
+        )
     return True, ""
+
+
+# =============================================================================
+# NOTE for main_window.py — Point #18
+# =============================================================================
+# In MainWindow.__init__, change:
+#
+#   if is_admin(self.user):
+#       self._stack.setCurrentIndex(1)   ← goes to dashboard
+#   else:
+#       self._stack.setCurrentIndex(0)
+#
+# To:
+#
+#   self._stack.setCurrentIndex(0)       ← always start on POS
+#
+# The dashboard remains accessible via the "Sales" or navigation menu.
+# This ensures ALL users — including admin — land on the POS screen first.
+# =============================================================================
