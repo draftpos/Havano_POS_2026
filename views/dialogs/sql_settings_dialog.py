@@ -179,6 +179,12 @@ class SqlSettingsDialog(QDialog):
         test_btn.setFixedHeight(40)
         test_btn.clicked.connect(self._test_sql_connection)
 
+        # ── NEW: Reconnect button (saves settings ONLY after successful connection check)
+        reconnect_btn = QPushButton("🔄 Reconnect")
+        reconnect_btn.setObjectName("PrimaryButton")
+        reconnect_btn.setFixedHeight(40)
+        reconnect_btn.clicked.connect(self._reconnect)
+
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setFixedHeight(40)
         cancel_btn.setFixedWidth(90)
@@ -190,6 +196,7 @@ class SqlSettingsDialog(QDialog):
         save_btn.clicked.connect(self._save_and_close)
 
         btn_row.addWidget(test_btn)
+        btn_row.addWidget(reconnect_btn)          # New reconnect button
         btn_row.addStretch()
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(save_btn)
@@ -233,7 +240,8 @@ class SqlSettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Connection Failed", f"❌ Failed:\n{str(e)}")
 
-    def _save_and_close(self):
+    # ── NEW: Save settings to file ONLY (no migration, no DB creation)
+    def _save_settings(self):
         data = {
             "auth_mode": "windows" if self.mode_combo.currentText() == "Windows Authentication" else "sql",
             "server":    self.server_input.text().strip() or ".\\SQLEXPRESS",
@@ -243,6 +251,43 @@ class SqlSettingsDialog(QDialog):
             "api_url":   self.frappe_url_input.text().strip(),
         }
         self.settings_file.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+    # ── NEW: Reconnect button logic
+    def _reconnect(self):
+        """Check connection to the EXISTING database, then save settings ONLY (no migration)"""
+        try:
+            # Important: test with the specific database (include_db=True)
+            conn = pyodbc.connect(
+                self._get_connection_string(include_db=True), timeout=5
+            )
+            conn.close()
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Reconnect Failed",
+                f"❌ Could not connect to the database:\n{str(e)}\n\n"
+                f"• Make sure the database '{self.db_input.text().strip() or 'pos_db'}' already exists.\n"
+                f"• Use 'Save Configuration' if you want to create a new database."
+            )
+            return
+
+        # Connection is valid → save settings only
+        self._save_settings()
+
+        try:
+            from services.site_config import invalidate_cache
+            invalidate_cache()
+        except Exception:
+            pass
+
+        QMessageBox.information(
+            self, "Reconnect Successful",
+            "✅ SQL settings saved successfully!\n\n"
+            "The application will now use the updated database connection."
+        )
+        self.accept()  # Close dialog (no sys.exit, no migration)
+
+    def _save_and_close(self):
+        self._save_settings()   # Reuse the shared save logic
         try:
             from services.site_config import invalidate_cache
             invalidate_cache()
