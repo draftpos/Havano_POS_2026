@@ -1,25 +1,3 @@
-# =============================================================================
-# setup_database.py  —  Havano POS
-#
-# Single source of truth for the database schema.
-# Derived 1-to-1 from script.sql (pos_db, 3/26/2026).
-#
-# SAFE to run on a FRESH database or an EXISTING one:
-#   • Creates any missing table.
-#   • Adds any missing column to existing tables (ALTER TABLE).
-#   • Never drops, truncates, or overwrites existing data.
-#
-# Called automatically by main.py on every startup AFTER a valid
-# DB connection is confirmed — so you never need to run it by hand
-# unless you wiped the DB with seed.py.
-#
-# To run manually:
-#   python setup_database.py
-#
-# Seeds one default admin user when the users table is empty:
-#   Username : admin   Password : admin123
-# =============================================================================
-
 import sys
 import os
 import hashlib
@@ -118,6 +96,7 @@ def run():
         add_col("companies", "default_currency", "NVARCHAR(10)  NOT NULL DEFAULT 'USD'")
         add_col("companies", "country",          "NVARCHAR(80)  NOT NULL DEFAULT ''")
 
+   
     # ==================================================================
     # 2. company_defaults
     # ==================================================================
@@ -133,6 +112,7 @@ def run():
                 [vat_number]               NVARCHAR(100) NOT NULL DEFAULT '',
                 [tin_number]               NVARCHAR(100) NOT NULL DEFAULT '',
                 [footer_text]              NVARCHAR(500) NOT NULL DEFAULT '',
+                [terms_and_conditions]     NVARCHAR(MAX) NOT NULL DEFAULT '',
                 [zimra_serial_no]          NVARCHAR(100) NOT NULL DEFAULT '',
                 [zimra_device_id]          NVARCHAR(100) NOT NULL DEFAULT '',
                 [zimra_api_key]            NVARCHAR(500) NOT NULL DEFAULT '',
@@ -154,6 +134,7 @@ def run():
                 [api_secret]               NVARCHAR(200) NOT NULL DEFAULT '',
                 [invoice_prefix]           NVARCHAR(6)   NOT NULL DEFAULT '',
                 [invoice_start_number]     INT           NOT NULL DEFAULT 0,
+                [allow_credit_sales]       NVARCHAR(10)  NOT NULL DEFAULT '0',
                 [server_company_currency]  NVARCHAR(10)  NOT NULL DEFAULT 'USD',
                 [server_api_host]          NVARCHAR(255) NOT NULL DEFAULT '',
                 [server_pos_account]       NVARCHAR(255) NOT NULL DEFAULT '',
@@ -170,13 +151,16 @@ def run():
         ok("company_defaults")
     else:
         skip("company_defaults")
+        # Migration loop for existing databases
         for col, defn in [
+            ("phone",                    "NVARCHAR(100) NOT NULL DEFAULT ''"),
             ("zimra_serial_no",          "NVARCHAR(100) NOT NULL DEFAULT ''"),
             ("zimra_device_id",          "NVARCHAR(100) NOT NULL DEFAULT ''"),
             ("zimra_api_key",            "NVARCHAR(500) NOT NULL DEFAULT ''"),
             ("zimra_api_url",            "NVARCHAR(300) NOT NULL DEFAULT ''"),
             ("invoice_prefix",           "NVARCHAR(6)   NOT NULL DEFAULT ''"),
             ("invoice_start_number",     "INT           NOT NULL DEFAULT 0"),
+            ("allow_credit_sales",       "NVARCHAR(10)  NOT NULL DEFAULT '0'"),
             ("server_company_currency",  "NVARCHAR(10)  NOT NULL DEFAULT 'USD'"),
             ("server_api_host",          "NVARCHAR(255) NOT NULL DEFAULT ''"),
             ("server_pos_account",       "NVARCHAR(255) NOT NULL DEFAULT ''"),
@@ -189,17 +173,17 @@ def run():
             ("server_vat_enabled",       "NVARCHAR(10)  NOT NULL DEFAULT ''"),
             ("api_key",                  "NVARCHAR(200) NOT NULL DEFAULT ''"),
             ("api_secret",               "NVARCHAR(200) NOT NULL DEFAULT ''"),
+            ("terms_and_conditions",     "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
         ]:
             add_col("company_defaults", col, defn)
+        
         # Ensure at least one settings row exists
         try:
             cur.execute("SELECT COUNT(*) FROM [dbo].[company_defaults]")
             if cur.fetchone()[0] == 0:
-                cur.execute(
-                    "INSERT INTO [dbo].[company_defaults] DEFAULT VALUES")
+                cur.execute("INSERT INTO [dbo].[company_defaults] DEFAULT VALUES")
         except Exception:
             pass
-
     # ==================================================================
     # 3. customer_groups
     # ==================================================================
@@ -270,7 +254,7 @@ def run():
         skip("cost_centers")
         add_col("cost_centers", "company_id", "INT NOT NULL DEFAULT 0")
 
-    # ==================================================================
+        # ==================================================================
     # 7. customers
     # ==================================================================
     if not table_exists("customers"):
@@ -292,6 +276,7 @@ def run():
                 [outstanding_amount]      DECIMAL(18,2) NULL DEFAULT 0,
                 [laybye_balance]          DECIMAL(18,2) NULL DEFAULT 0,
                 [loyalty_points]          INT           NULL DEFAULT 0,
+                [frappe_synced]           BIT           NOT NULL DEFAULT 0,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -311,10 +296,12 @@ def run():
             ("default_price_list_id",   "INT           NULL"),
             ("balance",                 "DECIMAL(18,2) NULL DEFAULT 0"),
             ("outstanding_amount",      "DECIMAL(18,2) NULL DEFAULT 0"),
+            ("laybye_balance",          "DECIMAL(18,2) NULL DEFAULT 0"),
             ("loyalty_points",          "INT           NULL DEFAULT 0"),
+            ("frappe_synced",           "BIT           NOT NULL DEFAULT 0"),
         ]:
             add_col("customers", col, defn)
-
+    
     # ==================================================================
     # 8. users
     # ==================================================================
@@ -340,6 +327,9 @@ def run():
                 [allow_receipt]        BIT           NOT NULL DEFAULT 1,
                 [allow_credit_note]    BIT           NOT NULL DEFAULT 1,
                 [allow_reprint]        BIT           NOT NULL DEFAULT 1,
+                [allow_laybye]         BIT           NOT NULL DEFAULT 1,
+                [allow_quote]          BIT           NOT NULL DEFAULT 1,
+                [discount_expiry_date] NVARCHAR(50)  NULL,
                 [company]              NVARCHAR(140) NULL  DEFAULT '',
                 [max_discount_percent] INT           NULL  DEFAULT 0,
                 PRIMARY KEY CLUSTERED ([id] ASC),
@@ -364,6 +354,9 @@ def run():
             ("allow_receipt",        "BIT           NOT NULL DEFAULT 1"),
             ("allow_credit_note",    "BIT           NOT NULL DEFAULT 1"),
             ("allow_reprint",        "BIT           NOT NULL DEFAULT 1"),
+            ("allow_laybye",         "BIT           NOT NULL DEFAULT 1"),   #← ADD THIS
+            ("allow_quote",          "BIT           NOT NULL DEFAULT 1"),  # ← ADD THIS
+            ("discount_expiry_date", "NVARCHAR(50)  NULL"),
             ("company",              "NVARCHAR(140) NULL DEFAULT ''"),
             ("max_discount_percent", "INT           NULL DEFAULT 0"),
         ]:
@@ -391,6 +384,8 @@ def run():
                 [order_6]           BIT           NOT NULL DEFAULT 0,
                 [uom]               NVARCHAR(20)  NULL,
                 [conversion_factor] DECIMAL(12,4) NULL,
+                [tax_rate]          DECIMAL(8,4)  NULL,
+                [tax_type]          NVARCHAR(50)  NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -408,9 +403,14 @@ def run():
             ("order_6",           "BIT           NOT NULL DEFAULT 0"),
             ("uom",               "NVARCHAR(20)  NULL"),
             ("conversion_factor", "DECIMAL(12,4) NULL"),
+            ("tax_rate",          "DECIMAL(8,4)  NULL"),
+            ("tax_type",          "NVARCHAR(50)  NULL"),
         ]:
             add_col("products", col, defn)
 
+    # ==================================================================
+    # 10. sales
+    # ==================================================================
     # ==================================================================
     # 10. sales
     # ==================================================================
@@ -433,9 +433,11 @@ def run():
                 [subtotal]          DECIMAL(12,2) NOT NULL,
                 [total_vat]         DECIMAL(12,2) NOT NULL,
                 [discount_amount]   DECIMAL(12,2) NOT NULL,
+                [is_on_account]     BIT           NOT NULL DEFAULT 0,
                 [receipt_type]      NVARCHAR(30)  NOT NULL,
                 [footer]            NVARCHAR(MAX) NOT NULL,
                 [synced]            BIT           NOT NULL DEFAULT 0,
+                [syncing]           BIT           NOT NULL DEFAULT 0,
                 [total_items]       DECIMAL(12,4) NOT NULL,
                 [change_amount]     DECIMAL(12,2) NOT NULL,
                 [company_name]      NVARCHAR(120) NOT NULL,
@@ -443,6 +445,27 @@ def run():
                 [created_at]        DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
                 [payment_entry_ref] NVARCHAR(80)  NULL,
                 [payment_synced]    BIT           NOT NULL DEFAULT 0,
+                [shift_id]          INT           NULL,
+                [fiscal_status]               NVARCHAR(50)  NULL,
+                [fiscal_qr_code]              NVARCHAR(MAX) NULL,
+                [fiscal_verification_code]    NVARCHAR(255) NULL,
+                [fiscal_receipt_counter]      INT           NULL,
+                [fiscal_global_no]            NVARCHAR(100) NULL,
+                [fiscal_sync_date]            DATETIME2(7)  NULL,
+                [fiscal_error]                NVARCHAR(MAX) NULL,
+                [total_tax_amount]            DECIMAL(12,2) NULL DEFAULT 0,
+                [subtotal_before_tax]         DECIMAL(12,2) NULL DEFAULT 0,
+                -- ── Multi-currency fields ──────────────────────────────────
+                -- total_usd   : invoice grand total always in USD
+                -- total_zwd   : invoice grand total in ZWD (NULL if not a ZWD sale)
+                -- tendered_usd: raw USD cash the customer gave (change calc only)
+                -- tendered_zwd: raw ZWD cash the customer gave (change calc only)
+                -- exchange_rate: rate used at time of sale (foreign_currency → USD)
+                [total_usd]       DECIMAL(14,4) NULL DEFAULT 0,
+                [total_zwd]       DECIMAL(14,4) NULL DEFAULT 0,
+                [tendered_usd]    DECIMAL(14,4) NULL DEFAULT 0,
+                [tendered_zwd]    DECIMAL(14,4) NULL DEFAULT 0,
+                [exchange_rate]   DECIMAL(18,8) NULL DEFAULT 1,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -455,6 +478,26 @@ def run():
             ("created_at",        "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
             ("payment_entry_ref", "NVARCHAR(80)  NULL"),
             ("payment_synced",    "BIT           NOT NULL DEFAULT 0"),
+            ("synced",            "BIT           NOT NULL DEFAULT 0"),
+            ("syncing",           "BIT           NOT NULL DEFAULT 0"),
+            ("is_on_account",     "BIT           NOT NULL DEFAULT 0"),
+            ("shift_id",                    "INT           NULL"),
+            ("fiscal_status",               "NVARCHAR(50)  NULL"),
+            ("fiscal_qr_code",              "NVARCHAR(MAX) NULL"),
+            ("fiscal_verification_code",    "NVARCHAR(255) NULL"),
+            ("fiscal_receipt_counter",      "INT           NULL"),
+            ("fiscal_global_no",            "NVARCHAR(100) NULL"),
+            ("fiscal_sync_date",            "DATETIME2(7)  NULL"),
+            ("fiscal_error",                "NVARCHAR(MAX) NULL"),
+            ("sync_error",                  "NVARCHAR(MAX) NULL"),
+            ("total_tax_amount",            "DECIMAL(12,2) NULL DEFAULT 0"),
+            ("subtotal_before_tax",         "DECIMAL(12,2) NULL DEFAULT 0"),
+            # ── Multi-currency fields (migration) ──
+            ("total_usd",     "DECIMAL(14,4) NULL DEFAULT 0"),
+            ("total_zwd",     "DECIMAL(14,4) NULL DEFAULT 0"),
+            ("tendered_usd",  "DECIMAL(14,4) NULL DEFAULT 0"),
+            ("tendered_zwd",  "DECIMAL(14,4) NULL DEFAULT 0"),
+            ("exchange_rate", "DECIMAL(18,8) NULL DEFAULT 1"),
         ]:
             add_col("sales", col, defn)
 
@@ -477,6 +520,7 @@ def run():
                 [tax_rate]     DECIMAL(8,4)  NOT NULL,
                 [tax_amount]   DECIMAL(12,2) NOT NULL,
                 [remarks]      NVARCHAR(MAX) NOT NULL DEFAULT '',
+                
                 [order_1]      BIT           NOT NULL DEFAULT 0,
                 [order_2]      BIT           NOT NULL DEFAULT 0,
                 [order_3]      BIT           NOT NULL DEFAULT 0,
@@ -497,6 +541,7 @@ def run():
             ("order_4", "BIT           NOT NULL DEFAULT 0"),
             ("order_5", "BIT           NOT NULL DEFAULT 0"),
             ("order_6", "BIT           NOT NULL DEFAULT 0"),
+            ("is_on_account",     "BIT           NOT NULL DEFAULT 0"),
         ]:
             add_col("sale_items", col, defn)
 
@@ -574,9 +619,16 @@ def run():
                 [remarks]                  NVARCHAR(255) NULL,
                 [payment_type]             NVARCHAR(20)  NOT NULL DEFAULT 'Receive',
                 [synced]                   BIT           NOT NULL DEFAULT 0,
+                [syncing]                  BIT           NOT NULL DEFAULT 0,
                 [frappe_payment_ref]       NVARCHAR(80)  NULL,
                 [created_at]               DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 [frappe_so_ref]            NVARCHAR(255) NULL,
+                [sync_attempts]            INT           NOT NULL DEFAULT 0,
+                [last_error]               NVARCHAR(MAX) NULL,
+                [amount_usd]               DECIMAL(14,4) NULL DEFAULT 0,
+                [amount_zwd]               DECIMAL(14,4) NULL DEFAULT 0,
+                [amount_zwg]               DECIMAL(14,4) NULL DEFAULT 0,
+                [exchange_rate]            DECIMAL(18,8) NULL DEFAULT 1,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -596,6 +648,13 @@ def run():
             ("remarks",                  "NVARCHAR(255) NULL"),
             ("frappe_payment_ref",       "NVARCHAR(80)  NULL"),
             ("frappe_so_ref",            "NVARCHAR(255) NULL"),
+            ("sync_attempts",            "INT           NOT NULL DEFAULT 0"),
+            ("syncing",                  "BIT           NOT NULL DEFAULT 0"),
+            ("last_error",               "NVARCHAR(MAX) NULL"),
+            ("amount_usd",    "DECIMAL(14,4) NULL DEFAULT 0"),
+            ("amount_zwd",    "DECIMAL(14,4) NULL DEFAULT 0"),
+            ("amount_zwg",    "DECIMAL(14,4) NULL DEFAULT 0"),
+            ("exchange_rate", "DECIMAL(18,8) NULL DEFAULT 1"),
         ]:
             add_col("payment_entries", col, defn)
 
@@ -625,6 +684,7 @@ def run():
         skip("credit_notes")
         add_col("credit_notes", "frappe_ref",    "NVARCHAR(80) NULL")
         add_col("credit_notes", "frappe_cn_ref", "NVARCHAR(80) NULL")
+        add_col("credit_notes", "sync_error",    "NVARCHAR(MAX) NULL")
 
     # ==================================================================
     # 16. credit_note_items  (FK -> credit_notes added later)
@@ -672,6 +732,7 @@ def run():
         for col, defn in [
             ("account_number",   "NVARCHAR(80)  NULL"),
             ("account_currency", "NVARCHAR(10)  NOT NULL DEFAULT 'USD'"),
+            ("is_group",         "BIT           NOT NULL DEFAULT 0"),
             ("updated_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
         ]:
             add_col("gl_accounts", col, defn)
@@ -756,6 +817,7 @@ def run():
             ("currency",     "NVARCHAR(10)  NULL DEFAULT 'USD'"),
             ("account_name", "NVARCHAR(100) NULL"),
             ("payment_date", "DATE          NULL"),
+            ("sync_error",   "NVARCHAR(MAX) NULL"),
         ]:
             add_col("customer_payments", col, defn)
 
@@ -778,6 +840,9 @@ def run():
     else:
         skip("product_uom_prices")
 
+    # ==================================================================
+    # 22. sales_order
+    # ==================================================================
     # ==================================================================
     # 22. sales_order
     # ==================================================================
@@ -807,11 +872,18 @@ def run():
     else:
         skip("sales_order")
         for col, defn in [
+            ("order_no",       "NVARCHAR(100) NULL"),
+            ("customer_id",    "INT           NULL"),
+            ("customer_name",  "NVARCHAR(255) NULL"),
+            ("company",        "NVARCHAR(255) NULL"),
+            ("order_date",     "NVARCHAR(50)  NULL"),
             ("delivery_date",  "NVARCHAR(50)  NOT NULL DEFAULT ''"),
             ("order_type",     "NVARCHAR(50)  NOT NULL DEFAULT 'Sales'"),
+            ("total",          "FLOAT         NOT NULL DEFAULT 0"),
             ("deposit_amount", "FLOAT         NOT NULL DEFAULT 0"),
             ("deposit_method", "NVARCHAR(100) NOT NULL DEFAULT ''"),
             ("balance_due",    "FLOAT         NOT NULL DEFAULT 0"),
+            ("status",         "NVARCHAR(50)  NOT NULL DEFAULT 'Draft'"),
             ("synced",         "INT           NOT NULL DEFAULT 0"),
             ("frappe_ref",     "NVARCHAR(255) NOT NULL DEFAULT ''"),
             ("created_at",     "NVARCHAR(50)  NULL"),
@@ -891,6 +963,7 @@ def run():
             ("created_at",       "NVARCHAR(50)  NOT NULL DEFAULT ''"),
             ("last_attempt_at",  "NVARCHAR(50)  NOT NULL DEFAULT ''"),
             ("error_message",    "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+            ("sync_error",       "NVARCHAR(MAX) NULL"),
         ]:
             add_col("laybye_payment_entries", col, defn)
 
@@ -970,14 +1043,385 @@ def run():
         ]:
             add_col("shift_report_details", col, defn)
 
+    # ==================================================================
+    # 28. sync_errors
+    # ==================================================================
+    if not table_exists("sync_errors"):
+        cur.execute("""
+            CREATE TABLE [dbo].[sync_errors] (
+                [id]          INT           IDENTITY(1,1) NOT NULL,
+                [doc_type]    NVARCHAR(20)  NOT NULL DEFAULT '',
+                [doc_ref]     NVARCHAR(100) NOT NULL DEFAULT '',
+                [customer]    NVARCHAR(255) NOT NULL DEFAULT '',
+                [amount]      FLOAT         NOT NULL DEFAULT 0,
+                [error_code]  NVARCHAR(50)  NOT NULL DEFAULT '',
+                [error_msg]   NVARCHAR(MAX) NOT NULL DEFAULT '',
+                [occurred_at] NVARCHAR(50)  NOT NULL DEFAULT '',
+                [resolved]    BIT           NOT NULL DEFAULT 0,
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("sync_errors")
+    else:
+        skip("sync_errors")
+        # Migrate existing installs — add any columns that may be missing
+        add_col("sync_errors", "doc_type",    "NVARCHAR(20)  NOT NULL DEFAULT ''")
+        add_col("sync_errors", "doc_ref",     "NVARCHAR(100) NOT NULL DEFAULT ''")
+        add_col("sync_errors", "customer",    "NVARCHAR(255) NOT NULL DEFAULT ''")
+        add_col("sync_errors", "amount",      "FLOAT         NOT NULL DEFAULT 0")
+        add_col("sync_errors", "error_code",  "NVARCHAR(50)  NOT NULL DEFAULT ''")
+        add_col("sync_errors", "error_msg",   "NVARCHAR(MAX) NOT NULL DEFAULT ''")
+        add_col("sync_errors", "occurred_at", "NVARCHAR(50)  NOT NULL DEFAULT ''")
+        add_col("sync_errors", "resolved",    "BIT           NOT NULL DEFAULT 0")
+
+    # ==================================================================
+    # 29. fiscal_settings
+    # ==================================================================
+    if not table_exists("fiscal_settings"):
+        cur.execute("""
+            CREATE TABLE [dbo].[fiscal_settings] (
+                [id]                    INT           IDENTITY(1,1) NOT NULL,
+                [enabled]               BIT           NOT NULL DEFAULT 0,
+                [base_url]              NVARCHAR(500) NOT NULL DEFAULT '',
+                [api_key]               NVARCHAR(200) NOT NULL DEFAULT '',
+                [api_secret]            NVARCHAR(200) NOT NULL DEFAULT '',
+                [device_sn]             NVARCHAR(100) NOT NULL DEFAULT '',
+                [ping_interval_minutes] INT           NOT NULL DEFAULT 5,
+                [device_status]         NVARCHAR(20)  NOT NULL DEFAULT 'unknown',
+                [last_ping_time]        DATETIME2(7)  NULL,
+                [reporting_frequency]   INT           NULL,
+                [operation_id]          NVARCHAR(100) NULL,
+                [created_at]            DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                [updated_at]            DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("fiscal_settings")
+    else:
+        skip("fiscal_settings")
+        for col, defn in [
+            ("enabled",               "BIT           NOT NULL DEFAULT 0"),
+            ("base_url",              "NVARCHAR(500) NOT NULL DEFAULT ''"),
+            ("api_key",               "NVARCHAR(200) NOT NULL DEFAULT ''"),
+            ("api_secret",            "NVARCHAR(200) NOT NULL DEFAULT ''"),
+            ("device_sn",             "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("ping_interval_minutes", "INT           NOT NULL DEFAULT 5"),
+            ("device_status",         "NVARCHAR(20)  NOT NULL DEFAULT 'unknown'"),
+            ("last_ping_time",        "DATETIME2(7)  NULL"),
+            ("reporting_frequency",   "INT           NULL"),
+            ("operation_id",          "NVARCHAR(100) NULL"),
+            ("created_at",            "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+            ("updated_at",            "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("fiscal_settings", col, defn)
+
+    # ==================================================================
+    # 30. invoice_counter
+    # ==================================================================
+    if not table_exists("invoice_counter"):
+        cur.execute("""
+            CREATE TABLE [dbo].[invoice_counter] (
+                [counter_name] NVARCHAR(50)  NOT NULL,
+                [last_number]  INT           NOT NULL DEFAULT 0,
+                [updated_at]   DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([counter_name] ASC)
+            )
+        """)
+        ok("invoice_counter")
+    else:
+        skip("invoice_counter")
+        for col, defn in [
+            ("last_number", "INT          NOT NULL DEFAULT 0"),
+            ("updated_at",  "DATETIME2(7) NOT NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("invoice_counter", col, defn)
+
+    # ==================================================================
+    # 31. product_taxes
+    # ==================================================================
+    if not table_exists("product_taxes"):
+        cur.execute("""
+            CREATE TABLE [dbo].[product_taxes] (
+                [id]                INT           IDENTITY(1,1) NOT NULL,
+                [part_no]           NVARCHAR(50)  NOT NULL,
+                [item_tax_template] NVARCHAR(100) NULL,
+                [tax_category]      NVARCHAR(50)  NULL,
+                [valid_from]        DATE          NULL,
+                [minimum_net_rate]  DECIMAL(8,4)  NULL,
+                [maximum_net_rate]  DECIMAL(8,4)  NULL,
+                [created_at]        DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
+                [updated_at]        DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("product_taxes")
+    else:
+        skip("product_taxes")
+        for col, defn in [
+            ("item_tax_template", "NVARCHAR(100) NULL"),
+            ("tax_category",      "NVARCHAR(50)  NULL"),
+            ("valid_from",        "DATE          NULL"),
+            ("minimum_net_rate",  "DECIMAL(8,4)  NULL"),
+            ("maximum_net_rate",  "DECIMAL(8,4)  NULL"),
+            ("created_at",        "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
+            ("updated_at",        "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("product_taxes", col, defn)
+
+    # ==================================================================
+    # 32. quotations
+    # ==================================================================
+    if not table_exists("quotations"):
+        cur.execute("""
+            CREATE TABLE [dbo].[quotations] (
+                [id]               INT           IDENTITY(1,1) NOT NULL,
+                [name]             NVARCHAR(100) NOT NULL,
+                [transaction_date] NVARCHAR(20)  NOT NULL DEFAULT '',
+                [valid_till]       NVARCHAR(20)  NULL,
+                [grand_total]      DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [docstatus]        INT           NOT NULL DEFAULT 0,
+                [company]          NVARCHAR(120) NOT NULL DEFAULT '',
+                [reference_number] NVARCHAR(80)  NULL,
+                [status]           NVARCHAR(50)  NOT NULL DEFAULT 'Draft',
+                [customer]         NVARCHAR(120) NOT NULL DEFAULT '',
+                [synced]           BIT           NOT NULL DEFAULT 0,
+                [frappe_ref]       NVARCHAR(80)  NULL,
+                [sync_date]        DATETIME2(7)  NULL,
+                [raw_data]         NVARCHAR(MAX) NULL,
+                [created_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                [updated_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("quotations")
+    else:
+        skip("quotations")
+        for col, defn in [
+            ("transaction_date", "NVARCHAR(20)  NOT NULL DEFAULT ''"),
+            ("valid_till",       "NVARCHAR(20)  NULL"),
+            ("grand_total",      "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+            ("docstatus",        "INT           NOT NULL DEFAULT 0"),
+            ("company",          "NVARCHAR(120) NOT NULL DEFAULT ''"),
+            ("reference_number", "NVARCHAR(80)  NULL"),
+            ("status",           "NVARCHAR(50)  NOT NULL DEFAULT 'Draft'"),
+            ("customer",         "NVARCHAR(120) NOT NULL DEFAULT ''"),
+            ("synced",           "BIT           NOT NULL DEFAULT 0"),
+            ("frappe_ref",       "NVARCHAR(80)  NULL"),
+            ("sync_date",        "DATETIME2(7)  NULL"),
+            ("raw_data",         "NVARCHAR(MAX) NULL"),
+            ("created_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+            ("updated_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("quotations", col, defn)
+
+    # ==================================================================
+    # 33. quotation_items  (FK -> quotations ON DELETE CASCADE)
+    # ==================================================================
+    if not table_exists("quotation_items"):
+        cur.execute("""
+            CREATE TABLE [dbo].[quotation_items] (
+                [id]           INT           IDENTITY(1,1) NOT NULL,
+                [quotation_id] INT           NOT NULL,
+                [item_code]    NVARCHAR(50)  NOT NULL DEFAULT '',
+                [item_name]    NVARCHAR(200) NOT NULL DEFAULT '',
+                [description]  NVARCHAR(MAX) NULL,
+                [qty]          DECIMAL(12,4) NOT NULL DEFAULT 1,
+                [rate]         DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [amount]       DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [uom]          NVARCHAR(20)  NOT NULL DEFAULT '',
+                [product_id]   INT           NULL,
+                [part_no]      NVARCHAR(50)  NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("quotation_items")
+    else:
+        skip("quotation_items")
+        for col, defn in [
+            ("item_code",   "NVARCHAR(50)  NOT NULL DEFAULT ''"),
+            ("item_name",   "NVARCHAR(200) NOT NULL DEFAULT ''"),
+            ("description", "NVARCHAR(MAX) NULL"),
+            ("qty",         "DECIMAL(12,4) NOT NULL DEFAULT 1"),
+            ("rate",        "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+            ("amount",      "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+            ("uom",         "NVARCHAR(20)  NOT NULL DEFAULT ''"),
+            ("product_id",  "INT           NULL"),
+            ("part_no",     "NVARCHAR(50)  NULL"),
+        ]:
+            add_col("quotation_items", col, defn)
+
+    # ==================================================================
+    # 34. shift_reconciliations
+    # ==================================================================
+    if not table_exists("shift_reconciliations"):
+        cur.execute("""
+            CREATE TABLE [dbo].[shift_reconciliations] (
+                [id]                   INT           IDENTITY(1,1) NOT NULL,
+                [shift_id]             INT           NOT NULL,
+                [shift_number]         INT           NOT NULL,
+                [shift_date]           NVARCHAR(20)  NOT NULL DEFAULT '',
+                [start_time]           NVARCHAR(20)  NOT NULL DEFAULT '',
+                [end_time]             NVARCHAR(20)  NOT NULL DEFAULT '',
+                [closing_cashier_id]   INT           NULL,
+                [closing_cashier_name] NVARCHAR(100) NULL,
+                [total_expected]       DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [total_counted]        DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [total_variance]       DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [reconciliation_json]  NVARCHAR(MAX) NOT NULL DEFAULT '',
+                [printed_at]           DATETIME2(7)  NULL,
+                [created_at]           DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("shift_reconciliations")
+    else:
+        skip("shift_reconciliations")
+        for col, defn in [
+            ("shift_number",         "INT           NOT NULL DEFAULT 0"),
+            ("shift_date",           "NVARCHAR(20)  NOT NULL DEFAULT ''"),
+            ("start_time",           "NVARCHAR(20)  NOT NULL DEFAULT ''"),
+            ("end_time",             "NVARCHAR(20)  NOT NULL DEFAULT ''"),
+            ("closing_cashier_id",   "INT           NULL"),
+            ("closing_cashier_name", "NVARCHAR(100) NULL"),
+            ("total_expected",       "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+            ("total_counted",        "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+            ("total_variance",       "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+            ("reconciliation_json",  "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+            ("printed_at",           "DATETIME2(7)  NULL"),
+            ("created_at",           "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("shift_reconciliations", col, defn)
+
+    # ==================================================================
+    # 35. transaction_hashes
+    # ==================================================================
+    if not table_exists("transaction_hashes"):
+        cur.execute("""
+            CREATE TABLE [dbo].[transaction_hashes] (
+                [id]               INT          IDENTITY(1,1) NOT NULL,
+                [transaction_hash] NVARCHAR(64) NOT NULL,
+                [sale_id]          INT          NULL,
+                [created_at]       DATETIME2(7) NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("transaction_hashes")
+    else:
+        skip("transaction_hashes")
+        for col, defn in [
+            ("transaction_hash", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ("sale_id",          "INT          NULL"),
+            ("created_at",       "DATETIME2(7) NOT NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("transaction_hashes", col, defn)
+
+    # ==================================================================
+    # 36. transaction_tracking
+    # ==================================================================
+    if not table_exists("transaction_tracking"):
+        cur.execute("""
+            CREATE TABLE [dbo].[transaction_tracking] (
+                [id]             INT           IDENTITY(1,1) NOT NULL,
+                [transaction_id] NVARCHAR(100) NOT NULL,
+                [sale_id]        INT           NULL,
+                [created_at]     DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                [total]          DECIMAL(12,2) NULL,
+                [item_count]     INT           NULL,
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("transaction_tracking")
+    else:
+        skip("transaction_tracking")
+        for col, defn in [
+            ("transaction_id", "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("sale_id",        "INT           NULL"),
+            ("created_at",     "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+            ("total",          "DECIMAL(12,2) NULL"),
+            ("item_count",     "INT           NULL"),
+        ]:
+            add_col("transaction_tracking", col, defn)
+
+    # ==================================================================
+    # 37. modes_of_payment
+    # ==================================================================
+    if not table_exists("modes_of_payment"):
+        cur.execute("""
+            CREATE TABLE [dbo].[modes_of_payment] (
+                [id]               INT           IDENTITY(1,1) NOT NULL,
+                [name]             NVARCHAR(120) NOT NULL,
+                [type]             NVARCHAR(50)  NOT NULL DEFAULT 'General',
+                [mop_type]         NVARCHAR(50)  NOT NULL DEFAULT 'General',
+                [enabled]          BIT           NOT NULL DEFAULT 1,
+                [account]          NVARCHAR(255) NULL,
+                [gl_account]       NVARCHAR(255) NULL,
+                [account_currency] NVARCHAR(10)  NOT NULL DEFAULT 'USD',
+                [gl_account_name]  NVARCHAR(255) NULL,
+                [company]          NVARCHAR(255) NOT NULL DEFAULT '',
+                [synced_from_api]  BIT           NOT NULL DEFAULT 0,
+                [created_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                [updated_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                UNIQUE NONCLUSTERED ([name] ASC)
+            )
+        """)
+        ok("modes_of_payment")
+    else:
+        skip("modes_of_payment")
+        for col, defn in [
+            ("type",             "NVARCHAR(50)  NOT NULL DEFAULT 'General'"),
+            ("mop_type",         "NVARCHAR(50)  NOT NULL DEFAULT 'General'"),
+            ("enabled",          "BIT           NOT NULL DEFAULT 1"),
+            ("account",          "NVARCHAR(255) NULL"),
+            ("gl_account",       "NVARCHAR(255) NULL"),
+            ("account_currency", "NVARCHAR(10)  NOT NULL DEFAULT 'USD'"),
+            ("gl_account_name",  "NVARCHAR(255) NULL"),
+            ("company",          "NVARCHAR(255) NOT NULL DEFAULT ''"),
+            ("synced_from_api",  "BIT           NOT NULL DEFAULT 0"),
+            ("created_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+            ("updated_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("modes_of_payment", col, defn)
+
+    # ==================================================================
+    # 38. payment_entries
+    # ==================================================================
+    if not table_exists("payment_entries"):
+        cur.execute("""
+            CREATE TABLE [dbo].[payment_entries] (
+                [id]                      INT           IDENTITY(1,1) PRIMARY KEY,
+                [sale_id]                 INT           NULL,
+                [sale_invoice_no]         NVARCHAR(80)  NULL,
+                [frappe_invoice_ref]      NVARCHAR(80)  NULL,
+                [party]                   NVARCHAR(120) NULL,
+                [paid_amount]             DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [received_amount]         DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [source_exchange_rate]    DECIMAL(12,6) NOT NULL DEFAULT 1,
+                [currency]                NVARCHAR(10)  NULL,
+                [mode_of_payment]         NVARCHAR(80)  NULL,
+                [reference_no]            NVARCHAR(80)  NULL,
+                [payment_type]            NVARCHAR(20)  NOT NULL DEFAULT 'Receive',
+                [synced]                  BIT           NOT NULL DEFAULT 0,
+                [frappe_payment_ref]      NVARCHAR(80)  NULL,
+                [sync_attempts]           INT           NOT NULL DEFAULT 0,
+                [sync_error]              NVARCHAR(MAX) NULL,
+                [created_at]              DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()
+            )
+        """)
+        ok("payment_entries")
+    else:
+        skip("payment_entries")
+        for col, defn in [
+            ("sync_attempts", "INT           NOT NULL DEFAULT 0"),
+            ("sync_error",    "NVARCHAR(MAX) NULL"),
+            ("last_error",    "NVARCHAR(MAX) NULL"),
+        ]:
+            add_col("payment_entries", col, defn)
+
     # ------------------------------------------------------------------
     # Commit all table DDL before foreign keys
     # ------------------------------------------------------------------
     conn.commit()
-
-    # ==================================================================
-    # Foreign key constraints  (exactly matching script.sql)
-    # ==================================================================
     print("\n  Adding foreign key constraints...")
 
     fk_defs = [
@@ -1038,6 +1482,12 @@ def run():
          "ADD CONSTRAINT [FK_sales_order_item_sales_order] "
          "FOREIGN KEY ([sales_order_id]) "
          "REFERENCES [dbo].[sales_order]([id])"),
+
+        ("FK_quotation_items_quotations",
+         "ALTER TABLE [dbo].[quotation_items] WITH CHECK "
+         "ADD CONSTRAINT [FK_quotation_items_quotations] "
+         "FOREIGN KEY ([quotation_id]) "
+         "REFERENCES [dbo].[quotations]([id]) ON DELETE CASCADE"),
     ]
 
     for fk_name, fk_sql in fk_defs:
@@ -1065,9 +1515,10 @@ def run():
                      active, synced_from_frappe,
                      allow_discount, allow_receipt,
                      allow_credit_note, allow_reprint,
+                     allow_laybye, allow_quote,
                      company, max_discount_percent)
                 VALUES (?, ?, 'admin', 'Administrator', 'Administrator',
-                        1, 0, 1, 1, 1, 1, '', 0)
+                        1, 0, 1, 1, 1, 1, 1, 1, '', 0)
             """, ("admin", _hash("admin123")))
             conn.commit()
             print("\n  [+] Default admin user created:")
@@ -1077,11 +1528,7 @@ def run():
         else:
             print("\n  [ ] Users already present - skipping seed.")
     except Exception as e:
-        print(f"\n  [!] Error seeding admin user: {e}")
-
-    conn.close()
-    print("\n======================================")
-    print("  Setup complete!")
+        print(f"[setup_database] ! Error seeding admin user: {e}")
     print("======================================\n")
 
 

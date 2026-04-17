@@ -16,7 +16,7 @@ from pathlib import Path
 
 log = logging.getLogger("SiteConfig")
 
-_DEFAULT_HOST  = ""
+_DEFAULT_HOST  = "https://apk.havano.cloud"
 _SETTINGS_FILE = Path("app_data/sql_settings.json")
 
 _cached: str | None = None

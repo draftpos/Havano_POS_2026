@@ -1,6 +1,6 @@
 {
     "auth_mode": "windows",
-    "server": ".\\SQLEXPRESS",
+    "server": "LOCALHOST\\SQLEXPRESS;",
     "database": "pos_db",
     "username": "",
     "password": "",

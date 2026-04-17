@@ -1,116 +1,312 @@
 """
-reset_database.py — drops all POS tables so the app rebuilds from scratch.
+ZIMRA Fiscalization API - Python Test Script (v2 - fixed)
+Run: python test_zimra.py
 
-Usage:
-    python reset_database.py
+Fixes from v1:
+  - global_invoice_no must be "0" not "" (server does int() on it)
+  - Token is response["message"] as a plain string, not nested dict
+  - Ping success = HTTP 200 + operationID present (no ResponseCode field)
+  - Response fields: QRcode, VerificationCode, receiptCounter, receiptGlobalNo
 """
 
-import sys
+import requests
 import json
-import pyodbc
-from pathlib import Path
+from datetime import datetime
 
-# ── same driver detection as db.py ────────────────────────────────────────────
-def _best_driver() -> str:
-    preferred = [
-        "ODBC Driver 18 for SQL Server",
-        "ODBC Driver 17 for SQL Server",
-        "ODBC Driver 13 for SQL Server",
-        "SQL Server",
-    ]
-    for d in preferred:
-        if d in pyodbc.drivers():
-            return d
-    raise RuntimeError("No SQL Server ODBC driver found.")
+# =============================================================================
+# CONFIG
+# =============================================================================
+BASE_URL   = "https://erpfiscal.havano.online"
+API_KEY    = "105399628d8d243"
+API_SECRET = "02d4fb4d0d22f09"
+DEVICE_SN  = "EC-01"
 
-def _get_connection():
-    path = Path("app_data/sql_settings.json")
-    if not path.exists():
-        print("ERROR: app_data/sql_settings.json not found.")
-        print("Make sure you run this script from your project root folder.")
-        sys.exit(1)
+TIMESTAMP  = datetime.now().strftime("%Y%m%d%H%M%S")
+INVOICE_NO = f"TEST-{TIMESTAMP}"
+CREDIT_NO  = f"CN-{TIMESTAMP}"
 
-    cfg  = json.loads(path.read_text(encoding="utf-8"))
-    drv  = _best_driver()
+# =============================================================================
+# HELPERS
+# =============================================================================
 
-    if cfg.get("auth_mode") == "windows":
-        conn_str = (
-            f"DRIVER={{{drv}}};"
-            f"SERVER={cfg['server']};"
-            f"DATABASE={cfg['database']};"
-            "Trusted_Connection=yes;"
-            "TrustServerCertificate=yes;"
+def separator(title):
+    print(f"\n{'='*60}")
+    print(f"  {title}")
+    print(f"{'='*60}")
+
+def pretty(data):
+    print(json.dumps(data, indent=2))
+
+def get_auth_headers(csrf_token=None):
+    headers = {
+        "Authorization": f"token {API_KEY}:{API_SECRET}",
+        "Content-Type":  "application/x-www-form-urlencoded",
+    }
+    if csrf_token:
+        headers["X-Frappe-CSRF-Token"] = csrf_token
+    return headers
+
+def build_items_xml(items):
+    """
+    items = list of dicts:
+      { code, name, qty, price, total, vat, vat_rate, vat_name }
+    vat_name options: VAT | ZERO RATED | EXEMPT
+    Negative qty/total/vat for credit notes.
+    """
+    xml = "<ITEMS>"
+    for i, item in enumerate(items, start=1):
+        xml += (
+            f"<ITEM>"
+            f"<HH>{i}</HH>"
+            f"<ITEMCODE>{item['code']}</ITEMCODE>"
+            f"<ITEMNAME>{item['name']}</ITEMNAME>"
+            f"<ITEMNAME2>{item['name']}</ITEMNAME2>"
+            f"<QTY>{item['qty']}</QTY>"
+            f"<PRICE>{item['price']:.2f}</PRICE>"
+            f"<TOTAL>{item['total']:.2f}</TOTAL>"
+            f"<VAT>{item['vat']:.2f}</VAT>"
+            f"<VATR>{item['vat_rate']:.2f}</VATR>"
+            f"<VNAME>{item['vat_name']}</VNAME>"
+            f"</ITEM>"
         )
+    xml += "</ITEMS>"
+    return xml
+
+def extract_fiscal_data(response_json):
+    """
+    Pull fiscal fields out of a successful response.
+    Returns dict or None.
+    Confirmed response shape:
+      { "message": { "Message": "...", "QRcode": "...", "VerificationCode": "...",
+                     "receiptCounter": 138, "receiptGlobalNo": 621, ... } }
+    """
+    msg = response_json.get("message", {})
+    if not isinstance(msg, dict):
+        return None
+    if "QRcode" not in msg:
+        return None
+    return {
+        "qr_code":           msg.get("QRcode", ""),
+        "verification_code": msg.get("VerificationCode", ""),
+        "receipt_counter":   msg.get("receiptCounter"),
+        "receipt_global_no": msg.get("receiptGlobalNo"),
+        "device_id":         msg.get("DeviceID", ""),
+        "fiscal_day":        msg.get("FiscalDay", ""),
+        "receipt_type":      msg.get("receiptType", ""),
+        "efd_serial":        msg.get("EFDSERIAL", ""),
+    }
+
+
+# =============================================================================
+# STEP 1: GET CSRF TOKEN
+# =============================================================================
+
+def step1_get_token():
+    separator("STEP 1: Get CSRF Token")
+    url = f"{BASE_URL}/api/method/havanozimracloud.api.token"
+
+    resp = requests.post(url, headers=get_auth_headers())
+    print(f"Status: {resp.status_code}")
+    data = resp.json()
+    pretty(data)
+
+    # Token = response["message"] as a plain string
+    token = data.get("message") if isinstance(data.get("message"), str) else None
+
+    if token:
+        print(f"\n✅ CSRF Token: {token}")
     else:
-        conn_str = (
-            f"DRIVER={{{drv}}};"
-            f"SERVER={cfg['server']};"
-            f"DATABASE={cfg['database']};"
-            f"UID={cfg['username']};"
-            f"PWD={cfg['password']};"
-            "TrustServerCertificate=yes;"
-        )
-
-    return pyodbc.connect(conn_str)
+        print("\n❌ Could not extract token")
+    return token
 
 
-# ── tables to drop (dependants first so FK constraints don't block) ───────────
-TABLES = [
-    "sale_items",
-    "sales",
-    "credit_note_items",
-    "credit_notes",
-    "customers",
-    "customer_groups",
-    "products",
-    "price_list_items",
-    "price_lists",
-    "warehouses",
-    "cost_centers",
-    "companies",
-    "users",
-    "company_defaults",
-]
+# =============================================================================
+# STEP 2: PING ZIMRA
+# =============================================================================
+
+def step2_ping(csrf_token):
+    separator("STEP 2: Ping ZIMRA Server")
+    url = f"{BASE_URL}/api/method/havanozimracloud.api.pingzimra"
+
+    resp = requests.post(
+        url,
+        headers=get_auth_headers(csrf_token),
+        data={"device_sn": DEVICE_SN},
+    )
+    print(f"Status: {resp.status_code}")
+    data = resp.json()
+    pretty(data)
+
+    # Success = HTTP 200 + operationID in message (no ResponseCode field)
+    msg = data.get("message", {})
+    if resp.status_code == 200 and isinstance(msg, dict) and "operationID" in msg:
+        print(f"\n✅ Ping successful — EC-01 is reachable")
+        print(f"   operationID:        {msg.get('operationID')}")
+        print(f"   reportingFrequency: {msg.get('reportingFrequency')}")
+    else:
+        print(f"\n⚠️  Unexpected ping response")
+
+    return resp.status_code == 200
 
 
-def reset():
-    conn = _get_connection()
-    cur  = conn.cursor()
+# =============================================================================
+# STEP 3: SEND NORMAL INVOICE
+# =============================================================================
 
-    print("\n" + "="*52)
-    print("   POS DATABASE RESET")
-    print("="*52)
+def step3_send_invoice(csrf_token):
+    separator("STEP 3: Send Invoice")
+    url = f"{BASE_URL}/api/method/havanozimracloud.api.sendinvoice"
 
-    # turn off all FK checks so we can drop in any order
-    try:
-        cur.execute("EXEC sp_MSforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT ALL'")
-        conn.commit()
-    except Exception:
-        pass
+    items = [
+        {
+            "code": "99001868", "name": "Milo",
+            "qty": 1, "price": 6.10, "total": 6.10,
+            "vat": 0.80, "vat_rate": 0.15, "vat_name": "VAT",
+        },
+        {
+            "code": "99002638", "name": "Dano Refill",
+            "qty": 1, "price": 5.10, "total": 5.10,
+            "vat": 0.00, "vat_rate": 0.00, "vat_name": "ZERO RATED",
+        },
+    ]
 
-    dropped = 0
-    for table in TABLES:
-        try:
-            cur.execute(f"""
-                IF OBJECT_ID('{table}', 'U') IS NOT NULL
-                    DROP TABLE [{table}]
-            """)
-            conn.commit()
-            print(f"  Dropped : {table}")
-            dropped += 1
-        except Exception as e:
-            print(f"  Skipped : {table}  ({e})")
+    payload = {
+        "device_sn":                 DEVICE_SN,
+        "add_customer":              "0",
+        "invoice_flag":              "1",
+        "currency":                  "USD",
+        "invoice_number":            INVOICE_NO,
+        "customer_name":             "Walk-in Customer",
+        "trade_name":                "",
+        "customer_vat_number":       "",
+        "customer_address":          "",
+        "customer_telephone_number": "",
+        "customer_tin":              "",
+        "customer_province":         "",
+        "customer_street":           "",
+        "customer_houseNo":          "",
+        "customer_city":             "",
+        "customer_email":            "",
+        "invoice_comment":           "Test from Python script",
+        "original_invoice_no":       "",
+        "global_invoice_no":         "0",    # FIX: must be "0" not "" (server does int() on this)
+        "items_xml":                 build_items_xml(items),
+    }
 
-    conn.close()
-    print("="*52)
-    print(f"  Done - {dropped} table(s) dropped.")
-    print("  Launch the app normally to rebuild all tables.\n")
+    print(f"Invoice Number: {INVOICE_NO}")
+    print(f"Items XML:\n{payload['items_xml']}\n")
 
+    resp = requests.post(url, headers=get_auth_headers(csrf_token), data=payload)
+    print(f"Status: {resp.status_code}")
+    data = resp.json()
+    pretty(data)
+
+    fiscal = extract_fiscal_data(data)
+    if fiscal:
+        print("\n✅ Invoice fiscalized successfully!")
+        print(f"   QR Code:           {fiscal['qr_code']}")
+        print(f"   Verification Code: {fiscal['verification_code']}")
+        print(f"   Receipt Counter:   {fiscal['receipt_counter']}")
+        print(f"   Global No:         {fiscal['receipt_global_no']}")
+    else:
+        print(f"\n❌ Invoice failed — see response above")
+
+    return fiscal
+
+
+# =============================================================================
+# STEP 4: SEND CREDIT NOTE
+# =============================================================================
+
+def step4_send_credit_note(csrf_token, original_invoice_no=None):
+    separator("STEP 4: Send Credit Note (Return)")
+    url = f"{BASE_URL}/api/method/havanozimracloud.api.sendinvoice"
+
+    original = original_invoice_no or INVOICE_NO
+
+    items = [
+        {
+            "code": "99001868", "name": "Milo",
+            "qty": -1, "price": 6.10, "total": -6.10,
+            "vat": -0.80, "vat_rate": 0.15, "vat_name": "VAT",
+        },
+    ]
+
+    payload = {
+        "device_sn":                 DEVICE_SN,
+        "add_customer":              "0",
+        "invoice_flag":              "3",       # 3 = credit note / return
+        "currency":                  "USD",
+        "invoice_number":            CREDIT_NO,
+        "customer_name":             "Walk-in Customer",
+        "trade_name":                "",
+        "customer_vat_number":       "",
+        "customer_address":          "",
+        "customer_telephone_number": "",
+        "customer_tin":              "",
+        "customer_province":         "",
+        "customer_street":           "",
+        "customer_houseNo":          "",
+        "customer_city":             "",
+        "customer_email":            "",
+        "invoice_comment":           "Customer return",
+        "original_invoice_no":       original,
+        "global_invoice_no":         "0",       # same fix
+        "items_xml":                 build_items_xml(items),
+    }
+
+    print(f"Credit Note Number: {CREDIT_NO}")
+    print(f"Original Invoice:   {original}")
+    print(f"Items XML:\n{payload['items_xml']}\n")
+
+    resp = requests.post(url, headers=get_auth_headers(csrf_token), data=payload)
+    print(f"Status: {resp.status_code}")
+    data = resp.json()
+    pretty(data)
+
+    fiscal = extract_fiscal_data(data)
+    if fiscal:
+        print("\n✅ Credit note fiscalized successfully!")
+        print(f"   QR Code:           {fiscal['qr_code']}")
+        print(f"   Verification Code: {fiscal['verification_code']}")
+        print(f"   Receipt Counter:   {fiscal['receipt_counter']}")
+        print(f"   Global No:         {fiscal['receipt_global_no']}")
+    else:
+        print(f"\n❌ Credit note failed — see response above")
+
+    return fiscal
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
 
 if __name__ == "__main__":
-    print("\n  WARNING: This will permanently delete ALL data.")
-    confirm = input("  Type  YES  to continue: ").strip()
-    if confirm == "YES":
-        reset()
-    else:
-        print("  Aborted - nothing was changed.\n")
+    print(f"\n🚀 ZIMRA API Test v2  |  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"   Base URL:  {BASE_URL}")
+    print(f"   Device:    {DEVICE_SN}")
+    print(f"   Invoice:   {INVOICE_NO}")
+    print(f"   Credit:    {CREDIT_NO}")
+
+    # Step 1
+    csrf_token = step1_get_token()
+    if not csrf_token:
+        print("\n❌ Cannot continue without CSRF token.")
+        exit(1)
+
+    # Step 2
+    step2_ping(csrf_token)
+
+    # Step 3
+    invoice_fiscal = step3_send_invoice(csrf_token)
+
+    # Step 4
+    step4_send_credit_note(csrf_token, original_invoice_no=INVOICE_NO)
+
+    separator("SUMMARY")
+    print(f"Invoice No:  {INVOICE_NO}")
+    print(f"Credit No:   {CREDIT_NO}")
+    if invoice_fiscal:
+        print(f"Invoice QR:  {invoice_fiscal['qr_code']}")
+        print(f"Invoice VC:  {invoice_fiscal['verification_code']}")
+    print()

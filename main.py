@@ -17,10 +17,33 @@ from views.dialogs.sql_settings_dialog import SqlSettingsDialog
 from database.db import is_connection_valid
 
 def resource_path(relative_path: str) -> str:
-    """Handles asset paths for both dev and PyInstaller bundles."""
+    """
+    Handles asset paths for both dev and PyInstaller bundles.
+    Use this for read-only bundled assets (icons, images shipped inside the exe).
+    """
     if hasattr(sys, "_MEIPASS"):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
+
+def get_app_data_dir() -> Path:
+    """
+    Returns the writable 'app_data' directory that sits NEXT TO the .exe
+    (or next to main.py in dev mode).
+
+    WHY THIS MATTERS:
+    - PyInstaller --onefile extracts to a temp folder (sys._MEIPASS).
+      If you use Path("app_data") or Path.cwd() / "app_data" inside a
+      bundled app, the working directory can be anywhere the user launched
+      the exe from — it will NOT reliably point to the exe's own folder.
+    - This function always resolves to <exe_folder>/app_data, which is
+      where sql_settings.json, advance_settings.json, logos/, and
+      offline_sync.json are expected to live.
+    """
+    if hasattr(sys, "_MEIPASS"):
+        # Running as a bundled .exe — parent of sys.executable is the exe folder
+        return Path(sys.executable).parent / "app_data"
+    # Dev mode — use the project root (same as before)
+    return Path(os.path.abspath(".")) / "app_data"
 
 def global_exception_handler(exctype, value, tb):
     """Prevents the app from disappearing without a trace on crash."""
@@ -98,9 +121,11 @@ if __name__ == "__main__":
     apply_global_styles(app)
 
     # 2. Ensure Environment is Ready
-    # Create app_data folder if it doesn't exist to prevent IO Errors
-    Path("app_data").mkdir(exist_ok=True)
-    settings_file = Path("app_data/sql_settings.json")
+    # Create app_data folder next to the exe (or cwd in dev).
+    # NOTE: get_app_data_dir() is exe-safe — do NOT use Path("app_data") here.
+    app_data_dir = get_app_data_dir()
+    app_data_dir.mkdir(exist_ok=True)
+    settings_file = app_data_dir / "sql_settings.json"
 
     # 3. Connection & Setup Logic
     # We loop here in case the user enters wrong settings, so they can retry
@@ -172,7 +197,5 @@ if __name__ == "__main__":
     else:
         print("[startup] Login cancelled. Exiting.")
         sys.exit(0)
-        
-        
-        
+         
 #pyinstaller --noconfirm --onefile --windowed --icon "assets/havano-logo.ico" --add-data "assets;assets" --name "HavanoPOS" main.py

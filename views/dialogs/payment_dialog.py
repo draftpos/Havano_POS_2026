@@ -7,8 +7,12 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QFrame, QSizePolicy, QMessageBox,
     QScrollArea,
 )
-from PySide6.QtCore import Qt, QLocale
+from PySide6.QtCore import Qt, QLocale, QTimer
 from PySide6.QtGui  import QDoubleValidator
+import hashlib
+import json
+import time
+
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
@@ -28,20 +32,31 @@ DANGER    = "#b02020"
 DANGER_H  = "#cc2828"
 ORANGE    = "#c05a00"
 
+
 # =============================================================================
 # Data helpers
 # =============================================================================
 
 def _get_local_rate(from_currency: str, to_currency: str = "USD") -> float:
-    """Fetch exchange rate via models.exchange_rate — same source as split payment dialog."""
+    """
+    Return the exchange rate from_currency → to_currency.
+    Tries the direct rate first; if not stored, tries the inverse pair and
+    reciprocals it so that both ZWD→USD and USD→ZWD always resolve.
+    """
     if from_currency.upper() == to_currency.upper():
         return 1.0
     try:
         from models.exchange_rate import get_rate
         r = get_rate(from_currency, to_currency)
-        return float(r) if r else 1.0
+        if r:
+            return float(r)
+        # Try the inverse pair and reciprocal it
+        inv = get_rate(to_currency, from_currency)
+        if inv and float(inv) > 0:
+            return 1.0 / float(inv)
     except Exception:
-        return 1.0
+        pass
+    return 1.0
 
 
 def _get_default_customer() -> dict | None:
@@ -66,57 +81,99 @@ def _get_default_company() -> dict | None:
 
 def _load_payment_methods(company: str) -> list[dict]:
     """
-    Pull GL accounts for this company, deduplicated by (account_type, currency).
-    Returns list of: {label, currency, rate_to_usd, is_credit}
+    Load payment methods from modes_of_payment table (synced from Frappe).
+    Only includes MOPs that have a non-empty gl_account (leaf accounts only —
+    group accounts like "Cash In Hand - DC1134" are excluded because Frappe
+    rejects them in transactions).
 
-    #16 — Accounts whose `is_credit` field is truthy in Frappe are included in
-    the display list so the cashier can see them, but they are tagged with
-    is_credit=True.  _save() checks this flag and skips payment-entry creation
-    for those methods.  The UI also shows a small badge so it is visually clear.
+    Returns list of: {label, mop_name, gl_account, currency, rate_to_usd, is_credit}
+      label     — display name shown on the button (MOP name, e.g. "Ecocash USD")
+      mop_name  — same as label; the Frappe Mode of Payment name to send in PE
+      gl_account — the leaf GL account to send as paid_to (e.g. "Ecocash USD - DC1134")
+      currency  — account_currency (e.g. "USD", "ZWD")
+    On Account is NOT included here — it is added separately as a plain input row.
     """
+    result = []
+    seen   = set()
+
     try:
-        from models.gl_account import get_all_accounts
-        all_accts = get_all_accounts()
-        accts = [a for a in all_accts if a.get("company") == company] or all_accts
-    except Exception:
-        accts = []
+        from database.db import get_connection, fetchall_dicts
+        conn = get_connection()
+        cur  = conn.cursor()
 
-    seen, result = set(), []
-    for a in accts:
-        curr  = (a.get("account_currency") or "USD").upper()
-        atype = (a.get("account_type") or a.get("name") or "Cash").strip()
-        key   = (atype.lower(), curr)
-        if key in seen:
-            continue
-        seen.add(key)
+        # Only pull MOPs with a real gl_account; skip group/parent accounts
+        # (group accounts have no account_type row in gl_accounts — they just
+        #  appear as parent_account of other rows).
+        cur.execute("""
+            SELECT
+                m.name            AS mop_name,
+                m.gl_account      AS gl_account,
+                m.account_currency AS currency
+            FROM modes_of_payment m
+            WHERE m.gl_account IS NOT NULL
+              AND m.gl_account <> ''
+              AND m.enabled = 1
+            ORDER BY m.name
+        """)
+        rows = fetchall_dicts(cur)
+        conn.close()
 
-        rate = 1.0
-        try:
-            from models.exchange_rate import get_rate
-            r = get_rate(curr, "USD")
-            if r:
-                rate = float(r)
-        except Exception:
-            pass
+        for row in rows:
+            mop_name   = (row.get("mop_name")   or "").strip()
+            gl_account = (row.get("gl_account") or "").strip()
+            curr       = (row.get("currency")   or "USD").upper()
 
-        # #16 — read the is_credit flag from the Frappe account record.
-        # Frappe stores this as 1 / 0 or True / False on the Account doctype.
-        is_credit = bool(a.get("is_credit") or a.get("credit_account") or False)
+            if not mop_name or not gl_account:
+                continue
 
-        result.append({
-            "label":       a.get("account_name") or a.get("name") or atype,
-            "currency":    curr,
-            "rate_to_usd": rate,
-            "is_credit":   is_credit,   # #16
-        })
+            # Skip group accounts — they have no account_type in gl_accounts
+            # (leaf accounts always have account_type = 'Cash' or 'Bank')
+            try:
+                from database.db import get_connection as _gc, fetchone_dict as _fd
+                _conn = _gc(); _cur = _conn.cursor()
+                _cur.execute(
+                    "SELECT account_type FROM gl_accounts WHERE name = ?",
+                    (gl_account,)
+                )
+                _row = _fd(_cur)
+                _conn.close()
+                if _row is not None and (_row.get("account_type") or "").strip() == "":
+                    # Group account — skip
+                    print(f"  [skip] '{gl_account}' is a group account — excluded from payment methods")
+                    continue
+            except Exception:
+                pass  # If we can't check, allow it through
 
-    if not result:
-        result = [
-            {"label": "Cash",       "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
-            {"label": "Cash (ZIG)", "currency": "ZIG", "rate_to_usd": _get_local_rate("ZIG"), "is_credit": False},
-            {"label": "Card",       "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
-            {"label": "Bank / EFT", "currency": "USD", "rate_to_usd": 1.0, "is_credit": False},
-        ]
+            key = mop_name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            rate = 1.0
+            try:
+                from models.exchange_rate import get_rate
+                r = get_rate(curr, "USD")
+                if r and float(r) > 0:
+                    rate = float(r)
+            except Exception:
+                pass
+
+            result.append({
+                "label":       mop_name,   # shown on button; also used as method name
+                "mop_name":    mop_name,   # Frappe MOP name → sent to payment_entry_service
+                "gl_account":  gl_account, # leaf GL account → sent as paid_to
+                "currency":    curr,
+                "rate_to_usd": rate,
+                "is_credit":   False,
+            })
+
+    except Exception as e:
+        print(f"Error loading payment methods from modes_of_payment: {e}")
+
+    print(f"Loaded {len(result)} payment methods from modes_of_payment:")
+    for r in result:
+        print(f"  - {r['label']} ({r['currency']}) -> GL: {r['gl_account']}")
+
     return result
 
 
@@ -144,6 +201,18 @@ def _method_btn_style(active: bool) -> str:
             f"QPushButton:hover {{ background:{LIGHT}; }}")
 
 
+def _oa_btn_style(active: bool) -> str:
+    if active:
+        return (f"QPushButton {{ background:{ORANGE}; color:{WHITE}; border:none;"
+                f" border-radius:6px; font-size:12px; font-weight:bold;"
+                f" text-align:left; padding:0 12px; }}"
+                f"QPushButton:hover {{ background:#d46800; }}")
+    return (f"QPushButton {{ background:{WHITE}; color:{ORANGE};"
+            f" border:1px solid {ORANGE}; border-radius:6px;"
+            f" font-size:12px; text-align:left; padding:0 12px; }}"
+            f"QPushButton:hover {{ background:#fff4ec; }}")
+
+
 def _field_style(active: bool) -> str:
     if active:
         return (f"QLineEdit {{ background:{WHITE}; color:{DARK_TEXT};"
@@ -153,6 +222,17 @@ def _field_style(active: bool) -> str:
             f" border:1px solid {BORDER}; border-radius:6px;"
             f" font-size:14px; padding:0 10px; }}"
             f"QLineEdit:focus {{ border:2px solid {ACCENT}; }}")
+
+
+def _oa_field_style(active: bool) -> str:
+    if active:
+        return (f"QLineEdit {{ background:{WHITE}; color:{ORANGE};"
+                f" border:2px solid {ORANGE}; border-radius:6px;"
+                f" font-size:14px; font-weight:bold; padding:0 10px; }}")
+    return (f"QLineEdit {{ background:{WHITE}; color:{ORANGE};"
+            f" border:1px solid {ORANGE}; border-radius:6px;"
+            f" font-size:14px; padding:0 10px; }}"
+            f"QLineEdit:focus {{ border:2px solid {ORANGE}; }}")
 
 
 def _numpad_btn(text, kind="digit"):
@@ -203,11 +283,29 @@ class PaymentDialog(QDialog):
       self.accepted_company      — dict | None
       self.accepted_company_name — str
       self.accepted_splits       — list
+      self.accepted_is_credit    — bool
+      self.accepted_sale_id      — int
     """
 
-    def __init__(self, parent=None, total: float = 0.0, customer: dict | None = None):
+    _OA_LABEL = "On Account"
+
+    def __init__(self, parent=None, total: float = 0.0, customer: dict | None = None,
+                 items: list = None, cashier_id: int = None, cashier_name: str = "",
+                 subtotal: float = None, total_vat: float = 0.0, discount_amount: float = 0.0,
+                 shift_id: int = None):
         super().__init__(parent)
         self.total             = total
+        self.items             = items or []
+        self.cashier_id        = cashier_id
+        self.cashier_name      = cashier_name
+        self.subtotal          = subtotal
+        self.total_vat         = total_vat
+        self.discount_amount   = discount_amount
+        self.shift_id          = shift_id
+        
+        # ✅ Add processing flag to prevent duplicate saves
+        self._processing_save = False
+        
         self.accepted_method   = ""
         self.accepted_tendered = 0.0
         self.accepted_change   = 0.0
@@ -216,19 +314,28 @@ class PaymentDialog(QDialog):
         self.accepted_customer = None
         self.accepted_company  = None
         self.accepted_company_name = ""
-        self.accepted_is_credit = False   # #16 — True when method is credit-flagged
+        self.accepted_is_credit = False
+        self.accepted_sale_id   = None
 
         self._customer = customer or _get_default_customer()
         self._company  = _get_default_company()
-        # Rate fetched live from exchange_rate model — same source as split payment
-        self._local_rate = _get_local_rate  # callable: _local_rate(from_ccy, to_ccy)
+        self._local_rate = _get_local_rate
 
         co_name = self._company.get("name", "") if self._company else ""
         self._methods: list[dict] = _load_payment_methods(co_name)
 
-        # label -> (QPushButton, QLineEdit, due_QLabel)
+        self._credit_sales_allowed = False
+        try:
+            from models.company_defaults import get_defaults as _gd
+            _defs = _gd() or {}
+            self._credit_sales_allowed = str(_defs.get("allow_credit_sales", "0")).strip() == "1"
+        except Exception:
+            pass
+
         self._method_rows: dict[str, tuple] = {}
         self._active_method: str = self._methods[0]["label"] if self._methods else ""
+
+        self._print_btn: QPushButton | None = None
 
         self.setWindowTitle("Payment")
         self.setMinimumSize(860, 560)
@@ -254,7 +361,6 @@ class PaymentDialog(QDialog):
         outer.setSpacing(0)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        # ── header ────────────────────────────────────────────────────────────
         hdr = QWidget()
         hdr.setFixedHeight(52)
         hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
@@ -264,7 +370,6 @@ class PaymentDialog(QDialog):
         title = QLabel("Payment")
         title.setStyleSheet(
             f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;")
-        # Rate pill — fetched live from exchange_rate model
         zwg_rate = _get_local_rate("USD", "ZWG")
         rate_pill = QLabel(f"1 USD = {zwg_rate:,.2f} ZWG")
         rate_pill.setStyleSheet(
@@ -282,9 +387,6 @@ class PaymentDialog(QDialog):
         hl.addWidget(hint)
         outer.addWidget(hdr)
 
-        # ── centred content wrapper ───────────────────────────────────────────
-        # Everything lives inside a fixed-max-width container that is centred.
-        # This prevents the two panels from stretching absurdly on wide screens.
         outer_h = QHBoxLayout()
         outer_h.setContentsMargins(0, 0, 0, 0)
         outer_h.setSpacing(0)
@@ -319,19 +421,14 @@ class PaymentDialog(QDialog):
         wrap.setLayout(outer_h)
         outer.addWidget(wrap, stretch=1)
 
-    # =========================================================================
-    # Left panel
-    # =========================================================================
-
     def _build_left(self):
         vbox = QVBoxLayout()
-        vbox.setSpacing(10)
+        vbox.setSpacing(0)
+        vbox.setContentsMargins(0, 0, 0, 0)
 
-        # ── DUE card (static) + CHANGE card (live) ───────────────────────────
         cards = QHBoxLayout()
         cards.setSpacing(10)
 
-        # DUE — static total
         due_card = QFrame()
         due_card.setFixedHeight(72)
         due_card.setStyleSheet(
@@ -353,7 +450,6 @@ class PaymentDialog(QDialog):
         dcl.addWidget(due_usd)
         cards.addWidget(due_card, 1)
 
-        # CHANGE — live, shows overpayment (0.00 until paid > total)
         chg_card = QFrame()
         chg_card.setFixedHeight(72)
         chg_card.setStyleSheet(
@@ -377,9 +473,10 @@ class PaymentDialog(QDialog):
         cards.addWidget(chg_card, 1)
 
         vbox.addLayout(cards)
+        vbox.addSpacing(6)
         vbox.addWidget(_hr())
+        vbox.addSpacing(4)
 
-        # ── column headers ────────────────────────────────────────────────────
         ch = QWidget()
         ch.setFixedHeight(18)
         ch.setStyleSheet("background:transparent;")
@@ -390,7 +487,7 @@ class PaymentDialog(QDialog):
             ("MODE OF PAYMENT", 4, Qt.AlignLeft),
             ("CCY",             1, Qt.AlignCenter),
             ("PAID",            3, Qt.AlignRight),
-            ("AMOUNT DUE",      4, Qt.AlignRight),   # label matches per-row due cell
+            ("AMOUNT DUE",      4, Qt.AlignRight),
         ]:
             l = QLabel(txt)
             l.setStyleSheet(
@@ -399,109 +496,75 @@ class PaymentDialog(QDialog):
             l.setAlignment(align)
             chl.addWidget(l, st)
         vbox.addWidget(ch)
-
-        # ── scrollable rows ───────────────────────────────────────────────────
-        sw = QWidget(); sw.setStyleSheet("background:transparent;")
-        sl = QVBoxLayout(sw)
-        sl.setSpacing(4)
-        sl.setContentsMargins(0, 0, 4, 0)
+        vbox.addSpacing(2)
 
         validator = QDoubleValidator(0.0, 999999.99, 2)
         validator.setLocale(QLocale(QLocale.English))
 
-        for method in self._methods:
-            label     = method["label"]
-            curr      = method["currency"]
-            is_credit = method.get("is_credit", False)   # #16
-
+        def _make_row(label, curr, is_oa=False):
             rw = QWidget()
-            rw.setFixedHeight(40)
+            rw.setFixedHeight(30)
             rw.setStyleSheet("background:transparent;")
             rl = QHBoxLayout(rw)
-            rl.setContentsMargins(0, 0, 0, 0)
-            rl.setSpacing(8)
+            rl.setContentsMargins(0, 1, 0, 1)
+            rl.setSpacing(6)
 
-            # method button — append "[Credit]" tag so cashier can see it
-            display_label = f"  {label}"
-            mb = QPushButton(display_label)
-            mb.setFixedHeight(32)
+            mb = QPushButton(f"  {label}")
+            mb.setFixedHeight(26)
             mb.setCursor(Qt.PointingHandCursor)
             mb.setFocusPolicy(Qt.NoFocus)
-            mb.setStyleSheet(_method_btn_style(False))
+            mb.setStyleSheet(_oa_btn_style(False) if is_oa else _method_btn_style(False))
             mb.clicked.connect(lambda _, m=label: self._activate_method(m))
 
-            # #16 — credit badge (shown only for credit-flagged methods)
-            if is_credit:
-                credit_badge = QLabel("CREDIT")
-                credit_badge.setFixedHeight(20)
-                credit_badge.setAlignment(Qt.AlignCenter)
-                credit_badge.setStyleSheet(
-                    f"background:{ORANGE}; color:{WHITE}; border-radius:4px;"
-                    f" font-size:9px; font-weight:bold; padding:0 5px;")
-
-            # currency badge
             cb = QLabel(curr)
-            cb.setFixedHeight(32)
+            cb.setFixedHeight(26)
             cb.setFixedWidth(46)
             cb.setAlignment(Qt.AlignCenter)
-            cb.setStyleSheet(
-                f"background:{LIGHT}; color:{ACCENT}; border:1px solid {BORDER};"
-                f" border-radius:6px; font-size:10px; font-weight:bold;")
+            if is_oa:
+                cb.setStyleSheet(
+                    f"background:#fff4ec; color:{ORANGE}; border:1px solid {ORANGE};"
+                    f" border-radius:5px; font-size:10px; font-weight:bold;")
+            else:
+                cb.setStyleSheet(
+                    f"background:{LIGHT}; color:{ACCENT}; border:1px solid {BORDER};"
+                    f" border-radius:5px; font-size:10px; font-weight:bold;")
 
-            # paid field
             ae = QLineEdit()
-            ae.setFixedHeight(32)
+            ae.setFixedHeight(26)
             ae.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             ae.setValidator(validator)
-            ae.setStyleSheet(_field_style(False))
+            ae.setStyleSheet(_oa_field_style(False) if is_oa else _field_style(False))
             ae.focusInEvent = lambda e, m=label, orig=ae.focusInEvent: (
                 self._activate_method(m, focus_field=False), orig(e))
             ae.textChanged.connect(lambda _, m=label: self._on_text_changed(m))
 
-            # amount due label
             due = QLabel("—")
-            due.setFixedHeight(32)
+            due.setFixedHeight(26)
             due.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             due.setStyleSheet(
                 f"color:{DARK_TEXT}; font-size:11px; font-weight:bold;"
                 f" background:{WHITE}; border:1px solid {BORDER};"
-                f" border-radius:6px; padding:0 8px;")
+                f" border-radius:5px; padding:0 8px;")
 
-            # Build the method-label cell: button + optional credit badge stacked
-            if is_credit:
-                mb_wrap = QWidget()
-                mb_wrap.setStyleSheet("background:transparent;")
-                mb_vl = QVBoxLayout(mb_wrap)
-                mb_vl.setContentsMargins(0, 0, 0, 0)
-                mb_vl.setSpacing(1)
-                mb_vl.addWidget(mb)
-                mb_vl.addWidget(credit_badge)
-                rl.addWidget(mb_wrap, 4)
-            else:
-                rl.addWidget(mb, 4)
-
+            rl.addWidget(mb,  4)
             rl.addWidget(cb,  1)
             rl.addWidget(ae,  3)
             rl.addWidget(due, 4)
 
             self._method_rows[label] = (mb, ae, due)
-            sl.addWidget(rw)
+            return rw
 
-        sl.addStretch(1)
+        for method in self._methods:
+            vbox.addWidget(_make_row(method["label"], method["currency"], is_oa=False))
 
-        sa = QScrollArea()
-        sa.setWidget(sw)
-        sa.setWidgetResizable(True)
-        sa.setFrameShape(QFrame.NoFrame)
-        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        sa.setStyleSheet("background:transparent;")
-        vbox.addWidget(sa, stretch=1)
+        if self._credit_sales_allowed:
+            vbox.addSpacing(4)
+            vbox.addWidget(_hr())
+            vbox.addSpacing(4)
+            vbox.addWidget(_make_row(self._OA_LABEL, "USD", is_oa=True))
 
+        vbox.addStretch(1)
         return vbox
-
-    # =========================================================================
-    # Right panel
-    # =========================================================================
 
     def _build_right(self):
         vbox = QVBoxLayout()
@@ -522,15 +585,6 @@ class PaymentDialog(QDialog):
         bcan.clicked.connect(self.reject)
         grid.addWidget(bcan, 0, 2, 1, 2)
 
-        # ── Digit rows 7–1  (unchanged) ──────────────────────────────────────
-        # #2 — Layout: 4 columns.  Bottom two rows are rearranged to fit 00 / 000.
-        #
-        #   Row 1:  7   8   9   [10]
-        #   Row 2:  4   5   6   [20]
-        #   Row 3:  1   2   3   [50]
-        #   Row 4:  0   00  .   [100]
-        #   Row 5: 000       ←  spans cols 0-1, so it is wide and touch-friendly
-        #
         digit_rows = [["7","8","9"], ["4","5","6"], ["1","2","3"]]
         quick_amts = [10, 20, 50, 100]
 
@@ -544,7 +598,6 @@ class PaymentDialog(QDialog):
             qb.clicked.connect(lambda _, a=qa: self._numpad_quick(a))
             grid.addWidget(qb, ri, 3)
 
-        # Row 4:  0 | 00 | . | 100-quick
         b0 = _numpad_btn("0", "digit")
         b0.clicked.connect(lambda: self._numpad_press("0"))
         grid.addWidget(b0, 4, 0)
@@ -561,30 +614,25 @@ class PaymentDialog(QDialog):
         qb100.clicked.connect(lambda: self._numpad_quick(100))
         grid.addWidget(qb100, 4, 3)
 
-        # Row 5:  000 (spans 3 cols — visually prominent for 1 000 entry)
         b000 = _numpad_btn("000", "digit")
         b000.clicked.connect(lambda: self._numpad_press_multi("000"))
-        grid.addWidget(b000, 5, 0, 1, 3)   # colspan 3
+        grid.addWidget(b000, 5, 0, 1, 3)
 
         for r in range(6):
-            grid.setRowStretch(r, 1)
+            grid.setRowMinimumHeight(r, 42)
+            grid.setRowStretch(r, 0)
         for c in range(4):
             grid.setColumnStretch(c, 1)
 
-        vbox.addLayout(grid, stretch=5)
+        vbox.addLayout(grid, stretch=0)
         vbox.addWidget(_hr())
 
-        # #15 — Only ONE button on the finalisation row.
-        # The old layout had both "Save (F2)" and "Print (F3)" — both called
-        # self._save(), making them identical.  Per requirement #15 the "Save"
-        # button is removed; only "Print" remains.  The keyboard shortcut F2
-        # still works via keyPressEvent (calls _save), but there is no separate
-        # on-screen Save button.
         brow = QHBoxLayout()
         brow.setSpacing(8)
-        bprint = _action_btn("🖨  Print  (F2)", NAVY_2, NAVY_3, height=52)
-        bprint.clicked.connect(self._save)
-        brow.addWidget(bprint)
+        self._print_btn = _action_btn("🖨  Print  (F2)", NAVY_2, NAVY_3, height=52)
+        self._print_btn.clicked.connect(self._save)
+        self._print_btn.setEnabled(False)
+        brow.addWidget(self._print_btn)
         vbox.addLayout(brow, stretch=1)
 
         return vbox
@@ -595,9 +643,12 @@ class PaymentDialog(QDialog):
 
     def _activate_method(self, label: str, focus_field: bool = True):
         self._active_method = label
+        is_oa = label == self._OA_LABEL
         for m, (mb, ae, _) in self._method_rows.items():
-            mb.setStyleSheet(_method_btn_style(m == label))
-            ae.setStyleSheet(_field_style(m == label))
+            m_is_oa = m == self._OA_LABEL
+            active  = m == label
+            mb.setStyleSheet(_oa_btn_style(active) if m_is_oa else _method_btn_style(active))
+            ae.setStyleSheet(_oa_field_style(active) if m_is_oa else _field_style(active))
         if focus_field and label in self._method_rows:
             ae = self._method_rows[label][1]
             ae.setFocus()
@@ -608,20 +659,18 @@ class PaymentDialog(QDialog):
             return self._method_rows[self._active_method][1]
         return next(iter(self._method_rows.values()))[1]
 
-    def _method_info(self, label: str) -> tuple[str, float]:
-        """Return (currency, usd_per_unit) using live exchange rates.
-        usd_per_unit: multiply entered amount by this to get USD equivalent.
-        Rate source: models.exchange_rate — same as split payment dialog.
-        """
+    def _method_info(self, label: str) -> tuple[str, float, str]:
+        if label == self._OA_LABEL:
+            return "USD", 1.0, ""
         for m in self._methods:
             if m["label"] == label:
                 curr = m["currency"]
+                gl_acct = m.get("gl_account", "")
                 if curr.upper() == "USD":
-                    return curr, 1.0
-                # Always fetch live from exchange_rate model
+                    return curr, 1.0, gl_acct
                 r = _get_local_rate(curr, "USD")
-                return curr, (r if r > 0 else 1.0)
-        return "USD", 1.0
+                return curr, (r if r > 0 else 1.0), gl_acct
+        return "USD", 1.0, ""
 
     # =========================================================================
     # Numpad
@@ -644,10 +693,6 @@ class PaymentDialog(QDialog):
                 f.setText(cur + key)
 
     def _numpad_press_multi(self, digits: str):
-        """#2 — Handle multi-digit presses: '00' and '000'.
-        Appends each digit in turn so the integer-part length cap (8 chars)
-        is honoured.  Decimal part is never touched by these buttons.
-        """
         for d in digits:
             self._numpad_press(d)
 
@@ -658,7 +703,19 @@ class PaymentDialog(QDialog):
         self._active_field().clear()
 
     def _numpad_quick(self, amt: int):
-        self._active_field().setText(f"{amt:.2f}")
+        """
+        Insert a quick amount into the active field.
+        If the active method is a non-USD currency, convert the USD quick-amount
+        to the native equivalent so the cashier sees the right number to enter.
+        """
+        curr, usd_per_unit, _ = self._method_info(self._active_method)
+        if curr.upper() != "USD" and usd_per_unit > 0:
+            # usd_per_unit = ZWD→USD rate, e.g. 0.00277
+            # native amount = USD amt / rate  (e.g. 10 USD / 0.00277 ≈ 3610 ZWD)
+            native = amt / usd_per_unit
+            self._active_field().setText(f"{native:.2f}")
+        else:
+            self._active_field().setText(f"{amt:.2f}")
 
     # =========================================================================
     # Live totals
@@ -672,19 +729,25 @@ class PaymentDialog(QDialog):
             val = float(ae.text() or "0")
         except ValueError:
             val = 0.0
-        _, rate = self._method_info(label)
-        return val * rate   # rate_to_usd already handles ZIG → USD
+        _, rate, _ = self._method_info(label)
+        return val * rate
+
+    def _get_paid_native(self, label: str) -> float:
+        """Returns the amount exactly as entered by the user, in the account's own currency (no conversion)."""
+        if label not in self._method_rows:
+            return 0.0
+        _, ae, _ = self._method_rows[label]
+        try:
+            return float(ae.text() or "0")
+        except ValueError:
+            return 0.0
 
     def _on_text_changed(self, _label: str = ""):
-        paid_usd = sum(self._get_paid_usd(m["label"]) for m in self._methods)
+        paid_usd = sum(self._get_paid_usd(m) for m in self._method_rows)
         rem_usd  = max(self.total - paid_usd, 0.0)
-        local_ccy = "ZWG"   # display secondary currency
-        local_rate = _get_local_rate("USD", local_ccy)   # USD → ZWG
-        rem_zig  = rem_usd * local_rate
         chg_usd  = max(paid_usd - self.total, 0.0)
         settled  = rem_usd <= 0.005
 
-        # CHANGE card — live
         self._chg_usd_lbl.setText(f"USD  {chg_usd:.2f}")
         if chg_usd > 0.005:
             self._chg_usd_lbl.setStyleSheet(
@@ -699,24 +762,22 @@ class PaymentDialog(QDialog):
             self._chg_card.setStyleSheet(
                 f"QFrame {{ background:{WHITE}; border:2px solid {BORDER}; border-radius:8px; }}")
 
-        # Per-row AMOUNT DUE labels — show remaining in the row's own currency only.
-        # Tiny muted secondary (the other currency) after the primary figure.
-        for m in self._methods:
-            label = m["label"]
-            if label not in self._method_rows:
-                continue
+        for label in self._method_rows:
             _, _, due_lbl = self._method_rows[label]
-            curr, usd_per_unit = self._method_info(label)
             fg = SUCCESS if settled else DARK_TEXT
-
+            curr, usd_per_unit, _ = self._method_info(label)
             if curr.upper() == "USD":
                 text = f"USD  {rem_usd:.2f}"
             else:
-                # Convert remaining USD into this row's currency using live rate
-                rate_for_row = _get_local_rate("USD", curr)
-                native = rem_usd * rate_for_row
-                text   = f"{curr}  {native:,.2f}"
-
+                # usd_per_unit = how many USD one native unit buys (e.g. ZWD→USD).
+                # To get how many native units are needed, divide remaining USD by that rate.
+                if usd_per_unit > 0:
+                    native = rem_usd / usd_per_unit
+                else:
+                    # Fallback: try fetching USD→curr directly (handles inverse-only stored rates)
+                    rate_usd_to_native = _get_local_rate("USD", curr)
+                    native = rem_usd * rate_usd_to_native
+                text = f"{curr}  {native:,.2f}"
             due_lbl.setText(text)
             due_lbl.setTextFormat(Qt.PlainText)
             due_lbl.setStyleSheet(
@@ -724,20 +785,67 @@ class PaymentDialog(QDialog):
                 f" background:{WHITE}; border:1px solid {BORDER};"
                 f" border-radius:6px; padding:0 10px;")
 
-    # =========================================================================
-    # Actions
-    # =========================================================================
+        if self._print_btn is not None:
+            self._print_btn.setEnabled(settled)
 
     def _get_tendered(self) -> float:
-        return sum(self._get_paid_usd(m["label"]) for m in self._methods)
+        return sum(self._get_paid_usd(m) for m in self._method_rows)
+
+    def _generate_transaction_hash(self) -> str:
+        """Generate a unique hash for this transaction to detect duplicates."""
+        # Create a simplified representation of items
+        simplified_items = []
+        for item in self.items:
+            simplified_items.append({
+                "part_no": item.get("part_no", ""),
+                "product_name": item.get("product_name", ""),
+                "qty": float(item.get("qty", 0)),
+                "price": float(item.get("price", 0)),
+                "total": float(item.get("total", 0))
+            })
+        
+        # Sort items to ensure consistent hash
+        simplified_items.sort(key=lambda x: x.get("part_no", ""))
+        
+        # Create hash data
+        hash_data = {
+            "total": round(self.total, 2),
+            "items": simplified_items,
+            "customer_id": self._customer.get("id", "") if self._customer else "",
+            "cashier_id": self.cashier_id,
+            "timestamp": int(time.time() / 10)  # 10-second window
+        }
+        
+        hash_string = json.dumps(hash_data, sort_keys=True)
+        return hashlib.md5(hash_string.encode()).hexdigest()
+
+    def _check_duplicate_transaction(self, transaction_hash: str) -> bool:
+        """Check if this transaction was already processed."""
+        try:
+            from models.sale import check_recent_transaction_by_hash
+            return check_recent_transaction_by_hash(transaction_hash, seconds=10)
+        except Exception as e:
+            print(f"[WARNING] Could not check for duplicate: {e}")
+            return False
 
     def _save(self):
-        tendered = self._get_tendered()
-        if tendered <= 0:
-            QMessageBox.warning(self, "No Amount", "Please enter the tendered amount.")
+        """Save the sale with duplicate prevention."""
+        
+        # ✅ Prevent multiple simultaneous saves
+        if self._processing_save:
+            print("[PaymentDialog] Save already in progress, ignoring duplicate call")
+            return
+        
+        paid_usd = sum(self._get_paid_usd(m) for m in self._method_rows)
+        on_account_amount = self._get_paid_usd(self._OA_LABEL)
+
+        if paid_usd <= 0:
+            QMessageBox.warning(self, "No Amount",
+                "Please enter an amount to proceed.")
             self._active_field().setFocus()
             return
-        rem = self.total - tendered
+
+        rem = self.total - paid_usd
         if rem > 0.005:
             QMessageBox.warning(
                 self, "Insufficient Amount",
@@ -747,26 +855,261 @@ class PaymentDialog(QDialog):
             self._active_field().selectAll()
             return
 
-        curr, _ = self._method_info(self._active_method)
+        # ✅ Generate transaction hash for duplicate detection
+        transaction_hash = self._generate_transaction_hash()
+        
+        # ✅ Check for duplicate before proceeding
+        if self._check_duplicate_transaction(transaction_hash):
+            QMessageBox.warning(
+                self,
+                "Duplicate Transaction Detected",
+                "This transaction appears to have been already processed.\n"
+                "Please check if the invoice was already created."
+            )
+            return
+        
+        # Set processing flag
+        self._processing_save = True
+        
+        # Disable the print button while processing
+        if self._print_btn:
+            self._print_btn.setEnabled(False)
+            self._print_btn.setText("Processing...")
+        
+        try:
+            curr, _, _ = self._method_info(self._active_method)
 
-        # #16 — look up is_credit for the active method
-        is_credit = False
-        for m in self._methods:
-            if m["label"] == self._active_method:
-                is_credit = bool(m.get("is_credit", False))
-                break
+            splits = []
+            for label in self._method_rows:
+                amt_usd    = self._get_paid_usd(label)
+                amt_native = self._get_paid_native(label)
+                if amt_usd > 0.005:
+                    is_oa = label == self._OA_LABEL
+                    curr_label, rate, gl_acct = self._method_info(label)
+                    # Find the MOP name for this label (same as label since we now
+                    # load from modes_of_payment where label == mop_name)
+                    mop_name_for_split = next(
+                        (m.get("mop_name", m["label"]) for m in self._methods
+                         if m["label"] == label),
+                        label
+                    )
+                    split_data = {
+                        "method":        mop_name_for_split,  # ← Frappe MOP name
+                        "base_value":    amt_usd,
+                        "paid_amount":   amt_usd,    # ← always USD basis for DB storage
+                        "exchange_rate": rate,
+                        "currency":      "US",       # ← always store as USD in DB
+                        "native_currency":  curr_label,   # ← original currency kept for reference
+                        "native_amount":    amt_native,   # ← original local amount kept for reference
+                        "is_credit":     is_oa,
+                    }
+                    if not is_oa:
+                        if gl_acct:
+                            split_data["gl_account"] = gl_acct
+                            split_data["paid_to"] = gl_acct
+                    if is_oa:
+                        split_data["on_account"] = True
+                    splits.append(split_data)
 
-        self.accepted_method       = self._active_method
-        self.accepted_tendered     = tendered
-        self.accepted_change       = max(tendered - self.total, 0.0)
-        self.accepted_currency     = curr
-        self.accepted_splits       = []
-        self.accepted_customer     = self._customer
-        self.accepted_company      = self._company
-        self.accepted_company_name = (
-            self._company.get("name", "") if self._company else "")
-        self.accepted_is_credit    = is_credit   # #16 — caller reads this
-        self.accept()
+            if splits:
+                primary = next((s for s in splits if not s.get("on_account")), splits[0])
+                accepted_meth = primary["method"] if len(splits) == 1 else "SPLIT"
+            else:
+                accepted_meth = self._active_method
+
+            active_rate = self._method_info(self._active_method)[1] or 1.0
+            self.accepted_method = accepted_meth
+            self.accepted_tendered = self._get_paid_native(self._active_method)
+            self.accepted_change = max(self._get_paid_native(self._active_method) - (self.total * active_rate), 0.0)
+            self.accepted_currency = curr
+            self.accepted_splits = splits
+            self.accepted_customer = self._customer
+            self.accepted_company = self._company
+            self.accepted_company_name = self._company.get("name", "") if self._company else ""
+            self.accepted_is_credit = on_account_amount > 0.005
+            
+            # ✅ CREATE THE SALE IN DATABASE
+            from models.sale import create_sale
+            from database.db import get_connection
+            
+            # VALIDATE items before proceeding
+            if not self.items or len(self.items) == 0:
+                print(f"[PaymentDialog] ERROR: No items to save!")
+                QMessageBox.warning(self, "No Items", "Cannot create sale with no items.")
+                return
+            
+            # Prepare items for sale creation
+            sale_items = []
+            print(f"[PaymentDialog] Processing {len(self.items)} items for sale")
+
+            # For non-USD single-currency sales, convert price and total to the
+            # local currency so sale_items reflect what was actually charged.
+            # SPLIT payments always stay in USD (rate = 1.0).
+            if accepted_meth == "SPLIT":
+                _item_rate = 1.0
+                _item_currency = "USD"
+            else:
+                _item_currency, _rate_to_usd, _ = self._method_info(self._active_method)
+                _rate_to_usd = float(_rate_to_usd) if _rate_to_usd else 1.0
+                # _method_info returns ZWG->USD (e.g. 0.033).
+                # We need USD->ZWG (e.g. 30) to convert USD catalog prices into local currency.
+                _item_rate = (1.0 / _rate_to_usd) if _rate_to_usd not in (0.0, 1.0) else 1.0
+
+            _convert = _item_rate != 1.0 and _item_currency.upper() not in ("USD", "US")
+
+            for idx, item in enumerate(self.items):
+                raw_price = float(item.get("price", 0))
+                raw_total = float(item.get("total", 0))
+
+                sale_item = {
+                    "product_id":   item.get("product_id"),
+                    "part_no":      str(item.get("part_no",      "")),
+                    "product_name": str(item.get("product_name", "")),
+                    "qty":          float(item.get("qty", 1)),
+                    "price":        round(raw_price * _item_rate, 4) if _convert else raw_price,
+                    "discount":     float(item.get("discount",   0)),
+                    "tax":          str(item.get("tax",      "")),
+                    "total":        round(raw_total * _item_rate, 4) if _convert else raw_total,
+                    "tax_type":     str(item.get("tax_type", "")),
+                    "tax_rate":     float(item.get("tax_rate",   0)),
+                    "tax_amount":   round(float(item.get("tax_amount", 0)) * _item_rate, 4) if _convert else float(item.get("tax_amount", 0)),
+                    "remarks":      str(item.get("remarks",  "")),
+                }
+                sale_items.append(sale_item)
+                print(f"   Item {idx+1}: {sale_item['product_name']} qty={sale_item['qty']} "
+                      f"price={raw_price}→{sale_item['price']} total={raw_total}→{sale_item['total']} "
+                      f"[{_item_currency} rate={_item_rate}]")
+
+            # ✅ Create the sale with idempotency_key
+            sale = create_sale(
+                items=sale_items,
+                total=self.total,
+                tendered=self._get_paid_native(self._active_method),
+                method=accepted_meth,
+                cashier_id=self.cashier_id,
+                cashier_name=self.cashier_name,
+                customer_name=self._customer.get("customer_name", "") if self._customer else "",
+                customer_contact=self._customer.get("mobile", "") if self._customer else "",
+                company_name=self._company.get("name", "") if self._company else "",
+                kot="",
+                currency="USD" if accepted_meth == "SPLIT" else curr,
+                subtotal=self.subtotal,
+                total_vat=self.total_vat,
+                discount_amount=self.discount_amount,
+                receipt_type="Invoice",
+                footer="",
+                change_amount=self.accepted_change,
+                is_on_account=self.accepted_is_credit,
+                skip_stock=False,
+                skip_print=False,
+                shift_id=self.shift_id,
+                idempotency_key=transaction_hash,  # ✅ Pass transaction hash
+            )
+            
+            # Check if sale was created successfully
+            if not sale:
+                print("[PaymentDialog] ERROR: Sale creation failed")
+                QMessageBox.critical(self, "Error", "Failed to create sale. Please try again.")
+                return
+            
+            # Store the sale ID
+            self.accepted_sale_id = sale.get("id")
+            self.accepted_sale = sale
+            print(f"[PaymentDialog] Sale created with ID: {self.accepted_sale_id}")
+            
+            # ✅ Record the transaction hash in database
+            try:
+                from models.sale import record_transaction_hash
+                record_transaction_hash(transaction_hash, self.accepted_sale_id)
+            except Exception as e:
+                print(f"[WARNING] Could not record transaction hash: {e}")
+                
+            # ✅ Create Payment Entries for Syncing
+            # FIX: ONLY create payment entries if NOT an On Account payment
+            if not self.accepted_is_credit:
+                try:
+                    # Add necessary details to the sale dict for payment creation
+                    sale_copy = dict(sale)
+                    sale_copy["method"] = self.accepted_method
+                    if splits and isinstance(splits, list) and len(splits) > 0:
+                        sale_copy["gl_account"] = splits[0].get("gl_account") or splits[0].get("paid_to", "")
+                    
+                    if self.accepted_method == "SPLIT":
+                        from services.payment_entry_service import create_split_payment_entries
+                        create_split_payment_entries(sale_copy, splits)
+                        print(f"[PaymentDialog] Created split payment entries for sale {self.accepted_sale_id}")
+                    else:
+                        from services.payment_entry_service import create_payment_entry
+                        create_payment_entry(sale_copy)
+                        print(f"[PaymentDialog] Created single payment entry for sale {self.accepted_sale_id}")
+                except Exception as e:
+                    print(f"[ERROR] Failed to create payment entry records: {e}")
+            else:
+                print(f"[PaymentDialog] On Account payment - NO payment entry created for sale {self.accepted_sale_id}")
+            
+            # CRITICAL FIX: Verify items were saved and insert directly if not
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            # Check if items exist
+            cursor.execute("SELECT COUNT(*) FROM sale_items WHERE sale_id = ?", (self.accepted_sale_id,))
+            item_count = cursor.fetchone()[0]
+            print(f"[PaymentDialog] Items found in sale_items: {item_count}")
+            
+            if item_count == 0:
+                print(f"[PaymentDialog] ⚠️ No items found! Inserting {len(sale_items)} items directly...")
+                
+                # Direct insert of items
+                for item in sale_items:
+                    cursor.execute("""
+                        INSERT INTO sale_items (
+                            sale_id, part_no, product_name, qty, price,
+                            discount, tax, total, tax_type, tax_rate, tax_amount, remarks
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        self.accepted_sale_id,
+                        item.get("part_no", ""),
+                        item.get("product_name", ""),
+                        item.get("qty", 1),
+                        item.get("price", 0),
+                        item.get("discount", 0),
+                        item.get("tax", ""),
+                        item.get("total", 0),
+                        item.get("tax_type", ""),
+                        item.get("tax_rate", 0),
+                        item.get("tax_amount", 0),
+                        item.get("remarks", ""),
+                    ))
+                
+                conn.commit()
+                
+                # Verify again
+                cursor.execute("SELECT COUNT(*) FROM sale_items WHERE sale_id = ?", (self.accepted_sale_id,))
+                new_count = cursor.fetchone()[0]
+                print(f"[PaymentDialog] After direct insert: {new_count} items in sale_items")
+                
+                if new_count == 0:
+                    print(f"[PaymentDialog] ❌ CRITICAL: Still no items after direct insert!")
+                    QMessageBox.critical(self, "Database Error", 
+                        "Failed to save sale items. Please check the database connection.")
+                    return
+            
+            conn.close()
+            
+            # Accept the dialog
+            self.accept()
+            
+        except Exception as e:
+            print(f"[PaymentDialog] Error creating sale: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Failed to create sale: {e}")
+        finally:
+            # ✅ Reset processing flag
+            self._processing_save = False
+            if self._print_btn:
+                self._print_btn.setEnabled(True)
+                self._print_btn.setText("🖨  Print  (F2)")
 
     def _open_split(self):
         co = self._company.get("name", "") if self._company else ""
@@ -795,22 +1138,26 @@ class PaymentDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "Split Error", str(e))
 
-    def _print(self):
-        QMessageBox.information(self, "Print Receipt",
-                                "Print receipt — connect to printer model.")
-
     # =========================================================================
     # Keyboard
     # =========================================================================
 
     def keyPressEvent(self, event):
         k = event.key()
-        if k == Qt.Key_F2:              self._save();    return
-        if k == Qt.Key_F3:              self._print();   return
-        if k in (Qt.Key_Return, Qt.Key_Enter): self._save(); return
-        if k == Qt.Key_Escape:          self.reject();   return
+        if k == Qt.Key_F2:
+            if self._get_tendered() >= self.total - 0.005 and self._get_tendered() > 0:
+                self._save()
+            return
+        if k == Qt.Key_F3:
+            return
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            self._save()
+            return
+        if k == Qt.Key_Escape:
+            self.reject()
+            return
 
-        focused    = self.focusWidget()
+        focused = self.focusWidget()
         is_editing = isinstance(focused, QLineEdit) and bool(focused.text())
         if not is_editing:
             idx_map = {

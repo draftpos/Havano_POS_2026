@@ -4,7 +4,7 @@
 # Produces a receipt that is visually and structurally distinct from a normal
 # POS sales invoice:
 #
-#   doc_type = "sales_order"   → C# PrintingManager routes to the SO template
+#   doc_type = "sales_order"   → PrintingService routes to the SO template
 #   receiptType                → "Sales Order"  |  "Laybye Deposit"
 #
 # What appears on the printed slip:
@@ -15,7 +15,7 @@
 #   │   Order Date: 2025-07-01            │
 #   │   Delivery Date: 2025-07-15         │  ← if set
 #   │   Status: Confirmed                 │
-#   │   Customer: John Doe                │
+#   │   Customer: John Doe               │
 #   ├─────────────────────────────────────┤
 #   │   # | Item          | Qty | Amount  │
 #   │   1 | Widget A      |   2 | 10.00   │
@@ -25,7 +25,9 @@
 #   │   Deposit Paid:  USD  5.00          │
 #   │   Balance Due:   USD 10.00          │
 #   ├─────────────────────────────────────┤
-#   │   Payment Method: EcoCash           │
+#   │   Forms of Payment                  │
+#   │   CASH                   3.00       │  ← ALL payment methods listed
+#   │   ECOCASH               2.00        │
 #   ├─────────────────────────────────────┤
 #   │   TERMS & CONDITIONS                │  ← salesOrderTerms block
 #   │   1. This Sales Order is not a ...  │
@@ -53,9 +55,8 @@ log = logging.getLogger("sales_order_print")
 
 
 # ---------------------------------------------------------------------------
-# Default terms printed on every Sales Order slip.
-# Override per-company by adding a `sales_order_terms` column to
-# company_defaults and populating it there.
+# Default terms printed on every Sales Order slip if nothing is saved in
+# company_defaults.terms_and_conditions yet.
 # ---------------------------------------------------------------------------
 _DEFAULT_SO_TERMS = (
     "1. This Sales Order is not a tax invoice.\n"
@@ -117,6 +118,11 @@ def _build_receipt(order: dict, receipt_type: str = "Sales Order") -> "ReceiptDa
         "Sales Order"    — full order slip, shows the complete order total
         "Laybye Deposit" — deposit confirmation, highlights deposit paid
                            and outstanding balance
+
+    FIXED: Reads deposit_methods (list) for multi-payment support, falls back
+           to single deposit_method string for backward compatibility.
+    FIXED: salesOrderTerms is always populated — from DB or built-in default —
+           so terms never silently disappear from the printed slip.
     """
     from models.receipt import ReceiptData, Item, MultiCurrencyDetail
 
@@ -136,29 +142,67 @@ def _build_receipt(order: dict, receipt_type: str = "Sales Order") -> "ReceiptDa
     balance_due    = float(order.get("balance_due",    0))
     order_status   = order.get("status", "")
 
-    # ── Terms — use company override if available, else default ───────────────
-    so_terms = co.get("sales_order_terms") or _DEFAULT_SO_TERMS
+    # ── Terms — use company_defaults.terms_and_conditions, else built-in default
+    # Always guaranteed to be a non-empty string so the printer never skips it.
+    so_terms = (
+        co.get("terms_and_conditions")
+        or _DEFAULT_SO_TERMS
+    )
 
     # ── Footer ────────────────────────────────────────────────────────────────
     base_footer = co.get("footer_text") or "Thank you for your business!"
 
     # ── Receipt-type-specific fields ──────────────────────────────────────────
     if receipt_type == "Laybye Deposit":
-        # amountTendered = deposit paid today  (not the full order total)
         tendered     = deposit_amount
         change       = 0.0
-        # customerRef prints as a prominent reference line in the totals area
         customer_ref = f"BALANCE DUE:  {order.get('currency', 'USD')} {balance_due:.2f}"
         footer       = base_footer
     else:
-        # Full Sales Order slip — tendered = full total
         tendered     = total
         change       = 0.0
         customer_ref = ""
         footer       = base_footer
 
+    # ── Payment methods — support BOTH multi-payment list AND single string ───
+    #
+    # New orders save:  deposit_methods = [{"method": "CASH", "amount": 50.0},
+    #                                      {"method": "ECOCASH", "amount": 30.0}]
+    # Old orders save:  deposit_method  = "CASH"   (single string, no list)
+    #
+    raw_methods   = order.get("deposit_methods") or []   # preferred: list of dicts
+    single_method = order.get("deposit_method",  "") or ""  # fallback: plain string
+
+    payment_items: list[Item] = []
+
+    if raw_methods:
+        # Multi-payment: build one Item per method
+        for pm in raw_methods:
+            m_name   = str(pm.get("method", "Payment"))
+            m_amount = float(pm.get("amount", 0.0))
+            payment_items.append(Item(
+                productName = m_name,
+                qty         = 1,
+                price       = m_amount,
+                amount      = m_amount,
+                tax_amount  = 0.0,
+            ))
+        payment_mode_str = " + ".join(pm.get("method", "") for pm in raw_methods)
+    elif single_method:
+        # Legacy single-method order
+        payment_items.append(Item(
+            productName = single_method,
+            qty         = 1,
+            price       = deposit_amount,
+            amount      = deposit_amount,
+            tax_amount  = 0.0,
+        ))
+        payment_mode_str = single_method
+    else:
+        payment_mode_str = ""
+
     receipt = ReceiptData(
-        # ── Routing: tells the C# PrintingManager to use the SO template ─────
+        # ── Routing: tells PrintingService to use the SO template ─────────────
         doc_type    = "sales_order",
         receiptType = receipt_type,        # "Sales Order"  |  "Laybye Deposit"
 
@@ -170,8 +214,7 @@ def _build_receipt(order: dict, receipt_type: str = "Sales Order") -> "ReceiptDa
         tel                 = co.get("phone",         ""),
         tin                 = co.get("tin_number",    ""),
         vatNo               = co.get("vat_number",    ""),
-        # Intentionally NOT setting deviceSerial / deviceId — this is not a
-        # fiscal document, so ZIMRA fields must stay blank.
+        # Intentionally NOT setting deviceSerial / deviceId — not a fiscal doc
         deviceSerial        = "",
         deviceId            = "",
 
@@ -180,40 +223,42 @@ def _build_receipt(order: dict, receipt_type: str = "Sales Order") -> "ReceiptDa
         invoiceDate = order_date,
 
         # ── Cashier / customer ────────────────────────────────────────────────
-        cashierName     = "",            # not tied to a POS cashier
+        cashierName     = "",
         customerName    = customer_name,
         customerContact = customer_contact,
-        customerRef     = customer_ref,  # "BALANCE DUE: USD X.XX" (deposit slip)
+        customerRef     = customer_ref,
 
         # ── Totals ────────────────────────────────────────────────────────────
-        grandTotal     = total,          # full order value
+        grandTotal     = total,
         subtotal       = total,
-        totalVat       = 0.0,            # SO is pre-invoice — no VAT line
-        amountTendered = tendered,       # deposit on deposit slip; total on SO
+        totalVat       = 0.0,
+        amountTendered = tendered,
         change         = change,
         discAmt        = 0.0,
 
         # ── Payment ───────────────────────────────────────────────────────────
-        paymentMode = order.get("deposit_method", ""),
+        paymentMode = payment_mode_str,    # "CASH + ECOCASH" or single name
         currency    = order.get("currency", "USD"),
         footer      = footer,
 
         # ── Sales-Order-specific ──────────────────────────────────────────────
         deliveryDate    = delivery_date,
-        salesOrderTerms = so_terms,
+        salesOrderTerms = so_terms,        # always non-empty — guaranteed above
         orderStatus     = order_status,
     )
 
     # ── Deposit / balance summary (multiCurrencyDetails rows) ─────────────────
-    # These always appear on both slip types so the customer can clearly see:
-    #   ORDER TOTAL  /  DEPOSIT PAID  /  BALANCE DUE
     receipt.multiCurrencyDetails = [
         MultiCurrencyDetail(key="Order Total",  value=round(total,          2)),
         MultiCurrencyDetail(key="Deposit Paid", value=round(deposit_amount, 2)),
         MultiCurrencyDetail(key="Balance Due",  value=round(balance_due,    2)),
     ]
 
-    # ── Line items ────────────────────────────────────────────────────────────
+    # ── Payment method items — stored separately so they don't mix with
+    #    product line items in the items table
+    receipt.paymentItems = payment_items
+
+    # ── Line items (products) ─────────────────────────────────────────────────
     for it in order.get("items", []):
         qty    = float(it.get("qty",    1))
         rate   = float(it.get("rate",   0))
@@ -227,7 +272,7 @@ def _build_receipt(order: dict, receipt_type: str = "Sales Order") -> "ReceiptDa
             tax_amount  = 0.0,
         ))
 
-    # Keep itemlist in sync (backward-compat with PrintingManager)
+    # Keep itemlist in sync (backward-compat)
     receipt.itemlist = receipt.items
     return receipt
 
@@ -246,6 +291,7 @@ def print_sales_order(order_id: int) -> bool:
       • Customer name
       • Line items table
       • Order Total / Deposit Paid / Balance Due summary
+      • Forms of Payment — ALL methods listed (Cash, EcoCash, etc.)
       • Terms & Conditions block
       • Company footer
 
@@ -288,6 +334,7 @@ def print_laybye_deposit(order_id: int) -> bool:
       • Order No, Order Date, Customer name
       • Line items table
       • Order Total / Deposit Paid / Balance Due summary  ← always visible
+      • Forms of Payment — ALL methods listed (Cash, EcoCash, etc.)
       • "BALANCE DUE: USD X.XX" reference line
       • Terms & Conditions block
       • Company footer

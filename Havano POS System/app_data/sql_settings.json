@@ -1,0 +1,8 @@
+{
+    "auth_mode": "windows",
+    "server": ".\\SQLEXPRESS",
+    "database": "pos_db",
+    "username": "",
+    "password": "",
+    "api_url": "https://erp1193.havano.cloud"
+}

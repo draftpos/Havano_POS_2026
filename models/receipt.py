@@ -150,7 +150,7 @@ class ReceiptData:
     doc_type: str = "receipt"
 
     receiptType: str = "Sales"
-
+    fiscal_pending: bool = False 
     companyLogoPath: str = ""
     companyName: str = ""
     KOT: str = ""

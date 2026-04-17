@@ -489,6 +489,10 @@ class CreditNoteDialog(QDialog):
     def _confirm(self):
         if not self._sale:
             return
+        
+        # Debounce: Disable button immediately to prevent double-creation
+        self._btn_confirm.setEnabled(False)
+        self._btn_confirm.setText("Processing…")
 
         items_to_return = []
         for r in range(self._tbl.rowCount()):
