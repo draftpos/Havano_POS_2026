@@ -1,9 +1,9 @@
 {
-  "main_printer": "XP-80C",
+  "main_printer": "POS-80C (copy 5)",
   "orders": {
     "Order 1": {
-      "active": false,
-      "printer": "(None)"
+      "active": true,
+      "printer": "POS-80C (copy 5)"
     },
     "Order 2": {
       "active": false,

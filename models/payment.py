@@ -152,10 +152,10 @@ def auto_migrate():
                     payment_date DATE,
                     created_at DATETIME2 DEFAULT SYSDATETIME()
                 )
-                log.info("Created customer_payments table")
             END
         """)
         conn.commit()
+        log.info("Created customer_payments table or ensured it exists")
     except Exception as e:
         log.warning(f"Could not create customer_payments table: {e}")
     finally:

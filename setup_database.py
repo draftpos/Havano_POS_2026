@@ -438,6 +438,7 @@ def run():
                 [footer]            NVARCHAR(MAX) NOT NULL,
                 [synced]            BIT           NOT NULL DEFAULT 0,
                 [syncing]           BIT           NOT NULL DEFAULT 0,
+                [sync_error]        NVARCHAR(MAX) NULL,
                 [total_items]       DECIMAL(12,4) NOT NULL,
                 [change_amount]     DECIMAL(12,2) NOT NULL,
                 [company_name]      NVARCHAR(120) NOT NULL,
@@ -456,11 +457,6 @@ def run():
                 [total_tax_amount]            DECIMAL(12,2) NULL DEFAULT 0,
                 [subtotal_before_tax]         DECIMAL(12,2) NULL DEFAULT 0,
                 -- ── Multi-currency fields ──────────────────────────────────
-                -- total_usd   : invoice grand total always in USD
-                -- total_zwd   : invoice grand total in ZWD (NULL if not a ZWD sale)
-                -- tendered_usd: raw USD cash the customer gave (change calc only)
-                -- tendered_zwd: raw ZWD cash the customer gave (change calc only)
-                -- exchange_rate: rate used at time of sale (foreign_currency → USD)
                 [total_usd]       DECIMAL(14,4) NULL DEFAULT 0,
                 [total_zwd]       DECIMAL(14,4) NULL DEFAULT 0,
                 [tendered_usd]    DECIMAL(14,4) NULL DEFAULT 0,
@@ -472,34 +468,36 @@ def run():
         ok("sales")
     else:
         skip("sales")
-        for col, defn in [
-            ("company_name",      "NVARCHAR(120) NOT NULL DEFAULT ''"),
-            ("frappe_ref",        "NVARCHAR(80)  NULL"),
-            ("created_at",        "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
-            ("payment_entry_ref", "NVARCHAR(80)  NULL"),
-            ("payment_synced",    "BIT           NOT NULL DEFAULT 0"),
-            ("synced",            "BIT           NOT NULL DEFAULT 0"),
-            ("syncing",           "BIT           NOT NULL DEFAULT 0"),
-            ("is_on_account",     "BIT           NOT NULL DEFAULT 0"),
-            ("shift_id",                    "INT           NULL"),
-            ("fiscal_status",               "NVARCHAR(50)  NULL"),
-            ("fiscal_qr_code",              "NVARCHAR(MAX) NULL"),
-            ("fiscal_verification_code",    "NVARCHAR(255) NULL"),
-            ("fiscal_receipt_counter",      "INT           NULL"),
-            ("fiscal_global_no",            "NVARCHAR(100) NULL"),
-            ("fiscal_sync_date",            "DATETIME2(7)  NULL"),
-            ("fiscal_error",                "NVARCHAR(MAX) NULL"),
-            ("sync_error",                  "NVARCHAR(MAX) NULL"),
-            ("total_tax_amount",            "DECIMAL(12,2) NULL DEFAULT 0"),
-            ("subtotal_before_tax",         "DECIMAL(12,2) NULL DEFAULT 0"),
-            # ── Multi-currency fields (migration) ──
-            ("total_usd",     "DECIMAL(14,4) NULL DEFAULT 0"),
-            ("total_zwd",     "DECIMAL(14,4) NULL DEFAULT 0"),
-            ("tendered_usd",  "DECIMAL(14,4) NULL DEFAULT 0"),
-            ("tendered_zwd",  "DECIMAL(14,4) NULL DEFAULT 0"),
-            ("exchange_rate", "DECIMAL(18,8) NULL DEFAULT 1"),
-        ]:
-            add_col("sales", col, defn)
+
+    # Migration loop for sales
+    for col, defn in [
+        ("company_name",      "NVARCHAR(120) NOT NULL DEFAULT ''"),
+        ("frappe_ref",        "NVARCHAR(80)  NULL"),
+        ("created_at",        "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
+        ("payment_entry_ref", "NVARCHAR(80)  NULL"),
+        ("payment_synced",    "BIT           NOT NULL DEFAULT 0"),
+        ("synced",            "BIT           NOT NULL DEFAULT 0"),
+        ("syncing",           "BIT           NOT NULL DEFAULT 0"),
+        ("is_on_account",     "BIT           NOT NULL DEFAULT 0"),
+        ("shift_id",                    "INT           NULL"),
+        ("fiscal_status",               "NVARCHAR(50)  NULL"),
+        ("fiscal_qr_code",              "NVARCHAR(MAX) NULL"),
+        ("fiscal_verification_code",    "NVARCHAR(255) NULL"),
+        ("fiscal_receipt_counter",      "INT           NULL"),
+        ("fiscal_global_no",            "NVARCHAR(100) NULL"),
+        ("fiscal_sync_date",            "DATETIME2(7)  NULL"),
+        ("fiscal_error",                "NVARCHAR(MAX) NULL"),
+        ("sync_error",                  "NVARCHAR(MAX) NULL"),
+        ("total_tax_amount",            "DECIMAL(12,2) NULL DEFAULT 0"),
+        ("subtotal_before_tax",         "DECIMAL(12,2) NULL DEFAULT 0"),
+        # ── Multi-currency fields (migration) ──
+        ("total_usd",     "DECIMAL(14,4) NULL DEFAULT 0"),
+        ("total_zwd",     "DECIMAL(14,4) NULL DEFAULT 0"),
+        ("tendered_usd",  "DECIMAL(14,4) NULL DEFAULT 0"),
+        ("tendered_zwd",  "DECIMAL(14,4) NULL DEFAULT 0"),
+        ("exchange_rate", "DECIMAL(18,8) NULL DEFAULT 1"),
+    ]:
+        add_col("sales", col, defn)
 
     # ==================================================================
     # 11. sale_items  (FK -> sales added later)
@@ -721,6 +719,7 @@ def run():
                 [parent_account]   NVARCHAR(140) NOT NULL DEFAULT '',
                 [account_type]     NVARCHAR(80)  NOT NULL DEFAULT '',
                 [account_currency] NVARCHAR(10)  NOT NULL DEFAULT 'USD',
+                [is_group]         BIT           NOT NULL DEFAULT 0,
                 [updated_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 PRIMARY KEY CLUSTERED ([id] ASC),
                 UNIQUE NONCLUSTERED ([name] ASC)
@@ -729,13 +728,15 @@ def run():
         ok("gl_accounts")
     else:
         skip("gl_accounts")
-        for col, defn in [
-            ("account_number",   "NVARCHAR(80)  NULL"),
-            ("account_currency", "NVARCHAR(10)  NOT NULL DEFAULT 'USD'"),
-            ("is_group",         "BIT           NOT NULL DEFAULT 0"),
-            ("updated_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
-        ]:
-            add_col("gl_accounts", col, defn)
+
+    # Migration loop for gl_accounts (ensure all columns exist)
+    for col, defn in [
+        ("account_number",   "NVARCHAR(80)  NULL"),
+        ("account_currency", "NVARCHAR(10)  NOT NULL DEFAULT 'USD'"),
+        ("is_group",         "BIT           NOT NULL DEFAULT 0"),
+        ("updated_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+    ]:
+        add_col("gl_accounts", col, defn)
 
     # ==================================================================
     # 18. exchange_rates
@@ -805,21 +806,24 @@ def run():
                 [currency]     NVARCHAR(10)  NULL DEFAULT 'USD',
                 [account_name] NVARCHAR(100) NULL,
                 [payment_date] DATE          NULL,
+                [sync_error]   NVARCHAR(MAX) NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
         ok("customer_payments")
     else:
         skip("customer_payments")
-        for col, defn in [
-            ("reference",    "NVARCHAR(100) NULL"),
-            ("cashier_id",   "INT           NULL"),
-            ("currency",     "NVARCHAR(10)  NULL DEFAULT 'USD'"),
-            ("account_name", "NVARCHAR(100) NULL"),
-            ("payment_date", "DATE          NULL"),
-            ("sync_error",   "NVARCHAR(MAX) NULL"),
-        ]:
-            add_col("customer_payments", col, defn)
+
+    # Migration loop for customer_payments
+    for col, defn in [
+        ("reference",    "NVARCHAR(100) NULL"),
+        ("cashier_id",   "INT           NULL"),
+        ("currency",     "NVARCHAR(10)  NULL DEFAULT 'USD'"),
+        ("account_name", "NVARCHAR(100) NULL"),
+        ("payment_date", "DATE          NULL"),
+        ("sync_error",   "NVARCHAR(MAX) NULL"),
+    ]:
+        add_col("customer_payments", col, defn)
 
     # ==================================================================
     # 21. product_uom_prices
@@ -942,30 +946,33 @@ def run():
                 [created_at]       NVARCHAR(50)  NOT NULL DEFAULT '',
                 [last_attempt_at]  NVARCHAR(50)  NOT NULL DEFAULT '',
                 [error_message]    NVARCHAR(MAX) NOT NULL DEFAULT '',
+                [sync_error]       NVARCHAR(MAX) NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
         ok("laybye_payment_entries")
     else:
         skip("laybye_payment_entries")
-        for col, defn in [
-            ("order_no",         "NVARCHAR(100) NOT NULL DEFAULT ''"),
-            ("customer_id",      "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("customer_name",    "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("deposit_amount",   "FLOAT         NOT NULL DEFAULT 0"),
-            ("deposit_method",   "NVARCHAR(100) NOT NULL DEFAULT ''"),
-            ("account_paid_to",  "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("account_currency", "NVARCHAR(20)  NOT NULL DEFAULT 'USD'"),
-            ("frappe_so_ref",    "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("frappe_pe_ref",    "NVARCHAR(255) NOT NULL DEFAULT ''"),
-            ("status",           "NVARCHAR(50)  NOT NULL DEFAULT 'pending'"),
-            ("sync_attempts",    "INT           NOT NULL DEFAULT 0"),
-            ("created_at",       "NVARCHAR(50)  NOT NULL DEFAULT ''"),
-            ("last_attempt_at",  "NVARCHAR(50)  NOT NULL DEFAULT ''"),
-            ("error_message",    "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
-            ("sync_error",       "NVARCHAR(MAX) NULL"),
-        ]:
-            add_col("laybye_payment_entries", col, defn)
+
+    # Migration loop for laybye_payment_entries
+    for col, defn in [
+        ("order_no",         "NVARCHAR(100) NOT NULL DEFAULT ''"),
+        ("customer_id",      "NVARCHAR(255) NOT NULL DEFAULT ''"),
+        ("customer_name",    "NVARCHAR(255) NOT NULL DEFAULT ''"),
+        ("deposit_amount",   "FLOAT         NOT NULL DEFAULT 0"),
+        ("deposit_method",   "NVARCHAR(100) NOT NULL DEFAULT ''"),
+        ("account_paid_to",  "NVARCHAR(255) NOT NULL DEFAULT ''"),
+        ("account_currency", "NVARCHAR(20)  NOT NULL DEFAULT 'USD'"),
+        ("frappe_so_ref",    "NVARCHAR(255) NOT NULL DEFAULT ''"),
+        ("frappe_pe_ref",    "NVARCHAR(255) NOT NULL DEFAULT ''"),
+        ("status",           "NVARCHAR(50)  NOT NULL DEFAULT 'pending'"),
+        ("sync_attempts",    "INT           NOT NULL DEFAULT 0"),
+        ("created_at",       "NVARCHAR(50)  NOT NULL DEFAULT ''"),
+        ("last_attempt_at",  "NVARCHAR(50)  NOT NULL DEFAULT ''"),
+        ("error_message",    "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+        ("sync_error",       "NVARCHAR(MAX) NULL"),
+    ]:
+        add_col("laybye_payment_entries", col, defn)
 
     # ==================================================================
     # 25. pos_settings
