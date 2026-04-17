@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -11,8 +12,8 @@ from datetime import datetime, date
 
 log = logging.getLogger("SalesOrderUpload")
 
-UPLOAD_INTERVAL  = 60        # seconds between full sync cycles
-REQUEST_TIMEOUT  = 30        # HTTP timeout per request
+UPLOAD_INTERVAL  = 30        # More frequent checks
+REQUEST_TIMEOUT  = 60        # Higher timeout for slow connections
 MAX_PER_MINUTE   = 20
 INTER_PUSH_DELAY = 60 / MAX_PER_MINUTE   # 3 s between pushes
 
@@ -98,9 +99,11 @@ def _build_so_payload(order: dict, items: list[dict], defaults: dict) -> dict | 
     if not frappe_items:
         return None
 
-    walk_in  = defaults.get("server_walk_in_customer", "default").strip() or "default"
+    walk_in  = defaults.get("server_walk_in_customer", "Default").strip() or "Default"
     customer = (order.get("customer_name") or "").strip() or walk_in
     company  = (order.get("company") or defaults.get("server_company", "")).strip()
+
+    base_currency = defaults.get("server_company_currency", "USD").strip().upper() or "USD"
 
     payload = {
         "doctype":          "Sales Order",
@@ -110,6 +113,8 @@ def _build_so_payload(order: dict, items: list[dict], defaults: dict) -> dict | 
         "delivery_date":    delivery_date,  # actual delivery date from order
         "order_type":       order.get("order_type") or "Sales",
         "reserve_stock":    1,            # reserve stock on submit
+        "currency":         base_currency,
+        "conversion_rate":  1.0,
         "items":            frappe_items,
     }
 
@@ -138,6 +143,11 @@ def _build_so_payload(order: dict, items: list[dict], defaults: dict) -> dict | 
 # Push one order to Frappe
 # =============================================================================
 
+_RETRYABLE_ERRORS = (
+    "negativestockerror",
+    "not enough stock",
+)
+
 _PERMANENT_ERRORS = (
     "not marked as sales item",
     "is not a sales item",
@@ -150,22 +160,39 @@ def _push_order(order: dict, api_key: str, api_secret: str,
                 defaults: dict, host: str):
     """
     Returns:
-        str   — Frappe doc name on success
+        str   — server doc name on success
         True  — permanent skip (data error / already exists), mark synced
         False — transient failure, retry next cycle
     """
-    order_no = order.get("order_no") or str(order["id"])
+    order_no  = order.get("order_no") or str(order["id"])
+    customer  = order.get("customer_name") or ""
+    amount    = float(order.get("total") or 0)
+
+    def _fail(code: str, msg: str) -> bool:
+        log.error("❌ Order %s  %s: %s", order_no, code, msg)
+        try:
+            from services.sync_errors_service import record_error
+            record_error("SO", order_no, msg,
+                         customer=customer, amount=amount, error_code=code)
+        except Exception as _re:
+            log.debug("sync_errors record_error skipped: %s", _re)
+        try:
+            from main_window import sync_error_bus
+            sync_error_bus.post_error("SalesOrderUpload", order_no,
+                                      f"{code}: {msg}")
+        except Exception:
+            pass
+        return False
 
     try:
         from models.sales_order import get_order_items
         items = get_order_items(order["id"])
     except Exception as e:
-        log.error("Items fetch failed for %s: %s", order_no, e)
-        return False
+        return _fail("DB_ERROR", f"Could not load order items: {e}")
 
     payload = _build_so_payload(order, items, defaults)
     if not payload:
-        log.warning("Order %s — no valid items, skipping (marked synced).", order_no)
+        log.warning("Order %s — no valid items, skipping.", order_no)
         return True
 
     url = f"{host}/api/resource/Sales%20Order"
@@ -173,8 +200,7 @@ def _push_order(order: dict, api_key: str, api_secret: str,
     try:
         body = _dumps(payload).encode("utf-8")
     except Exception as e:
-        log.error("JSON serialisation failed for order %s: %s", order_no, e)
-        return False
+        return _fail("JSON_ERROR", f"Could not serialise order: {e}")
 
     req = urllib.request.Request(
         url=url,
@@ -190,52 +216,49 @@ def _push_order(order: dict, api_key: str, api_secret: str,
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             name = (json.loads(resp.read()).get("data") or {}).get("name", "")
-            log.info("✅ Order %s → Frappe %s", order_no, name)
+            log.info("✅ Order %s synced → %s", order_no, name)
+            # clear any previous errors for this order
+            try:
+                from services.sync_errors_service import resolve
+                resolve("SO", order_no)
+            except Exception:
+                pass
             return name if name else True
 
     except urllib.error.HTTPError as e:
         try:
-            err = json.loads(e.read().decode())
-            msg = (
-                err.get("exception")
-                or err.get("message")
-                or str(err.get("_server_messages", ""))
-                or f"HTTP {e.code}"
-            )
+            msg = e.read().decode("utf-8", errors="replace")
         except Exception:
+            msg = f"HTTP {e.code}"
+        if not msg.strip():
             msg = f"HTTP {e.code}"
 
         if e.code == 409:
-            log.info("Order %s already on Frappe (409) — marking synced.", order_no)
+            log.info("Order %s already exists on server (409) — marking synced.", order_no)
+            try:
+                from services.sync_errors_service import resolve
+                resolve("SO", order_no)
+            except Exception:
+                pass
             return True
+
+        if e.code == 417 and any(kw in msg.lower() for kw in _RETRYABLE_ERRORS):
+            log.warning("Order %s — retryable Frappe error (keeping in queue).\n  %s",
+                        order_no, msg)
+            return _fail(f"HTTP {e.code}", msg)
 
         if e.code == 417 and any(kw in msg.lower() for kw in _PERMANENT_ERRORS):
-            log.warning("⚠️  Order %s — permanent Frappe error (marking synced).\n  %s",
+            log.warning("Order %s — permanent data error (recorded, marked synced).\n  %s",
                         order_no, msg)
-            return True
+            return _fail(f"HTTP {e.code}", msg) or True
 
-        log.error("❌ Order %s  HTTP %s: %s", order_no, e.code, msg)
-        try:
-            from main_window import sync_error_bus
-            sync_error_bus.post_error("SalesOrderUpload", order_no, msg)
-        except Exception:
-            pass
-        return False
+        return _fail(f"HTTP {e.code}", msg)
 
     except urllib.error.URLError as e:
-        log.warning("Network error pushing %s: %s", order_no, e.reason)
-        try:
-            from main_window import sync_error_bus
-            sync_error_bus.post_error(
-                "SalesOrderUpload", order_no,
-                f"Network error: {e.reason} — check server URL in Company Defaults.")
-        except Exception:
-            pass
-        return False
+        return _fail("NETWORK", f"Cannot reach server: {e.reason} — check site URL in Company Defaults.")
 
     except Exception as e:
-        log.error("Unexpected error pushing %s: %s", order_no, e)
-        return False
+        return _fail("UNKNOWN", str(e))
 
 
 # =============================================================================
@@ -288,10 +311,12 @@ def push_unsynced_orders() -> dict:
             # payment daemon can push it automatically
             if frappe_ref and isinstance(frappe_ref, str):
                 try:
-                    from services.laybye_payment_entry_service import link_laybye_payment_to_frappe
+                    from services.laybye_payment_entry_service import link_laybye_payment_to_frappe, sync_laybye_payment_entries
                     link_laybye_payment_to_frappe(order.get("order_no", ""), frappe_ref)
+                    # Trigger immediate sync for this order's payment
+                    sync_laybye_payment_entries()
                 except Exception as _lpe:
-                    log.warning("[so-sync] link laybye payment failed for %s: %s",
+                    log.warning("[so-sync] link/sync laybye payment failed for %s: %s",
                                 order.get("order_no", ""), _lpe)
         else:
             result["failed"] += 1

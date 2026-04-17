@@ -1,0 +1,36 @@
+{
+  "timestamp": "2026-03-30T16:56:52.560277",
+  "payment_id": 5,
+  "status": "failed",
+  "payment_data": {
+    "id": 5,
+    "customer_name": "gettest gettest",
+    "amount": "2.00",
+    "currency": "USD",
+    "method": "Cash",
+    "account_name": "Cash",
+    "reference": "",
+    "payment_date": "2026-03-30"
+  },
+  "payload": {
+    "doctype": "Payment Entry",
+    "payment_type": "Receive",
+    "party_type": "Customer",
+    "party": "gettest gettest",
+    "party_name": "gettest gettest",
+    "paid_to": "Cash In Hand - DC1134",
+    "paid_to_account_currency": "USD",
+    "paid_amount": 2.0,
+    "paid_amount_after_tax": 2.0,
+    "received_amount": 2.0,
+    "received_amount_after_tax": 2.0,
+    "reference_no": "PAY-0000005",
+    "reference_date": "2026-03-30",
+    "remarks": "Customer Payment via Cash (Cash)",
+    "docstatus": 1,
+    "references": [],
+    "company": "TN Harlequin",
+    "cost_center": "Main - DC1134"
+  },
+  "error": "frappe.exceptions.ValidationError: Payment Entry ACC-PAY-2026-00090: Account Cash In Hand - DC1134 is a Group Account and group accounts cannot be used in transactions"
+}

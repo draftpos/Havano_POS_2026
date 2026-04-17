@@ -986,7 +986,7 @@ class SettingsDialog(QDialog):
         ml.addWidget(_section_divider("HARDWARE & PRINTING"))
         _add_items([
             ("🖨", "Hardware Settings",  lambda: HardwareDialog(self).exec()),
-            ("🖨", "Advanced Printing",  _open_adv_printing),
+            # ("🖨", "Advanced Printing",  _open_adv_printing),
         ])
 
         scroll_area.setWidget(menu)
@@ -1098,259 +1098,239 @@ class ToggleSwitch(QCheckBox):
         from PySide6.QtCore import QSize
         return QSize(self._TRACK_W + 2, self._TRACK_H + 2)
 
-
 # =============================================================================
-# POSRulesDialog — POS Business Rules (accessible from Settings menu)
+# POS BUSINESS RULES — NAVY BLUE ERP (FIXED CLICK & SLIDE)
 # =============================================================================
-class POSRulesDialog(QDialog):
-    """
-    Toggle-based POS business rules:
-      #3  Block zero-price sales
-      #4  Block zero-stock sales
-      #7  Apply Frappe pricing rules
-    """
+from PySide6.QtWidgets import (
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
+    QLabel, QFrame, QCheckBox, QMessageBox
+)
+from PySide6.QtCore import Qt, QTimer, Property, QEasingCurve, QPropertyAnimation
+from PySide6.QtGui import QPainter, QColor
 
+# ── Sliding Toggle (Fixed Click Logic) ──────────────────────────────────────
+class SlidingToggle(QCheckBox):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("POS Rules")
-        self.setFixedSize(560, 520)
-        self.setModal(True)
-        self.setStyleSheet(f"QDialog {{ background:{OFF_WHITE}; }}")
+        self.setFixedSize(44, 22)
+        self.setCursor(Qt.PointingHandCursor)
+        
+        self._position = 0.0 
+        self.animation = QPropertyAnimation(self, b"position")
+        self.animation.setDuration(160)
+        self.animation.setEasingCurve(QEasingCurve.InOutQuad)
+
+    @Property(float)
+    def position(self): return self._position
+
+    @position.setter
+    def position(self, pos):
+        self._position = pos
+        self.update() 
+
+    # Fix: Ensure the entire widget area handles the click toggle
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.setChecked(not self.isChecked())
+        super().mouseReleaseEvent(event)
+
+    def checkStateSet(self):
+        super().checkStateSet()
+        self.animation.stop()
+        self.animation.setEndValue(1.0 if self.isChecked() else 0.0)
+        self.animation.start()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        
+        # Track Background (Gray to Navy Blue: #0d1f3c)
+        bg_color = QColor(209, 217, 230) 
+        if self._position > 0:
+            # Smoothly transition color based on position
+            r = int(209 + (self._position * (13 - 209)))
+            g = int(217 + (self._position * (31 - 217)))
+            b = int(230 + (self._position * (60 - 230)))
+            bg_color = QColor(r, g, b)
+            
+        p.setBrush(bg_color)
+        p.drawRoundedRect(0, 0, self.width(), self.height(), 11, 11)
+        
+        # Handle (White Circle)
+        p.setBrush(QColor("#ffffff"))
+        handle_size = 16
+        margin = 3
+        range_x = self.width() - handle_size - (margin * 2)
+        handle_x = margin + (self._position * range_x)
+        
+        p.drawEllipse(handle_x, margin, handle_size, handle_size)
+        p.end()
+
+# ── Main Dialog ──────────────────────────────────────────────────────────────
+class POSRulesDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self._toggles = {}
+        
+        self.setFixedSize(520, 420)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        # Navy Blue Border
+        self.setStyleSheet("QDialog { background:#ffffff; border:1px solid #0d1f3c; }")
+        
         self._build()
+        self._load_existing_rules()
 
     def _build(self):
         root = QVBoxLayout(self)
-        root.setSpacing(0); root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # ── Header bar ────────────────────────────────────────────────────────
-        hdr = QWidget(); hdr.setFixedHeight(60)
-        hdr.setStyleSheet(f"background:{NAVY}; border-bottom: 2px solid {ACCENT};")
-        hl = QHBoxLayout(hdr); hl.setContentsMargins(24, 0, 20, 0)
+        # ── Header Action Bar ───────────────────────────────────────────────
+        header = QWidget()
+        header.setFixedHeight(55)
+        header.setStyleSheet("background:#f8fafc; border-bottom:1px solid #d1d9e6;")
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(20, 0, 15, 0)
 
-        icon_lbl = QLabel("🛡")
-        icon_lbl.setStyleSheet("font-size:22px; background:transparent;")
-        title_lbl = QLabel("POS Business Rules")
-        title_lbl.setStyleSheet(
-            f"font-size:17px; font-weight:bold; color:{WHITE}; background:transparent; margin-left:8px;")
-        sub_lbl = QLabel("Configure sale restrictions and pricing behaviour")
-        sub_lbl.setStyleSheet(
-            f"font-size:11px; color:{MID}; background:transparent; margin-left:8px;")
+        title = QLabel("POS BUSINESS RULES")
+        title.setStyleSheet("font-size:11px; font-weight:bold; color:#0d1f3c; letter-spacing:1.5px;")
+        
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
 
-        text_col = QVBoxLayout(); text_col.setSpacing(1)
-        text_col.addWidget(title_lbl); text_col.addWidget(sub_lbl)
+        self.save_btn = QPushButton("SAVE RULES")
+        self.save_btn.setFixedSize(110, 32)
+        self.save_btn.setStyleSheet("""
+            QPushButton { 
+                background:#0d1f3c; color:white; border-radius:4px; 
+                font-weight:bold; font-size:10px; border:none;
+            }
+            QPushButton:hover { background:#1a5fb4; }
+            QPushButton:disabled { background:#ffffff; color:#10b981; border:1px solid #10b981; }
+        """)
+        self.save_btn.clicked.connect(self._save)
 
-        hl.addWidget(icon_lbl)
-        hl.addLayout(text_col)
+        self.exit_btn = QPushButton("CLOSE")
+        self.exit_btn.setFixedSize(70, 32)
+        self.exit_btn.setStyleSheet("""
+            QPushButton { 
+                background:transparent; color:#0d1f3c; border:1px solid #0d1f3c; 
+                border-radius:4px; font-weight:bold; font-size:10px;
+            }
+            QPushButton:hover { background:#eef2f7; color:#0d1f3c; }
+        """)
+        self.exit_btn.clicked.connect(self.reject)
+
+        controls.addWidget(self.save_btn)
+        controls.addWidget(self.exit_btn)
+
+        hl.addWidget(title)
         hl.addStretch()
+        hl.addLayout(controls)
+        root.addWidget(header)
 
-        close_x = QPushButton("✕")
-        close_x.setFixedSize(32, 32); close_x.setCursor(Qt.PointingHandCursor)
-        close_x.setFocusPolicy(Qt.NoFocus)
-        close_x.setStyleSheet(f"""
-            QPushButton {{ background:transparent; color:{MID}; border:none;
-                           font-size:16px; font-weight:bold; border-radius:6px; }}
-            QPushButton:hover {{ background:{DANGER}; color:{WHITE}; }}
-        """)
-        close_x.clicked.connect(self.reject)
-        hl.addWidget(close_x)
-        root.addWidget(hdr)
+        # ── List Body ───────────────────────────────────────────────────────
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(30, 20, 30, 20)
+        bl.setSpacing(0)
 
-        # ── Scrollable body ───────────────────────────────────────────────────
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background:transparent; border:none; }")
+        rules = [
+            ("block_zero_price", "BLOCK ZERO-PRICE SALES", "Prevent $0.00 items on invoices."),
+            ("block_zero_stock", "BLOCK ZERO-STOCK SALES", "Stop sales when stock is empty."),
+            ("use_pricing_rules", "APPLY PRICING RULES", "Auto-apply ERP discount rules.")
+        ]
 
-        body = QWidget(); body.setStyleSheet(f"background:{OFF_WHITE};")
-        bl = QVBoxLayout(body); bl.setSpacing(8); bl.setContentsMargins(24, 20, 24, 20)
-
-        # ── Section: Sale Restrictions ────────────────────────────────────────
-        self._section_label(bl, "SALE RESTRICTIONS")
-
-        self._rule_card(bl,
-            key="block_zero_price",
-            icon="🚫",
-            title="Block Zero-Price Sales",
-            desc="Prevents adding any item priced at $0.00 to the invoice. Cashiers will see a warning and the item will not be added.",
-            default=True,
-            accent="#b02020",
-        )
-        self._rule_card(bl,
-            key="block_zero_stock",
-            icon="📦",
-            title="Block Zero-Stock Sales",
-            desc="Stops a sale when the item has no available stock. An 'Insufficient Stock' alert is shown to the cashier.",
-            default=False,
-            accent="#c05a00",
-        )
-
-        bl.addSpacing(6)
-        self._section_label(bl, "PRICING")
-
-        self._rule_card(bl,
-            key="use_pricing_rules",
-            icon="💸",
-            title="Apply Frappe Pricing Rules",
-            desc="Automatically fetches and applies discount rules from Frappe ERPNext when an item is added to the cart.",
-            default=False,
-            accent="#1a5fb4",
-        )
-
-        # ── Info note ─────────────────────────────────────────────────────────
-        bl.addSpacing(6)
-        note_card = QWidget()
-        note_card.setStyleSheet(f"""
-            QWidget {{
-                background: #eef4ff;
-                border: 1px solid #b8d0f0;
-                border-left: 4px solid {ACCENT};
-                border-radius: 8px;
-            }}
-        """)
-        nl = QHBoxLayout(note_card); nl.setContentsMargins(16, 12, 16, 12); nl.setSpacing(12)
-        note_icon = QLabel("💡"); note_icon.setStyleSheet("background:transparent; font-size:18px;")
-        note_icon.setFixedWidth(24)
-        note_text = QLabel(
-            "<b>Per-user permissions</b> such as Allow Discounts, Reprint, "
-            "Credit Notes and Receipt are managed in "
-            "<b>Settings → Users</b> — edit any user to adjust their access.")
-        note_text.setWordWrap(True)
-        note_text.setStyleSheet(f"color:{NAVY}; font-size:12px; background:transparent; line-height:1.5;")
-        nl.addWidget(note_icon, alignment=Qt.AlignTop)
-        nl.addWidget(note_text, 1)
-        bl.addWidget(note_card)
+        for key, lbl, desc in rules:
+            bl.addWidget(self._rule_row(key, lbl, desc))
 
         bl.addStretch()
-        scroll.setWidget(body)
-        root.addWidget(scroll, 1)
+        
+        self.status_lbl = QLabel("● SYSTEM CONFIGURATION")
+        self.status_lbl.setStyleSheet("color:#0d1f3c; font-size:9px; font-weight:bold; opacity:0.6;")
+        bl.addWidget(self.status_lbl)
 
-        # ── Footer / Save bar ─────────────────────────────────────────────────
-        footer = QWidget()
-        footer.setFixedHeight(64)
-        footer.setStyleSheet(f"""
-            QWidget {{
-                background: {WHITE};
-                border-top: 1px solid {BORDER};
-            }}
-        """)
-        fl = QHBoxLayout(footer); fl.setContentsMargins(24, 0, 24, 0); fl.setSpacing(10)
+        root.addWidget(body)
 
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setFixedSize(100, 38); cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.setFocusPolicy(Qt.NoFocus)
-        cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{WHITE}; color:{MUTED}; border:1px solid {BORDER};
-                border-radius:6px; font-size:13px; font-weight:600;
-            }}
-            QPushButton:hover {{ background:{LIGHT}; color:{NAVY}; border-color:{MID}; }}
-        """)
-        cancel_btn.clicked.connect(self.reject)
+    def _rule_row(self, key, label, desc):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 15, 0, 15)
+        
+        row = QHBoxLayout()
+        txt = QVBoxLayout(); txt.setSpacing(2)
+        
+        title = QLabel(label)
+        title.setStyleSheet("color:#0d1f3c; font-size:11px; font-weight:bold;")
+        sub = QLabel(desc)
+        sub.setStyleSheet("color:#0d1f3c; font-size:10px; opacity:0.6;")
+        
+        txt.addWidget(title); txt.addWidget(sub)
 
-        save_btn = QPushButton("  💾  Save Rules")
-        save_btn.setFixedSize(160, 38); save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.setFocusPolicy(Qt.NoFocus)
-        save_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{SUCCESS}; color:{WHITE}; border:none;
-                border-radius:6px; font-size:13px; font-weight:bold;
-            }}
-            QPushButton:hover {{ background:{SUCCESS_H}; }}
-            QPushButton:pressed {{ background:#155e30; }}
-        """)
-        save_btn.clicked.connect(self._save)
-
-        fl.addStretch()
-        fl.addWidget(cancel_btn)
-        fl.addWidget(save_btn)
-        root.addWidget(footer)
-
-    def _section_label(self, layout, text):
-        lbl = QLabel(text)
-        lbl.setStyleSheet(f"""
-            color:{MUTED}; font-size:10px; font-weight:bold;
-            background:transparent; letter-spacing:1.5px;
-            padding-bottom:2px;
-        """)
-        layout.addWidget(lbl)
-
-    def _rule_card(self, layout, key, icon, title, desc, default, accent=None):
-        accent = accent or ACCENT
-        card = QWidget()
-        card.setStyleSheet(f"""
-            QWidget#ruleCard {{
-                background:{WHITE};
-                border:1px solid {BORDER};
-                border-left: 4px solid {accent};
-                border-radius: 10px;
-            }}
-        """)
-        card.setObjectName("ruleCard")
-
-        cl = QHBoxLayout(card); cl.setContentsMargins(16, 14, 18, 14); cl.setSpacing(14)
-
-        # Icon badge
-        ic = QLabel(icon)
-        ic.setFixedSize(38, 38)
-        ic.setAlignment(Qt.AlignCenter)
-        ic.setStyleSheet(f"""
-            font-size:18px;
-            background:{LIGHT};
-            border-radius:8px;
-        """)
-
-        # Text
-        txt_col = QVBoxLayout(); txt_col.setSpacing(3)
-        t_lbl = QLabel(title)
-        t_lbl.setStyleSheet(f"font-size:13px; font-weight:bold; color:{NAVY}; background:transparent;")
-        d_lbl = QLabel(desc)
-        d_lbl.setWordWrap(True)
-        d_lbl.setStyleSheet(f"font-size:11px; color:{MUTED}; background:transparent; line-height:1.4;")
-        txt_col.addWidget(t_lbl); txt_col.addWidget(d_lbl)
-
-        # Toggle
-        tog = ToggleSwitch()
-        try:
-            from database.db import get_connection
-            conn = get_connection(); cur = conn.cursor()
-            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key=?", (key,))
-            row = cur.fetchone(); conn.close()
-            tog.setChecked(bool(int(row[0])) if row else default)
-        except Exception:
-            tog.setChecked(default)
-
-        cl.addWidget(ic, alignment=Qt.AlignTop | Qt.AlignLeft)
-        cl.addLayout(txt_col, 1)
-        cl.addWidget(tog, alignment=Qt.AlignVCenter)
-
+        # Toggle Switch
+        tog = SlidingToggle()
         self._toggles[key] = tog
-        layout.addWidget(card)
+
+        row.addLayout(txt, 1)
+        row.addWidget(tog)
+        layout.addLayout(row)
+        
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background:#eef2f7; border:none;")
+        layout.addWidget(line)
+        
+        return container
 
     def _save(self):
         try:
+            self.save_btn.setEnabled(False)
+            self.save_btn.setText("SAVING...")
+
             from database.db import get_connection
             conn = get_connection(); cur = conn.cursor()
-            cur.execute("""
-                IF NOT EXISTS (
-                    SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-                    WHERE TABLE_NAME='pos_settings'
-                )
-                CREATE TABLE pos_settings (
-                    setting_key   NVARCHAR(80)  NOT NULL PRIMARY KEY,
-                    setting_value NVARCHAR(255) NOT NULL DEFAULT '0'
-                )
-            """)
+            
             for key, tog in self._toggles.items():
                 val = "1" if tog.isChecked() else "0"
                 cur.execute("""
                     MERGE pos_settings AS t
                     USING (SELECT ? AS k, ? AS v) AS s ON t.setting_key = s.k
-                    WHEN MATCHED     THEN UPDATE SET setting_value = s.v
-                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
-                                          VALUES (s.k, s.v);
+                    WHEN MATCHED THEN UPDATE SET setting_value = s.v
+                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value) VALUES (s.k, s.v);
                 """, (key, val))
+            
             conn.commit(); conn.close()
-            QMessageBox.information(self, "Saved", "POS rules saved successfully.")
-            self.accept()
+            
+            self.save_btn.setText("✓ SAVED")
+            QTimer.singleShot(1500, self._reset_btn)
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Could not save rules:\n{e}")
+            self.save_btn.setEnabled(True)
+            self.save_btn.setText("SAVE RULES")
+            QMessageBox.warning(self, "Error", f"Failed: {e}")
+
+    def _reset_btn(self):
+        self.save_btn.setEnabled(True)
+        self.save_btn.setText("SAVE RULES")
+
+    def _load_existing_rules(self):
+        # Default ALL to True first (Consistency with _get_pos_rule)
+        for t in self._toggles.values():
+            t.setChecked(True)
+            t.position = 1.0
+
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_key, setting_value FROM pos_settings")
+            for k, v in cur.fetchall():
+                if k in self._toggles:
+                    checked = (v == "1")
+                    self._toggles[k].setChecked(checked)
+                    self._toggles[k].position = 1.0 if checked else 0.0
+            conn.close()
+        except: pass
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape: self.reject()
+        else: super().keyPressEvent(event)

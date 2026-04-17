@@ -1,0 +1,35 @@
+{
+  "timestamp": "2026-03-30T17:13:23.966218",
+  "payment_id": 10,
+  "status": "attempt",
+  "payment_data": {
+    "id": 10,
+    "customer_name": "de",
+    "amount": "2.00",
+    "currency": "USD",
+    "method": "Cash",
+    "account_name": "Cash",
+    "reference": "",
+    "payment_date": "2026-03-30"
+  },
+  "payload": {
+    "doctype": "Payment Entry",
+    "payment_type": "Receive",
+    "party_type": "Customer",
+    "party": "de",
+    "party_name": "de",
+    "paid_to": "Cash - DC1134",
+    "paid_to_account_currency": "USD",
+    "paid_amount": 2.0,
+    "paid_amount_after_tax": 2.0,
+    "received_amount": 2.0,
+    "received_amount_after_tax": 2.0,
+    "reference_no": "PAY-0000010",
+    "reference_date": "2026-03-30",
+    "remarks": "Customer Payment via Cash (Cash)",
+    "docstatus": 1,
+    "references": [],
+    "company": "TN Harlequin",
+    "cost_center": "Main - DC1134"
+  }
+}

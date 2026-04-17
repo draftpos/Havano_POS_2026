@@ -1,20 +1,381 @@
 from models.receipt import ReceiptData
 from models.advance_settings import AdvanceSettings
 from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
-from PySide6.QtGui import QPainter, QFont, QFontMetrics, QPixmap
+from PySide6.QtGui import QPainter, QFont, QFontMetrics, QPixmap, QColor
 from PySide6.QtCore import Qt, QMarginsF, QSizeF
 from PySide6.QtGui import QPageSize
+from PySide6.QtWidgets import QMessageBox
 from datetime import datetime
 from pathlib import Path
+from services.qr_print_service import get_qr_print_service
+from services.fiscalization_service import get_fiscalization_service
+import sys
+
+
+# =============================================================================
+# PATH HELPER
+# =============================================================================
+def _get_app_data_dir() -> Path:
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys.executable).parent / "app_data"
+    return Path.cwd() / "app_data"
+
+
+def _get_logo_path(logo_filename: str) -> Path:
+    return _get_app_data_dir() / "logos" / logo_filename
+
+
+# Color constants
+DARK_TEXT = "#0d1f3c"
+SUCCESS   = "#1a7a3c"
+DANGER    = "#b02020"
+ORANGE    = "#c05a00"
 
 
 class PrintingService:
     def __init__(self):
         self.paper_width = 550
         self.margin = 10
+        
+    def _create_font(self, font_name: str, size: int, style: str) -> QFont:
+        font = QFont(font_name if font_name else "Arial", size if size else 10)
+        if style == "Bold":
+            font.setBold(True)
+        elif style == "Italic":
+            font.setItalic(True)
+        return font
+    
+    def _make_bold(self, font: QFont) -> QFont:
+        bold_font = QFont(font)
+        bold_font.setBold(True)
+        return bold_font
+    
+    def _draw_logo(self, painter: QPainter, settings, y: int) -> int:
+        try:
+            logo_filename = getattr(settings, "logoFilename", None)
+            if logo_filename:
+                logo_path = _get_logo_path(logo_filename)
+                if logo_path.exists():
+                    pixmap = QPixmap(str(logo_path))
+                    if not pixmap.isNull():
+                        scaled_pixmap = pixmap.scaled(150, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        x = (self.paper_width - scaled_pixmap.width()) // 2
+                        painter.drawPixmap(x, y, scaled_pixmap)
+                        return y + scaled_pixmap.height() + 10
+        except Exception as e:
+            print(f"Logo draw error: {e}")
+        return y
+    
+    def print_credit_note(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+        """Full credit note receipt with fiscal QR code support and waiting for fiscalization."""
+        settings = AdvanceSettings.load_from_file()
+        painter = None
+        try:
+            printer = QPrinter(QPrinter.HighResolution)
+            if printer_name and printer_name != "(None)":
+                info = QPrinterInfo.printerInfo(printer_name)
+                if not info.isNull():
+                    printer.setPrinterName(printer_name)
 
-    def print_kitchen_order(self, receipt: ReceiptData, printer_name: str = None) -> bool:
-        """Prints simple KOT for kitchen - Qty + Name only"""
+            printer.setPageSize(QPageSize(QSizeF(100, 1000), QPageSize.Millimeter))
+            printer.setFullPage(True)
+            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+
+            painter = QPainter(printer)
+            rect = printer.pageRect(QPrinter.DevicePixel)
+            painter.translate(0, -rect.top())
+            y = 0
+
+            now = datetime.now()
+            normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
+            bold_font   = self._make_bold(normal_font)
+
+            # Logo
+            y = self._draw_logo(painter, settings, y)
+
+            # Company Header
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
+                             Qt.AlignCenter, (receipt.companyName or "Havano POS").upper())
+            y += 60
+
+            painter.setFont(normal_font)
+            for line in [receipt.companyAddress, receipt.companyAddressLine1, receipt.companyAddressLine2]:
+                if line:
+                    painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, line)
+                    y += 28
+            
+            city_state = f"{receipt.city} {receipt.state} {receipt.postcode}".strip()
+            if city_state:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, city_state)
+                y += 28
+            if receipt.tel:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, f"Tel: {receipt.tel}")
+                y += 28
+            if receipt.companyEmail:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, receipt.companyEmail)
+                y += 24
+            if receipt.tin:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, f"TIN: {receipt.tin}")
+                y += 24
+            if receipt.vatNo:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, f"VAT: {receipt.vatNo}")
+                y += 24
+
+            y += 10
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 25
+
+            # Heading
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 44,
+                             Qt.AlignCenter, "*** CREDIT NOTE ***")
+            y += 60
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 25
+
+            # Document Details
+            painter.setFont(normal_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Credit Note No  :  {receipt.invoiceNo or 'N/A'}")
+            y += 32
+            
+            orig_inv = getattr(receipt, "originalInvoiceNo", "") or ""
+            if orig_inv:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                                 Qt.AlignCenter, f"Orig. Invoice   :  {orig_inv}")
+                y += 32
+            
+            _raw_date = str(receipt.invoiceDate or "").split(" ")[0].split("T")[0]
+            try:
+                _display_date = datetime.strptime(_raw_date, "%Y-%m-%d").strftime("%d/%m/%Y") if _raw_date else now.strftime("%d/%m/%Y")
+            except ValueError:
+                _display_date = _raw_date or now.strftime("%d/%m/%Y")
+            
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Date            :  {_display_date}")
+            y += 32
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Time            :  {now.strftime('%H:%M:%S')}")
+            y += 32
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Cashier         :  {receipt.cashierName or 'Admin'}")
+            y += 32
+            
+            if receipt.customerName:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                                 Qt.AlignCenter, f"Customer        :  {receipt.customerName}")
+                y += 32
+            if receipt.customerContact:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                                 Qt.AlignCenter, f"Contact         :  {receipt.customerContact}")
+                y += 32
+
+            y += 8
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 24
+
+            # Items Table
+            painter.setFont(normal_font)
+            fm: QFontMetrics = painter.fontMetrics()
+
+            max_qty_w   = fm.horizontalAdvance("Qty")
+            max_price_w = fm.horizontalAdvance("Price")
+            max_total_w = fm.horizontalAdvance("Total")
+            
+            for item in receipt.items:
+                max_qty_w   = max(max_qty_w,   fm.horizontalAdvance(f"{item.qty:.0f}"))
+                max_price_w = max(max_price_w, fm.horizontalAdvance(f"{item.price:,.2f}"))
+                max_total_w = max(max_total_w, fm.horizontalAdvance(f"{item.amount:,.2f}"))
+            
+            max_qty_w += 10
+            max_price_w += 14
+            max_total_w += 14
+
+            TOTAL_X = self.paper_width - self.margin - max_total_w
+            PRICE_X = TOTAL_X - max_price_w - 10
+            QTY_X   = PRICE_X - max_qty_w - 10
+
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, QTY_X - self.margin, 24, Qt.AlignLeft,   "Item (Returned)")
+            painter.drawText(QTY_X,       y, max_qty_w,           24, Qt.AlignCenter, "Qty")
+            painter.drawText(PRICE_X,     y, max_price_w,         24, Qt.AlignRight,  "Price")
+            painter.drawText(TOTAL_X,     y, max_total_w,         24, Qt.AlignRight,  "Total")
+            y += 30
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 24
+
+            painter.setFont(normal_font)
+            line_h = fm.height() + 6
+            
+            for item in receipt.items:
+                name   = item.productName or ""
+                name_w = QTY_X - self.margin - 6
+                rect   = fm.boundingRect(0, 0, name_w, 1000, Qt.TextWordWrap, name)
+                painter.drawText(self.margin, y, name_w, rect.height(), Qt.TextWordWrap, name)
+                row_h  = max(rect.height(), line_h)
+                painter.drawText(QTY_X,   y, max_qty_w,   row_h, Qt.AlignCenter, f"{item.qty:.0f}")
+                painter.drawText(PRICE_X, y, max_price_w, row_h, Qt.AlignRight,  f"{item.price:,.2f}")
+                painter.drawText(TOTAL_X, y, max_total_w, row_h, Qt.AlignRight,  f"{item.amount:,.2f}")
+                y += row_h + 6
+                self._draw_dot_line(painter, self.margin, y, self.paper_width - self.margin * 2, ".")
+                y += 12
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 14
+
+            # Totals
+            fm2  = painter.fontMetrics()
+            lh2  = fm2.height() + 6
+
+            def draw_cn_total(label: str, value: float, use_bold: bool = False):
+                nonlocal y
+                text = f"{receipt.currency or 'USD'} {value:,.2f}"
+                w = fm2.horizontalAdvance(text)
+                painter.setFont(bold_font if use_bold else normal_font)
+                painter.drawText(self.margin, y, 220, lh2, Qt.AlignLeft,  label)
+                painter.drawText(self.paper_width - self.margin - w, y, w, lh2, Qt.AlignRight, text)
+                y += lh2
+
+            if receipt.totalVat > 0:
+                draw_cn_total("VAT", receipt.totalVat)
+            draw_cn_total("CREDIT TOTAL", receipt.grandTotal, use_bold=True)
+
+            y += 14
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+
+            # =========================================================================
+            # FISCAL QR CODE SECTION FOR CREDIT NOTE
+            # QR data is pre-resolved synchronously by main_window before printing
+            # and injected into receipt.fiscal_qr_code / receipt.fiscal_verification_code.
+            # No polling needed here.
+            # =========================================================================
+            try:
+                fiscal_service = get_fiscalization_service()
+                fiscal_enabled = fiscal_service.is_fiscalization_enabled() if fiscal_service else False
+            except Exception as e:
+                print(f"[PrintService] Error checking fiscal status: {e}")
+                fiscal_enabled = False
+
+            qr_code = (getattr(receipt, "fiscal_qr_code", "") or "").strip()
+            v_code  = (getattr(receipt, "fiscal_verification_code", "") or "").strip()
+            fiscal_ready = bool(qr_code)
+
+            # Draw fiscal QR or pending message
+            if fiscal_enabled and fiscal_ready and qr_code:
+                try:
+                    qr_service = get_qr_print_service()
+                    qr_pixmap = qr_service.generate_qr_pixmap(qr_code, size=200)
+                    if not qr_pixmap.isNull():
+                        qr_x = (self.paper_width - qr_pixmap.width()) // 2
+                        painter.drawPixmap(qr_x, y, qr_pixmap)
+                        y += qr_pixmap.height() + 10
+
+                        if v_code:
+                            v_font = QFont(normal_font)
+                            ps = normal_font.pointSize()
+                            v_size = max(ps - 1, 8) if ps > 0 else max(normal_font.pixelSize() - 2, 8)
+                            if ps > 0:
+                                v_font.setPointSize(v_size)
+                            else:
+                                v_font.setPixelSize(v_size)
+                            painter.setFont(v_font)
+                            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
+                                             Qt.AlignCenter, f"Verification: {v_code}")
+                            y += 30
+
+                        painter.setFont(normal_font)
+                        painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
+                                         Qt.AlignCenter, "Scan QR code to verify with ZIMRA")
+                        y += 40
+                        painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                        y += 20
+                    else:
+                        print(f"[PrintService] QR pixmap generation failed for credit note {receipt.invoiceNo}")
+                except Exception as e:
+                    print(f"[PrintService] Error drawing fiscal QR for credit note: {e}")
+            elif fiscal_enabled and not fiscal_ready:
+                # Fiscalization enabled but QR not ready
+                painter.setFont(bold_font)
+                painter.setPen(QColor(ORANGE))
+                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 30,
+                                 Qt.AlignCenter, "FISCALIZATION PENDING")
+                y += 30
+                painter.setFont(normal_font)
+                painter.setPen(QColor(DARK_TEXT))
+                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
+                                 Qt.AlignCenter, "Credit note will be re-issued once fiscalized")
+                y += 40
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 20
+
+            # Reason
+            cn_reason = getattr(receipt, "creditNoteReason", "") or ""
+            if cn_reason:
+                painter.setFont(bold_font)
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 24, Qt.AlignLeft, "Reason:")
+                y += 26
+                painter.setFont(normal_font)
+                fm_r = painter.fontMetrics()
+                for rline in cn_reason.split("\n"):
+                    rline = rline.strip()
+                    if not rline:
+                        continue
+                    rr = fm_r.boundingRect(0, 0, self.paper_width - self.margin*2, 1000, Qt.TextWordWrap, rline)
+                    painter.drawText(self.margin, y, self.paper_width - self.margin*2,
+                                     rr.height(), Qt.TextWordWrap, rline)
+                    y += rr.height() + 4
+                y += 10
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 14
+
+            # Footer
+            painter.setFont(normal_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
+                             Qt.AlignCenter, receipt.footer or "Credit note issued. Thank you.")
+            y += 30
+
+            painter.end()
+            print(f"✅ CREDIT NOTE printed successfully → {printer_name or 'Default'}")
+            return True
+
+        except Exception as e:
+            print(f"❌ Credit note printing failed: {str(e)}")
+            if painter and painter.isActive():
+                painter.end()
+            QMessageBox.warning(None, "Print Failed", f"Credit note could not be printed:\n\n{e}")
+            return False
+
+    def _draw_dot_line(self, painter, start_x, y, width, dot_char="."):
+        fm = painter.fontMetrics()
+        dot_width = fm.horizontalAdvance(dot_char)
+        if dot_width <= 0:
+            return
+        num_dots = int(width / dot_width) + 1
+        painter.drawText(start_x, y, dot_char * num_dots)
+
+    def get_available_printers(self) -> list[str]:
+        try:
+            return ["(None)"] + [p.printerName() for p in QPrinterInfo.availablePrinters()]
+        except Exception:
+            return ["(None)", "Default Printer"]
+
+
+# # Singleton instance
+# printing_service = PrintingService()
+    def print_shift_reconciliation(
+        self,
+        shift: dict = None,
+        totals: list[dict] = None,
+        cashier_id=None,
+        printer_name: str = None,
+        print_data: dict = None,
+        reconciliation_data: dict = None,
+    ) -> bool:
+        """
+        Prints the end-of-shift reconciliation report.
+        """
         settings = AdvanceSettings.load_from_file()
 
         painter = None
@@ -29,72 +390,304 @@ class PrintingService:
             printer.setPageMargins(QMarginsF(0, 0, 0, 0))
 
             painter = QPainter(printer)
-            y = 20
+            y = 10
 
-            header_font = self._create_font(
-                settings.contentHeaderFontName,
-                settings.contentHeaderSize,
-                settings.contentHeaderStyle
-            )
-            normal_font = self._create_font(
-                settings.contentFontName,
-                settings.contentFontSize,
-                settings.contentFontStyle
-            )
-            order_font = self._create_font(
-                settings.orderContentFontName,
-                settings.orderContentFontSize,
-                settings.orderContentStyle
-            )
+            normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
+            bold_font   = self._make_bold(normal_font)
+            small_font  = QFont(normal_font)
+            
+            # Robustly calculate small size (avoiding -1 for pixel-based fonts)
+            base_size = normal_font.pointSize()
+            if base_size < 1: 
+                base_size = normal_font.pixelSize()
+            
+            new_size = max(base_size - 1, 8)
+            if normal_font.pointSize() > 0:
+                small_font.setPointSize(new_size)
+            else:
+                small_font.setPixelSize(new_size)
 
-            painter.setFont(header_font)
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 50,
-                             Qt.AlignCenter, "KITCHEN ORDER")
-            y += 60
+            # Logo
+            y = self._draw_logo(painter, settings, y)
 
-            painter.setFont(order_font)
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
-                             Qt.AlignCenter, f"Order No : {receipt.KOT or 'KOT-' + str(receipt.invoiceNo)}")
-            y += 35
-
-            painter.setFont(normal_font)
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
-                             Qt.AlignCenter, f"Invoice No : {receipt.invoiceNo or 'N/A'}")
-            y += 35
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
-                             Qt.AlignCenter, f"Time : {datetime.now().strftime('%H:%M')}")
-            y += 40
+            # Company Name
+            painter.setFont(bold_font)
+            company = getattr(settings, "companyName", None) or "Havano POS"
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
+                             Qt.AlignCenter, company.upper())
+            y += 50
 
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
-            y += 30
+            y += 20
 
-            painter.setFont(order_font)
-            for item in receipt.items:
-                line = f"{int(item.qty)} × {item.productName}"
-                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 35,
-                                  Qt.AlignLeft, line)
-                y += 38
+            # Report Title
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 36,
+                             Qt.AlignCenter, "SHIFT RECONCILIATION REPORT")
+            y += 44
 
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
-            y += 30
+            y += 20
+
+            # Shift Meta - use reconciliation_data first
+            if reconciliation_data:
+                shift_num = reconciliation_data.get('shift_number', '—')
+                shift_date = reconciliation_data.get('date', datetime.now().strftime("%d/%m/%Y"))
+                start_time = reconciliation_data.get('start_time', '—')
+                end_time = reconciliation_data.get('end_time', datetime.now().strftime("%H:%M:%S"))
+                closing_cashier = reconciliation_data.get('closing_cashier_name', '')
+            elif print_data:
+                shift_num = print_data.get('shift_number', '—')
+                shift_date = print_data.get('date', datetime.now().strftime("%d/%m/%Y"))
+                start_time = print_data.get('start_time', '—')
+                end_time = print_data.get('end_time', datetime.now().strftime("%H:%M:%S"))
+                closing_cashier = print_data.get('closing_cashier_name', '')
+            else:
+                shift_num = shift.get('shift_number', '—') if shift else '—'
+                shift_date = shift.get('date', datetime.now().strftime("%d/%m/%Y")) if shift else datetime.now().strftime("%d/%m/%Y")
+                start_time = shift.get('start_time', '—') if shift else '—'
+                end_time = datetime.now().strftime("%H:%M:%S")
+                closing_cashier = ''
 
             painter.setFont(normal_font)
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
-                             Qt.AlignCenter, "Please prepare quickly!")
-            y += 25
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 25,
-                             Qt.AlignCenter, "Thank you - Havano POS")
+            fm = painter.fontMetrics()
+            line_h = fm.height() + 6
+
+            def draw_meta(label: str, value: str):
+                nonlocal y
+                painter.setFont(bold_font)
+                painter.drawText(self.margin, y, 140, line_h, Qt.AlignLeft, label)
+                painter.setFont(normal_font)
+                painter.drawText(self.margin + 140, y,
+                                 self.paper_width - self.margin * 2 - 140, line_h,
+                                 Qt.AlignLeft, value)
+                y += line_h
+
+            draw_meta("Shift #:", str(shift_num))
+            draw_meta("Date:", str(shift_date))
+            draw_meta("Started:", str(start_time))
+            draw_meta("Closed:", str(end_time))
+            if closing_cashier:
+                draw_meta("Closed By:", str(closing_cashier))
+
+            y += 6
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 16
+
+            # Column positions
+            COL_METHOD = self.margin
+            COL_EXP = self.margin + 130
+            COL_ACTUAL = self.margin + 230
+            COL_VAR = self.margin + 320
+            COL_W = 75
+
+            # Get data from reconciliation_data or print_data
+            cashiers = []
+            payment_methods = []
+            grand_expected = 0.0
+            grand_counted = 0.0
+            
+            if reconciliation_data:
+                cashiers = reconciliation_data.get('cashiers', [])
+                payment_methods = reconciliation_data.get('payment_methods', [])
+                grand_expected = float(reconciliation_data.get('total_expected', 0))
+                grand_counted = float(reconciliation_data.get('total_counted', 0))
+            elif print_data:
+                cashiers = print_data.get('cashiers', [])
+                payment_methods = print_data.get('payment_methods', [])
+                grand_expected = float(print_data.get('grand_expected', print_data.get('total_expected', 0)))
+                grand_counted = float(print_data.get('grand_counted', print_data.get('total_counted', 0)))
+            elif totals:
+                for t in totals:
+                    payment_methods.append({
+                        'method': t.get('method'),
+                        'expected': float(t.get('expected', 0)),
+                        'counted': float(t.get('actual', 0)),
+                        'variance': float(t.get('variance', 0))
+                    })
+                grand_expected = sum(float(t.get('expected', 0)) for t in totals)
+                grand_counted = sum(float(t.get('actual', 0)) for t in totals)
+
+            # Cashier Breakdown
+            if cashiers:
+                for cashier in cashiers:
+                    cashier_name = cashier.get('cashier_name') or cashier.get('username', 'Unknown')
+                    total_sales = float(cashier.get('total_sales', 0))
+                    transactions = cashier.get('transaction_count', cashier.get('transactions', 0))
+
+                    painter.setFont(bold_font)
+                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, line_h,
+                                     Qt.AlignLeft, f"CASHIER: {cashier_name.upper()}")
+                    y += line_h + 4
+
+                    painter.setFont(small_font)
+                    painter.drawText(self.margin + 10, y, self.paper_width - self.margin * 2 - 10, line_h,
+                                     Qt.AlignLeft, f"Sales: ${total_sales:,.2f} | Transactions: {transactions}")
+                    y += line_h
+                    y += 4
+
+                    # Table headers
+                    painter.setFont(bold_font)
+                    painter.drawText(COL_METHOD, y, 120, line_h, Qt.AlignLeft, "Method")
+                    painter.drawText(COL_EXP,    y, COL_W, line_h, Qt.AlignRight, "Expected")
+                    painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, "Counted")
+                    painter.drawText(COL_VAR,    y, COL_W, line_h, Qt.AlignRight, "Variance")
+                    y += line_h + 2
+
+                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                    y += 8
+
+                    # "rows" is the primary key (set by _build_reconciliation_data).
+                    # Fall back to "payment_breakdown" for any old saved JSON.
+                    rows_to_print = cashier.get('rows') or cashier.get('payment_breakdown', [])
+
+                    painter.setFont(normal_font)
+                    if rows_to_print:
+                        for row in rows_to_print:
+                            method   = row.get('method', '')
+                            expected = float(row.get('expected', 0))
+                            counted  = float(row.get('counted',
+                                             row.get('collected',
+                                             row.get('amount_collected', 0))))
+                            variance = counted - expected
+
+                            display_method = method if len(method) <= 18 else method[:15] + "..."
+                            
+                            # Special styling for ON ACCOUNT
+                            if method.upper() == "ON ACCOUNT":
+                                painter.setPen(QColor(ORANGE))
+                                painter.setFont(bold_font)
+                            else:
+                                painter.setPen(QColor(DARK_TEXT))
+                                painter.setFont(normal_font)
+
+                            painter.drawText(COL_METHOD, y, 120, line_h, Qt.AlignLeft, display_method)
+                            painter.drawText(COL_EXP,    y, COL_W, line_h, Qt.AlignRight, f"{expected:,.2f}")
+                            painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, f"{counted:,.2f}")
+
+                            variance_color = DANGER if variance < 0 else SUCCESS if variance > 0 else DARK_TEXT
+                            old_color = painter.pen().color()
+                            painter.setPen(QColor(variance_color))
+                            painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, f"{variance:+,.2f}")
+                            painter.setPen(old_color)
+                            y += line_h + 2
+                    else:
+                        painter.setFont(small_font)
+                        painter.drawText(self.margin + 10, y, self.paper_width - self.margin * 2, line_h,
+                                         Qt.AlignLeft, "No payment methods recorded")
+                        y += line_h + 2
+
+                    y += 4
+
+                    # Cashier sub-total
+                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                    y += 6
+
+                    painter.setFont(bold_font)
+                    total_exp = float(cashier.get('total_expected', 0))
+                    total_cnt = float(cashier.get('total_counted', cashier.get('total_sales', 0)))
+                    total_var = total_cnt - total_exp
+
+                    painter.drawText(COL_METHOD, y, 120, line_h, Qt.AlignLeft, "SUB-TOTAL")
+                    painter.drawText(COL_EXP,    y, COL_W, line_h, Qt.AlignRight, f"{total_exp:,.2f}")
+                    painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, f"{total_cnt:,.2f}")
+
+                    variance_color = DANGER if total_var < 0 else SUCCESS if total_var > 0 else DARK_TEXT
+                    old_color = painter.pen().color()
+                    painter.setPen(QColor(variance_color))
+                    painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, f"{total_var:+,.2f}")
+                    painter.setPen(old_color)
+                    y += line_h + 8
+
+                    # Separator between cashiers
+                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                    y += 12
+
+                    if y > 2500:
+                        printer.newPage()
+                        y = 20
+
+            # Payment methods only (no cashier breakdown) - INCLUDING ON ACCOUNT
+            if payment_methods:
+                painter.setFont(bold_font)
+                painter.drawText(COL_METHOD, y, 130, line_h, Qt.AlignLeft, "Method")
+                painter.drawText(COL_EXP, y, COL_W, line_h, Qt.AlignRight, "Expected")
+                painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, "Counted")
+                painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, "Variance")
+                y += line_h + 4
+
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 10
+
+                painter.setFont(normal_font)
+                for pm in payment_methods:
+                    method = pm.get('method', '')
+                    expected = float(pm.get('expected', 0))
+                    counted = float(pm.get('counted', pm.get('actual', 0)))
+                    variance = counted - expected
+                    
+                    # Special styling for ON ACCOUNT
+                    if method.upper() == "ON ACCOUNT":
+                        painter.setPen(QColor(ORANGE))
+                        painter.setFont(bold_font)
+                    else:
+                        painter.setPen(QColor(DARK_TEXT))
+                        painter.setFont(normal_font)
+
+                    painter.drawText(COL_METHOD, y, 130, line_h, Qt.AlignLeft, method)
+                    painter.drawText(COL_EXP, y, COL_W, line_h, Qt.AlignRight, f"{expected:,.2f}")
+                    painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, f"{counted:,.2f}")
+                    
+                    variance_color = DANGER if variance < 0 else SUCCESS if variance > 0 else DARK_TEXT
+                    old_color = painter.pen().color()
+                    painter.setPen(QColor(variance_color))
+                    painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, f"{variance:+,.2f}")
+                    painter.setPen(old_color)
+                    y += line_h + 4
+
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 10
+
+                painter.setFont(bold_font)
+                painter.drawText(COL_METHOD, y, 130, line_h, Qt.AlignLeft, "TOTAL")
+                painter.drawText(COL_EXP, y, COL_W, line_h, Qt.AlignRight, f"{grand_expected:,.2f}")
+                painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, f"{grand_counted:,.2f}")
+                
+                grand_var = grand_counted - grand_expected
+                variance_color = DANGER if grand_var < 0 else SUCCESS if grand_var > 0 else DARK_TEXT
+                old_color = painter.pen().color()
+                painter.setPen(QColor(variance_color))
+                painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, f"{grand_var:+,.2f}")
+                painter.setPen(old_color)
+                y += line_h + 6
+
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 20
+
+            # Footer
+            painter.setFont(normal_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 30,
+                             Qt.AlignCenter, f"Printed: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+            y += 30
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
+                             Qt.AlignCenter, "— End of Shift Report —")
 
             painter.end()
-            print(f"✅ KITCHEN ORDER printed successfully → {printer_name or 'Default'}")
+            print(f"✅ SHIFT RECONCILIATION printed → {printer_name or 'Default'}")
             return True
 
         except Exception as e:
-            print(f"❌ KOT Printing failed: {str(e)}")
+            print(f"❌ Shift reconciliation print failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
             if painter and painter.isActive():
                 painter.end()
+            QMessageBox.warning(None, "Print Failed", f"Shift report could not be printed:\n\n{e}")
             return False
 
+    # =========================================================================
+    # FONT HELPERS
+    # =========================================================================
     def _create_font(self, family: str, size: int, style_str: str = "Regular") -> QFont:
         font = QFont(family or "Arial", max(size or 10, 8))
         if not style_str:
@@ -112,16 +705,51 @@ class PrintingService:
         f.setWeight(QFont.Bold)
         return f
 
-    def print_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
-        if getattr(receipt, "doc_type", "receipt") == "sales_order":
-            return self.print_sales_order_receipt(receipt, printer_name=printer_name)
-        if getattr(receipt, "doc_type", "receipt") == "payment":
-            return self._print_payment_receipt(receipt, printer_name=printer_name)
-        return self._print_invoice_receipt(receipt, printer_name=printer_name)
+    # =========================================================================
+    # LOGO HELPER
+    # =========================================================================
+    def _draw_logo(self, painter: QPainter, settings: AdvanceSettings, y: int) -> int:
+        """
+        Draws the logo if configured and the file exists.
+        Returns the updated y position after the logo.
+        """
+        if settings.logoDirectory:
+            logo_full_path = _get_logo_path(settings.logoDirectory)
+            if logo_full_path.exists():
+                logo_pix = QPixmap(str(logo_full_path))
+                if not logo_pix.isNull():
+                    scaled = logo_pix.scaled(300, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    x = (self.paper_width - scaled.width()) // 2
+                    painter.drawPixmap(x, y, scaled)
+                    y += scaled.height() + 10
+        return y
 
-    def _print_invoice_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+    # =========================================================================
+    # ROUTING
+    # =========================================================================
+    def print_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+        """Main entry point — routes to the correct template by doc_type."""
+        doc_type = getattr(receipt, "doc_type", "receipt")
+        if doc_type == "sales_order":
+            return self.print_sales_order_receipt(receipt, printer_name=printer_name)
+        if doc_type == "payment":
+            return self.print_payment_receipt(receipt, printer_name=printer_name)
+        if doc_type == "credit_note":
+            return self.print_credit_note(receipt, printer_name=printer_name)
+        return self.print_invoice_receipt(receipt, printer_name=printer_name)
+
+    def reprint(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+        """Reprint any receipt — stamps a REPRINT banner."""
+        receipt.is_reprint = True
+        return self.print_receipt(receipt, printer_name=printer_name)
+
+    # =========================================================================
+    # INVOICE RECEIPT
+    # =========================================================================
+    def print_invoice_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
         settings = AdvanceSettings.load_from_file()
 
+        painter = None
         try:
             printer = QPrinter(QPrinter.HighResolution)
             if printer_name and printer_name != "(None)":
@@ -141,26 +769,29 @@ class PrintingService:
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
             bold_font   = self._make_bold(normal_font)
 
-            if settings.logoDirectory:
-                logo_full_path = Path("app_data/logos") / settings.logoDirectory
-                if logo_full_path.exists():
-                    logo_pix = QPixmap(str(logo_full_path))
-                    if not logo_pix.isNull():
-                        scaled = logo_pix.scaled(300, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        x = (self.paper_width - scaled.width()) // 2
-                        painter.drawPixmap(x, y, scaled)
-                        y += scaled.height() + 10
+            # Logo
+            y = self._draw_logo(painter, settings, y)
 
+            # Company Header
             painter.setFont(bold_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
                              Qt.AlignCenter, (receipt.companyName or "Havano POS").upper())
             y += 60
 
+            # Reprint Banner
+            if getattr(receipt, "is_reprint", False):
+                painter.setFont(bold_font)
+                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 34,
+                                 Qt.AlignCenter, "*** REPRINT ***")
+                y += 40
+
+            # Company Address
             painter.setFont(normal_font)
             for line in [receipt.companyAddress, receipt.companyAddressLine1, receipt.companyAddressLine2]:
                 if line:
                     painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, line)
                     y += 30
+            
             city_state = f"{receipt.city} {receipt.state} {receipt.postcode}".strip()
             if city_state:
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, city_state)
@@ -182,14 +813,32 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 25
 
-            # ── UPDATED ALIGNMENT: Centered like the Sales Order ─────
+            # Receipt Heading
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 44,
+                             Qt.AlignCenter, "*** SALES RECEIPT ***")
+            y += 56
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 25
+
+            # Invoice Details
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30, Qt.AlignCenter, f"Invoice : {receipt.invoiceNo or 'N/A'}")
             y += 30
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30, Qt.AlignCenter, f"Date    : {receipt.invoiceDate or datetime.now().strftime('%d/%m/%Y')}")
+            
+            _raw_date = str(receipt.invoiceDate or "").split(" ")[0].split("T")[0]
+            try:
+                _display_date = datetime.strptime(_raw_date, "%Y-%m-%d").strftime("%d/%m/%Y") if _raw_date else datetime.now().strftime("%d/%m/%Y")
+            except ValueError:
+                _display_date = _raw_date or datetime.now().strftime("%d/%m/%Y")
+            
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30, Qt.AlignCenter, f"Date    : {_display_date}")
+            y += 30
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30, Qt.AlignCenter, f"Time    : {datetime.now().strftime('%H:%M:%S')}")
             y += 30
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30, Qt.AlignCenter, f"Cashier : {receipt.cashierName or 'Admin'}")
             y += 30
+            
             if receipt.customerName:
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, f"Customer : {receipt.customerName}")
                 y += 22
@@ -207,23 +856,29 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 24
 
+            # Items Table
             painter.setFont(normal_font)
             fm: QFontMetrics = painter.fontMetrics()
 
             max_qty_w   = fm.horizontalAdvance("Qty")
             max_price_w = fm.horizontalAdvance("Price")
             max_total_w = fm.horizontalAdvance("Total")
+            
             for item in receipt.items:
                 max_qty_w   = max(max_qty_w,   fm.horizontalAdvance(f"{item.qty:.0f}"))
                 max_price_w = max(max_price_w, fm.horizontalAdvance(f"{item.price:,.2f}"))
                 max_total_w = max(max_total_w, fm.horizontalAdvance(f"{item.amount:,.2f}"))
-            max_qty_w += 10; max_price_w += 14; max_total_w += 14
+            
+            max_qty_w += 10
+            max_price_w += 14
+            max_total_w += 14
 
             TOTAL_X = self.paper_width - self.margin - max_total_w
             PRICE_X = TOTAL_X - max_price_w - 10
             QTY_X   = PRICE_X - max_qty_w - 10
 
             painter.setFont(bold_font)
+            painter.drawText(self.margin, y, QTY_X - self.margin, 24, Qt.AlignLeft, "Item")
             painter.drawText(QTY_X,   y, max_qty_w,   24, Qt.AlignCenter, "Qty")
             painter.drawText(PRICE_X, y, max_price_w, 24, Qt.AlignRight,  "Price")
             painter.drawText(TOTAL_X, y, max_total_w, 24, Qt.AlignRight,  "Total")
@@ -233,6 +888,7 @@ class PrintingService:
 
             painter.setFont(normal_font)
             line_h = fm.height() + 6
+            
             for item in receipt.items:
                 name = item.productName or ""
                 rect = fm.boundingRect(0, 0, self.paper_width - self.margin * 2, 1000, Qt.TextWordWrap, name)
@@ -248,27 +904,108 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 14
 
+            # Totals
             painter.setFont(normal_font)
             fm = painter.fontMetrics()
             line_h = fm.height() + 6
 
             def draw_total(label: str, value: float):
                 nonlocal y
-                text = f"{value:,.2f}"
+                text = f"{receipt.currency or 'USD'} {value:,.2f}"
                 w = fm.horizontalAdvance(text)
                 painter.drawText(self.margin, y, 200, line_h, Qt.AlignLeft,  label)
                 painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
                 y += line_h
 
-            draw_total("Subtotal", receipt.subtotal)
             if receipt.totalVat > 0:
                 draw_total("VAT", receipt.totalVat)
+            
+            painter.setFont(bold_font)
             draw_total("GRAND TOTAL", receipt.grandTotal)
-            y += 6
-            draw_total("Paid", receipt.amountTendered)
-            draw_total("Change", receipt.change)
+
             y += 20
 
+            # =========================================================================
+            # FISCAL QR CODE SECTION
+            # Always do a fresh DB lookup right before drawing — the receipt object
+            # may have been built before fiscalization completed, so receipt.qrCode
+            # is unreliable.  The DB is the only source of truth at print time.
+            # =========================================================================
+            fiscal_service = get_fiscalization_service()
+            fiscal_enabled = fiscal_service.is_fiscalization_enabled() if fiscal_service else False
+
+            if fiscal_enabled:
+                # Fresh lookup by invoice number — never trust the receipt object here
+                qr_code  = ""
+                v_code   = ""
+                try:
+                    from database.db import get_connection
+                    _conn = get_connection()
+                    _cur  = _conn.cursor()
+                    _cur.execute(
+                        "SELECT fiscal_qr_code, fiscal_verification_code "
+                        "FROM sales WHERE invoice_no = ?",
+                        (receipt.invoiceNo,)
+                    )
+                    _row = _cur.fetchone()
+                    _conn.close()
+                    if _row:
+                        qr_code = (_row[0] or "").strip()
+                        v_code  = (_row[1] or "").strip()
+                except Exception as _e:
+                    print(f"[PrintService] DB fiscal lookup failed: {_e}")
+                    # Fall back to whatever was set on the receipt object
+                    qr_code = (getattr(receipt, "qrCode", "") or "").strip()
+                    v_code  = (getattr(receipt, "vCode",  "") or "").strip()
+
+                if qr_code:
+                    try:
+                        qr_service = get_qr_print_service()
+                        qr_pixmap  = qr_service.generate_qr_pixmap(qr_code, size=200)
+                        if not qr_pixmap.isNull():
+                            qr_x = (self.paper_width - qr_pixmap.width()) // 2
+                            painter.drawPixmap(qr_x, y, qr_pixmap)
+                            y += qr_pixmap.height() + 10
+
+                            if v_code:
+                                v_font = QFont(normal_font)
+                                ps = normal_font.pointSize()
+                                v_size = max(ps - 1, 8) if ps > 0 else max(normal_font.pixelSize() - 2, 8)
+                                if ps > 0:
+                                    v_font.setPointSize(v_size)
+                                else:
+                                    v_font.setPixelSize(v_size)
+                                painter.setFont(v_font)
+                                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
+                                                 Qt.AlignCenter, f"Verification: {v_code}")
+                                y += 30
+
+                            painter.setFont(normal_font)
+                            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
+                                             Qt.AlignCenter, "Scan QR code to verify with ZIMRA")
+                            y += 40
+                            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                            y += 20
+                        else:
+                            print(f"[PrintService] QR pixmap generation failed for invoice {receipt.invoiceNo}")
+                    except Exception as e:
+                        print(f"[PrintService] Error drawing fiscal QR: {e}")
+                else:
+                    # Fiscalization enabled but QR not in DB yet — already waited upstream
+                    painter.setFont(bold_font)
+                    painter.setPen(QColor(ORANGE))
+                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 30,
+                                     Qt.AlignCenter, "FISCALIZATION PENDING")
+                    y += 30
+                    painter.setFont(normal_font)
+                    painter.setPen(QColor(DARK_TEXT))
+                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
+                                     Qt.AlignCenter, "Receipt will be re-issued once fiscalized")
+                    y += 40
+                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                    y += 20
+
+            # Footer
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
                              Qt.AlignCenter, receipt.footer or "Thank you for your purchase!")
@@ -277,15 +1014,20 @@ class PrintingService:
                              Qt.AlignCenter, "Come again soon!")
 
             painter.end()
+            print(f"✅ INVOICE printed successfully → {printer_name or 'Default'}")
             return True
 
         except Exception as e:
             print(f"❌ Printing failed: {str(e)}")
-            if 'painter' in locals() and painter.isActive():
+            if painter and painter.isActive():
                 painter.end()
+            QMessageBox.warning(None, "Print Failed", f"Invoice receipt could not be printed:\n\n{e}")
             return False
 
-    def _print_payment_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+    # =========================================================================
+    # PAYMENT RECEIPT
+    # =========================================================================
+    def print_payment_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
         """Dedicated template for customer payment receipts."""
         settings = AdvanceSettings.load_from_file()
 
@@ -308,19 +1050,12 @@ class PrintingService:
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
             bold_font   = self._make_bold(normal_font)
+            now = datetime.now()
 
-            # ── LOGO ─────────────────────────────────────────────────────────
-            if settings.logoDirectory:
-                logo_full_path = Path("app_data/logos") / settings.logoDirectory
-                if logo_full_path.exists():
-                    logo_pix = QPixmap(str(logo_full_path))
-                    if not logo_pix.isNull():
-                        scaled = logo_pix.scaled(300, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        x = (self.paper_width - scaled.width()) // 2
-                        painter.drawPixmap(x, y, scaled)
-                        y += scaled.height() + 10
+            # Logo
+            y = self._draw_logo(painter, settings, y)
 
-            # ── COMPANY DETAILS ───────────────────────────────────────────────
+            # Company Details
             painter.setFont(bold_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
                              Qt.AlignCenter, (receipt.companyName or "Havano POS").upper())
@@ -331,6 +1066,7 @@ class PrintingService:
                 if line:
                     painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, line)
                     y += 30
+            
             city_state = f"{receipt.city} {receipt.state} {receipt.postcode}".strip()
             if city_state:
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22, Qt.AlignCenter, city_state)
@@ -352,35 +1088,98 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 25
 
-            # ── HEADING ───────────────────────────────────────────────────────
+            # Heading
             painter.setFont(bold_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 44,
                              Qt.AlignCenter, "*** PAYMENT RECEIPT ***")
             y += 60
-
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 25
 
-            # ── PAYMENT DETAILS ───────────────────────────────────────────────
+            # Payment Details
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
                              Qt.AlignCenter, f"Ref No    :  {receipt.orderNo or 'N/A'}")
             y += 32
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
-                             Qt.AlignCenter, f"Date      :  {receipt.date or datetime.now().strftime('%d/%m/%Y')}")
+                             Qt.AlignCenter, f"Date      :  {receipt.invoiceDate or now.strftime('%d/%m/%Y')}")
             y += 32
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
-                             Qt.AlignCenter, f"Customer  :  {receipt.customer or 'Walk-in'}")
+                             Qt.AlignCenter, f"Time      :  {now.strftime('%H:%M:%S')}")
+            y += 32
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Customer  :  {receipt.customerName or 'Walk-in'}")
             y += 32
 
             y += 8
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 20
 
-            # ── AMOUNT PAID & BALANCE ─────────────────────────────────────────
+            # Laybye Deposit Section
+            is_laybye = getattr(receipt, "is_laybye_deposit", False)
+            if is_laybye:
+                laybye_ref = getattr(receipt, "laybye_ref", "") or ""
+                painter.setFont(bold_font)
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                                 Qt.AlignCenter, "LAYBYE DEPOSIT")
+                y += 32
+                if laybye_ref:
+                    painter.setFont(normal_font)
+                    painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                                     Qt.AlignCenter, f"Laybye Ref  :  {laybye_ref}")
+                    y += 32
+                y += 4
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 20
+
+            # Forms of Payment
             fm = painter.fontMetrics()
             line_h = fm.height() + 10
 
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, line_h,
+                             Qt.AlignLeft, "Forms of Payment")
+            y += line_h + 4
+
+            painter.setFont(normal_font)
+
+            receipt_splits = getattr(receipt, "splits", None) or []
+            if isinstance(receipt_splits, str):
+                import json as _json
+                try:
+                    receipt_splits = _json.loads(receipt_splits)
+                except Exception:
+                    receipt_splits = []
+
+            if receipt_splits:
+                for s in receipt_splits:
+                    method_name  = s.get("method", "Payment")
+                    curr         = s.get("currency", "USD")
+                    amt          = float(s.get("amount", 0))
+                    method_value = f"{curr}  {amt:,.2f}"
+                    w = fm.horizontalAdvance(method_value)
+                    painter.drawText(self.margin, y, self.paper_width - self.margin*2 - w - 4,
+                                     line_h, Qt.AlignLeft, method_name)
+                    painter.drawText(self.paper_width - self.margin - w, y, w,
+                                     line_h, Qt.AlignRight, method_value)
+                    y += line_h
+            else:
+                items = receipt.items or []
+                for item in items:
+                    method_name  = item.productName or "Payment"
+                    method_value = f"{item.amount:,.2f}"
+                    w = fm.horizontalAdvance(method_value)
+                    painter.drawText(self.margin, y, self.paper_width - self.margin*2 - w - 4,
+                                     line_h, Qt.AlignLeft, method_name)
+                    painter.drawText(self.paper_width - self.margin - w, y, w,
+                                     line_h, Qt.AlignRight, method_value)
+                    y += line_h
+
+            y += 8
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 14
+
+            # Amount Paid
             painter.setFont(bold_font)
             amount_text = f"{receipt.total:,.2f}"
             w = fm.horizontalAdvance(amount_text)
@@ -388,6 +1187,7 @@ class PrintingService:
             painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, amount_text)
             y += line_h + 4
 
+            # Customer Balance
             painter.setFont(normal_font)
             balance = getattr(receipt, "balanceDue", 0.0) or 0.0
             balance_text = f"{balance:,.2f}"
@@ -399,21 +1199,26 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 20
 
-            # ── FOOTER ────────────────────────────────────────────────────────
+            # Footer
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
                              Qt.AlignCenter, receipt.footer or "Thank you for your payment!")
             y += 30
 
             painter.end()
+            print(f"✅ PAYMENT RECEIPT printed successfully → {printer_name or 'Default'}")
             return True
 
         except Exception as e:
             print(f"❌ Payment receipt printing failed: {str(e)}")
             if painter and painter.isActive():
                 painter.end()
+            QMessageBox.warning(None, "Print Failed", f"Payment receipt could not be printed:\n\n{e}")
             return False
 
+    # =========================================================================
+    # SALES ORDER RECEIPT
+    # =========================================================================
     def print_sales_order_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
         settings = AdvanceSettings.load_from_file()
 
@@ -437,16 +1242,10 @@ class PrintingService:
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
             bold_font   = self._make_bold(normal_font)
 
-            if settings.logoDirectory:
-                logo_full_path = Path("app_data/logos") / settings.logoDirectory
-                if logo_full_path.exists():
-                    logo_pix = QPixmap(str(logo_full_path))
-                    if not logo_pix.isNull():
-                        scaled = logo_pix.scaled(300, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        x_logo = (self.paper_width - scaled.width()) // 2
-                        painter.drawPixmap(x_logo, y, scaled)
-                        y += scaled.height() + 10
+            # Logo
+            y = self._draw_logo(painter, settings, y)
 
+            # Company Header
             painter.setFont(bold_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
                              Qt.AlignCenter, (receipt.companyName or "Havano POS").upper())
@@ -474,49 +1273,49 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 20
 
+            # Document Heading
             painter.setFont(bold_font)
             doc_heading = f"*** {(receipt.receiptType or 'SALES ORDER').upper()} ***"
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 44,
                              Qt.AlignCenter, doc_heading)
             y += 60
 
-            # ── UPDATED ALIGNMENT: Centered like the heading with spacing ─────
+            # Order Meta
             painter.setFont(normal_font)
-
-            # Order Number
-            order_text = f"Order No  :  {receipt.invoiceNo or 'N/A'}"
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, order_text)
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Order No  :  {receipt.invoiceNo or 'N/A'}")
             y += 32
 
-            # Date
             order_date = receipt.invoiceDate or datetime.now().strftime("%Y-%m-%d")
-            date_text = f"Order Date  :  {order_date}"
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, date_text)
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Order Date  :  {order_date}")
             y += 32
 
-            # Delivery Date
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Order Time  :  {datetime.now().strftime('%H:%M:%S')}")
+            y += 32
+
             delivery_date = getattr(receipt, "deliveryDate", "")
             if delivery_date:
-                delivery_text = f"Delivery  :  {delivery_date}"
-                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, delivery_text)
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                                 Qt.AlignCenter, f"Delivery  :  {delivery_date}")
                 y += 32
 
-            # Customer
             if receipt.customerName:
-                customer_text = f"Customer  :  {receipt.customerName}"
-                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, customer_text)
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                                 Qt.AlignCenter, f"Customer  :  {receipt.customerName}")
                 y += 32
 
-            # Customer Contact
             if receipt.customerContact:
-                contact_text = f"Contact  :  {receipt.customerContact}"
-                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28, Qt.AlignCenter, contact_text)
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                                 Qt.AlignCenter, f"Contact  :  {receipt.customerContact}")
                 y += 32
 
             y += 8
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 20
 
+            # Items Table
             painter.setFont(normal_font)
             fm: QFontMetrics = painter.fontMetrics()
 
@@ -555,11 +1354,9 @@ class PrintingService:
                 rect   = fm.boundingRect(0, 0, name_w, 1000, Qt.TextWordWrap, name)
                 painter.drawText(self.margin, y, name_w, rect.height(), Qt.TextWordWrap, name)
                 row_h = max(rect.height(), line_h)
-
                 painter.drawText(QTY_X,   y, max_qty_w,   row_h, Qt.AlignCenter, f"{item.qty:.0f}")
                 painter.drawText(PRICE_X, y, max_price_w, row_h, Qt.AlignRight,  f"{item.price:,.2f}")
                 painter.drawText(TOTAL_X, y, max_total_w, row_h, Qt.AlignRight,  f"{item.amount:,.2f}")
-
                 y += row_h + 6
                 self._draw_dot_line(painter, self.margin, y, self.paper_width - self.margin * 2, ".")
                 y += 12
@@ -567,6 +1364,7 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 14
 
+            # Order Summary
             painter.setFont(normal_font)
             fm_n     = painter.fontMetrics()
             n_line_h = fm_n.height() + 6
@@ -587,61 +1385,234 @@ class PrintingService:
 
             y += 6
 
-            if receipt.paymentMode:
+            # Forms of Payment
+            payment_items = getattr(receipt, "paymentItems", None) or []
+
+            if payment_items:
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                 y += 14
-                painter.setFont(normal_font)
-                painter.drawText(self.margin, y, f"Payment Method : {receipt.paymentMode}")
-                y += 26
-
-            so_terms = getattr(receipt, "salesOrderTerms", "")
-            if not so_terms:
-                try:
-                    from models.company_defaults import get_defaults
-                    so_terms = get_defaults().get("terms_and_conditions", "")
-                except Exception:
-                    so_terms = ""
-            if so_terms:
-                y += 6
-                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
-                y += 14
-
                 painter.setFont(bold_font)
-                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 26,
-                                  Qt.AlignLeft, "TERMS & CONDITIONS")
-                y += 28
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, n_line_h,
+                                 Qt.AlignLeft, "Forms of Payment")
+                y += n_line_h + 4
 
                 painter.setFont(normal_font)
-                fm_t = painter.fontMetrics()
-                for term_line in so_terms.split("\n"):
-                    term_line = term_line.strip()
-                    if not term_line:
-                        continue
-                    rect = fm_t.boundingRect(0, 0, self.paper_width - self.margin * 2,
-                                             1000, Qt.TextWordWrap, term_line)
+                fm_p = painter.fontMetrics()
+                lh_p = fm_p.height() + 8
+                for pm in payment_items:
+                    method_name  = pm.productName or "Payment"
+                    method_value = f"{pm.amount:,.2f}"
+                    w = fm_p.horizontalAdvance(method_value)
                     painter.drawText(self.margin, y,
-                                     self.paper_width - self.margin * 2,
-                                     rect.height(), Qt.TextWordWrap, term_line)
-                    y += rect.height() + 4
+                                     self.paper_width - self.margin*2 - w - 4,
+                                     lh_p, Qt.AlignLeft, method_name)
+                    painter.drawText(self.paper_width - self.margin - w, y,
+                                     w, lh_p, Qt.AlignRight, method_value)
+                    y += lh_p
+                y += 6
 
-            y += 10
-            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
-            y += 14
-
+            # Footer
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
                              Qt.AlignCenter, receipt.footer or "Thank you for your business!")
             y += 30
 
             painter.end()
+            print(f"✅ SALES ORDER printed successfully → {printer_name or 'Default'}")
             return True
 
         except Exception as e:
             print(f"❌ Sales Order printing failed: {str(e)}")
             if painter and painter.isActive():
                 painter.end()
+            QMessageBox.warning(None, "Print Failed", f"Sales order could not be printed:\n\n{e}")
             return False
 
+    # =========================================================================
+    # CREDIT NOTE
+    # =========================================================================
+    
+    # =========================================================================
+    # LAYBYE DEPOSIT (from order_id)
+    # =========================================================================
+    def print_laybye_deposit(self, order_id, printer_name: str = None) -> bool:
+        """Fetches the sales order by ID and prints a deposit receipt."""
+        settings = AdvanceSettings.load_from_file()
+
+        painter = None
+        try:
+            from models.sales_order import get_order_by_id
+            order = get_order_by_id(order_id)
+            if not order:
+                print(f"⚠️  print_laybye_deposit: order {order_id} not found")
+                return False
+
+            printer = QPrinter(QPrinter.HighResolution)
+            if printer_name and printer_name != "(None)":
+                info = QPrinterInfo.printerInfo(printer_name)
+                if not info.isNull():
+                    printer.setPrinterName(printer_name)
+
+            printer.setPageSize(QPageSize(QSizeF(80, 2000), QPageSize.Millimeter))
+            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+
+            painter = QPainter(printer)
+            y = 10
+
+            normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
+            bold_font   = self._make_bold(normal_font)
+
+            # Logo
+            y = self._draw_logo(painter, settings, y)
+
+            # Company Name
+            painter.setFont(bold_font)
+            company = getattr(settings, "companyName", None) or "Havano POS"
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
+                             Qt.AlignCenter, company.upper())
+            y += 50
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+
+            # Title
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 36,
+                             Qt.AlignCenter, "*** LAYBYE RECEIPT ***")
+            y += 44
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+
+            # Order Meta
+            painter.setFont(normal_font)
+            fm     = painter.fontMetrics()
+            line_h = fm.height() + 6
+
+            def draw_meta(label: str, value: str):
+                nonlocal y
+                painter.setFont(bold_font)
+                painter.drawText(self.margin, y, 160, line_h, Qt.AlignLeft, label)
+                painter.setFont(normal_font)
+                painter.drawText(self.margin + 160, y,
+                                 self.paper_width - self.margin * 2 - 160,
+                                 line_h, Qt.AlignLeft, str(value or "—"))
+                y += line_h
+
+            draw_meta("Order #:",    str(order.get("id", order_id)))
+            draw_meta("Date:",       str(order.get("date", datetime.now().strftime("%d/%m/%Y"))))
+            draw_meta("Time:",       datetime.now().strftime("%H:%M:%S"))
+            draw_meta("Customer:",   str(order.get("customer_name", order.get("customer", "—"))))
+            draw_meta("Delivery:",   str(order.get("delivery_date", "—")))
+
+            y += 6
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 16
+
+            # Items
+            painter.setFont(bold_font)
+            TOTAL_X = self.paper_width - self.margin - 80
+            painter.drawText(self.margin, y, TOTAL_X - self.margin - 10, line_h, Qt.AlignLeft,  "Item")
+            painter.drawText(TOTAL_X,    y, 80,                          line_h, Qt.AlignRight, "Amount")
+            y += line_h + 4
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 10
+
+            painter.setFont(normal_font)
+            items = order.get("items", order.get("cart_items", []))
+            for item in items:
+                name   = item.get("item_name", item.get("product_name", ""))
+                qty    = item.get("qty", 1)
+                amount = item.get("amount", item.get("total", 0.0))
+                label  = f"{qty} × {name}"
+                painter.drawText(self.margin, y, TOTAL_X - self.margin - 10, line_h, Qt.AlignLeft,  label)
+                painter.drawText(TOTAL_X,    y, 80,                          line_h, Qt.AlignRight, f"{float(amount):,.2f}")
+                y += line_h + 4
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 14
+
+            # Totals
+            def draw_total(label: str, value: float, use_bold: bool = False):
+                nonlocal y
+                text = f"{value:,.2f}"
+                w    = fm.horizontalAdvance(text)
+                painter.setFont(bold_font if use_bold else normal_font)
+                painter.drawText(self.margin, y, 220, line_h, Qt.AlignLeft,  label)
+                painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
+                y += line_h
+
+            order_total = float(order.get("total", 0.0))
+            deposit     = float(order.get("deposit_amount", 0.0))
+            balance     = order_total - deposit
+
+            draw_total("Order Total:", order_total, use_bold=True)
+
+            # Forms of Payment
+            raw_methods   = order.get("deposit_methods") or []
+            single_method = order.get("deposit_method", "") or ""
+
+            y += 4
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 8
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, line_h,
+                             Qt.AlignLeft, "Forms of Payment")
+            y += line_h + 2
+
+            painter.setFont(normal_font)
+            if raw_methods:
+                for pm in raw_methods:
+                    m_name   = str(pm.get("method", "Payment"))
+                    m_amount = float(pm.get("amount", 0.0))
+                    m_text   = f"{m_amount:,.2f}"
+                    w        = fm.horizontalAdvance(m_text)
+                    painter.drawText(self.margin, y, self.paper_width - self.margin*2 - w - 4,
+                                     line_h, Qt.AlignLeft, m_name)
+                    painter.drawText(self.paper_width - self.margin - w, y, w,
+                                     line_h, Qt.AlignRight, m_text)
+                    y += line_h + 2
+            elif single_method:
+                dep_text = f"{deposit:,.2f}"
+                w        = fm.horizontalAdvance(dep_text)
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2 - w - 4,
+                                 line_h, Qt.AlignLeft, single_method)
+                painter.drawText(self.paper_width - self.margin - w, y, w,
+                                 line_h, Qt.AlignRight, dep_text)
+                y += line_h + 2
+
+            y += 4
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 8
+            draw_total("Balance Due:", balance, use_bold=True)
+
+            y += 16
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+
+            # Footer
+            painter.setFont(normal_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 30,
+                             Qt.AlignCenter, "Thank you for your laybye!")
+            y += 28
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
+                             Qt.AlignCenter, f"Printed: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
+            painter.end()
+            print(f"✅ LAYBYE DEPOSIT printed → Order #{order_id}")
+            return True
+
+        except Exception as e:
+            print(f"❌ Laybye deposit print failed: {str(e)}")
+            if painter and painter.isActive():
+                painter.end()
+            QMessageBox.warning(None, "Print Failed", f"Laybye receipt could not be printed:\n\n{e}")
+            return False
+
+    # =========================================================================
+    # DRAW HELPERS
+    # =========================================================================
     def _draw_dot_line(self, painter, start_x, y, width, dot_char="."):
         fm = painter.fontMetrics()
         dot_width = fm.horizontalAdvance(dot_char)
@@ -653,8 +1624,60 @@ class PrintingService:
     def get_available_printers(self) -> list[str]:
         try:
             return ["(None)"] + [p.printerName() for p in QPrinterInfo.availablePrinters()]
-        except:
+        except Exception:
             return ["(None)", "Default Printer"]
 
+    # =========================================================================
+    # OFFLINE SYNC COUNTER
+    # =========================================================================
+    @property
+    def _SYNC_FILE(self) -> Path:
+        return _get_app_data_dir() / "offline_sync.json"
 
+    def get_next_sync_number(self) -> int:
+        import json as _json
+        try:
+            self._SYNC_FILE.parent.mkdir(parents=True, exist_ok=True)
+            current = 0
+            if self._SYNC_FILE.exists():
+                try:
+                    data = _json.loads(self._SYNC_FILE.read_text(encoding="utf-8"))
+                    current = int(data.get("sync_no", 0))
+                except Exception:
+                    current = 0
+            next_no = current + 1
+            self._SYNC_FILE.write_text(
+                _json.dumps({"sync_no": next_no}, indent=2), encoding="utf-8"
+            )
+            return next_no
+        except Exception as e:
+            print(f"⚠️  Could not update offline sync counter: {e}")
+            return 0
+
+    def peek_sync_number(self) -> int:
+        import json as _json
+        try:
+            if self._SYNC_FILE.exists():
+                data = _json.loads(self._SYNC_FILE.read_text(encoding="utf-8"))
+                return int(data.get("sync_no", 0))
+        except Exception:
+            pass
+        return 0
+
+    # =========================================================================
+    # LAYBYE CART GUARD
+    # =========================================================================
+    @staticmethod
+    def cart_has_items(cart_items: list) -> bool:
+        if not cart_items:
+            return False
+        return any((getattr(i, "qty", 0) or 0) > 0 for i in cart_items)
+
+
+# Singleton instance
 printing_service = PrintingService()
+
+
+def print_laybye_deposit(order_id, printer_name: str = None) -> bool:
+    """Module-level shim for laybye deposit printing."""
+    return printing_service.print_laybye_deposit(order_id, printer_name=printer_name)

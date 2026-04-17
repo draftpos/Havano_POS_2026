@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-04-14T12:58:48.664456",
+  "payment_id": 3,
+  "status": "attempt_1",
+  "payment_data": {
+    "id": 3,
+    "customer_id": 6,
+    "amount": "4.00",
+    "method": "Bank Accounts",
+    "reference": "",
+    "cashier_id": 5,
+    "created_at": "2026-04-14 12:58:48.368326",
+    "currency": "USD",
+    "account_name": null,
+    "payment_date": "2026-04-14",
+    "synced": 0,
+    "frappe_ref": "",
+    "sync_attempts": 0,
+    "last_sync_attempt": null,
+    "sync_error": null,
+    "payment_type": "outstanding",
+    "splits_json": "[{\"method\": \"Bank Accounts\", \"mop_name\": \"Bank Accounts\", \"gl_account\": \"101 - CBZ ZWD - DC1134\", \"currency\": \"ZWD\", \"amount\": 120.0, \"amount_usd\": 3.99996, \"exchange_rate\": 0.033333}]",
+    "customer_name": "Farai",
+    "customer_outstanding": "1726.60",
+    "customer_laybye": "0.00",
+    "splits": [
+      {
+        "id": 5,
+        "method": "Bank Accounts",
+        "mop_name": "Bank Accounts",
+        "gl_account": "101 - CBZ ZWD - DC1134",
+        "currency": "ZWD",
+        "amount": "120.00",
+        "amount_usd": "4.00",
+        "exchange_rate": "0.033333"
+      }
+    ]
+  },
+  "payload": {
+    "doctype": "Payment Entry",
+    "payment_type": "Receive",
+    "party_type": "Customer",
+    "party": "Farai",
+    "party_name": "Farai",
+    "paid_to": "Cash 12111111 - DC1134",
+    "paid_to_account_currency": "USD",
+    "paid_amount": 4.0,
+    "paid_amount_after_tax": 4.0,
+    "received_amount": 4.0,
+    "received_amount_after_tax": 4.0,
+    "reference_no": "PAY-0000003",
+    "reference_date": "2026-04-14",
+    "remarks": "Customer Payment via Bank Accounts",
+    "docstatus": 1,
+    "references": [],
+    "company": "TN Harlequin",
+    "cost_center": "Main - DC1134"
+  }
+}

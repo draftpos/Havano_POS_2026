@@ -5039,7 +5039,7 @@ class POSView(QWidget):
     # =========================================================================
     # POS RULES HELPERS  (#3 #4 #7)
     # =========================================================================
-    def _get_pos_rule(self, key: str, default: bool = False) -> bool:
+    def _get_pos_rule(self, key: str, default: bool = True) -> bool:
         """Read a single toggle from pos_settings table. Fast; falls back to default."""
         try:
             from database.db import get_connection
@@ -5078,7 +5078,7 @@ class POSView(QWidget):
             return
 
         # ── #4 Block zero/negative stock ─────────────────────────────────────
-        if self._get_pos_rule("block_zero_stock", default=False):
+        if self._get_pos_rule("block_zero_stock", default=True):
             # stock may be passed in; if not, look it up
             item_stock = stock
             if item_stock is None and product_id:
@@ -5100,7 +5100,7 @@ class POSView(QWidget):
                 return
 
         # ── #7 Apply Frappe pricing rules ─────────────────────────────────────
-        if self._get_pos_rule("use_pricing_rules", default=False):
+        if self._get_pos_rule("use_pricing_rules", default=True):
             price = self._apply_pricing_rules(product_id, part_no, price)
         for r in range(self.invoice_table.rowCount()):
             try:
@@ -6969,20 +6969,14 @@ class POSView(QWidget):
                 company        = company_name,
                 delivery_date  = delivery_date,
                 order_type     = order_type,
+                deposit_splits = deposit_dlg.deposit_splits,
             )
         except Exception as e:
             QMessageBox.critical(self, "Save Failed",
                                  f"Could not save Laybye:\n{_friendly_db_error(e)}")
             return
 
-        # ── 4b. Queue deposit payment entry for sync ─────────────────────────
-        if deposit_amount and deposit_amount > 0:
-            try:
-                from services.laybye_payment_entry_service import create_laybye_payment_entry
-                create_laybye_payment_entry(_get_order_by_id(order_id))
-            except Exception as _lpe:
-                import logging as _lg
-                _lg.getLogger("Laybye").warning("Laybye payment entry skipped: %s", _lpe)
+        # ── 4b. Sync & Print handled automatically ─────────────────────────
 
         # ── 4c. Print deposit slip ────────────────────────────────────────────────────────
         if _HAS_SO_PRINT:

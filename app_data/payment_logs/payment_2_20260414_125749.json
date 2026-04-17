@@ -1,0 +1,89 @@
+{
+  "timestamp": "2026-04-14T12:57:49.383894",
+  "payment_id": 2,
+  "status": "attempt_1",
+  "payment_data": {
+    "id": 2,
+    "customer_id": 2,
+    "amount": "36918.98",
+    "method": "SPLIT",
+    "reference": "",
+    "cashier_id": 5,
+    "created_at": "2026-04-14 12:57:48.995042",
+    "currency": "USD",
+    "account_name": null,
+    "payment_date": "2026-04-14",
+    "synced": 0,
+    "frappe_ref": "",
+    "sync_attempts": 0,
+    "last_sync_attempt": null,
+    "sync_error": null,
+    "payment_type": "outstanding",
+    "splits_json": "[{\"method\": \"Bank Accounts\", \"mop_name\": \"Bank Accounts\", \"gl_account\": \"101 - CBZ ZWD - DC1134\", \"currency\": \"ZWD\", \"amount\": 123332.0, \"amount_usd\": 4111.0255560000005, \"exchange_rate\": 0.033333}, {\"method\": \"Cash\", \"mop_name\": \"Cash\", \"gl_account\": \"Cash 12111111 - DC1134\", \"currency\": \"USD\", \"amount\": 32000.0, \"amount_usd\": 32000.0, \"exchange_rate\": 1.0}, {\"method\": \"CBZ ZWD\", \"mop_name\": \"CBZ ZWD\", \"gl_account\": \"101 - CBZ ZWD - DC1134\", \"currency\": \"ZWD\", \"amount\": 23333.0, \"amount_usd\": 777.7588890000001, \"exchange_rate\": 0.033333}, {\"method\": \"Ecocash USD\", \"mop_name\": \"Ecocash USD\", \"gl_account\": \"Ecocash USD - DC1134\", \"currency\": \"USD\", \"amount\": 30.2, \"amount_usd\": 30.2, \"exchange_rate\": 1.0}]",
+    "customer_name": "dansohol",
+    "customer_outstanding": "-36518.97",
+    "customer_laybye": "0.00",
+    "splits": [
+      {
+        "id": 1,
+        "method": "Bank Accounts",
+        "mop_name": "Bank Accounts",
+        "gl_account": "101 - CBZ ZWD - DC1134",
+        "currency": "ZWD",
+        "amount": "123332.00",
+        "amount_usd": "4111.03",
+        "exchange_rate": "0.033333"
+      },
+      {
+        "id": 2,
+        "method": "Cash",
+        "mop_name": "Cash",
+        "gl_account": "Cash 12111111 - DC1134",
+        "currency": "USD",
+        "amount": "32000.00",
+        "amount_usd": "32000.00",
+        "exchange_rate": "1.000000"
+      },
+      {
+        "id": 3,
+        "method": "CBZ ZWD",
+        "mop_name": "CBZ ZWD",
+        "gl_account": "101 - CBZ ZWD - DC1134",
+        "currency": "ZWD",
+        "amount": "23333.00",
+        "amount_usd": "777.76",
+        "exchange_rate": "0.033333"
+      },
+      {
+        "id": 4,
+        "method": "Ecocash USD",
+        "mop_name": "Ecocash USD",
+        "gl_account": "Ecocash USD - DC1134",
+        "currency": "USD",
+        "amount": "30.20",
+        "amount_usd": "30.20",
+        "exchange_rate": "1.000000"
+      }
+    ]
+  },
+  "payload": {
+    "doctype": "Payment Entry",
+    "payment_type": "Receive",
+    "party_type": "Customer",
+    "party": "dansohol",
+    "party_name": "dansohol",
+    "paid_to": "Cash 12111111 - DC1134",
+    "paid_to_account_currency": "USD",
+    "paid_amount": 36918.98,
+    "paid_amount_after_tax": 36918.98,
+    "received_amount": 36918.98,
+    "received_amount_after_tax": 36918.98,
+    "reference_no": "PAY-0000002",
+    "reference_date": "2026-04-14",
+    "remarks": "Customer Payment via SPLIT",
+    "docstatus": 1,
+    "references": [],
+    "company": "TN Harlequin",
+    "cost_center": "Main - DC1134"
+  }
+}

@@ -1,18 +1,19 @@
 # =============================================================================
 # views/pages/company_defaults_page.py
 # =============================================================================
-
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QTextEdit, QPushButton, QFrame, QSizePolicy, QScrollArea,
-    QSpinBox,
+    QSpinBox, QMessageBox, QProgressBar, QDialog, QGroupBox
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Property as _Prop, QThread, Signal
+from PySide6.QtGui  import QPainter, QColor, QLinearGradient, QRadialGradient
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
 NAVY_3    = "#1e3d6e"
 ACCENT    = "#1a5fb4"
+ACCENT_H  = "#1c6dd0"
 WHITE     = "#ffffff"
 OFF_WHITE = "#f5f8fc"
 LIGHT     = "#e4eaf4"
@@ -23,19 +24,175 @@ DARK_TEXT = "#0d1f3c"
 SUCCESS   = "#1a7a3c"
 SUCCESS_H = "#1f9447"
 DANGER    = "#b02020"
+ORANGE    = "#c05a00"
 
-FIELD_H   = 38    # height for every input / read-only field
-LBL_W     = 130   # label column width
-ROW_SP    = 14    # spacing between field rows
+FIELD_H = 38
+LBL_W   = 160
+ROW_SP  = 12
 
 
-# ── Shared widget builders ────────────────────────────────────────────────────
+# =============================================================================
+# ToggleSwitch — pill toggle (same as payment_dialog)
+# =============================================================================
+
+class _TogglePill(QWidget):
+    def __init__(self, size=20, parent=None):
+        super().__init__(parent)
+        self._size     = size
+        self._checked  = False
+        self._knob_pos = 0.0
+        self.setFixedSize(int(2.2 * size), size)
+        self.setCursor(Qt.PointingHandCursor)
+        self._anim = QPropertyAnimation(self, b"knob_pos", self)
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.InOutCubic)
+
+    def _get_knob_pos(self): return self._knob_pos
+    def _set_knob_pos(self, v):
+        self._knob_pos = v; self.update()
+    knob_pos = _Prop(float, _get_knob_pos, _set_knob_pos)
+
+    def isChecked(self): return self._checked
+    def setChecked(self, value: bool, animated=False):
+        self._checked = bool(value)
+        target = 1.0 if self._checked else 0.0
+        if animated:
+            self._anim.stop()
+            self._anim.setStartValue(self._knob_pos)
+            self._anim.setEndValue(target)
+            self._anim.start()
+        else:
+            self._knob_pos = target; self.update()
+    def mousePressEvent(self, _ev):
+        self.setChecked(not self._checked, animated=True)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        s = self._size; w = self.width(); h = self.height(); r = h / 2
+        t = self._knob_pos
+        if t < 0.01:
+            p.setBrush(QColor("#d7d7d7")); p.setPen(Qt.NoPen)
+            p.drawRoundedRect(0, 0, w, h, r, r)
+        else:
+            grad = QLinearGradient(0, 0, w, 0)
+            grad.setColorAt(0, QColor("#f19af3")); grad.setColorAt(1, QColor("#f099b5"))
+            p.setBrush(QColor("#d7d7d7")); p.setPen(Qt.NoPen)
+            p.drawRoundedRect(0, 0, w, h, r, r)
+            if t > 0.99:
+                p.setBrush(grad); p.drawRoundedRect(0, 0, w, h, r, r)
+            else:
+                p.setOpacity(t); p.setBrush(grad)
+                p.drawRoundedRect(0, 0, w, h, r, r); p.setOpacity(1.0)
+        knob_d = 0.8*s; knob_r = knob_d/2
+        off_x = 0.1*s; on_x = 1.3*s
+        knob_x = off_x + self._knob_pos*(on_x - off_x); knob_y = 0.1*s
+        cx = knob_x+knob_r; cy = knob_y+knob_r
+        shadow = QRadialGradient(cx, cy+4, knob_r*1.1)
+        shadow.setColorAt(0, QColor(0,0,0,55)); shadow.setColorAt(0.6, QColor(0,0,0,30))
+        shadow.setColorAt(1, QColor(0,0,0,0))
+        p.setBrush(shadow); p.setPen(Qt.NoPen)
+        p.drawEllipse(int(knob_x-knob_r*0.15), int(knob_y+knob_r*0.5),
+                      int(knob_d*1.3), int(knob_d*0.9))
+        kg = QLinearGradient(cx, knob_y, cx, knob_y+knob_d)
+        kg.setColorAt(0, QColor("#dedede")); kg.setColorAt(1, QColor("#ffffff"))
+        p.setBrush(kg); p.setPen(Qt.NoPen)
+        p.drawEllipse(int(knob_x), int(knob_y), int(knob_d), int(knob_d))
+        p.end()
+
+
+class _ToggleSwitch(QWidget):
+    """Pill toggle + label. API: isChecked() / setChecked(bool)."""
+    def __init__(self, label: str, size: int = 20, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self._pill = _TogglePill(size=size, parent=self)
+        layout.addWidget(self._pill)
+        self._lbl = QLabel(label)
+        self._lbl.setStyleSheet(
+            f"font-size:12px;font-weight:600;color:{DARK_TEXT};background:transparent;")
+        layout.addWidget(self._lbl)
+        layout.addStretch()
+
+    def isChecked(self) -> bool: return self._pill.isChecked()
+    def setChecked(self, value: bool): self._pill.setChecked(value, animated=False)
+
+
+# =============================================================================
+# Test Connection Thread for Fiscalization
+# =============================================================================
+
+class TestConnectionThread(QThread):
+    finished_signal = Signal(bool, str)  # success, message
+    
+    def __init__(self, base_url: str, api_key: str, api_secret: str, device_sn: str):
+        super().__init__()
+        self.base_url = base_url
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.device_sn = device_sn
+    
+    def run(self):
+        try:
+            import requests
+            
+            # Step 1: Get CSRF Token
+            token_url = f"{self.base_url}/api/method/havanozimracloud.api.token"
+            token_resp = requests.post(token_url, timeout=30)
+            
+            if token_resp.status_code != 200:
+                self.finished_signal.emit(False, f"Token failed: HTTP {token_resp.status_code}")
+                return
+            
+            token_data = token_resp.json()
+            csrf_token = token_data.get("message")
+            if not csrf_token:
+                self.finished_signal.emit(False, "Invalid token response")
+                return
+            
+            # Step 2: Ping ZIMRA
+            ping_url = f"{self.base_url}/api/method/havanozimracloud.api.pingzimra"
+            headers = {
+                "X-Frappe-CSRF-Token": csrf_token,
+                "Authorization": f"token {self.api_key}:{self.api_secret}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            
+            ping_resp = requests.post(ping_url, data={"device_sn": self.device_sn}, 
+                                      headers=headers, timeout=30)
+            
+            if ping_resp.status_code != 200:
+                self.finished_signal.emit(False, f"Ping failed: HTTP {ping_resp.status_code}")
+                return
+            
+            ping_data = ping_resp.json()
+            message = ping_data.get("message")
+            
+            if isinstance(message, str):
+                self.finished_signal.emit(False, message)
+            elif isinstance(message, dict):
+                self.finished_signal.emit(
+                    True, 
+                    f"Connected!\nDevice: {message.get('device_sn', 'N/A')}\n"
+                    f"Reporting Frequency: {message.get('reporting_frequency', 'N/A')} min"
+                )
+            else:
+                self.finished_signal.emit(False, "Invalid ping response format")
+                
+        except Exception as e:
+            self.finished_signal.emit(False, f"Connection error: {str(e)}")
+
+
+# =============================================================================
+# Helper widgets
+# =============================================================================
 
 def _sec(text):
     l = QLabel(text.upper())
     l.setStyleSheet(
-        f"color:{MUTED};font-size:10px;font-weight:bold;"
-        f"background:transparent;letter-spacing:1.5px;"
+        f"color:{MUTED}; font-size:10px; font-weight:bold;"
+        f" background:transparent; letter-spacing:1.5px;"
     )
     l.setFixedHeight(20)
     return l
@@ -45,7 +202,7 @@ def _hr():
     f = QFrame()
     f.setFrameShape(QFrame.HLine)
     f.setFixedHeight(1)
-    f.setStyleSheet(f"background:{BORDER};border:none;")
+    f.setStyleSheet(f"background:{BORDER}; border:none;")
     return f
 
 
@@ -55,7 +212,7 @@ def _lbl(text, w=LBL_W):
     l.setFixedHeight(FIELD_H)
     l.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
     l.setStyleSheet(
-        f"color:{MUTED};font-size:12px;font-weight:bold;background:transparent;"
+        f"color:{MUTED}; font-size:12px; font-weight:bold; background:transparent;"
     )
     return l
 
@@ -83,10 +240,9 @@ def _ro(text="—"):
     l = QLabel(text)
     l.setFixedHeight(FIELD_H)
     l.setStyleSheet(
-        f"color:{DARK_TEXT};font-size:13px;"
-        f"background:{LIGHT};"
-        f"border:1px solid {BORDER};border-radius:6px;"
-        f"padding:0 12px;"
+        f"color:{DARK_TEXT}; font-size:13px;"
+        f" background:{LIGHT}; border:1px solid {BORDER};"
+        f" border-radius:6px; padding:0 12px;"
     )
     return l
 
@@ -116,7 +272,6 @@ def _spinbox():
 
 
 def _field_row(label_text, widget, lw=LBL_W):
-    """Returns a QHBoxLayout with label + widget properly spaced."""
     row = QHBoxLayout()
     row.setSpacing(16)
     row.setContentsMargins(0, 0, 0, 0)
@@ -125,8 +280,7 @@ def _field_row(label_text, widget, lw=LBL_W):
     return row
 
 
-def _section_header(layout, title, top_margin=8):
-    """Adds section title + divider to a QVBoxLayout."""
+def _section_header(layout, title, top_margin=16):
     layout.addSpacing(top_margin)
     layout.addWidget(_sec(title))
     layout.addSpacing(6)
@@ -134,12 +288,13 @@ def _section_header(layout, title, top_margin=8):
     layout.addSpacing(10)
 
 
-def _panel(bg=WHITE, border_right=False):
+def _card(bg=WHITE):
     w = QWidget()
-    # Use objectName to scope the border-right so it never bleeds into child widgets
-    w.setObjectName("panel")
-    br = f"border-right:1px solid {BORDER};" if border_right else ""
-    w.setStyleSheet(f"QWidget#panel {{ background:{bg}; {br} }}")
+    w.setObjectName("card")
+    w.setStyleSheet(
+        f"QWidget#card {{ background:{bg}; border:1px solid {BORDER};"
+        f" border-radius:8px; }}"
+    )
     return w
 
 
@@ -148,37 +303,67 @@ class CompanyDefaultsPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(f"QWidget{{background:{OFF_WHITE};}}")
+        self.setStyleSheet(f"QWidget {{ background:{OFF_WHITE}; }}")
         self._inputs    = {}
         self._ro_labels = {}
+        self._test_thread = None
+        self._fiscal_settings = {}  # Store tested fiscal settings
         self._build()
         self._load()
 
-    # =========================================================================
     def _build(self):
         outer = QVBoxLayout(self)
         outer.setSpacing(0)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        # ── Fixed header bar ──────────────────────────────────────────────────
+        # ── Header bar ────────────────────────────────────────────────────────
         hdr = QWidget()
         hdr.setFixedHeight(64)
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr)
-        hl.setContentsMargins(28, 0, 28, 0)
+        hl.setContentsMargins(32, 0, 32, 0)
         hl.setSpacing(16)
 
         title = QLabel("Company Defaults")
         title.setStyleSheet(
-            f"font-size:18px;font-weight:bold;color:{WHITE};background:transparent;"
+            f"font-size:18px; font-weight:bold; color:{WHITE}; background:transparent;"
         )
 
         self._status_lbl = QLabel("")
         self._status_lbl.setStyleSheet(
-            f"font-size:13px;background:transparent;color:#2ecc71;"
+            f"font-size:13px; background:transparent; color:#2ecc71;"
         )
 
-        save_btn = QPushButton("  Save  ")
+        # ── FISCALIZATION BUTTON ──────────────────────────────────────────────
+        fiscal_btn = QPushButton("  ⚙️ Fiscalization  ")
+        fiscal_btn.setFixedHeight(38)
+        fiscal_btn.setCursor(Qt.PointingHandCursor)
+        fiscal_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY_2}; color:{WHITE}; border:1px solid {ACCENT};
+                border-radius:6px; font-size:12px; font-weight:bold; padding:0 16px;
+            }}
+            QPushButton:hover   {{ background:{NAVY_3}; border:1px solid {ACCENT_H}; }}
+            QPushButton:pressed {{ background:{NAVY}; }}
+        """)
+        fiscal_btn.clicked.connect(self._open_fiscalization_dialog)
+
+        # ── EXTERNAL SITE SETTINGS BUTTON ─────────────────────────────────────
+        external_btn = QPushButton("  🌐 External Site  ")
+        external_btn.setFixedHeight(38)
+        external_btn.setCursor(Qt.PointingHandCursor)
+        external_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY_2}; color:{WHITE}; border:1px solid {ORANGE};
+                border-radius:6px; font-size:12px; font-weight:bold; padding:0 16px;
+            }}
+            QPushButton:hover   {{ background:{NAVY_3}; border:1px solid {ORANGE}; }}
+            QPushButton:pressed {{ background:{NAVY}; }}
+        """)
+        external_btn.clicked.connect(self._open_external_site_settings)
+
+        # ── SAVE CHANGES BUTTON ───────────────────────────────────────────────
+        save_btn = QPushButton("  Save Changes  ")
         save_btn.setFixedHeight(38)
         save_btn.setCursor(Qt.PointingHandCursor)
         save_btn.setStyleSheet(f"""
@@ -194,14 +379,16 @@ class CompanyDefaultsPage(QWidget):
         hl.addWidget(title)
         hl.addStretch()
         hl.addWidget(self._status_lbl)
+        hl.addWidget(fiscal_btn)
+        hl.addWidget(external_btn)  # External site button after fiscalization
         hl.addWidget(save_btn)
         outer.addWidget(hdr)
 
-        # Accent gradient line
-        bar = QFrame(); bar.setFixedHeight(3)
+        bar = QFrame()
+        bar.setFixedHeight(3)
         bar.setStyleSheet(f"""
-            background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                stop:0 {NAVY},stop:0.5 {ACCENT},stop:1 {NAVY_3});
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 {NAVY}, stop:0.5 {ACCENT}, stop:1 {NAVY_3});
         """)
         outer.addWidget(bar)
 
@@ -212,44 +399,30 @@ class CompanyDefaultsPage(QWidget):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setStyleSheet(f"""
             QScrollArea {{ border:none; background:{OFF_WHITE}; }}
-            QScrollBar:vertical {{
-                background:{LIGHT}; width:8px; border-radius:4px;
-            }}
-            QScrollBar::handle:vertical {{
-                background:#b0c4de; border-radius:4px; min-height:32px;
-            }}
-            QScrollBar:horizontal {{
-                background:{LIGHT}; height:8px; border-radius:4px;
-            }}
-            QScrollBar::handle:horizontal {{
-                background:#b0c4de; border-radius:4px; min-width:32px;
-            }}
+            QScrollBar:vertical   {{ background:{LIGHT}; width:8px; border-radius:4px; }}
+            QScrollBar::handle:vertical  {{ background:#b0c4de; border-radius:4px; min-height:32px; }}
+            QScrollBar:horizontal {{ background:{LIGHT}; height:8px; border-radius:4px; }}
+            QScrollBar::handle:horizontal {{ background:#b0c4de; border-radius:4px; min-width:32px; }}
         """)
 
         content = QWidget()
         content.setStyleSheet(f"background:{OFF_WHITE};")
         root = QVBoxLayout(content)
-        root.setSpacing(0)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(20)
+        root.setContentsMargins(32, 28, 32, 40)
 
         # ═════════════════════════════════════════════════════════════════════
-        # TOP ROW
-        # LEFT  — Receipt Details
-        # RIGHT — User Info + Login Defaults + Invoice Numbering
+        # ROW 1: Receipt Details | Invoice Numbering | Payment Settings
         # ═════════════════════════════════════════════════════════════════════
-        top_row = QHBoxLayout()
-        top_row.setSpacing(0)
-        top_row.setContentsMargins(0, 0, 0, 0)
+        row1 = QHBoxLayout()
+        row1.setSpacing(16)
 
-        # ── LEFT panel : Receipt Details ──────────────────────────────────────
-        receipt_p = _panel(WHITE, border_right=True)
-        rl = QVBoxLayout(receipt_p)
-        rl.setContentsMargins(36, 32, 36, 32)
-        rl.setSpacing(ROW_SP)
-
-        _section_header(rl, "Receipt Details", top_margin=0)
-        rl.addSpacing(8)   # extra gap between header and first field
-
+        # Receipt Details
+        rc = _card()
+        rcl = QVBoxLayout(rc)
+        rcl.setContentsMargins(28, 20, 28, 24)
+        rcl.setSpacing(ROW_SP)
+        _section_header(rcl, "Receipt Details", top_margin=0)
         for label, key in [
             ("Company Name",   "company_name"),
             ("Address Line 1", "address_1"),
@@ -261,110 +434,102 @@ class CompanyDefaultsPage(QWidget):
         ]:
             inp = _inp()
             self._inputs[key] = inp
-            rl.addLayout(_field_row(label, inp))
-
-        rl.addStretch()
-
-        # ── RIGHT panel : User + Login Defaults + Invoice Numbering ──────────
-        right_p = _panel(OFF_WHITE)
-        rr = QVBoxLayout(right_p)
-        rr.setContentsMargins(36, 32, 36, 32)
-        rr.setSpacing(ROW_SP)
-
-        # User
-        _section_header(rr, "User", top_margin=0)
-        for label, key in [
-            ("Username",   "server_username"),
-            ("First Name", "server_first_name"),
-            ("Last Name",  "server_last_name"),
-            ("Email",      "server_email"),
-            ("Mobile",     "server_mobile"),
-        ]:
-            ro = _ro()
-            self._ro_labels[key] = ro
-            rr.addLayout(_field_row(label, ro))
+            rcl.addLayout(_field_row(label, inp))
+        rcl.addStretch()
 
         # Invoice Numbering
-        _section_header(rr, "Invoice Numbering", top_margin=16)
+        ic = _card()
+        icl = QVBoxLayout(ic)
+        icl.setContentsMargins(28, 20, 28, 24)
+        icl.setSpacing(ROW_SP)
+        _section_header(icl, "Invoice Numbering", top_margin=0)
 
         self._prefix_inp = _inp(placeholder="e.g. ABC  (max 6 chars)")
         self._prefix_inp.setMaxLength(6)
         self._prefix_inp.textChanged.connect(self._update_preview)
-        rr.addLayout(_field_row("Prefix", self._prefix_inp))
+        icl.addLayout(_field_row("Prefix", self._prefix_inp))
 
         self._start_num = _spinbox()
         self._start_num.valueChanged.connect(self._update_preview)
-        rr.addLayout(_field_row("Starting from", self._start_num))
+        icl.addLayout(_field_row("Starting from", self._start_num))
 
-        # Preview badge
-        preview_row = QHBoxLayout()
-        preview_row.setSpacing(16)
-        preview_row.setContentsMargins(0, 4, 0, 0)
-        preview_row.addWidget(_lbl("Preview"))
+        prev_row = QHBoxLayout()
+        prev_row.setSpacing(16)
+        prev_row.setContentsMargins(0, 4, 0, 0)
+        prev_row.addWidget(_lbl("Preview"))
         self._preview_lbl = QLabel("000001")
         self._preview_lbl.setFixedHeight(FIELD_H)
         self._preview_lbl.setStyleSheet(
-            f"color:{ACCENT};font-size:14px;font-weight:bold;"
-            f"background:{LIGHT};border:1px solid {BORDER};"
-            f"border-radius:6px;padding:0 14px;"
+            f"color:{ACCENT}; font-size:14px; font-weight:bold;"
+            f" background:{LIGHT}; border:1px solid {BORDER};"
+            f" border-radius:6px; padding:0 14px;"
         )
-        preview_row.addWidget(self._preview_lbl)
-        preview_row.addStretch()
-        rr.addLayout(preview_row)
+        prev_row.addWidget(self._preview_lbl)
+        prev_row.addStretch()
+        icl.addLayout(prev_row)
+        icl.addStretch()
 
-        rr.addStretch()
+        # Payment Settings
+        pc = _card()
+        pcl = QVBoxLayout(pc)
+        pcl.setContentsMargins(28, 20, 28, 24)
+        pcl.setSpacing(ROW_SP)
+        _section_header(pcl, "Payment Settings", top_margin=0)
 
-        top_row.addWidget(receipt_p, 1)
-        top_row.addWidget(right_p, 1)
+        self._allow_credit_chk = _ToggleSwitch("Allow Credit Sales  (On Account)", size=20)
 
-        top_w = QWidget()
-        top_w.setLayout(top_row)
-        root.addWidget(top_w)
+        hint = QLabel(
+            "When enabled, cashiers can choose <b>On Account</b> as a payment "
+            "method. The system records the sale but skips the payment entry "
+            "for the on-account portion — letting the customer pay later."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(
+            f"color:{MUTED}; font-size:11px; background:{LIGHT};"
+            f" border:1px solid {BORDER}; border-radius:6px; padding:10px 12px;"
+        )
 
-        # Divider between top and bottom
-        div = QFrame(); div.setFixedHeight(1)
-        div.setStyleSheet(f"background:{BORDER};border:none;")
-        root.addWidget(div)
+        pcl.addWidget(self._allow_credit_chk)
+        pcl.addSpacing(8)
+        pcl.addWidget(hint)
+        pcl.addStretch()
+
+        row1.addWidget(rc,  3)
+        row1.addWidget(ic,  2)
+        row1.addWidget(pc,  2)
+        root.addLayout(row1)
 
         # ═════════════════════════════════════════════════════════════════════
-        # BOTTOM ROW
-        # LEFT  — Footer Text
-        # MID   — ZIMRA Settings
-        # RIGHT — blank
+        # ROW 2: Footer Text | ZIMRA Settings | Login Defaults
         # ═════════════════════════════════════════════════════════════════════
-        bot_row = QHBoxLayout()
-        bot_row.setSpacing(0)
-        bot_row.setContentsMargins(0, 0, 0, 0)
+        row2 = QHBoxLayout()
+        row2.setSpacing(16)
 
         # Footer Text
-        footer_p = _panel(WHITE, border_right=True)
-        fl = QVBoxLayout(footer_p)
-        fl.setContentsMargins(36, 28, 36, 28)
-        fl.setSpacing(ROW_SP)
-
-        _section_header(fl, "Footer Text", top_margin=0)
-
+        fc = _card()
+        fcl = QVBoxLayout(fc)
+        fcl.setContentsMargins(28, 20, 28, 24)
+        fcl.setSpacing(ROW_SP)
+        _section_header(fcl, "Footer Text", top_margin=0)
         self._footer = QTextEdit()
-        self._footer.setMinimumHeight(200)
+        self._footer.setMinimumHeight(160)
         self._footer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._footer.setStyleSheet(f"""
             QTextEdit {{
                 background:{WHITE}; color:{DARK_TEXT};
                 border:1px solid {BORDER}; border-radius:6px;
-                padding:10px 12px; font-size:13px; line-height:1.5;
+                padding:10px 12px; font-size:13px;
             }}
             QTextEdit:focus {{ border:2px solid {ACCENT}; }}
         """)
-        fl.addWidget(self._footer, 1)
+        fcl.addWidget(self._footer, 1)
 
         # ZIMRA Settings
-        zimra_p = _panel(OFF_WHITE, border_right=True)
-        zl = QVBoxLayout(zimra_p)
-        zl.setContentsMargins(36, 28, 36, 28)
-        zl.setSpacing(ROW_SP)
-
-        _section_header(zl, "ZIMRA Settings", top_margin=0)
-
+        zc = _card(OFF_WHITE)
+        zcl = QVBoxLayout(zc)
+        zcl.setContentsMargins(28, 20, 28, 24)
+        zcl.setSpacing(ROW_SP)
+        _section_header(zcl, "ZIMRA Settings", top_margin=0)
         for label, key, pwd in [
             ("Serial No", "zimra_serial_no", False),
             ("Device ID", "zimra_device_id", False),
@@ -373,46 +538,47 @@ class CompanyDefaultsPage(QWidget):
         ]:
             inp = _inp(pwd=pwd)
             self._inputs[key] = inp
-            zl.addLayout(_field_row(label, inp, lw=90))
+            zcl.addLayout(_field_row(label, inp, lw=90))
+        zcl.addStretch()
 
-        zl.addStretch()
-
-        # Login Defaults (moved from top-right)
-        login_p = _panel(WHITE)
-        ll = QVBoxLayout(login_p)
-        ll.setContentsMargins(36, 28, 36, 28)
-        ll.setSpacing(ROW_SP)
-
-        _section_header(ll, "Login Defaults", top_margin=0)
-
+        # Login Defaults
+        lc = _card()
+        lcl = QVBoxLayout(lc)
+        lcl.setContentsMargins(28, 20, 28, 24)
+        lcl.setSpacing(ROW_SP)
+        _section_header(lcl, "Login Defaults", top_margin=0)
         for label, key in [
             ("Company",     "server_company"),
             ("Warehouse",   "server_warehouse"),
             ("Cost Centre", "server_cost_center"),
+            ("Username",    "server_username"),
+            ("First Name",  "server_first_name"),
+            ("Last Name",   "server_last_name"),
+            ("Email",       "server_email"),
+            ("Mobile",      "server_mobile"),
             ("Full Name",   "server_full_name"),
             ("Role",        "server_role"),
         ]:
             ro = _ro()
             self._ro_labels[key] = ro
-            ll.addLayout(_field_row(label, ro, lw=100))
+            lcl.addLayout(_field_row(label, ro, lw=110))
+        lcl.addStretch()
 
-        ll.addStretch()
+        row2.addWidget(fc,  2)
+        row2.addWidget(zc,  2)
+        row2.addWidget(lc,  3)
+        root.addLayout(row2)
 
-        bot_row.addWidget(footer_p, 1)
-        bot_row.addWidget(zimra_p, 1)
-        bot_row.addWidget(login_p, 1)
-
-        # ── SECOND BOTTOM ROW — Terms & Conditions (full width) ───────────────
-        terms_w = QWidget()
-        terms_w.setStyleSheet(f"background:{WHITE};")
-        tl = QVBoxLayout(terms_w)
-        tl.setContentsMargins(36, 28, 36, 28)
-        tl.setSpacing(ROW_SP)
-
-        _section_header(tl, "Terms & Conditions (printed on Sales Orders)", top_margin=0)
-
+        # ═════════════════════════════════════════════════════════════════════
+        # ROW 3: Terms & Conditions (full width)
+        # ═════════════════════════════════════════════════════════════════════
+        tc = _card()
+        tcl = QVBoxLayout(tc)
+        tcl.setContentsMargins(28, 20, 28, 24)
+        tcl.setSpacing(ROW_SP)
+        _section_header(tcl, "Terms & Conditions  (printed on Sales Orders)", top_margin=0)
         self._terms = QTextEdit()
-        self._terms.setMinimumHeight(180)
+        self._terms.setMinimumHeight(160)
         self._terms.setPlaceholderText(
             "Enter your sales order terms & conditions here.\n"
             "Each line will be printed as a separate paragraph."
@@ -422,17 +588,12 @@ class CompanyDefaultsPage(QWidget):
             QTextEdit {{
                 background:{WHITE}; color:{DARK_TEXT};
                 border:1px solid {BORDER}; border-radius:6px;
-                padding:10px 12px; font-size:13px; line-height:1.5;
+                padding:10px 12px; font-size:13px;
             }}
             QTextEdit:focus {{ border:2px solid {ACCENT}; }}
         """)
-        tl.addWidget(self._terms, 1)
-
-        root.addWidget(terms_w)
-
-        bot_w = QWidget()
-        bot_w.setLayout(bot_row)
-        root.addWidget(bot_w)
+        tcl.addWidget(self._terms, 1)
+        root.addWidget(tc)
 
         root.addStretch()
         scroll.setWidget(content)
@@ -446,7 +607,286 @@ class CompanyDefaultsPage(QWidget):
         text   = f"{prefix}{num:06d}" if prefix else f"{num:06d}"
         self._preview_lbl.setText(text)
 
-    # ── Load data ─────────────────────────────────────────────────────────────
+    # ── External Site Settings ────────────────────────────────────────────────
+
+    def _open_external_site_settings(self):
+        """Open the external quotation site settings dialog"""
+        try:
+            from views.dialogs.external_quotation_settings_dialog import ExternalQuotationSettingsDialog
+            dialog = ExternalQuotationSettingsDialog(self)
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not open external site settings:\n{e}")
+
+    # ── Fiscalization Dialog ─────────────────────────────────────────────────
+
+    def _open_fiscalization_dialog(self):
+        """Open the fiscalization settings dialog"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Fiscalization Settings")
+        dialog.setMinimumSize(500, 580)
+        dialog.setModal(True)
+        dialog.setStyleSheet(f"QDialog {{ background:{OFF_WHITE}; }}")
+        
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(15)
+        layout.setContentsMargins(25, 20, 25, 20)
+        
+        # Title
+        title = QLabel("ZIMRA Fiscalization Configuration")
+        title_font = title.font()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
+        
+        # Enable checkbox
+        self._fiscal_enable = _ToggleSwitch("Enable Fiscalization", size=20)
+        layout.addWidget(self._fiscal_enable)
+        layout.addSpacing(10)
+        
+        # Connection settings group
+        conn_group = QGroupBox("Connection Settings")
+        conn_layout = QVBoxLayout(conn_group)
+        conn_layout.setSpacing(12)
+        
+        # Base URL
+        self._fiscal_base_url = _inp(placeholder="https://your-zimra-server.com")
+        conn_layout.addLayout(_field_row("Base URL:", self._fiscal_base_url, lw=120))
+        
+        # API Key
+        self._fiscal_api_key = _inp(pwd=True)
+        conn_layout.addLayout(_field_row("API Key:", self._fiscal_api_key, lw=120))
+        
+        # API Secret
+        self._fiscal_api_secret = _inp(pwd=True)
+        conn_layout.addLayout(_field_row("API Secret:", self._fiscal_api_secret, lw=120))
+        
+        # Device SN
+        self._fiscal_device_sn = _inp(placeholder="ZIMRA device serial number")
+        conn_layout.addLayout(_field_row("Device SN:", self._fiscal_device_sn, lw=120))
+        
+        # Ping Interval
+        self._fiscal_ping_interval = _spinbox()
+        self._fiscal_ping_interval.setRange(1, 60)
+        self._fiscal_ping_interval.setValue(5)
+        conn_layout.addLayout(_field_row("Ping Interval (min):", self._fiscal_ping_interval, lw=120))
+        
+        layout.addWidget(conn_group)
+        
+        # Status display
+        status_group = QGroupBox("Device Status")
+        status_layout = QVBoxLayout(status_group)
+        self._fiscal_status_label = QLabel("Not tested")
+        self._fiscal_status_label.setWordWrap(True)
+        self._fiscal_status_label.setStyleSheet(f"color:{MUTED}; padding:8px;")
+        status_layout.addWidget(self._fiscal_status_label)
+        layout.addWidget(status_group)
+        
+        # Progress bar
+        self._fiscal_progress = QProgressBar()
+        self._fiscal_progress.setVisible(False)
+        self._fiscal_progress.setRange(0, 0)
+        layout.addWidget(self._fiscal_progress)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        test_btn = QPushButton("🔌 Test Connection")
+        test_btn.setFixedHeight(40)
+        test_btn.setCursor(Qt.PointingHandCursor)
+        test_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY_2}; color:{WHITE}; border:none;
+                border-radius:6px; font-size:12px; font-weight:bold; padding:0 20px;
+            }}
+            QPushButton:hover {{ background:{NAVY_3}; }}
+        """)
+        test_btn.clicked.connect(self._test_fiscal_connection)
+        
+        save_fiscal_btn = QPushButton("💾 Save Fiscal Settings")
+        save_fiscal_btn.setFixedHeight(40)
+        save_fiscal_btn.setCursor(Qt.PointingHandCursor)
+        save_fiscal_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{SUCCESS}; color:{WHITE}; border:none;
+                border-radius:6px; font-size:12px; font-weight:bold; padding:0 20px;
+            }}
+            QPushButton:hover {{ background:{SUCCESS_H}; }}
+        """)
+        save_fiscal_btn.clicked.connect(lambda: self._save_fiscal_settings(dialog))
+        
+        close_btn = QPushButton("Cancel")
+        close_btn.setFixedHeight(40)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{LIGHT}; color:{DARK_TEXT}; border:none;
+                border-radius:6px; font-size:12px; padding:0 20px;
+            }}
+            QPushButton:hover {{ background:{BORDER}; }}
+        """)
+        close_btn.clicked.connect(dialog.reject)
+        
+        btn_layout.addWidget(test_btn)
+        btn_layout.addWidget(save_fiscal_btn)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+        
+        # Load existing settings
+        self._load_fiscal_settings_into_dialog()
+        
+        dialog.exec()
+    
+    def _load_fiscal_settings_into_dialog(self):
+        """Load existing fiscal settings into the dialog fields"""
+        try:
+            from models.fiscal_settings import FiscalSettingsRepository
+            repo = FiscalSettingsRepository()
+            settings = repo.get_settings()
+            
+            if settings:
+                self._fiscal_enable.setChecked(settings.enabled)
+                self._fiscal_base_url.setText(settings.base_url)
+                self._fiscal_api_key.setText(settings.api_key)
+                self._fiscal_api_secret.setText(settings.api_secret)
+                self._fiscal_device_sn.setText(settings.device_sn)
+                self._fiscal_ping_interval.setValue(settings.ping_interval_minutes)
+                
+                if settings.device_status == "online":
+                    self._fiscal_status_label.setText(
+                        f"✅ Device Online\nLast ping: {settings.last_ping_time or 'Never'}"
+                    )
+                    self._fiscal_status_label.setStyleSheet(f"color:{SUCCESS}; padding:8px;")
+                elif settings.device_status == "offline":
+                    self._fiscal_status_label.setText("⚠️ Device Offline - Last connection failed")
+                    self._fiscal_status_label.setStyleSheet(f"color:{ORANGE}; padding:8px;")
+                elif settings.device_status == "error":
+                    self._fiscal_status_label.setText("❌ Connection Error")
+                    self._fiscal_status_label.setStyleSheet(f"color:{DANGER}; padding:8px;")
+                else:
+                    self._fiscal_status_label.setText("Status unknown - Test connection to verify")
+                    self._fiscal_status_label.setStyleSheet(f"color:{MUTED}; padding:8px;")
+        except Exception as e:
+            print(f"[Fiscal] Error loading settings: {e}")
+    
+    def _test_fiscal_connection(self):
+        """Test connection to ZIMRA"""
+        base_url = self._fiscal_base_url.text().strip()
+        api_key = self._fiscal_api_key.text().strip()
+        api_secret = self._fiscal_api_secret.text().strip()
+        device_sn = self._fiscal_device_sn.text().strip()
+        
+        # Validate
+        if not base_url:
+            QMessageBox.warning(self, "Missing Field", "Please enter the Base URL")
+            return
+        if not api_key:
+            QMessageBox.warning(self, "Missing Field", "Please enter the API Key")
+            return
+        if not api_secret:
+            QMessageBox.warning(self, "Missing Field", "Please enter the API Secret")
+            return
+        if not device_sn:
+            QMessageBox.warning(self, "Missing Field", "Please enter the Device SN")
+            return
+        
+        # Disable buttons during test
+        self._fiscal_progress.setVisible(True)
+        self._fiscal_status_label.setText("Testing connection...")
+        self._fiscal_status_label.setStyleSheet(f"color:{ACCENT}; padding:8px;")
+        
+        # Start test thread
+        self._test_thread = TestConnectionThread(base_url, api_key, api_secret, device_sn)
+        self._test_thread.finished_signal.connect(self._on_test_finished)
+        self._test_thread.start()
+    
+    def _on_test_finished(self, success: bool, message: str):
+        """Handle test connection result and update device status"""
+        self._fiscal_progress.setVisible(False)
+        
+        if success:
+            self._fiscal_status_label.setText(f"✅ {message}")
+            self._fiscal_status_label.setStyleSheet(f"color:{SUCCESS}; padding:8px;")
+            
+            # Update device status to online in the database
+            try:
+                from models.fiscal_settings import FiscalSettingsRepository
+                repo = FiscalSettingsRepository()
+                repo.update_device_status(status="online", reporting_frequency=5)
+                print("[Fiscal] Device status updated to online")
+            except Exception as e:
+                print(f"[Fiscal] Could not update device status: {e}")
+            
+            QMessageBox.information(
+                self, "Connection Successful", 
+                f"Successfully connected to ZIMRA!\n\n{message}\n\nYou can now save these settings."
+            )
+        else:
+            self._fiscal_status_label.setText(f"❌ {message}")
+            self._fiscal_status_label.setStyleSheet(f"color:{DANGER}; padding:8px;")
+            
+            # Update device status to offline/error
+            try:
+                from models.fiscal_settings import FiscalSettingsRepository
+                repo = FiscalSettingsRepository()
+                repo.update_device_status(status="offline")
+                print("[Fiscal] Device status updated to offline")
+            except Exception as e:
+                pass
+            
+            QMessageBox.warning(
+                self, "Connection Failed", 
+                f"Could not connect to ZIMRA:\n\n{message}\n\nPlease check your settings and try again."
+            )
+    
+    def _save_fiscal_settings(self, dialog: QDialog):
+        """Save fiscal settings to database"""
+        # Check if test was performed and successful
+        is_online = "✅" in self._fiscal_status_label.text() and "Connected" in self._fiscal_status_label.text()
+        
+        if not is_online:
+            reply = QMessageBox.question(
+                self, "Confirm Save",
+                "You haven't successfully tested the connection yet.\n\n"
+                "Do you still want to save these settings?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        
+        try:
+            from models.fiscal_settings import FiscalSettings, FiscalSettingsRepository
+            from services.fiscal_device_monitor import get_device_monitor_service
+            
+            # Determine device status based on test result
+            device_status = "online" if is_online else "unknown"
+            
+            settings = FiscalSettings(
+                enabled=self._fiscal_enable.isChecked(),
+                base_url=self._fiscal_base_url.text().strip(),
+                api_key=self._fiscal_api_key.text().strip(),
+                api_secret=self._fiscal_api_secret.text().strip(),
+                device_sn=self._fiscal_device_sn.text().strip(),
+                ping_interval_minutes=self._fiscal_ping_interval.value(),
+                device_status=device_status,
+            )
+            
+            repo = FiscalSettingsRepository()
+            repo.save_settings(settings)
+            
+            # Restart device monitor if enabled
+            if settings.enabled:
+                monitor = get_device_monitor_service()
+                monitor.restart_monitoring()
+            
+            QMessageBox.information(self, "Saved", "Fiscalization settings saved successfully!")
+            dialog.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save settings: {e}")
+
+    # ── Load ─────────────────────────────────────────────────────────────────
 
     def _load(self):
         try:
@@ -475,16 +915,20 @@ class CompanyDefaultsPage(QWidget):
         except (ValueError, TypeError):
             self._start_num.setValue(0)
 
+        self._allow_credit_chk.setChecked(
+            str(data.get("allow_credit_sales", "0")).strip() == "1"
+        )
         self._update_preview()
 
-    # ── Save data ─────────────────────────────────────────────────────────────
+    # ── Save ─────────────────────────────────────────────────────────────────
 
     def _save(self):
         data = {k: i.text().strip() for k, i in self._inputs.items()}
-        data["footer_text"]           = self._footer.toPlainText().strip()
-        data["terms_and_conditions"]  = self._terms.toPlainText().strip()
-        data["invoice_prefix"]        = self._prefix_inp.text().strip().upper()
+        data["footer_text"]          = self._footer.toPlainText().strip()
+        data["terms_and_conditions"] = self._terms.toPlainText().strip()
+        data["invoice_prefix"]       = self._prefix_inp.text().strip().upper()
         data["invoice_start_number"] = str(self._start_num.value())
+        data["allow_credit_sales"]   = "1" if self._allow_credit_chk.isChecked() else "0"
 
         for key, lbl in self._ro_labels.items():
             v = lbl.text()
@@ -500,7 +944,10 @@ class CompanyDefaultsPage(QWidget):
     def _show_status(self, msg, error=False):
         color = DANGER if error else "#2ecc71"
         self._status_lbl.setStyleSheet(
-            f"font-size:13px;background:transparent;color:{color};"
+            f"font-size:13px; background:transparent; color:{color};"
         )
         self._status_lbl.setText(msg)
-        QTimer.singleShot(3000, lambda: self._status_lbl.setText(""))
+        import shiboken6
+        QTimer.singleShot(3000, lambda: (
+            shiboken6.isValid(self._status_lbl) and self._status_lbl.setText("")
+        ))

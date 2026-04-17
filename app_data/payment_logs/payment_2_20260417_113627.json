@@ -1,0 +1,71 @@
+{
+  "timestamp": "2026-04-17T11:36:27.289613",
+  "payment_id": 2,
+  "status": "attempt_1",
+  "payment_data": {
+    "id": 2,
+    "customer_id": 2,
+    "amount": "5349.16",
+    "method": "SPLIT",
+    "reference": "",
+    "cashier_id": 5,
+    "created_at": "2026-04-17 11:36:26.871996",
+    "currency": "USD",
+    "account_name": null,
+    "payment_date": "2026-04-17",
+    "payment_type": "outstanding",
+    "splits_json": "[{\"method\": \"Bank Accounts\", \"mop_name\": \"Bank Accounts\", \"gl_account\": \"101 - CBZ ZWD - DC1134\", \"currency\": \"ZIG\", \"amount\": 123456.0, \"amount_usd\": 4115.158848, \"exchange_rate\": 0.033333}, {\"method\": \"Cash\", \"mop_name\": \"Cash\", \"gl_account\": \"Cash 12111111 - DC1134\", \"currency\": \"USD\", \"amount\": 1234.0, \"amount_usd\": 1234.0, \"exchange_rate\": 1.0}]",
+    "synced": 0,
+    "frappe_ref": "",
+    "sync_attempts": 0,
+    "last_sync_attempt": null,
+    "sync_error": null,
+    "syncing": 0,
+    "customer_name": "dansohol",
+    "customer_outstanding": "27555.67",
+    "customer_laybye": "4365.61",
+    "splits": [
+      {
+        "id": 3,
+        "method": "Bank Accounts",
+        "mop_name": "Bank Accounts",
+        "gl_account": "101 - CBZ ZWD - DC1134",
+        "currency": "ZIG",
+        "amount": "123456.00",
+        "amount_usd": "4115.16",
+        "exchange_rate": "0.033333"
+      },
+      {
+        "id": 4,
+        "method": "Cash",
+        "mop_name": "Cash",
+        "gl_account": "Cash 12111111 - DC1134",
+        "currency": "USD",
+        "amount": "1234.00",
+        "amount_usd": "1234.00",
+        "exchange_rate": "1.000000"
+      }
+    ]
+  },
+  "payload": {
+    "doctype": "Payment Entry",
+    "payment_type": "Receive",
+    "party_type": "Customer",
+    "party": "dansohol",
+    "party_name": "dansohol",
+    "paid_to": "Cash 12111111 - DC1134",
+    "paid_from_account_currency": "USD",
+    "paid_to_account_currency": "USD",
+    "paid_amount": 5349.16,
+    "received_amount": 5349.16,
+    "source_exchange_rate": 1.0,
+    "target_exchange_rate": 1.0,
+    "reference_no": "PAY-0000002",
+    "reference_date": "2026-04-17",
+    "remarks": "Customer Payment via SPLIT",
+    "docstatus": 1,
+    "references": [],
+    "company": "TN Harlequin",
+    "cost_center": "Main - DC1134"
+  }
+}

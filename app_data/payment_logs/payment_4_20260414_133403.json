@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-04-14T13:34:03.722841",
+  "payment_id": 4,
+  "status": "attempt_1",
+  "payment_data": {
+    "id": 4,
+    "customer_id": 2,
+    "amount": "0.40",
+    "method": "Bank Accounts",
+    "reference": "",
+    "cashier_id": 5,
+    "created_at": "2026-04-14 13:34:03.384659",
+    "currency": "USD",
+    "account_name": null,
+    "payment_date": "2026-04-14",
+    "synced": 0,
+    "frappe_ref": "",
+    "sync_attempts": 0,
+    "last_sync_attempt": null,
+    "sync_error": null,
+    "payment_type": "outstanding",
+    "splits_json": "[{\"method\": \"Bank Accounts\", \"mop_name\": \"Bank Accounts\", \"gl_account\": \"101 - CBZ ZWD - DC1134\", \"currency\": \"ZWD\", \"amount\": 12.0, \"amount_usd\": 0.399996, \"exchange_rate\": 0.033333}]",
+    "customer_name": "dansohol",
+    "customer_outstanding": "-36519.77",
+    "customer_laybye": "0.00",
+    "splits": [
+      {
+        "id": 6,
+        "method": "Bank Accounts",
+        "mop_name": "Bank Accounts",
+        "gl_account": "101 - CBZ ZWD - DC1134",
+        "currency": "ZWD",
+        "amount": "12.00",
+        "amount_usd": "0.40",
+        "exchange_rate": "0.033333"
+      }
+    ]
+  },
+  "payload": {
+    "doctype": "Payment Entry",
+    "payment_type": "Receive",
+    "party_type": "Customer",
+    "party": "dansohol",
+    "party_name": "dansohol",
+    "paid_to": "Cash 12111111 - DC1134",
+    "paid_to_account_currency": "USD",
+    "paid_amount": 0.4,
+    "paid_amount_after_tax": 0.4,
+    "received_amount": 0.4,
+    "received_amount_after_tax": 0.4,
+    "reference_no": "PAY-0000004",
+    "reference_date": "2026-04-14",
+    "remarks": "Customer Payment via Bank Accounts",
+    "docstatus": 1,
+    "references": [],
+    "company": "TN Harlequin",
+    "cost_center": "Main - DC1134"
+  }
+}

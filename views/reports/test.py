@@ -5079,7 +5079,7 @@ class POSView(QWidget):
     # =========================================================================
     # POS RULES HELPERS  (#3 #4 #7)
     # =========================================================================
-    def _get_pos_rule(self, key: str, default: bool = False) -> bool:
+    def _get_pos_rule(self, key: str, default: bool = True) -> bool:
         """Read a single toggle from pos_settings table. Fast; falls back to default."""
         try:
             from database.db import get_connection
@@ -5118,7 +5118,7 @@ class POSView(QWidget):
             return
 
         # ── #4 Block zero/negative stock ─────────────────────────────────────
-        if self._get_pos_rule("block_zero_stock", default=False):
+        if self._get_pos_rule("block_zero_stock", default=True):
             # stock may be passed in; if not, look it up
             item_stock = stock
             if item_stock is None and product_id:
@@ -6248,6 +6248,8 @@ class POSView(QWidget):
                 paymentMode     = sale.get("method", "CASH"),
                 currency        = sale.get("currency", "USD"),
                 footer          = co.get("footer_text", "Thank you for your purchase!"),
+                qrCode          = sale.get("fiscal_qr_code", ""),
+                vCode           = sale.get("fiscal_verification_code", ""),
             )
 
             for it in sale.get("items", []):

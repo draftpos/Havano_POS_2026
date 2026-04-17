@@ -10,6 +10,7 @@ _BLANK = {
     "email": "", "phone": "", "vat_number": "", "tin_number": "",
     # Editable — receipt footer
     "footer_text": "",
+    "allow_credit_sales": "0",
     # Editable — terms & conditions (printed on sales orders)
     "terms_and_conditions": "",
     # Editable — ZIMRA
@@ -72,6 +73,7 @@ def save_defaults(data: dict) -> None:
                 zimra_api_url         = ?,
                 invoice_prefix        = ?,
                 invoice_start_number  = ?,
+                allow_credit_sales    = ?,
                 server_company        = ?,
                 server_warehouse      = ?,
                 server_cost_center    = ?,
@@ -102,6 +104,7 @@ def save_defaults(data: dict) -> None:
             str(data.get("zimra_api_url",         "")),
             str(data.get("invoice_prefix",        "")),
             str(data.get("invoice_start_number",  "0")),
+            str(data.get("allow_credit_sales",    "0")),
             str(data.get("server_company",        "")),
             str(data.get("server_warehouse",      "")),
             str(data.get("server_cost_center",    "")),

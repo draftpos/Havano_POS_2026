@@ -12,6 +12,15 @@ def migrate():
     conn = get_connection()
     cur = conn.cursor()
     print("[migrate] Connecting to SQL Server...")
+    
+    def _add_column_if_missing(table: str, col: str, defn: str):
+        """Helper to add column if it doesn't exist."""
+        try:
+            cur.execute(f"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{table}' AND COLUMN_NAME='{col}') "
+                        f"ALTER TABLE {table} ADD {col} {defn}")
+            conn.commit()
+        except Exception as e:
+            print(f"[migrate]   ! Could not add {table}.{col}: {e}")
 
     # ── users ─────────────────────────────────────────────────────────────────
     cur.execute("""
@@ -160,10 +169,14 @@ def migrate():
             default_price_list_id    INT           NULL REFERENCES price_lists(id),
             balance                  DECIMAL(18,2) NULL DEFAULT 0,
             outstanding_amount       DECIMAL(18,2) NULL DEFAULT 0,
-            loyalty_points           INT           NULL DEFAULT 0
+            loyalty_points           INT           NULL DEFAULT 0,
+            frappe_synced            BIT           NOT NULL DEFAULT 0,
+            laybye_balance           DECIMAL(18,2) NULL DEFAULT 0
         )
     """)
     print("[migrate] ✅  customers")
+    _add_column_if_missing(cur, conn, "customers", "frappe_synced", "BIT NOT NULL DEFAULT 0")
+    _add_column_if_missing(cur, conn, "customers", "laybye_balance", "DECIMAL(18,2) NULL DEFAULT 0")
 
     # ── products ──────────────────────────────────────────────────────────────
     cur.execute("""
@@ -246,10 +259,12 @@ def migrate():
             frappe_ref       NVARCHAR(80)  NULL,
             created_at       DATETIME2     NULL DEFAULT SYSDATETIME(),
             payment_entry_ref NVARCHAR(80) NULL,
-            payment_synced   BIT           NOT NULL DEFAULT 0
+            payment_synced   BIT           NOT NULL DEFAULT 0,
+            is_on_account    BIT           NOT NULL DEFAULT 0
         )
     """)
     print("[migrate] ✅  sales")
+    _add_column_if_missing(cur, conn, "sales", "is_on_account", "BIT NOT NULL DEFAULT 0")
 
     # ── sale_items ────────────────────────────────────────────────────────────
     cur.execute("""
@@ -420,10 +435,17 @@ def migrate():
             synced                  BIT           NOT NULL DEFAULT 0,
             frappe_payment_ref      NVARCHAR(80)  NULL,
             created_at              DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
-            frappe_so_ref           NVARCHAR(255) NULL
+            frappe_so_ref           NVARCHAR(255) NULL,
+            sync_attempts           INT           NOT NULL DEFAULT 0,
+            sync_error              NVARCHAR(MAX) NULL,
+            last_error              NVARCHAR(MAX) NULL
         )
     """)
     print("[migrate] ✅  payment_entries")
+    _add_column_if_missing("payment_entries", "sync_attempts", "INT NOT NULL DEFAULT 0")
+    _add_column_if_missing("payment_entries", "last_error", "NVARCHAR(MAX) NULL")
+    _add_column_if_missing("payment_entries", "sync_error", "NVARCHAR(MAX) NULL")
+    _add_column_if_missing("payment_entries", "frappe_so_ref", "NVARCHAR(255) NULL")
 
     # ── sales_order ───────────────────────────────────────────────────────────
     cur.execute("""

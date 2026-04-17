@@ -158,6 +158,7 @@ def _next_order_no(cur) -> str:
 
 # =============================================================================
 # CRUD
+from services.laybye_payment_entry_service import create_laybye_payment_entry
 # =============================================================================
 def create_sales_order(
     cart_items:      list[dict],
@@ -169,6 +170,7 @@ def create_sales_order(
     order_date:      str   = "",
     delivery_date:   str   = "",
     order_type:      str   = "Sales",
+    deposit_splits:  dict  | None = None,   # ← ADDED (only change)
 ) -> int:
     """
     Persist a new laybye (sales order) and its line items.
@@ -244,60 +246,41 @@ def create_sales_order(
     log.info("Laybye created: %s  id=%d  total=%.2f  deposit=%.2f  balance=%.2f",
              order_no, order_id, total, deposit_amount, balance_due)
 
-    # ── Post Payment Entry to Frappe ─────────────────────────────────────────
-    order_snapshot = {
-        "order_no"       : order_no,
-        "customer_name"  : customer_name,
-        "deposit_amount" : deposit_amount,
-        "deposit_method" : deposit_method,
-        "order_date"     : order_date,
-    }
-    pe_name = post_payment_to_frappe(order_snapshot)
-    if pe_name:
-        # Save the Frappe PE reference back to the local DB
-        conn.execute(
-            "UPDATE sales_order SET frappe_ref = ? WHERE id = ?",
-            (pe_name, order_id))
-        conn.commit()
+    # ── Payment Entry Creation (Single or Split) ─────────────────────────
+    if deposit_amount > 0:
+        try:
+            pe_order = {
+                "id":            order_id,
+                "order_no":      order_no,
+                "customer_name": customer_name,
+                "order_date":    order_date,
+                "deposit_amount": deposit_amount,
+                "deposit_method": deposit_method,
+            }
+            try:
+                from services.laybye_payment_entry_service import create_laybye_payment_entry
+                create_laybye_payment_entry(pe_order, splits=deposit_splits)
+                log.info("Payment entry created for order %s (splits=%s)", 
+                         order_no, bool(deposit_splits))
+            except Exception as pe_err:
+                log.error("Could not create payment entry: %s", pe_err)
+        except Exception as e:
+            log.error("Payment entry preparation failed: %s", e)
 
     return order_id
 # =============================================================================
 # Frappe Payment Entry sync
 # =============================================================================
-
 def post_payment_to_frappe(order: dict) -> str | None:
     """
     Post a Payment Entry to Frappe when a laybye order is created.
-    Returns the Frappe Payment Entry name (e.g. 'PE-0001') or None on failure.
-
-    Payload mirrors the working shape:
-    {
-        "doctype": "Payment Entry",
-        "payment_type": "Receive",
-        "party_type": "Customer",
-        "party": "<customer_name>",
-        "party_name": "<customer_name>",
-        "paid_from": "<receivables account>",          ← required by Frappe
-        "paid_to": "<cash/bank account>",
-        "paid_to_account_currency": "USD",
-        "paid_from_account_currency": "USD",
-        "paid_amount": <deposit>,
-        "paid_amount_after_tax": <deposit>,
-        "received_amount": <deposit>,
-        "received_amount_after_tax": <deposit>,
-        "reference_no": "<order_no>",
-        "reference_date": "<order_date>",
-        "remarks": "...",
-        "docstatus": 1,
-        "references": []
-    }
+    Uses the EXACT same working logic as payment_upload_service.py
     """
     if not order.get("deposit_amount") or order["deposit_amount"] <= 0:
         log.info("No deposit on order %s — skipping Frappe payment entry.", order.get("order_no"))
         return None
 
-    # ── Pull credentials (full fallback: memory → DB → env vars) ────────────
-    # FIX: use get_credentials() not get_session() so daemon/startup cases work
+    # ── Pull credentials ─────────────────────────────────────────────────────
     try:
         from services.credentials import get_credentials
         api_key, api_secret = get_credentials()
@@ -317,106 +300,98 @@ def post_payment_to_frappe(order: dict) -> str | None:
         log.error("Could not load site host: %s", e)
         return None
 
-    # ── Pull company + currency from company_defaults ────────────────────────
+    # ── Pull company defaults ────────────────────────────────────────────────
     try:
         from models.company_defaults import get_defaults
         defaults = get_defaults()
         company  = defaults.get("server_company") or ""
         currency = defaults.get("server_company_currency") or "USD"
+        walk_in  = defaults.get("server_walk_in_customer", "").strip() or "Default"
     except Exception as e:
-        log.warning("Could not load company defaults: %s — using fallbacks.", e)
-        company  = ""
+        log.warning("Could not load company defaults: %s", e)
+        company = ""
         currency = "USD"
+        walk_in = "Default"
 
-    # ── Resolve paid_to (cash/bank) account from local GL accounts table ─────
+    # ── USE THE SAME WORKING ACCOUNT LOOKUP AS payment_upload_service ────────
+    # Create a payment-like dict so we can use the same helper
+    payment_dict = {
+        "account_name": order.get("deposit_method", "Cash"),
+        "currency": currency,
+        "customer_name": order.get("customer_name") or walk_in,
+    }
+    
     try:
-        from models.gl_account import get_account_for_payment
-        gl = get_account_for_payment(currency, company)
-        paid_to = gl["name"] if gl else ""
+        # Import the working function from payment_upload_service
+        from services.payment_upload_service import _get_paid_to_account, _get_defaults
+        paid_to = _get_paid_to_account(payment_dict, _get_defaults())
     except Exception as e:
-        log.warning("Could not resolve GL account (paid_to): %s — paid_to will be empty.", e)
-        paid_to = ""
+        log.warning("Could not get paid_to account using payment_upload_service: %s", e)
+        # Fallback: try direct GL lookup
+        try:
+            from models.gl_account import get_account_for_payment
+            gl = get_account_for_payment(currency, company)
+            paid_to = gl["name"] if gl else ""
+        except Exception:
+            paid_to = ""
 
     if not paid_to:
-        log.error(
-            "No GL account found for currency=%s company=%s — skipping payment entry.",
-            currency, company
-        )
+        log.error("No paid_to account found — cannot post payment entry.")
         return None
 
-    # ── Resolve paid_from (receivables / debtors) account ────────────────────
-    # Frappe requires this field — typically "Debtors - <abbr>" or equivalent.
-    # We attempt to read it from gl_accounts first, then fall back to a
-    # convention-based name so the POST never fails silently with a missing key.
-    paid_from = ""
-    try:
-        from models.gl_account import get_receivables_account
-        gl_recv = get_receivables_account(currency, company)
-        paid_from = gl_recv["name"] if gl_recv else ""
-    except Exception:
-        pass  # function may not exist yet — fall through to convention
-
-    if not paid_from:
-        # Derive company abbreviation from the company name (text after last " - ")
-        # e.g. "Acme Trading - AT"  →  abbreviation "AT"
-        # Frappe's standard receivables account is "Debtors - <abbr>"
-        abbr = company.split(" - ")[-1].strip() if " - " in company else ""
-        paid_from = f"Debtors - {abbr}" if abbr else "Debtors"
-        log.debug(
-            "[payment] paid_from resolved by convention: %s  (override via gl_account.get_receivables_account)",
-            paid_from
-        )
-
-    # ── Build payload ─────────────────────────────────────────────────────────
+    # ── Build payload (SAME STRUCTURE AS WORKING payment_upload_service) ────
     reference_date = order.get("order_date") or date.today().isoformat()
-    amount         = round(float(order["deposit_amount"]), 4)
-    party          = order.get("customer_name") or "Walk-in Customer"
-    order_no       = order.get("order_no") or "Laybye"
+    amount = round(float(order["deposit_amount"]), 4)
+    party = order.get("customer_name") or walk_in
+    order_no = order.get("order_no") or "Laybye"
     deposit_method = order.get("deposit_method") or ""
+    reference_no = f"LAYBYE-{order_no}"
 
     payload = {
-        "doctype"                    : "Payment Entry",
-        "payment_type"               : "Receive",
-        "party_type"                 : "Customer",
-        "party"                      : party,
-        "party_name"                 : party,
-        # paid_from = receivables/debtors account (REQUIRED by Frappe)
-        "paid_from"                  : paid_from,
-        "paid_from_account_currency" : currency,
-        # paid_to = cash / bank account
-        "paid_to"                    : paid_to,
-        "paid_to_account_currency"   : currency,
-        # amounts — all four fields required by Frappe
-        "paid_amount"                : amount,
-        "paid_amount_after_tax"      : amount,
-        "received_amount"            : amount,
-        "received_amount_after_tax"  : amount,
-        "reference_no"               : order_no,
-        "reference_date"             : reference_date,
-        "remarks"                    : (
-            f"Laybye deposit for {order_no} via {deposit_method}"
-            if deposit_method else f"Laybye deposit for {order_no}"
-        ),
-        "docstatus"                  : 1,
-        "references"                 : [],
+        "doctype": "Payment Entry",
+        "payment_type": "Receive",
+        "party_type": "Customer",
+        "party": party,
+        "party_name": party,
+        "paid_to": paid_to,
+        "paid_to_account_currency": currency,
+        "paid_amount": amount,
+        "paid_amount_after_tax": amount,
+        "received_amount": amount,
+        "received_amount_after_tax": amount,
+        "reference_no": reference_no,
+        "reference_date": reference_date,
+        "remarks": f"Laybye deposit — {order_no}" if order_no else "Laybye deposit",
+        "docstatus": 1,
+        "references": [],
     }
+
+    if company:
+        payload["company"] = company
+
+    # Add cost_center if available
+    try:
+        cost_center = defaults.get("server_cost_center", "").strip()
+        if cost_center:
+            payload["cost_center"] = cost_center
+    except Exception:
+        pass
 
     log.debug("[payment] Posting Payment Entry payload: %s", payload)
 
     # ── POST to Frappe ────────────────────────────────────────────────────────
     try:
         response = requests.post(
-            f"{base_url}/api/resource/Payment Entry",
+            f"{base_url}/api/resource/Payment%20Entry",
             json=payload,
             headers={
                 "Authorization": f"token {api_key}:{api_secret}",
-                "Content-Type" : "application/json",
+                "Content-Type": "application/json",
             },
-            timeout=10,
+            timeout=30,
         )
 
         if not response.ok:
-            # Log the full Frappe error message so it's easy to diagnose
             try:
                 err_detail = response.json()
             except Exception:
@@ -428,20 +403,12 @@ def post_payment_to_frappe(order: dict) -> str | None:
             return None
 
         pe_name = response.json().get("data", {}).get("name")
-        log.info(
-            "Payment Entry created in Frappe: %s for order %s",
-            pe_name, order_no
-        )
+        log.info("✅ Payment Entry created in Frappe: %s for order %s", pe_name, order_no)
         return pe_name
 
     except requests.exceptions.RequestException as exc:
-        log.error(
-            "Failed to POST Payment Entry to Frappe for order %s: %s",
-            order_no, exc
-        )
-        return None  # Never crash local order — just log
-
-
+        log.error("Failed to POST Payment Entry to Frappe for order %s: %s", order_no, exc)
+        return None
 def get_sales_order(order_id: int) -> dict | None:
     """Fetch a single sales order by id, including its line items."""
     ensure_tables()

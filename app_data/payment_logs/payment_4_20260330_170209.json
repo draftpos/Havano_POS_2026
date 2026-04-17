@@ -1,0 +1,36 @@
+{
+  "timestamp": "2026-03-30T17:02:09.976357",
+  "payment_id": 4,
+  "status": "failed",
+  "payment_data": {
+    "id": 4,
+    "customer_name": "gettest gettest",
+    "amount": "8.00",
+    "currency": "USD",
+    "method": "Cash",
+    "account_name": "Cash",
+    "reference": "",
+    "payment_date": "2026-03-30"
+  },
+  "payload": {
+    "doctype": "Payment Entry",
+    "payment_type": "Receive",
+    "party_type": "Customer",
+    "party": "gettest gettest",
+    "party_name": "gettest gettest",
+    "paid_to": "Cash - DC1134",
+    "paid_to_account_currency": "USD",
+    "paid_amount": 8.0,
+    "paid_amount_after_tax": 8.0,
+    "received_amount": 8.0,
+    "received_amount_after_tax": 8.0,
+    "reference_no": "PAY-0000004",
+    "reference_date": "2026-03-30",
+    "remarks": "Customer Payment via Cash (Cash)",
+    "docstatus": 1,
+    "references": [],
+    "company": "TN Harlequin",
+    "cost_center": "Main - DC1134"
+  },
+  "error": "Network error: [WinError 10060] A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond"
+}
