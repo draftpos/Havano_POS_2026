@@ -5291,9 +5291,9 @@ class POSView(QWidget):
                 if is_pharmacist(getattr(self, "user", None)):
                     self.btn_pay.setText("DISPENSE")
                 else:
-                    self.btn_pay.setText("FINALIZE\nQUOTE")
+                    self.btn_pay.setText("FINALIZE QUOTE")
             except Exception:
-                self.btn_pay.setText("FINALIZE\nQUOTE")
+                self.btn_pay.setText("FINALIZE QUOTE")
         else:
             self.btn_pay.setText("PAY  F5")
 

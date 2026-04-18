@@ -7,7 +7,12 @@ import urllib.error
 
 from services.site_config import get_host as _site_get_host
 API_BASE_URL    = _site_get_host()
-LOGIN_ENDPOINT  = f"{_site_get_host()}/api/method/havano_pos_integration.auth.login"
+# Use saas_api.www.api.login — it uses frappe.db.get_value / ignore_permissions
+# for its internal lookups, so non-admin roles (Pharmacist, Cashier, etc.)
+# can authenticate cleanly. havano_pos_integration.auth.login did a
+# permission-checked frappe.get_list("User Permission", ...) that crashed
+# on anyone without read perm on that doctype.
+LOGIN_ENDPOINT  = f"{_site_get_host()}/api/method/saas_api.www.api.login"
 TIMEZONE        = "Africa/Harare"
 REQUEST_TIMEOUT = 8
 
@@ -169,7 +174,17 @@ def _parse_online_success(data: dict, username: str) -> dict:
     raw_company   = (user_block.get("company") or data.get("company") or "")
     raw_cost_center= (user_block.get("cost_center") or data.get("cost_center") or "")
     full_name    = user_block.get("full_name") or data.get("full_name") or raw_username
-    roles        = user_block.get("roles") or []
+
+    # Role normalization:
+    #   saas_api.www.api.login returns user.role as a single string
+    #   (derived from user.role_select — e.g., "Pharmacist", "Cashier").
+    #   Older havano_pos_integration shape returned user.roles as a list.
+    # Support both — _map_role treats whatever we pass as a list.
+    roles = user_block.get("roles") or []
+    if not roles:
+        single = user_block.get("role")
+        if single:
+            roles = [single]
 
     user = {
         "id":           None,
@@ -177,7 +192,7 @@ def _parse_online_success(data: dict, username: str) -> dict:
         "display_name": full_name,
         "warehouse":    raw_warehouse,
         "cost_center":  raw_cost_center,
-        "company":      raw_company, 
+        "company":      raw_company,
         "role":         _map_role(roles, raw_username),
     }
     return {
