@@ -5272,20 +5272,15 @@ class POSView(QWidget):
         if self.parent_window:
             self.parent_window._set_status(f"Laybye #{order_id} Saved Successfully")
     def _refresh_pay_button_label(self):
-        # Set the main action button's label based on pharmacy mode + user role.
-        #   Pharmacy mode OFF                  → "PAY  F5"
-        #   Pharmacy mode ON, non-pharmacist   → "FINALIZE\nQUOTE"
-        #   Pharmacy mode ON, pharmacist       → "DISPENSE"
+        # Set the main action button's label based on cart mode + user role.
+        #   Sales mode                     → "PAY  F5"
+        #   Quote mode, non-pharmacist     → "FINALIZE QUOTE"
+        #   Quote mode, pharmacist         → "DISPENSE"
         # Behavior change lives in _open_payment — this method only paints text.
         if not hasattr(self, "btn_pay") or self.btn_pay is None:
             return
-        try:
-            from settings.pharmacy_settings import get_pharmacy_mode
-            pharmacy_on = bool(get_pharmacy_mode())
-        except Exception:
-            pharmacy_on = False
-
-        if pharmacy_on:
+        mode = getattr(self, "_cart_mode", "sales")
+        if mode == "quote":
             try:
                 from utils.roles import is_pharmacist
                 if is_pharmacist(getattr(self, "user", None)):
@@ -5296,6 +5291,19 @@ class POSView(QWidget):
                 self.btn_pay.setText("FINALIZE QUOTE")
         else:
             self.btn_pay.setText("PAY  F5")
+
+    def _on_quote_mode_toggle(self, checked: bool):
+        # Flip cart mode and repaint the PAY button. Behavior switch happens
+        # at click time inside _open_payment (which reads _cart_mode).
+        self._cart_mode = "quote" if checked else "sales"
+        self._refresh_pay_button_label()
+        if getattr(self, "parent_window", None):
+            try:
+                self.parent_window._set_status(
+                    f"MODE: {'Quote' if checked else 'Sales'}"
+                )
+            except Exception:
+                pass
 
     def _open_payment(self):
         """
@@ -5308,16 +5316,14 @@ class POSView(QWidget):
         if not self._require_active_shift():
             return
 
-        # ── 0a. PHARMACY MODE REROUTE ─────────────────────────────────────────
-        # Every finalize becomes a quotation save when pharmacy mode is on —
-        # labelled "Dispense" for pharmacists, "Finalize Quote" for others.
-        try:
-            from settings.pharmacy_settings import get_pharmacy_mode
-            if get_pharmacy_mode():
-                self._save_quotation()
-                return
-        except Exception as _e:
-            print(f"[POSView] pharmacy_mode reroute skipped: {_e}")
+        # ── 0a. QUOTE MODE REROUTE ────────────────────────────────────────────
+        # In Quote mode the finalize button saves the cart as a quotation
+        # instead of opening the payment flow. Labelled "Dispense" for
+        # pharmacists, "Finalize Quote" for everyone else. Toggled from the
+        # navbar Quote Mode button; defaults to on for pharmacists.
+        if getattr(self, "_cart_mode", "sales") == "quote":
+            self._save_quotation()
+            return
 
         # ── 0b. REDIRECTION LOGIC (Laybye Check) ─────────────────────────────
         # If the laybye switcher is toggled ON, execute the Laybye flow instead
@@ -6291,6 +6297,38 @@ class POSView(QWidget):
         self._cn_badge = self._q_badge
         self._so_badge = self._q_badge
 
+        # ── Cart Mode (Sales vs Quote) — default by role ──────────────────────
+        # Pharmacists default to Quote; everyone else to Sales. Toggleable.
+        try:
+            from utils.roles import is_pharmacist as _is_pharm
+            self._cart_mode = "quote" if _is_pharm(getattr(self, "user", None)) else "sales"
+        except Exception:
+            self._cart_mode = "sales"
+
+        self.quote_mode_btn = QPushButton("Quote Mode")
+        self.quote_mode_btn.setCheckable(True)
+        self.quote_mode_btn.setChecked(self._cart_mode == "quote")
+        self.quote_mode_btn.setFixedHeight(NAV_H)
+        self.quote_mode_btn.setMinimumWidth(120)
+        self.quote_mode_btn.setCursor(Qt.PointingHandCursor)
+        self.quote_mode_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {NAVY_3}; color: {WHITE}; border: none;
+                border-radius: {NAV_R}px; font-size: {NAV_FS}px; font-weight: bold;
+                text-align: center; padding: 0px 5px; outline: none;
+            }}
+            QPushButton:hover   {{ background-color: {NAVY_2}; }}
+            QPushButton:checked {{ background-color: #7c3aed; }}
+            QPushButton:checked:hover {{ background-color: #9333ea; }}
+        """)
+        self.quote_mode_btn.setToolTip(
+            "Toggle Quote Mode — the finalize button saves the cart as a "
+            "quotation instead of opening the payment flow."
+        )
+        self.quote_mode_btn.toggled.connect(self._on_quote_mode_toggle)
+        layout.addWidget(self.quote_mode_btn)
+        layout.addSpacing(4)
+
         # ── Laybye Switcher ───────────────────────────────────────────────────
         self.laybye_btn = QPushButton("Laybye")
         self.laybye_btn.setCheckable(True)
@@ -6300,28 +6338,28 @@ class POSView(QWidget):
 
         self.laybye_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {AMBER}; 
-                color: {WHITE}; 
+                background-color: {AMBER};
+                color: {WHITE};
                 border: none;
-                border-radius: {NAV_R}px; 
-                font-size: {NAV_FS}px; 
+                border-radius: {NAV_R}px;
+                font-size: {NAV_FS}px;
                 font-weight: bold;
                 text-align: center;
-                padding: 0px 5px; 
+                padding: 0px 5px;
                 outline: none;
             }}
-            QPushButton:hover {{ 
-                background-color: {ORANGE}; 
+            QPushButton:hover {{
+                background-color: {ORANGE};
             }}
-            QPushButton:pressed {{ 
-                background-color: {NAVY_3}; 
+            QPushButton:pressed {{
+                background-color: {NAVY_3};
                 color: {WHITE};
             }}
-            QPushButton:checked {{ 
-                background-color: {AMBER}; 
+            QPushButton:checked {{
+                background-color: {AMBER};
             }}
-            QPushButton:checked:hover {{ 
-                background-color: {ORANGE}; 
+            QPushButton:checked:hover {{
+                background-color: {ORANGE};
             }}
         """)
 
@@ -6490,14 +6528,24 @@ class POSView(QWidget):
             print(f"[Pharmacy] is_pharmacy_product lookup failed: {e}")
         return False
 
-    def _prompt_dosage(self) -> str | None:
-        """Pharmacy: small inline dosage popup — not a full QDialog."""
+    def _prompt_dosage_and_batch(self, product_id) -> dict:
+        """Pharmacy: single popup that captures dosage AND batch together.
+        Returns {'dosage': str|None, 'batch_no': str|None, 'expiry_date': str|None}.
+        Skipping returns all-None; no-batches path still allows the dosage
+        to be captured and the cart add to proceed."""
         try:
             from models.dosage import list_dosages
             dosages = list_dosages() or []
         except Exception as e:
             print(f"[Pharmacy] list_dosages failed: {e}")
             dosages = []
+
+        try:
+            from models.product import get_batches_for_product
+            batches = get_batches_for_product(int(product_id)) if product_id else []
+        except Exception as e:
+            print(f"[Pharmacy] get_batches_for_product failed: {e}")
+            batches = []
 
         popup = QFrame(self, Qt.Popup)
         popup.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -6512,15 +6560,15 @@ class POSView(QWidget):
         lay.setContentsMargins(12, 10, 12, 10)
         lay.setSpacing(6)
 
-        title = QLabel("Dosage")
-        try:
-            title.setPixmap(qta.icon("fa5s.prescription-bottle-alt",
-                                     color=NAVY).pixmap(14, 14))
-        except Exception:
-            pass
-        title.setText("   Dosage")
-        title.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {NAVY};")
+        title = QLabel("Dispense Item — Dosage & Batch")
+        title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {NAVY};")
         lay.addWidget(title)
+
+        # --- Dosage section ---
+        dosage_hdr = QLabel("Dosage")
+        dosage_hdr.setStyleSheet(
+            f"font-size: 12px; font-weight: bold; color: {NAVY}; margin-top: 4px;")
+        lay.addWidget(dosage_hdr)
 
         lay.addWidget(QLabel("Choose saved dosage:"))
         cbo = QComboBox()
@@ -6537,11 +6585,31 @@ class POSView(QWidget):
         edit.setPlaceholderText("e.g. 1 tab TID x 5d")
         lay.addWidget(edit)
 
-        # Track which input the user touched last
+        # Track which dosage input the user touched last
         state = {"last": "combo"}
         edit.textEdited.connect(lambda _t: state.update({"last": "edit"}))
         cbo.activated.connect(lambda _i: state.update({"last": "combo"}))
 
+        # --- Batch section ---
+        batch_hdr = QLabel("Batch & Expiry")
+        batch_hdr.setStyleSheet(
+            f"font-size: 12px; font-weight: bold; color: {NAVY}; margin-top: 6px;")
+        lay.addWidget(batch_hdr)
+
+        batch_cbo = QComboBox()
+        if not batches:
+            batch_cbo.addItem("— no batches registered —", None)
+            batch_cbo.setEnabled(False)
+        else:
+            for b in batches:
+                bn  = b.get("batch_no") or "(no batch no)"
+                exp = b.get("expiry_date") or "?"
+                qty = b.get("qty", 0)
+                label = f"{bn}  —  expires {exp}   |   qty: {qty}"
+                batch_cbo.addItem(label, b)
+        lay.addWidget(batch_cbo)
+
+        # --- Buttons ---
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
         use_btn  = navy_btn("Use",  height=28, color=SUCCESS, hover=SUCCESS_H)
@@ -6549,116 +6617,41 @@ class POSView(QWidget):
         btn_row.addStretch(); btn_row.addWidget(skip_btn); btn_row.addWidget(use_btn)
         lay.addLayout(btn_row)
 
-        result = {"value": None, "committed": False}
+        result = {"dosage": None, "batch_no": None, "expiry_date": None}
         def _use():
             if state["last"] == "edit" and edit.text().strip():
-                result["value"] = edit.text().strip()
+                result["dosage"] = edit.text().strip()
             else:
-                result["value"] = cbo.currentData() or None
-            result["committed"] = True
+                result["dosage"] = cbo.currentData() or None
+            b = batch_cbo.currentData()
+            if b:
+                result["batch_no"] = b.get("batch_no") or None
+                result["expiry_date"] = b.get("expiry_date")
             popup.close()
         def _skip():
-            result["value"] = None
-            result["committed"] = True
             popup.close()
         use_btn.clicked.connect(_use)
         skip_btn.clicked.connect(_skip)
 
-        # Position below the invoice table
         try:
             origin = self.invoice_table.mapToGlobal(self.invoice_table.rect().topLeft())
             popup.adjustSize()
             popup.move(origin.x() + 60, origin.y() + 40)
         except Exception:
             pass
-        popup.setMinimumWidth(320)
+        popup.setMinimumWidth(360)
         # Qt.Popup + local event loop → modal-ish without the QDialog heft
         from PySide6.QtCore import QEventLoop
         loop = QEventLoop()
         popup.destroyed.connect(loop.quit)
         popup.show()
         loop.exec()
-        return result["value"]
 
-    def _prompt_batch(self, product_id) -> dict:
-        """Pharmacy: batch picker popup. Returns {'batch_no', 'expiry_date'} or nulls."""
-        try:
-            from models.product import get_batches_for_product
-            batches = get_batches_for_product(int(product_id)) if product_id else []
-        except Exception as e:
-            print(f"[Pharmacy] get_batches_for_product failed: {e}")
-            batches = []
-
-        if not batches:
-            try:
-                from utils.toast import show_toast
-                show_toast(self, "No batches registered for this product",
-                           duration_ms=2500, kind="warn")
-            except Exception:
-                pass
-            return {"batch_no": None, "expiry_date": None}
-
-        if len(batches) == 1:
-            b = batches[0]
-            return {"batch_no": b.get("batch_no") or None,
-                    "expiry_date": b.get("expiry_date")}
-
-        popup = QFrame(self, Qt.Popup)
-        popup.setAttribute(Qt.WA_DeleteOnClose, True)
-        popup.setStyleSheet(f"""
-            QFrame {{
-                background: {WHITE}; border: 1px solid {BORDER};
-                border-radius: 6px;
-            }}
-            QLabel {{ color: {NAVY}; background: transparent; }}
-        """)
-        lay = QVBoxLayout(popup)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(6)
-
-        title = QLabel("Pick a batch")
-        title.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {NAVY};")
-        lay.addWidget(title)
-
-        lst = QListWidget()
-        for b in batches:
-            bn  = b.get("batch_no") or "(no batch no)"
-            exp = b.get("expiry_date") or "?"
-            qty = b.get("qty", 0)
-            it = QListWidgetItem(f"{bn}  —  expires {exp}   |   qty: {qty}")
-            it.setData(Qt.UserRole, b)
-            lst.addItem(it)
-        lst.setStyleSheet(f"""
-            QListWidget {{ background: {WHITE}; color: {NAVY}; border: 1px solid {BORDER}; }}
-            QListWidget::item:selected {{ background: {ACCENT}; color: {WHITE}; }}
-        """)
-        lay.addWidget(lst)
-
-        result = {"chosen": None, "done": False}
-        def _pick(item):
-            b = item.data(Qt.UserRole) or {}
-            result["chosen"] = {"batch_no": b.get("batch_no") or None,
-                                "expiry_date": b.get("expiry_date")}
-            result["done"] = True
-            popup.close()
-        lst.itemClicked.connect(_pick)
-
-        try:
-            origin = self.invoice_table.mapToGlobal(self.invoice_table.rect().topLeft())
-            popup.setMinimumWidth(360)
-            popup.adjustSize()
-            popup.move(origin.x() + 60, origin.y() + 40)
-        except Exception:
-            pass
-        popup.show()
-        from PySide6.QtCore import QEventLoop
-        loop = QEventLoop()
-        popup.destroyed.connect(loop.quit)
-        loop.exec()
-
-        if result["chosen"]:
-            return result["chosen"]
-        return {"batch_no": None, "expiry_date": None}
+        return {
+            "dosage":      result["dosage"],
+            "batch_no":    result["batch_no"],
+            "expiry_date": result["expiry_date"],
+        }
 
     def _is_pharmacy_row_locked(self, row: int) -> bool:
         # Cashiers cannot modify or delete rows stamped as pharmacy line items.
@@ -6711,14 +6704,13 @@ class POSView(QWidget):
                     pass
                 print(f"[Pharmacy] Blocked add — user is not pharmacist: {name}")
                 return
-            # Pharmacist — prompt for dosage then batch
-            dosage_val = self._prompt_dosage()
-            batch_val  = self._prompt_batch(product_id)
+            # Pharmacist — single merged popup captures dosage + batch together
+            combined = self._prompt_dosage_and_batch(product_id)
             pharmacy_meta = {
                 "is_pharmacy": True,
-                "dosage":      dosage_val,
-                "batch_no":    batch_val.get("batch_no"),
-                "expiry_date": batch_val.get("expiry_date"),
+                "dosage":      combined.get("dosage"),
+                "batch_no":    combined.get("batch_no"),
+                "expiry_date": combined.get("expiry_date"),
                 "product_id":  product_id,
             }
 
@@ -10823,19 +10815,11 @@ class MainWindow(QMainWindow):
         _sql_h.addWidget(_sql_ic); _sql_h.addWidget(_sql_lbl)
         self._status_bar.addPermanentWidget(_sql_w)
 
-        # #18 — everyone lands on POS first, always
+        # #18 — everyone lands on POS first, always.
+        # POSView picks its initial cart mode (Sales vs Quote) based on the
+        # user's role; pharmacists default to Quote, everyone else to Sales.
+        # The mode is toggleable from the POS navbar at any time.
         self._stack.setCurrentIndex(0)
-
-        # Pharmacist landing — users whose ERPNext role is "Pharmacist" should
-        # land straight on the Quotations list so they can pick up a quote
-        # instead of hunting through the menu for it. Deferred via
-        # QTimer.singleShot(0, ...) so MainWindow finishes showing first.
-        try:
-            from utils.roles import is_pharmacist
-            if is_pharmacist(self.user):
-                QTimer.singleShot(0, self._open_quotations_for_pharmacist)
-        except Exception as _e:
-            print(f"[main_window] pharmacist redirect skipped: {_e}")
 
         # ── Background sync services ──────────────────────────────────────────
         # Product sync (every 15 s) — keeps local product list up to date
