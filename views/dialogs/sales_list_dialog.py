@@ -1140,6 +1140,12 @@ class SalesListPage(QWidget):
         self.print_btn.setIcon(qta.icon("fa5s.print", color="white"))
         self.recall_btn = _toolbar_btn("Recall",      ACCENT, ACCENT_H, size=(100,36))
         self.recall_btn.setIcon(qta.icon("fa5s.undo", color="white"))
+        self.label_btn  = _toolbar_btn("Preview Label", NAVY_2, NAVY_3, size=(140,36))
+        try:
+            self.label_btn.setIcon(qta.icon("fa5s.prescription-bottle-alt", color="white"))
+        except Exception:
+            pass
+        self.label_btn.setToolTip("Preview pharmacy labels for pharmacy items on this invoice")
         self.delete_btn = _toolbar_btn("Delete (F4)", DANGER, DANGER_H)
         self.delete_btn.setIcon(qta.icon("fa5s.trash", color="white"))
         self.sync_btn   = _toolbar_btn("Sync Now",    ACCENT, ACCENT_H, size=(120,36))
@@ -1150,10 +1156,12 @@ class SalesListPage(QWidget):
 
         self.print_btn.setEnabled(False)
         self.recall_btn.setEnabled(False)
+        self.label_btn.setEnabled(False)
         self.delete_btn.setVisible(False)
 
         self.print_btn.clicked.connect(self._on_print)
         self.recall_btn.clicked.connect(self._on_recall)
+        self.label_btn.clicked.connect(self._on_preview_label)
         self.delete_btn.clicked.connect(self._on_delete)
         self.sync_btn.clicked.connect(self._on_sync_now)
         self.filter_btn.clicked.connect(self._toggle_unsynced_filter)
@@ -1161,7 +1169,7 @@ class SalesListPage(QWidget):
 
         root.addWidget(_build_toolbar("Sales List", right_widgets=[
             self.filter_btn, self.sync_btn,
-            self.recall_btn, self.print_btn, self.delete_btn, close_btn,
+            self.recall_btn, self.print_btn, self.label_btn, self.delete_btn, close_btn,
         ]))
 
         # Status bar (shown during / after sync)
@@ -1349,6 +1357,7 @@ class SalesListPage(QWidget):
         has = self._get_selected_sale() is not None
         self.recall_btn.setEnabled(has)
         self.print_btn.setEnabled(has)
+        self.label_btn.setEnabled(has)
         self.delete_btn.setEnabled(has)
 
     # ── recall ────────────────────────────────────────────────────────────────
@@ -1362,6 +1371,20 @@ class SalesListPage(QWidget):
             self._show_status("No items found for this invoice.", color=AMBER)
             return
         self.on_recall(sale, items)
+
+    # ── pharmacy label preview ────────────────────────────────────────────────
+
+    def _on_preview_label(self):
+        sale = self._get_selected_sale()
+        if not sale:
+            return
+        try:
+            from services.pharmacy_label_print import preview_labels_for_sale
+            preview_labels_for_sale(self, int(sale["id"]))
+        except Exception as e:
+            import traceback as _tb
+            _tb.print_exc()
+            self._show_status(f"Label preview failed: {e}", color=DANGER)
 
     # ── unsynced filter ───────────────────────────────────────────────────────
 

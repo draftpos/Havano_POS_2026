@@ -13,6 +13,11 @@ from datetime import datetime, timedelta
 from typing import List
 import traceback
 
+try:
+    import qtawesome as qta
+except Exception:  # pragma: no cover — icons are optional decoration
+    qta = None
+
 
 class QuotationDialog(QDialog):
 
@@ -403,6 +408,22 @@ class QuotationDialog(QDialog):
         self.convert_btn.setMinimumWidth(130)
         self.convert_btn.clicked.connect(self._convert_to_sale)
 
+        # Pharmacy label preview — enabled only when exactly one row is selected
+        self.label_preview_btn = QPushButton("Preview Label")
+        self.label_preview_btn.setObjectName("primaryBtn")
+        self.label_preview_btn.setEnabled(False)
+        self.label_preview_btn.setToolTip(
+            "Preview pharmacy labels for pharmacy items on this quotation"
+        )
+        if qta is not None:
+            try:
+                self.label_preview_btn.setIcon(
+                    qta.icon("fa5s.prescription-bottle-alt", color="white")
+                )
+            except Exception:
+                pass
+        self.label_preview_btn.clicked.connect(self._preview_pharmacy_labels)
+
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.setObjectName("dangerBtn")
         self.delete_btn.setEnabled(False)
@@ -414,6 +435,7 @@ class QuotationDialog(QDialog):
 
         action_layout.addStretch()
         action_layout.addWidget(self.convert_btn)
+        action_layout.addWidget(self.label_preview_btn)
         action_layout.addWidget(self.delete_btn)
         action_layout.addWidget(close_btn)
         right_layout.addLayout(action_layout)
@@ -589,8 +611,13 @@ class QuotationDialog(QDialog):
         if not selected:
             self.convert_btn.setEnabled(False)
             self.delete_btn.setEnabled(False)
+            self.label_preview_btn.setEnabled(False)
             self.current_quotation = None
             return
+
+        # Only enable row-action buttons when exactly one row is selected.
+        selected_rows = {idx.row() for idx in self.quotation_table.selectedIndexes()}
+        single_selection = len(selected_rows) == 1
 
         row  = selected[0].row()
         item = self.quotation_table.item(row, 0)
@@ -600,6 +627,7 @@ class QuotationDialog(QDialog):
             can_convert = self.current_quotation.can_convert_to_sale()
             self.convert_btn.setEnabled(can_convert)
             self.delete_btn.setEnabled(True)
+            self.label_preview_btn.setEnabled(single_selection)
             self._display_quotation_details(self.current_quotation)
             self.convert_btn.setToolTip(
                 "Load quotation items into cart" if can_convert
@@ -712,6 +740,31 @@ class QuotationDialog(QDialog):
             traceback.print_exc()
 
     # ─────────────────────────────────────────────────────────────────
+    # Pharmacy label preview
+    # ─────────────────────────────────────────────────────────────────
+
+    def _preview_pharmacy_labels(self):
+        """Open a print preview of pharmacy labels for the selected quotation."""
+        if not self.current_quotation:
+            return
+        qid = getattr(self.current_quotation, "local_id", None)
+        if not qid:
+            QMessageBox.warning(
+                self, "Preview Label",
+                "Cannot preview labels — quotation is not saved locally yet."
+            )
+            return
+        try:
+            from services.pharmacy_label_print import preview_labels_for_quotation
+            preview_labels_for_quotation(self, int(qid))
+        except Exception as e:
+            traceback.print_exc()
+            QMessageBox.warning(
+                self, "Preview Label",
+                f"Failed to open label preview:\n{e}"
+            )
+
+    # ─────────────────────────────────────────────────────────────────
     # Delete
     # ─────────────────────────────────────────────────────────────────
 
@@ -739,6 +792,7 @@ class QuotationDialog(QDialog):
                 self.current_quotation = None
                 self.convert_btn.setEnabled(False)
                 self.delete_btn.setEnabled(False)
+                self.label_preview_btn.setEnabled(False)
                 # Reset detail panel
                 for lbl in (self.customer_name_label, self.quotation_ref_label,
                             self.company_label, self.transaction_date_label,
