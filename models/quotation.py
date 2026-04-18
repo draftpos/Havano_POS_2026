@@ -21,7 +21,12 @@ class QuotationItem:
     # Link to local product
     product_id: Optional[int] = None
     part_no: Optional[str] = None
-    
+    # ── Pharmacy-specific fields ──────────────────────────────────────────
+    is_pharmacy: bool = False
+    dosage: Optional[str] = None
+    batch_no: Optional[str] = None
+    expiry_date: Optional[str] = None
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'QuotationItem':
         return cls(
@@ -32,9 +37,13 @@ class QuotationItem:
             rate=float(data.get("rate", 0)),
             amount=float(data.get("amount", 0)),
             uom=str(data.get("uom", "Nos")),
-            part_no=str(data.get("item_code", ""))
+            part_no=str(data.get("item_code", "")),
+            is_pharmacy=bool(data.get("is_pharmacy", False)),
+            dosage=data.get("dosage"),
+            batch_no=data.get("batch_no"),
+            expiry_date=data.get("expiry_date"),
         )
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "item_code": self.item_code,
@@ -45,7 +54,11 @@ class QuotationItem:
             "amount": self.amount,
             "uom": self.uom,
             "product_id": self.product_id,
-            "part_no": self.part_no
+            "part_no": self.part_no,
+            "is_pharmacy": self.is_pharmacy,
+            "dosage": self.dosage,
+            "batch_no": self.batch_no,
+            "expiry_date": self.expiry_date,
         }
     
     def link_to_product(self, product: dict) -> None:
@@ -321,14 +334,15 @@ def save_quotation(quotation: Quotation) -> int:
             conn.close()
             raise Exception("Failed to get inserted quotation ID")
     
-    # Insert items with product links
+    # Insert items with product links (plus pharmacy fields)
     for item in quotation.items:
         cur.execute("""
             INSERT INTO quotation_items (
-                quotation_id, item_code, item_name, description, 
-                qty, rate, amount, uom, product_id, part_no
+                quotation_id, item_code, item_name, description,
+                qty, rate, amount, uom, product_id, part_no,
+                is_pharmacy, dosage, batch_no, expiry_date
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             quotation_id,
             item.item_code,
@@ -339,7 +353,11 @@ def save_quotation(quotation: Quotation) -> int:
             item.amount,
             item.uom,
             item.product_id,
-            item.part_no
+            item.part_no,
+            1 if item.is_pharmacy else 0,
+            item.dosage,
+            item.batch_no,
+            item.expiry_date,
         ))
     
     conn.commit()
@@ -593,6 +611,11 @@ def convert_quotation_to_cart(quotation: Quotation) -> list[dict]:
             "tax_rate":     0.0,
             "tax_amount":   0.0,
             "remarks":      f"From quotation: {quotation.name}",
+            # ── Pharmacy round-trip fields ────────────────────────────
+            "is_pharmacy":  bool(item.is_pharmacy),
+            "dosage":       item.dosage,
+            "batch_no":     item.batch_no,
+            "expiry_date":  item.expiry_date,
         })
 
     print(f"[DEBUG] cart_items built: {len(cart_items)} entries")

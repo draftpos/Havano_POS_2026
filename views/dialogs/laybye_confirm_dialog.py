@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QFrame, QWidget, QMessageBox,
 )
 from PySide6.QtCore import Qt, QTimer
+import qtawesome as qta
 
 # --- UI CONSTANTS ---
 NAVY      = "#0d1f3c"
@@ -74,7 +75,10 @@ class LaybyeConfirmDialog(QDialog):
         # Header: Replaced "Save Cart" with "Confirm Laybye"
         hdr = QWidget(); hdr.setStyleSheet(f"background:{ORANGE};"); hdr.setFixedHeight(56)
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
-        hl.addWidget(_lbl("📋", "font-size:22px;"))
+        _icon_lbl = QLabel()
+        _icon_lbl.setPixmap(qta.icon("fa5s.clipboard", color=WHITE).pixmap(22, 22))
+        _icon_lbl.setStyleSheet("background:transparent;")
+        hl.addWidget(_icon_lbl)
         hl.addSpacing(8)
         hl.addWidget(_lbl("Confirm Laybye Details",
                          f"color:{WHITE}; font-size:15px; font-weight:bold;"))
@@ -88,7 +92,7 @@ class LaybyeConfirmDialog(QDialog):
         cr.addWidget(_lbl("Customer:", f"color:{MUTED}; font-size:12px;"))
         
         cname = (self.selected_customer or {}).get("customer_name", "") if self.selected_customer else ""
-        self._cust_val = QLabel(cname or "⚠  No customer selected")
+        self._cust_val = QLabel(cname or "No customer selected")
         self._cust_val.setStyleSheet(
             (f"color:{DARK_TEXT}; font-size:12px; font-weight:bold;"
              if (cname and not _is_walk_in(self.selected_customer))
@@ -159,7 +163,9 @@ class LaybyeConfirmDialog(QDialog):
         )
         cxl.clicked.connect(self.reject)
         
-        self._ok = QPushButton("✔  Confirm Laybye"); self._ok.setFixedHeight(44)
+        self._ok = QPushButton("Confirm Laybye")
+        self._ok.setIcon(qta.icon("fa5s.check", color="white"))
+        self._ok.setFixedHeight(44)
         self._ok.setCursor(Qt.PointingHandCursor)
         self._ok.setStyleSheet(
             f"QPushButton {{ background:{ORANGE}; color:{WHITE}; border:none;"
@@ -194,7 +200,7 @@ class LaybyeConfirmDialog(QDialog):
         if dlg.exec() == QDialog.Accepted:
             c = dlg.selected_customer
             if _is_walk_in(c):
-                self._cust_val.setText("⚠  Walk-in not allowed for Laybye")
+                self._cust_val.setText("Walk-in not allowed for Laybye")
                 self._cust_val.setStyleSheet(f"color:{DANGER}; font-size:12px; font-weight:bold;")
                 self.selected_customer = None
             else:

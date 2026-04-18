@@ -8,7 +8,12 @@ _ORDER_COLS = [f"order_{i}" for i in range(1, 7)]
 _ORDER_SEL  = ", ".join(_ORDER_COLS)   # order_1, order_2, … order_6
 
 # Added uom and conversion_factor to the standard selection
-_BASE_SELECT = f"id, part_no, name, price, stock, category, image_path, uom, conversion_factor, {_ORDER_SEL}"
+# is_pharmacy_product is wrapped in COALESCE so pre-migration rows still work
+_BASE_SELECT = (
+    "id, part_no, name, price, stock, category, image_path, uom, conversion_factor, "
+    "COALESCE(is_pharmacy_product, 0) AS is_pharmacy_product, "
+    f"{_ORDER_SEL}"
+)
 
 # =============================================================================
 # READ
@@ -210,5 +215,43 @@ def _to_dict(row: dict) -> dict | None:
         "image_path":        row.get("image_path") or "",
         "uom":               row.get("uom") or "Unit",
         "conversion_factor": float(row.get("conversion_factor") or 1.0),
+        "is_pharmacy_product": bool(row.get("is_pharmacy_product", False)),
         **{f"order_{i}": bool(row.get(f"order_{i}", False)) for i in range(1, 7)},
     }
+
+
+# =============================================================================
+# PHARMACY — product batches
+# =============================================================================
+
+def get_batches_for_product(product_id: int) -> list[dict]:
+    """
+    Returns all batches for a product as a list of dicts:
+        [{"batch_no": str, "expiry_date": str|None, "qty": float}, ...]
+    Returns an empty list if the product has no batches (or if the
+    product_batches table is missing — defensive for pre-migration DBs).
+    """
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT batch_no, expiry_date, qty
+            FROM product_batches
+            WHERE product_id = ?
+            ORDER BY expiry_date, batch_no
+        """, (product_id,))
+        rows = fetchall_dicts(cur)
+        conn.close()
+    except Exception:
+        return []
+
+    out = []
+    for r in rows:
+        exp = r.get("expiry_date")
+        exp_str = exp.isoformat() if hasattr(exp, "isoformat") else (str(exp) if exp else None)
+        out.append({
+            "batch_no":    r.get("batch_no") or "",
+            "expiry_date": exp_str,
+            "qty":         float(r.get("qty") or 0),
+        })
+    return out

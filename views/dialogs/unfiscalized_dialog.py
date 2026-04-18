@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
+import qtawesome as qta
 from database.db import get_connection, fetchall_dicts
 
 # Colors matching system palette
@@ -45,7 +46,7 @@ class UnfiscalizedDialog(QDialog):
         hdr.setStyleSheet(f"background-color: {NAVY}; border-radius: 5px;")
         hl = QHBoxLayout(hdr)
         hl.setContentsMargins(16, 0, 16, 0)
-        title = QLabel("⚠ Unfiscalized Items Dashboard (Z)")
+        title = QLabel("Unfiscalized Items Dashboard (Z)")
         title.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {WHITE}; background: transparent;")
         self._count_lbl = QLabel("")
         self._count_lbl.setStyleSheet(f"color: #8fa8c8; font-size: 11px; background: transparent;")
@@ -70,11 +71,11 @@ class UnfiscalizedDialog(QDialog):
         
         # Tab 1: Sales List
         self._sales_tab = self._build_sales_tab()
-        self._tabs.addTab(self._sales_tab, "📋  Pending Invoices")
+        self._tabs.addTab(self._sales_tab, qta.icon("fa5s.clipboard"), "Pending Invoices")
         
         # Tab 2: Aggregated Summary (The "Z" Details)
         self._summary_tab = self._build_summary_tab()
-        self._tabs.addTab(self._summary_tab, "📉  Fiscal Day Summary (Z)")
+        self._tabs.addTab(self._summary_tab, qta.icon("fa5s.chart-line"), "Fiscal Day Summary (Z)")
         
         layout.addWidget(self._tabs, 1)
         
@@ -82,14 +83,16 @@ class UnfiscalizedDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
         
-        self._retry_btn = QPushButton("🔄 Retry Selected")
+        self._retry_btn = QPushButton("Retry Selected")
+        self._retry_btn.setIcon(qta.icon("fa5s.sync-alt"))
         self._retry_btn.setFixedHeight(36)
         self._retry_btn.setCursor(Qt.PointingHandCursor)
         self._retry_btn.setEnabled(False)
         self._retry_btn.setStyleSheet(self._btn_ss(ACCENT, ACCENT_H))
         self._retry_btn.clicked.connect(self._retry_selected)
         
-        self._retry_all_btn = QPushButton("🚀 Retry All Pending")
+        self._retry_all_btn = QPushButton("Retry All Pending")
+        self._retry_all_btn.setIcon(qta.icon("fa5s.sync-alt"))
         self._retry_all_btn.setFixedHeight(36)
         self._retry_all_btn.setCursor(Qt.PointingHandCursor)
         self._retry_all_btn.setStyleSheet(self._btn_ss(SUCCESS, "#1f9447"))

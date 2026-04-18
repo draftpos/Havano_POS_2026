@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QDate
 from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QColor, QFont
+import qtawesome as qta
 from PySide6.QtCore  import QPropertyAnimation, QEasingCurve, Property
 from PySide6.QtGui   import QPainter, QLinearGradient, QRadialGradient
 
@@ -388,7 +389,7 @@ class _UserFormDialog(QDialog):
         title_lbl.setStyleSheet(
             f"color:{WHITE};font-size:15px;font-weight:bold;background:transparent;"
         )
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton(); close_btn.setIcon(qta.icon("fa5s.times", color="white"))
         close_btn.setFixedSize(28, 28)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"""
@@ -808,7 +809,7 @@ class ManageUsersDialog(QDialog):
             f"font-size:12px;background:transparent;color:#2ecc71;"
         )
 
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton(); close_btn.setIcon(qta.icon("fa5s.times", color="white"))
         close_btn.setFixedSize(30, 30)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"""

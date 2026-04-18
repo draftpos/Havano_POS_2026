@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QDate
 from PySide6.QtGui import QAction, QColor, QFont
+import qtawesome as qta
 
 try:
     from views.dialogs.day_shift_dialog import DayShiftDialog
@@ -563,7 +564,8 @@ class _InlineSettingsDialog(QDialog):
         t.setStyleSheet(
             f"font-size:17px; font-weight:bold; color:{WHITE}; background:transparent;"
         )
-        close_btn = QPushButton("✕  Close")
+        close_btn = QPushButton("Close")
+        close_btn.setIcon(qta.icon("fa5s.times", color="white"))
         close_btn.setFixedSize(90, 32)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"""
@@ -595,20 +597,21 @@ class _InlineSettingsDialog(QDialog):
         self._stack.setStyleSheet(f"background:{OFF_WHITE};")
 
         pages = [
-            ("⚙  General",        self._page_general()),
-            ("🏢  Companies",      CompanyDialog(self)),
-            ("👥  Customer Groups",CustomerGroupDialog(self)),
-            ("🏭  Warehouses",     WarehouseDialog(self)),
-            ("💰  Cost Centers",   CostCenterDialog(self)),
-            ("🏷  Price Lists",    PriceListDialog(self)),
-            ("👤  Customers",      CustomerDialog(self)),
-            ("🔑  Users",          ManageUsersDialog(self, current_user=self.user)),
+            ("fa5s.cog",      "General",         self._page_general()),
+            ("fa5s.building", "Companies",       CompanyDialog(self)),
+            ("fa5s.users",    "Customer Groups", CustomerGroupDialog(self)),
+            ("fa5s.industry", "Warehouses",      WarehouseDialog(self)),
+            ("fa5s.money-bill", "Cost Centers",  CostCenterDialog(self)),
+            ("fa5s.tag",      "Price Lists",     PriceListDialog(self)),
+            ("fa5s.user",     "Customers",       CustomerDialog(self)),
+            ("fa5s.key",      "Users",           ManageUsersDialog(self, current_user=self.user)),
         ]
 
         self._nav_btns = []
-        for i, (label, page) in enumerate(pages):
+        for i, (icon_name, label, page) in enumerate(pages):
             self._stack.addWidget(page)
             btn = QPushButton(label)
+            btn.setIcon(qta.icon(icon_name))
             btn.setFixedHeight(42)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setCheckable(True)
@@ -701,7 +704,7 @@ class _InlineSettingsDialog(QDialog):
         lay.addSpacing(20)
 
         tip = QLabel(
-            "💡  Use the sidebar to manage Companies, Customers, Warehouses, "
+            "Use the sidebar to manage Companies, Customers, Warehouses, "
             "Cost Centers, Price Lists and Users.\n"
             "Changes take effect immediately."
         )
@@ -767,7 +770,8 @@ class QuantityPopup(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
-        ok_btn  = navy_btn("✓  Set Qty", height=40, color=SUCCESS, hover=SUCCESS_H)
+        ok_btn  = navy_btn("Set Qty", height=40, color=SUCCESS, hover=SUCCESS_H)
+        ok_btn.setIcon(qta.icon("fa5s.check", color="white"))
         cxl_btn = navy_btn("Cancel",     height=40, color=NAVY_2,  hover=NAVY_3)
         ok_btn.clicked.connect(self._confirm)
         cxl_btn.clicked.connect(self.reject)
@@ -1851,13 +1855,16 @@ class AdminDashboard(QWidget):
                 ("user",   lambda v: str(v)),
                 ("method", lambda v: str(v)),
                 ("total",  lambda v: f"${v:.2f}"),
-                ("synced", lambda v: "✓" if v else "—"),
+                ("synced", lambda v: "" if v else "—"),
             ]):
                 raw = s.get(key, ""); text = fmt(raw)
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignCenter if c != 2 else Qt.AlignLeft | Qt.AlignVCenter)
                 if key == "total": item.setForeground(QColor(ACCENT))
-                elif key == "synced": item.setForeground(QColor(SUCCESS if s.get("synced") else MUTED))
+                elif key == "synced":
+                    if s.get("synced"):
+                        item.setIcon(qta.icon("fa5s.check", color=SUCCESS))
+                    item.setForeground(QColor(SUCCESS if s.get("synced") else MUTED))
                 self.sales_table.setItem(r, c, item)
             self.sales_table.setRowHeight(r, 34)
 
@@ -1872,8 +1879,13 @@ class AdminDashboard(QWidget):
             low = []
 
         if not low:
-            lbl = QLabel("✓  All stock levels OK"); lbl.setStyleSheet(f"color: {SUCCESS}; font-size: 12px; background: transparent;")
-            self._stock_alert_layout.addWidget(lbl)
+            row_w = QWidget(); row_w.setStyleSheet("background: transparent;")
+            rh = QHBoxLayout(row_w); rh.setContentsMargins(0, 0, 0, 0); rh.setSpacing(6)
+            ic = QLabel(); ic.setPixmap(qta.icon("fa5s.check", color=SUCCESS).pixmap(14, 14))
+            ic.setStyleSheet("background:transparent;")
+            lbl = QLabel("All stock levels OK"); lbl.setStyleSheet(f"color: {SUCCESS}; font-size: 12px; background: transparent;")
+            rh.addWidget(ic); rh.addWidget(lbl); rh.addStretch()
+            self._stock_alert_layout.addWidget(row_w)
         else:
             for p in low[:8]:
                 row_w = QWidget(); row_w.setStyleSheet("background: transparent;")
@@ -2003,7 +2015,8 @@ class POSView(QWidget):
         f7_btn.clicked.connect(self._open_sales_list)
         layout.addWidget(f7_btn); layout.addSpacing(6)
 
-        self._cust_btn = QPushButton("👤  Customer")
+        self._cust_btn = QPushButton("Customer")
+        self._cust_btn.setIcon(qta.icon("fa5s.user", color="white"))
         self._cust_btn.setFixedHeight(26); self._cust_btn.setMaximumWidth(170)
         self._cust_btn.setCursor(Qt.PointingHandCursor)
         self._cust_btn.setStyleSheet(f"""
@@ -3099,8 +3112,8 @@ class POSView(QWidget):
             QMenu::item:selected   {{ background-color: {ACCENT}; color: {WHITE}; }}
             QMenu::separator       {{ height: 1px; background: {BORDER}; margin: 4px 10px; }}
         """)
-        act_set    = menu.addAction("🖼  Set Image…")
-        act_remove = menu.addAction("🗑  Remove Image")
+        act_set    = menu.addAction(qta.icon("fa5s.image"), "Set Image…")
+        act_remove = menu.addAction(qta.icon("fa5s.trash"), "Remove Image")
         act_remove.setEnabled(bool(current_image))
         chosen = menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
         if chosen == act_set:
@@ -3160,7 +3173,7 @@ class POSView(QWidget):
             self._selected_customer = dlg.selected_customer
             if self._selected_customer:
                 name = self._selected_customer.get("customer_name", "")
-                self._cust_btn.setText(f"👤  {name[:22]}")
+                self._cust_btn.setText(f"{name[:22]}")
                 self._cust_btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {ACCENT}; color: {WHITE};
@@ -3347,7 +3360,7 @@ class POSView(QWidget):
 
     def _reset_customer_btn(self):
         self._selected_customer = None
-        self._cust_btn.setText("👤  Customer")
+        self._cust_btn.setText("Customer")
         self._cust_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {NAVY_2}; color: {MID}; border: 1px solid {NAVY_3};

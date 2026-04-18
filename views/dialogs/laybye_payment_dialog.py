@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QLocale, QDate
 from PySide6.QtGui import QDoubleValidator, QKeyEvent
+import qtawesome as qta
 import hashlib
 import json
 import time
@@ -366,14 +367,14 @@ class LaybyePaymentDialog(QDialog):
         title = QLabel("Laybye  —  Deposit")
         title.setStyleSheet(f"color:{NAVY}; font-size:17px; font-weight:bold; background:transparent;")
 
-        badge = QLabel("🛍  LAYBYE")
+        badge = QLabel("LAYBYE")
         badge.setStyleSheet(f"background:{ORANGE}; color:{WHITE}; border-radius:5px; font-size:10px; font-weight:bold; padding:3px 10px;")
 
         zwg_rate = _get_local_rate("USD", "ZWG")
         rate_pill = QLabel(f"1 USD = {zwg_rate:,.2f} ZWG")
         rate_pill.setStyleSheet(f"color:{MUTED}; font-size:10px; background:{LIGHT}; border-radius:4px; padding:2px 8px;")
 
-        hint = QLabel("Deposit optional  ·  Enter to save  ·  Esc to cancel  ·  ⌫ Backspace to delete")
+        hint = QLabel("Deposit optional  ·  Enter to save  ·  Esc to cancel  ·  Backspace to delete")
         hint.setStyleSheet(f"color:{MUTED}; font-size:10px; background:transparent;")
         hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
@@ -393,7 +394,9 @@ class LaybyePaymentDialog(QDialog):
         cs = QHBoxLayout(cust_strip)
         cs.setContentsMargins(28, 0, 28, 0)
 
-        cust_icon = QLabel("👤")
+        cust_icon = QLabel()
+        cust_icon.setPixmap(qta.icon("fa5s.user", color=WHITE).pixmap(16, 16))
+        cust_icon.setStyleSheet("background:transparent;")
         cust_name_lbl = QLabel((self._customer or {}).get("customer_name", "Unknown"))
         cust_name_lbl.setStyleSheet(f"color:{WHITE}; font-size:13px; font-weight:bold; background:transparent;")
 
@@ -575,7 +578,8 @@ class LaybyePaymentDialog(QDialog):
             grid.addWidget(b, r, c)
 
         # Backspace and Clear
-        db = _numpad_btn("⌫", "del")
+        db = _numpad_btn("", "del")
+        db.setIcon(qta.icon("fa5s.backspace", color="white"))
         db.clicked.connect(self._numpad_back)
         grid.addWidget(db, 5, 0)
 
@@ -609,7 +613,8 @@ class LaybyePaymentDialog(QDialog):
         vbox.addWidget(_hr())
 
         # Save button
-        save_btn = _action_btn("🛍  Save Laybye", ORANGE, "#d96a00", 52)
+        save_btn = _action_btn("Save Laybye", ORANGE, "#d96a00", 52)
+        save_btn.setIcon(qta.icon("fa5s.shopping-bag", color="white"))
         save_btn.clicked.connect(self._save)
         vbox.addWidget(save_btn)
 

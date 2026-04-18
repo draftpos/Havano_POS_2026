@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QLocale, QTimer
 from PySide6.QtGui  import QDoubleValidator
+import qtawesome as qta
 import hashlib
 import json
 import time
@@ -573,7 +574,8 @@ class PaymentDialog(QDialog):
         grid = QGridLayout()
         grid.setSpacing(6)
 
-        bback = _numpad_btn("⌫", "del")
+        bback = _numpad_btn("", "del")
+        bback.setIcon(qta.icon("fa5s.backspace", color="white"))
         bback.clicked.connect(self._numpad_back)
         grid.addWidget(bback, 0, 0)
 
@@ -629,7 +631,8 @@ class PaymentDialog(QDialog):
 
         brow = QHBoxLayout()
         brow.setSpacing(8)
-        self._print_btn = _action_btn("🖨  Print  (F2)", NAVY_2, NAVY_3, height=52)
+        self._print_btn = _action_btn("Print  (F2)", NAVY_2, NAVY_3, height=52)
+        self._print_btn.setIcon(qta.icon("fa5s.print", color="white"))
         self._print_btn.clicked.connect(self._save)
         self._print_btn.setEnabled(False)
         brow.addWidget(self._print_btn)
@@ -1109,7 +1112,8 @@ class PaymentDialog(QDialog):
             self._processing_save = False
             if self._print_btn:
                 self._print_btn.setEnabled(True)
-                self._print_btn.setText("🖨  Print  (F2)")
+                self._print_btn.setText("Print  (F2)")
+                self._print_btn.setIcon(qta.icon("fa5s.print", color="white"))
 
     def _open_split(self):
         co = self._company.get("name", "") if self._company else ""

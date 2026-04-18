@@ -10,7 +10,8 @@ _SELECT = """
            cu.custom_cost_center_id, cc.name AS cost_center_name,
            cu.default_price_list_id, pl.name AS price_list_name,
            cu.balance, cu.laybye_balance, cu.outstanding_amount, cu.loyalty_points,
-           cu.frappe_synced
+           cu.frappe_synced,
+           cu.doctor_id, cu.doctor_frappe_name
     FROM customers cu
     LEFT JOIN customer_groups cg ON cg.id = cu.customer_group_id
     LEFT JOIN warehouses       w  ON w.id  = cu.custom_warehouse_id
@@ -176,9 +177,10 @@ def _to_dict(row: dict) -> dict | None:
     # Standardize output: converts None to empty strings or 0.0 for safety
     d = dict(row)
     numeric_fields = [
-        'balance', 'laybye_balance', 'outstanding_amount', 'loyalty_points', 
-        'id', 'customer_group_id', 'custom_warehouse_id', 
-        'custom_cost_center_id', 'default_price_list_id', 'frappe_synced'
+        'balance', 'laybye_balance', 'outstanding_amount', 'loyalty_points',
+        'id', 'customer_group_id', 'custom_warehouse_id',
+        'custom_cost_center_id', 'default_price_list_id', 'frappe_synced',
+        'doctor_id'
     ]
     for k, v in d.items():
         if v is None:

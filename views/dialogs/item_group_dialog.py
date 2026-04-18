@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QColor
+import qtawesome as qta
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
@@ -56,7 +57,7 @@ class SyncWorker(QThread):
             api_key    = session.get("api_key")    or ""
             api_secret = session.get("api_secret") or ""
         except Exception as e:
-            self.progress.emit(f"⚠  Auth session error: {e}")
+            self.progress.emit(f"Auth session error: {e}")
 
         # ── 2. Fetch from Frappe API ───────────────────────────────────────────
         import urllib.request, json
@@ -183,7 +184,8 @@ class ItemGroupDialog(QDialog):
             f"font-size:11px; color:{MID}; background:transparent;"
         )
 
-        close_btn = QPushButton("✕  Close")
+        close_btn = QPushButton("Close")
+        close_btn.setIcon(qta.icon("fa5s.times", color="white"))
         close_btn.setFixedSize(90, 32); close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"""
             QPushButton {{
@@ -208,7 +210,7 @@ class ItemGroupDialog(QDialog):
         top_row = QHBoxLayout(); top_row.setSpacing(8)
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍  Search by name or parent group …")
+        self._search.setPlaceholderText("Search by name or parent group …")
         self._search.setFixedHeight(34)
         self._search.setStyleSheet(f"""
             QLineEdit {{
@@ -298,9 +300,12 @@ class ItemGroupDialog(QDialog):
         self._f_parent  = _field("Parent Item Group")
         self._hidden_id = None
 
-        self._save_btn   = _navy_btn("💾  Save",   color=SUCCESS, hover=SUCCESS_H, height=32)
-        self._clear_btn  = _navy_btn("✕  Clear",  color=NAVY_2,  height=32, width=80)
-        self._delete_btn = _navy_btn("🗑  Delete", color=DANGER,  hover=DANGER_H,  height=32, width=90)
+        self._save_btn   = _navy_btn("Save",   color=SUCCESS, hover=SUCCESS_H, height=32)
+        self._save_btn.setIcon(qta.icon("fa5s.save", color="white"))
+        self._clear_btn  = _navy_btn("Clear",  color=NAVY_2,  height=32, width=80)
+        self._clear_btn.setIcon(qta.icon("fa5s.times", color="white"))
+        self._delete_btn = _navy_btn("Delete", color=DANGER,  hover=DANGER_H,  height=32, width=90)
+        self._delete_btn.setIcon(qta.icon("fa5s.trash", color="white"))
         self._delete_btn.setEnabled(False)
 
         self._save_btn.clicked.connect(self._on_save)
@@ -454,7 +459,7 @@ class ItemGroupDialog(QDialog):
             session = get_session()
             if not (session.get("api_key") and session.get("api_secret")):
                 self._set_status(
-                    "⚠  Not logged in online — sync may return 0 results. "
+                    "Not logged in online — sync may return 0 results. "
                     "Login first for credentials.",
                     error=True
                 )
@@ -484,7 +489,7 @@ class ItemGroupDialog(QDialog):
                 f"font-size:11px; color:{DANGER}; background:transparent;"
             )
         else:
-            msg = f"✅  Sync complete — {ins} inserted, {upd} updated"
+            msg = f"Sync complete — {ins} inserted, {upd} updated"
             if errs:
                 msg += f", {len(errs)} error(s)"
             self._set_status(msg)

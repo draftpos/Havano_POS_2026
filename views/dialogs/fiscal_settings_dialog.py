@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
+import qtawesome as qta
 
 from models.fiscal_settings import FiscalSettings, FiscalSettingsRepository
 from services.zimra_api_service import get_zimra_service
@@ -137,11 +138,13 @@ class FiscalSettingsDialog(QDialog):
         # Buttons
         btn_layout = QHBoxLayout()
         
-        self.test_btn = QPushButton("🔌 Test Connection")
+        self.test_btn = QPushButton("Test Connection")
+        self.test_btn.setIcon(qta.icon("fa5s.plug"))
         self.test_btn.clicked.connect(self._test_connection)
         self.test_btn.setMinimumHeight(40)
         
-        self.save_btn = QPushButton("💾 Save Settings")
+        self.save_btn = QPushButton("Save Settings")
+        self.save_btn.setIcon(qta.icon("fa5s.save"))
         self.save_btn.clicked.connect(self._save_settings)
         self.save_btn.setMinimumHeight(40)
         
@@ -176,16 +179,16 @@ class FiscalSettingsDialog(QDialog):
         # Update status based on device status
         if self.settings.device_status == "online":
             self.status_label.setText(
-                f"✅ Device Online\n"
+                f"Device Online\n"
                 f"Last ping: {self.settings.last_ping_time or 'Never'}\n"
                 f"Reporting frequency: {self.settings.reporting_frequency or 'N/A'} min"
             )
             self.status_label.setStyleSheet("color: green;")
         elif self.settings.device_status == "offline":
-            self.status_label.setText("⚠️ Device Offline - Last connection failed")
+            self.status_label.setText("Device Offline - Last connection failed")
             self.status_label.setStyleSheet("color: orange;")
         elif self.settings.device_status == "error":
-            self.status_label.setText("❌ Connection Error - Check network and credentials")
+            self.status_label.setText("Connection Error - Check network and credentials")
             self.status_label.setStyleSheet("color: red;")
         else:
             self.status_label.setText("Status unknown - Test connection to verify")
@@ -236,7 +239,7 @@ class FiscalSettingsDialog(QDialog):
         self.progress_bar.setVisible(False)
         
         if success:
-            self.status_label.setText(f"✅ {message}")
+            self.status_label.setText(f"{message}")
             self.status_label.setStyleSheet("color: green;")
             
             # Store the settings that worked (but don't save to DB yet)
@@ -256,7 +259,7 @@ class FiscalSettingsDialog(QDialog):
                 f"Successfully connected to ZIMRA!\n\n{message}\n\nYou can now save these settings."
             )
         else:
-            self.status_label.setText(f"❌ {message}")
+            self.status_label.setText(f"{message}")
             self.status_label.setStyleSheet("color: red;")
             
             QMessageBox.warning(

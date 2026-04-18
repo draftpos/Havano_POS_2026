@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QPushButton, QFrame, QMessageBox, QApplication
 )
 from PySide6.QtCore import Qt
+import qtawesome as qta
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +150,7 @@ class ExternalQuotationSettingsDialog(QDialog):
         main_layout.setContentsMargins(24, 20, 24, 20)
 
         # Title
-        title_label = QLabel("🔌  External Quotation Source")
+        title_label = QLabel("External Quotation Source")
         title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2196F3;")
         main_layout.addWidget(title_label)
 
@@ -199,11 +200,13 @@ class ExternalQuotationSettingsDialog(QDialog):
         button_row = QHBoxLayout()
         button_row.setSpacing(10)
 
-        self.test_connection_btn = QPushButton("🔗  Test Connection")
+        self.test_connection_btn = QPushButton("Test Connection")
+        self.test_connection_btn.setIcon(qta.icon("fa5s.link"))
         self.test_connection_btn.setObjectName("testConnectionBtn")
         self.test_connection_btn.clicked.connect(self._test_xtrnal_connection)
 
-        self.save_config_btn = QPushButton("💾  Save Configuration")
+        self.save_config_btn = QPushButton("Save Configuration")
+        self.save_config_btn.setIcon(qta.icon("fa5s.save"))
         self.save_config_btn.setObjectName("saveConfigBtn")
         self.save_config_btn.clicked.connect(self._save_xtrnal_config)
 
@@ -239,10 +242,10 @@ class ExternalQuotationSettingsDialog(QDialog):
         )
         
         if connection_ok:
-            self.connection_status_label.setText(f"✅  {status_message}")
+            self.connection_status_label.setText(f"{status_message}")
             self.connection_status_label.setStyleSheet("font-size: 12px; color: #28a745; font-weight: 600;")
         else:
-            self.connection_status_label.setText(f"❌  {status_message}")
+            self.connection_status_label.setText(f"{status_message}")
             self.connection_status_label.setStyleSheet("font-size: 12px; color: #dc3545; font-weight: 600;")
 
     def _save_xtrnal_config(self):
@@ -261,6 +264,6 @@ class ExternalQuotationSettingsDialog(QDialog):
         }
         
         save_xtrnal_site_config(config_to_save)
-        self.connection_status_label.setText("✅  Configuration saved successfully.")
+        self.connection_status_label.setText("Configuration saved successfully.")
         self.connection_status_label.setStyleSheet("font-size: 12px; color: #28a745; font-weight: 600;")
         self.accept()

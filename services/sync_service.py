@@ -53,6 +53,22 @@ def sync_from_login_response(login_data: dict) -> dict:
         result["modes_of_payment_synced"] = 0
         result["exchange_rates_synced"]   = 0
 
+    # Pharmacy reference data — best-effort, never blocks login.
+    # Runs in the foreground here (same as GL/MOP above) but swallows all errors.
+    try:
+        from services.doctor_sync_service import sync_doctors
+        from services.dosage_sync_service import sync_dosages
+        doc_res = sync_doctors()
+        dos_res = sync_dosages()
+        result["doctors_synced"] = doc_res.get("synced", 0)
+        result["dosages_synced"] = dos_res.get("synced", 0)
+        print(f"[sync] ✅ Doctors synced: {result['doctors_synced']} | "
+              f"Dosages synced: {result['dosages_synced']}")
+    except Exception as e:
+        log.warning("Doctor/Dosage sync during login failed: %s", e)
+        result["doctors_synced"] = 0
+        result["dosages_synced"] = 0
+
     return result
 
 

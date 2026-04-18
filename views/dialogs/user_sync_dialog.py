@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui  import QColor
+import qtawesome as qta
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
@@ -87,13 +88,14 @@ class UserSyncDialog(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(52)
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
-        title = QLabel("👥  User Sync")
+        title = QLabel("User Sync")
         title.setStyleSheet(
             f"font-size:16px; font-weight:bold; color:{WHITE}; background:transparent;"
         )
         self._status_lbl = QLabel("")
         self._status_lbl.setStyleSheet(f"color:{MUTED}; font-size:12px; background:transparent;")
-        self._close_btn = QPushButton("✕  Close")
+        self._close_btn = QPushButton("Close")
+        self._close_btn.setIcon(qta.icon("fa5s.times", color="white"))
         self._close_btn.setFixedSize(90, 32)
         self._close_btn.setCursor(Qt.PointingHandCursor)
         self._close_btn.setStyleSheet(f"""
@@ -134,7 +136,8 @@ class UserSyncDialog(QDialog):
         self._count_lbl = QLabel("Loading…")
         self._count_lbl.setStyleSheet(f"color:{MUTED}; font-size:12px; background:transparent;")
 
-        self._sync_btn = QPushButton("🔄  Sync from Frappe")
+        self._sync_btn = QPushButton("Sync from Frappe")
+        self._sync_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         self._sync_btn.setFixedHeight(40)
         self._sync_btn.setCursor(Qt.PointingHandCursor)
         self._sync_btn.setStyleSheet(f"""
@@ -183,7 +186,7 @@ class UserSyncDialog(QDialog):
                 if col == 3 and val == "—":
                     it.setForeground(QColor(MUTED))
                 if col == 0 and u.get("synced_from_frappe"):
-                    it.setText(f"☁  {val}")
+                    it.setIcon(qta.icon("fa5s.cloud"))
                 self._tbl.setItem(r, col, it)
 
         total  = self._tbl.rowCount()
@@ -226,17 +229,18 @@ class UserSyncDialog(QDialog):
 
     def _on_done(self, result: dict):
         self._sync_btn.setEnabled(True)
-        self._sync_btn.setText("🔄  Sync from Frappe")
+        self._sync_btn.setText("Sync from Frappe")
+        self._sync_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         self._close_btn.setEnabled(True)
 
         n = result.get("synced", 0)
         e = result.get("errors", 0)
 
         if e and not n:
-            self._status_lbl.setText(f"❌ {result.get('error_msg', 'Sync failed')}")
+            self._status_lbl.setText(f"{result.get('error_msg', 'Sync failed')}")
             self._status_lbl.setStyleSheet(f"color:{DANGER}; font-size:12px; background:transparent;")
         else:
-            self._status_lbl.setText(f"✅ {n} user(s) synced")
+            self._status_lbl.setText(f"{n} user(s) synced")
             self._status_lbl.setStyleSheet(
                 f"color:{GREEN}; font-size:12px; font-weight:bold; background:transparent;"
             )

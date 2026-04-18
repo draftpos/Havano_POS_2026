@@ -2,6 +2,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTableWidget,
                              QTableWidgetItem, QDateEdit, QPushButton, QLabel, 
                              QHeaderView, QTabWidget, QWidget)
 from PySide6.QtCore import QDate, Qt
+import qtawesome as qta
 from models.reports import get_sales_items_report
 from models.shift import get_shift_reports
 
@@ -19,12 +20,12 @@ class POSReportsDialog(QDialog):
         # Tab 1: X-Report (Shift & Sales History)
         self.tab_x = QWidget()
         self._setup_x_report_tab()
-        self.tabs.addTab(self.tab_x, "📊 X-Report (Shifts)")
+        self.tabs.addTab(self.tab_x, qta.icon("fa5s.chart-bar"), "X-Report (Shifts)")
         
         # Tab 2: Sales Items Report (Requirement 7)
         self.tab_items = QWidget()
         self._setup_items_report_tab()
-        self.tabs.addTab(self.tab_items, "📦 Sales Items Report")
+        self.tabs.addTab(self.tab_items, qta.icon("fa5s.box"), "Sales Items Report")
         
         layout.addWidget(self.tabs)
 

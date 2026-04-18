@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
     QPushButton, QComboBox, QFormLayout, QMessageBox, QGroupBox
 )
 from PySide6.QtCore import Qt
+import qtawesome as qta
 import pyodbc
 import json
 import sys
@@ -13,7 +14,8 @@ from pathlib import Path
 class SqlSettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("⚙️ System Configuration")
+        self.setWindowTitle("System Configuration")
+        self.setWindowIcon(qta.icon("fa5s.cog"))
         self.setFixedSize(680, 560)
         self.setModal(True)
         self._apply_stylesheet()
@@ -126,7 +128,7 @@ class SqlSettingsDialog(QDialog):
         root.addWidget(subtitle)
 
         # ── 1. Frappe Site URL ─────────────────────────────────────────────
-        site_group = QGroupBox("🌐  Frappe Site")
+        site_group = QGroupBox("Frappe Site")
         site_form  = QFormLayout(site_group)
         site_form.setSpacing(12)
         site_form.setContentsMargins(20, 22, 20, 18)
@@ -138,7 +140,7 @@ class SqlSettingsDialog(QDialog):
         root.addWidget(site_group)
 
         # ── 2. SQL Server Database ─────────────────────────────────────────
-        sql_group = QGroupBox("🗄️  SQL Server Database")
+        sql_group = QGroupBox("SQL Server Database")
         sql_form  = QFormLayout(sql_group)
         sql_form.setSpacing(12)
         sql_form.setContentsMargins(20, 22, 20, 18)
@@ -174,13 +176,15 @@ class SqlSettingsDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
-        test_btn = QPushButton("🔍 Test SQL Connection")
+        test_btn = QPushButton("Test SQL Connection")
+        test_btn.setIcon(qta.icon("fa5s.search"))
         test_btn.setObjectName("TestButton")
         test_btn.setFixedHeight(40)
         test_btn.clicked.connect(self._test_sql_connection)
 
         # ── NEW: Reconnect button (saves settings ONLY after successful connection check)
-        reconnect_btn = QPushButton("🔄 Reconnect")
+        reconnect_btn = QPushButton("Reconnect")
+        reconnect_btn.setIcon(qta.icon("fa5s.sync-alt"))
         reconnect_btn.setObjectName("PrimaryButton")
         reconnect_btn.setFixedHeight(40)
         reconnect_btn.clicked.connect(self._reconnect)
@@ -236,9 +240,9 @@ class SqlSettingsDialog(QDialog):
                 self._get_connection_string(include_db=False), timeout=5
             )
             conn.close()
-            QMessageBox.information(self, "Success", "✅ SQL Server connection successful!")
+            QMessageBox.information(self, "Success", "SQL Server connection successful!")
         except Exception as e:
-            QMessageBox.critical(self, "Connection Failed", f"❌ Failed:\n{str(e)}")
+            QMessageBox.critical(self, "Connection Failed", f"Failed:\n{str(e)}")
 
     # ── NEW: Save settings to file ONLY (no migration, no DB creation)
     def _save_settings(self):
@@ -264,7 +268,7 @@ class SqlSettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(
                 self, "Reconnect Failed",
-                f"❌ Could not connect to the database:\n{str(e)}\n\n"
+                f"Could not connect to the database:\n{str(e)}\n\n"
                 f"• Make sure the database '{self.db_input.text().strip() or 'pos_db'}' already exists.\n"
                 f"• Use 'Save Configuration' if you want to create a new database."
             )
@@ -281,7 +285,7 @@ class SqlSettingsDialog(QDialog):
 
         QMessageBox.information(
             self, "Reconnect Successful",
-            "✅ SQL settings saved successfully!\n\n"
+            "SQL settings saved successfully!\n\n"
             "The application will now use the updated database connection."
         )
         self.accept()  # Close dialog (no sys.exit, no migration)
@@ -317,7 +321,7 @@ class SqlSettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(
                 self, "Database Error",
-                f"❌ Could not create database '{db_name}':\n{e}"
+                f"Could not create database '{db_name}':\n{e}"
             )
             return
 
@@ -329,14 +333,14 @@ class SqlSettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(
                 self, "Setup Failed",
-                f"❌ Table setup failed:\n{e}\n\n"
+                f"Table setup failed:\n{e}\n\n"
                 f"Run setup_database.py manually to fix."
             )
             return
 
         QMessageBox.information(
             self, "Done",
-            f"✅ Database '{db_name}' is ready!\n\n"
+            f"Database '{db_name}' is ready!\n\n"
             f"Default login:  admin / admin123"
         )
         self.accept()

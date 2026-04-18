@@ -19,8 +19,9 @@ from PySide6.QtWidgets import (
     QPushButton, QFrame, QWidget, QGraphicsDropShadowEffect,
     QStackedWidget, QGridLayout, QSizePolicy
 )
-from PySide6.QtCore import Qt, QPropertyAnimation, QPoint, QTimer, QEasingCurve, QThread, Signal
+from PySide6.QtCore import Qt, QPropertyAnimation, QPoint, QTimer, QEasingCurve, QThread, Signal, QSize
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
+import qtawesome as qta
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY      = "#0d1f3c"
@@ -211,8 +212,10 @@ class LoginDialog(QDialog):
         # Tabs
         tab_row = QWidget(); tab_row.setStyleSheet(f"background:{OFF_WHITE};")
         tl = QHBoxLayout(tab_row); tl.setContentsMargins(28, 10, 28, 0); tl.setSpacing(8)
-        self._pin_tab = QPushButton("  🔢  PIN")
-        self._pw_tab  = QPushButton("  🔑  Password")
+        self._pin_tab = QPushButton("PIN")
+        self._pin_tab.setIcon(qta.icon("fa5s.hashtag"))
+        self._pw_tab  = QPushButton("Password")
+        self._pw_tab.setIcon(qta.icon("fa5s.key"))
         for b in (self._pin_tab, self._pw_tab):
             b.setFixedHeight(36); b.setCursor(Qt.PointingHandCursor)
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -245,7 +248,13 @@ class LoginDialog(QDialog):
         footer = QWidget(); footer.setFixedHeight(40)
         footer.setStyleSheet(f"background:{CREAM}; border-bottom-left-radius:20px; border-bottom-right-radius:20px;")
         fl = QHBoxLayout(footer); fl.setContentsMargins(0,0,0,0)
-        fl.addWidget(self._mk_lbl(f"🌐  {SITE_URL}", f"font-size:10px; color:{NAVY}; background:transparent; font-weight:bold;"))
+        fl.addStretch()
+        _globe = QLabel(); _globe.setPixmap(qta.icon("fa5s.globe", color=NAVY).pixmap(10, 10))
+        _globe.setStyleSheet("background:transparent;")
+        fl.addWidget(_globe)
+        fl.addSpacing(6)
+        fl.addWidget(self._mk_lbl(f"{SITE_URL}", f"font-size:10px; color:{NAVY}; background:transparent; font-weight:bold;"))
+        fl.addStretch()
         vl.addWidget(footer)
 
         root.addWidget(card)
@@ -285,7 +294,7 @@ class LoginDialog(QDialog):
             ("1","d"),("2","d"),("3","d"),
             ("4","d"),("5","d"),("6","d"),
             ("7","d"),("8","d"),("9","d"),
-            ("⌫","b"),("0","d"),("✓","e"),
+            ("","b"),("0","d"),("","e"),
         ]
         BTN_H = 46   # compact fixed height — no overlap, no giant buttons
         for i, (lbl, kind) in enumerate(keys):
@@ -305,6 +314,8 @@ class LoginDialog(QDialog):
                 """)
                 btn.clicked.connect(lambda _, x=lbl: self._pin_press(x))
             elif kind == "b":
+                btn.setIcon(qta.icon("fa5s.backspace", color=MUTED))
+                btn.setIconSize(QSize(22, 22))
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background:{LIGHT}; color:{MUTED};
@@ -319,6 +330,8 @@ class LoginDialog(QDialog):
                 btn.setAutoRepeatDelay(500)
                 btn.setAutoRepeatInterval(100)
             else:
+                btn.setIcon(qta.icon("fa5s.check", color=WHITE))
+                btn.setIconSize(QSize(22, 22))
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background:{ACCENT}; color:{WHITE};

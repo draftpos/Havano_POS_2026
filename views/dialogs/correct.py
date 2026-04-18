@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QDate
 from PySide6.QtGui import QAction, QColor, QFont
+import qtawesome as qta
 
 try:
     from views.dialogs.day_shift_dialog import DayShiftDialog
@@ -1098,9 +1099,14 @@ class AdminDashboard(QWidget):
             low = []
 
         if not low:
-            lbl = QLabel("✓  All stock levels OK")
+            row_w = QWidget(); row_w.setStyleSheet("background: transparent;")
+            rh = QHBoxLayout(row_w); rh.setContentsMargins(0, 0, 0, 0); rh.setSpacing(6)
+            ic = QLabel(); ic.setPixmap(qta.icon("fa5s.check", color=SUCCESS).pixmap(14, 14))
+            ic.setStyleSheet("background:transparent;")
+            lbl = QLabel("All stock levels OK")
             lbl.setStyleSheet(f"color: {SUCCESS}; font-size: 12px; background: transparent;")
-            self._stock_alert_layout.addWidget(lbl)
+            rh.addWidget(ic); rh.addWidget(lbl); rh.addStretch()
+            self._stock_alert_layout.addWidget(row_w)
         else:
             for p in low[:8]:
                 row_w = QWidget()

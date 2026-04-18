@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
+import qtawesome as qta
 from datetime import datetime
 from models.advance_settings import AdvanceSettings
 import json
@@ -186,10 +187,12 @@ class _Base(QDialog):
         hl.addWidget(title); hl.addStretch()
 
         if hasattr(self, "_save"):
-            cb = _btn("💾 Save Settings", color=SUCCESS, hover=SUCCESS_H, height=30, width=150)
+            cb = _btn("Save Settings", color=SUCCESS, hover=SUCCESS_H, height=30, width=150)
+            cb.setIcon(qta.icon("fa5s.save", color="white"))
             cb.clicked.connect(self._save)
         else:
-            cb = _btn("✕ Close", color=DANGER, hover=DANGER_H, height=30, width=90)
+            cb = _btn("Close", color=DANGER, hover=DANGER_H, height=30, width=90)
+            cb.setIcon(qta.icon("fa5s.times", color="white"))
             cb.clicked.connect(self.accept)
 
         hl.addWidget(cb); root.addWidget(hdr)
@@ -747,7 +750,8 @@ class HardwareDialog(_Base):
         lay.addSpacing(8)
 
         # Refresh printers button
-        refresh_btn = _btn("🔄 Refresh Printer List", color=ACCENT, hover=ACCENT_H, height=28)
+        refresh_btn = _btn("Refresh Printer List", color=ACCENT, hover=ACCENT_H, height=28)
+        refresh_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         refresh_btn.clicked.connect(self._refresh_printers)
         lay.addWidget(refresh_btn, alignment=Qt.AlignRight)
         lay.addSpacing(10); lay.addWidget(_hr()); lay.addSpacing(10)
@@ -837,7 +841,7 @@ class HardwareDialog(_Base):
             painter.setFont(normal_font)
             painter.drawText(10, 160, f"Printer : {printer_name}")
             painter.drawText(10, 190, f"Date    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            painter.drawText(10, 220, "Status  : OK ✓")
+            painter.drawText(10, 220, "Status  : OK")
             painter.drawText(10, 260, "This is a test page from Havano POS System.")
             painter.drawText(10, 300, "Developed by Havano Team.")
 
@@ -907,7 +911,8 @@ class SettingsDialog(QDialog):
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
         hl.addWidget(QLabel("Settings", styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
         hl.addStretch()
-        cb = _btn("✕", color=NAVY_2, hover=DANGER, height=28, width=32)
+        cb = _btn("", color=NAVY_2, hover=DANGER, height=28, width=32)
+        cb.setIcon(qta.icon("fa5s.times", color="white"))
         cb.clicked.connect(self.accept); hl.addWidget(cb); root.addWidget(hdr)
 
         from PySide6.QtWidgets import QScrollArea, QFrame as _QFrame
@@ -950,8 +955,9 @@ class SettingsDialog(QDialog):
                 _MB.warning(self, "Error", f"Could not open Advanced Printing:\n{e}")
 
         def _add_items(item_list):
-            for icon, label, handler in item_list:
-                row = QPushButton(f"   {icon}   {label}")
+            for icon_name, label, handler in item_list:
+                row = QPushButton(f"    {label}")
+                row.setIcon(qta.icon(icon_name))
                 row.setFixedHeight(44); row.setCursor(Qt.PointingHandCursor); row.setFocusPolicy(Qt.NoFocus)
                 row.setStyleSheet(f"""
                     QPushButton {{
@@ -966,27 +972,27 @@ class SettingsDialog(QDialog):
         # ── MASTER DATA ───────────────────────────────────────────────────────
         ml.addWidget(_section_divider("MASTER DATA"))
         _add_items([
-            ("🏢", "Companies",         lambda: CompanyDialog(self).exec()),
-            ("👥", "Customer Groups",   lambda: CustomerGroupDialog(self).exec()),
-            ("🏭", "Warehouses",        lambda: WarehouseDialog(self).exec()),
-            ("💰", "Cost Centers",      lambda: CostCenterDialog(self).exec()),
-            ("🏷", "Price Lists",       lambda: PriceListDialog(self).exec()),
-            ("👤", "Customers",         lambda: CustomerDialog(self).exec()),
+            ("fa5s.building",   "Companies",       lambda: CompanyDialog(self).exec()),
+            ("fa5s.users",      "Customer Groups", lambda: CustomerGroupDialog(self).exec()),
+            ("fa5s.industry",   "Warehouses",      lambda: WarehouseDialog(self).exec()),
+            ("fa5s.money-bill", "Cost Centers",    lambda: CostCenterDialog(self).exec()),
+            ("fa5s.tag",        "Price Lists",     lambda: PriceListDialog(self).exec()),
+            ("fa5s.user",       "Customers",       lambda: CustomerDialog(self).exec()),
         ])
 
         # ── ADMIN ─────────────────────────────────────────────────────────────
         ml.addWidget(_section_divider("ADMIN"))
         _add_items([
-            ("🔑", "Users",              lambda: UsersDialog(self, current_user=self.user).exec()),
-            ("🏛", "Company Defaults",   _open_company_defaults),
-            ("🛡", "POS Rules",          lambda: POSRulesDialog(self).exec()),
+            ("fa5s.key",        "Users",             lambda: UsersDialog(self, current_user=self.user).exec()),
+            ("fa5s.landmark",   "Company Defaults",  _open_company_defaults),
+            ("fa5s.shield-alt", "POS Rules",         lambda: POSRulesDialog(self).exec()),
         ])
 
         # ── HARDWARE & PRINTING ────────────────────────────────────────────────
         ml.addWidget(_section_divider("HARDWARE & PRINTING"))
         _add_items([
-            ("🖨", "Hardware Settings",  lambda: HardwareDialog(self).exec()),
-            # ("🖨", "Advanced Printing",  _open_adv_printing),
+            ("fa5s.print", "Hardware Settings",  lambda: HardwareDialog(self).exec()),
+            # ("fa5s.print", "Advanced Printing",  _open_adv_printing),
         ])
 
         scroll_area.setWidget(menu)
@@ -1302,7 +1308,8 @@ class POSRulesDialog(QDialog):
             
             conn.commit(); conn.close()
             
-            self.save_btn.setText("✓ SAVED")
+            self.save_btn.setText("SAVED")
+            self.save_btn.setIcon(qta.icon("fa5s.check", color="white"))
             QTimer.singleShot(1500, self._reset_btn)
         except Exception as e:
             self.save_btn.setEnabled(True)

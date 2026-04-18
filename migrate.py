@@ -554,6 +554,82 @@ def migrate():
     """)
     print("[migrate] ✅  pos_settings")
 
+    # ── doctors ───────────────────────────────────────────────────────────────
+    cur.execute("""
+        IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='doctors')
+        CREATE TABLE doctors (
+            id            INT           IDENTITY(1,1) PRIMARY KEY,
+            frappe_name   NVARCHAR(140) NULL UNIQUE,
+            full_name     NVARCHAR(200) NOT NULL,
+            practice_no   NVARCHAR(100) NULL,
+            qualification NVARCHAR(200) NULL,
+            school        NVARCHAR(200) NULL,
+            phone         NVARCHAR(50)  NULL,
+            synced        BIT           NOT NULL DEFAULT 0,
+            sync_date     DATETIME      NULL
+        )
+    """)
+    print("[migrate] ✅  doctors")
+
+    # ── dosages ───────────────────────────────────────────────────────────────
+    cur.execute("""
+        IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='dosages')
+        CREATE TABLE dosages (
+            id          INT           IDENTITY(1,1) PRIMARY KEY,
+            frappe_name NVARCHAR(140) NULL UNIQUE,
+            code        NVARCHAR(50)  NOT NULL UNIQUE,
+            description NVARCHAR(500) NULL,
+            synced      BIT           NOT NULL DEFAULT 0,
+            sync_date   DATETIME      NULL
+        )
+    """)
+    print("[migrate] ✅  dosages")
+
+    # ── product_batches ───────────────────────────────────────────────────────
+    cur.execute("""
+        IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='product_batches')
+        CREATE TABLE product_batches (
+            id          INT           IDENTITY(1,1) PRIMARY KEY,
+            product_id  INT           NOT NULL,
+            batch_no    NVARCHAR(100) NOT NULL,
+            expiry_date DATE          NULL,
+            qty         DECIMAL(18,4) NOT NULL DEFAULT 0,
+            synced      BIT           NOT NULL DEFAULT 0
+        )
+    """)
+    print("[migrate] ✅  product_batches")
+
+    # ── pharmacy ALTER TABLE additions ────────────────────────────────────────
+    # products.is_pharmacy_product
+    _add_column_if_missing("products", "is_pharmacy_product", "BIT NOT NULL DEFAULT 0")
+    print("[migrate] ✅  products.is_pharmacy_product")
+
+    # customers.doctor_id / doctor_frappe_name
+    _add_column_if_missing("customers", "doctor_id",          "INT NULL")
+    _add_column_if_missing("customers", "doctor_frappe_name", "NVARCHAR(140) NULL")
+    print("[migrate] ✅  customers.doctor_id / doctor_frappe_name")
+
+    # quotation_items pharmacy columns
+    # Ensure the quotations + quotation_items tables exist before altering.
+    # Importing models.quotation runs its create_quotations_table() side-effect.
+    try:
+        from models.quotation import create_quotations_table
+        create_quotations_table()
+    except Exception as _e:
+        print(f"[migrate]   ! quotation_items table setup warning: {_e}")
+    _add_column_if_missing("quotation_items", "is_pharmacy", "BIT NOT NULL DEFAULT 0")
+    _add_column_if_missing("quotation_items", "dosage",      "NVARCHAR(500) NULL")
+    _add_column_if_missing("quotation_items", "batch_no",    "NVARCHAR(100) NULL")
+    _add_column_if_missing("quotation_items", "expiry_date", "DATE NULL")
+    print("[migrate] ✅  quotation_items pharmacy columns")
+
+    # sale_items pharmacy columns
+    _add_column_if_missing("sale_items", "is_pharmacy", "BIT NOT NULL DEFAULT 0")
+    _add_column_if_missing("sale_items", "dosage",      "NVARCHAR(500) NULL")
+    _add_column_if_missing("sale_items", "batch_no",    "NVARCHAR(100) NULL")
+    _add_column_if_missing("sale_items", "expiry_date", "DATE NULL")
+    print("[migrate] ✅  sale_items pharmacy columns")
+
     # ── Seed default admin if users table is empty ────────────────────────────
     cur.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:

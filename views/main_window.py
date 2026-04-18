@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 import shutil
 import os
+import qtawesome as qta
 from models.advance_settings import AdvanceSettings
 from PySide6.QtCore import Qt, QTimer, QDate, Slot
 # from PySide6.QtGui import QAction, QColor, QFont
@@ -514,7 +515,8 @@ class UomPickerDialog(QDialog):
         root.addSpacing(14)
 
         # ── Cancel ────────────────────────────────────────────────────
-        cancel = QPushButton("✕  Cancel")
+        cancel = QPushButton("Cancel")
+        cancel.setIcon(qta.icon("fa5s.times"))
         cancel.setFixedHeight(46)
         cancel.setCursor(Qt.PointingHandCursor)
         cancel.setFocusPolicy(Qt.NoFocus)
@@ -1109,7 +1111,7 @@ class _InlineSettingsDialog(QDialog):
         lay.addSpacing(20)
 
         tip = QLabel(
-            "💡  Use the sidebar to manage Companies, Customers, Warehouses, "
+            "Use the sidebar to manage Companies, Customers, Warehouses, "
             "Cost Centers, Price Lists and Users.\n"
             "Changes take effect immediately."
         )
@@ -1205,7 +1207,8 @@ class _InlineSettingsDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
-        ok_btn  = navy_btn("✓  Set Qty", height=40, color=SUCCESS, hover=SUCCESS_H)
+        ok_btn  = navy_btn("Set Qty", height=40, color=SUCCESS, hover=SUCCESS_H)
+        ok_btn.setIcon(qta.icon("fa5s.check", color="white"))
         cxl_btn = navy_btn("Cancel",     height=40, color=NAVY_2,  hover=NAVY_3)
         ok_btn.clicked.connect(self._confirm)
         cxl_btn.clicked.connect(self.reject)
@@ -1646,7 +1649,7 @@ class CustomerDialog(QDialog):
         hl.addWidget(QLabel("Customers",
             styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
         hl.addStretch()
-        self._mode_badge = QLabel("  ➕  ADD MODE  ")
+        self._mode_badge = QLabel("  ADD MODE  ")
         self._mode_badge.setStyleSheet(f"""
             background:{SUCCESS}; color:{WHITE}; border-radius:10px;
             font-size:11px; font-weight:bold; padding:2px 10px;
@@ -1844,7 +1847,8 @@ class CustomerDialog(QDialog):
         _set_combo(self._f_pl,    c.get("default_price_list_id"))
 
         # Update UI chrome
-        self._save_btn.setText("💾  Save Changes")
+        self._save_btn.setText("Save Changes")
+        self._save_btn.setIcon(qta.icon("fa5s.save", color="white"))
         self._save_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color:{ACCENT}; color:{WHITE}; border:none;
@@ -1853,7 +1857,7 @@ class CustomerDialog(QDialog):
             QPushButton:hover   {{ background-color:{ACCENT_H}; }}
             QPushButton:pressed {{ background-color:{NAVY_3}; }}
         """)
-        self._mode_badge.setText("  ✏️  EDIT MODE  ")
+        self._mode_badge.setText("  EDIT MODE  ")
         self._mode_badge.setStyleSheet(f"""
             background:{ACCENT}; color:{WHITE}; border-radius:10px;
             font-size:11px; font-weight:bold; padding:2px 10px;
@@ -1876,7 +1880,7 @@ class CustomerDialog(QDialog):
             QPushButton:hover   {{ background-color:{SUCCESS_H}; }}
             QPushButton:pressed {{ background-color:{NAVY_3}; }}
         """)
-        self._mode_badge.setText("  ➕  ADD MODE  ")
+        self._mode_badge.setText("  ADD MODE  ")
         self._mode_badge.setStyleSheet(f"""
             background:{SUCCESS}; color:{WHITE}; border-radius:10px;
             font-size:11px; font-weight:bold; padding:2px 10px;
@@ -2186,14 +2190,16 @@ class ManageUsersDialog(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(58)
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(24, 0, 20, 0); hl.setSpacing(12)
-        icon_lbl = QLabel("👥"); icon_lbl.setStyleSheet("font-size:22px; background:transparent;")
+        icon_lbl = QLabel(); icon_lbl.setPixmap(qta.icon("fa5s.users", color="white").pixmap(22, 22))
+        icon_lbl.setStyleSheet("background:transparent;")
         title_lbl = QLabel("Manage Users")
         title_lbl.setStyleSheet(f"font-size:18px; font-weight:bold; color:{WHITE}; background:transparent;")
         sub_lbl = QLabel("Add · Edit · Delete · Assign roles, PINs & permissions")
         sub_lbl.setStyleSheet(f"font-size:11px; color:{MID}; background:transparent;")
         hl.addWidget(icon_lbl); hl.addWidget(title_lbl); hl.addSpacing(8)
         hl.addWidget(sub_lbl); hl.addStretch()
-        close_x = QPushButton("✕"); close_x.setFixedSize(34, 34)
+        close_x = QPushButton(); close_x.setIcon(qta.icon("fa5s.times", color="white"))
+        close_x.setFixedSize(34, 34)
         close_x.setCursor(Qt.PointingHandCursor)
         close_x.setStyleSheet(f"""
             QPushButton {{ background:rgba(255,255,255,0.12); color:{WHITE};
@@ -2221,7 +2227,8 @@ class ManageUsersDialog(QDialog):
         lbl_all = QLabel("All Users")
         lbl_all.setStyleSheet(f"font-size:14px; font-weight:bold; color:{NAVY}; background:transparent;")
         tl.addWidget(lbl_all); tl.addStretch()
-        self._del_btn = QPushButton("🗑  Delete User")
+        self._del_btn = QPushButton("Delete User")
+        self._del_btn.setIcon(qta.icon("fa5s.trash", color="white"))
         self._del_btn.setFixedHeight(32); self._del_btn.setCursor(Qt.PointingHandCursor)
         self._del_btn.setEnabled(False)
         self._del_btn.setStyleSheet(f"""
@@ -2392,7 +2399,8 @@ class ManageUsersDialog(QDialog):
             }}
             QLineEdit:focus {{ border:2px solid {ACCENT}; background:{WHITE}; }}
         """)
-        eye_btn = QPushButton("👁"); eye_btn.setFixedSize(36, 36)
+        eye_btn = QPushButton(); eye_btn.setIcon(qta.icon("fa5s.eye"))
+        eye_btn.setFixedSize(36, 36)
         eye_btn.setCursor(Qt.PointingHandCursor); eye_btn.setCheckable(True)
         eye_btn.setStyleSheet(f"""
             QPushButton {{ background:{OFF_WHITE}; border:1px solid {BORDER};
@@ -2545,7 +2553,8 @@ class ManageUsersDialog(QDialog):
         """)
         self._clear_btn.clicked.connect(self._clear_form)
 
-        self._save_btn = QPushButton("💾  Save User")
+        self._save_btn = QPushButton("Save User")
+        self._save_btn.setIcon(qta.icon("fa5s.save", color="white"))
         self._save_btn.setFixedHeight(38); self._save_btn.setCursor(Qt.PointingHandCursor)
         self._save_btn.setStyleSheet(f"""
             QPushButton {{ background:{SUCCESS}; color:{WHITE};
@@ -2581,7 +2590,8 @@ class ManageUsersDialog(QDialog):
             email_disp = u.get("email") or u.get("frappe_user") or ""
             role   = u.get("role", "cashier")
             pin    = u.get("pin") or "—"
-            src    = "☁ Cloud" if u.get("synced_from_frappe") else "Local"
+            is_cloud = bool(u.get("synced_from_frappe"))
+            src    = "Cloud" if is_cloud else "Local"
             active = u.get("active", True)
 
             # cols: Name, Email, Role, PIN, Source
@@ -2598,6 +2608,8 @@ class ManageUsersDialog(QDialog):
                     it.setForeground(QColor(ACCENT if role == "admin" else MUTED))
                     it.setFont(__import__("PySide6.QtGui", fromlist=["QFont"]).QFont(
                         "Segoe UI", 11, 75 if role == "admin" else 50))
+                if c == 4 and is_cloud:
+                    it.setIcon(qta.icon("fa5s.cloud"))
                 if not active:
                     it.setForeground(QColor(BORDER))
                 it.setData(Qt.UserRole, u)
@@ -3232,10 +3244,10 @@ class AdminDashboard(QWidget):
         self._kpi = {}
 
         for key, label, icon, color in [
-            ("sales", "Total Sales", "💰", ACCENT),
-            ("expenses", "Expenses", "📉", DANGER),
-            ("profit", "Gross Profit", "📈", SUCCESS),
-            ("exp_profit", "Expected Profit", "🎯", AMBER),
+            ("sales", "Total Sales", "fa5s.money-bill", ACCENT),
+            ("expenses", "Expenses", "fa5s.chart-line", DANGER),
+            ("profit", "Gross Profit", "fa5s.chart-line", SUCCESS),
+            ("exp_profit", "Expected Profit", "fa5s.bullseye", AMBER),
         ]:
             card, val_lbl = self._kpi_card(label, icon, "$0.00", color)
             self._kpi[key] = val_lbl
@@ -3247,9 +3259,9 @@ class AdminDashboard(QWidget):
         row.setSpacing(14)
 
         for key, label, icon, color in [
-            ("stock_cost", "Stock @ Cost", "🏭", NAVY),
-            ("stock_sell", "Stock @ Selling", "🏷", ACCENT_H),
-            ("potential", "Potential Profit", "💎", SUCCESS),
+            ("stock_cost", "Stock @ Cost", "fa5s.industry", NAVY),
+            ("stock_sell", "Stock @ Selling", "fa5s.tag", ACCENT_H),
+            ("potential", "Potential Profit", "fa5s.gem", SUCCESS),
         ]:
             card, val_lbl = self._kpi_card(label, icon, "$0.00", color)
             self._kpi[key] = val_lbl
@@ -3268,15 +3280,16 @@ class AdminDashboard(QWidget):
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 10, 16, 10)
         cl.setSpacing(3)
-        
+
         top = QHBoxLayout()
         lbl = QLabel(label)
         lbl.setStyleSheet(
             f"color:{MUTED}; font-size:11px; background:transparent; "
             "font-weight:bold; letter-spacing:0.5px;"
         )
-        ico = QLabel(icon)
-        ico.setStyleSheet(f"font-size:18px; background:transparent;")
+        ico = QLabel()
+        ico.setPixmap(qta.icon(icon, color=color).pixmap(18, 18))
+        ico.setStyleSheet("background:transparent;")
         top.addWidget(lbl, 1)
         top.addWidget(ico)
         
@@ -3337,7 +3350,7 @@ class AdminDashboard(QWidget):
         # Search row
         srch_row = QHBoxLayout()
         srch = QLineEdit()
-        srch.setPlaceholderText("🔍  Filter by product name or part number…")
+        srch.setPlaceholderText("Filter by product name or part number…")
         srch.setFixedHeight(34)
         srch.setStyleSheet(f"""
             QLineEdit {{ background:{WHITE}; color:{DARK_TEXT};
@@ -3349,7 +3362,8 @@ class AdminDashboard(QWidget):
         self._stock_search = srch
         srch_row.addWidget(srch, 1)
 
-        export_btn = navy_btn("📥  Export CSV", height=34, color=NAVY_2, hover=NAVY_3)
+        export_btn = navy_btn("Export CSV", height=34, color=NAVY_2, hover=NAVY_3)
+        export_btn.setIcon(qta.icon("fa5s.download", color="white"))
         export_btn.clicked.connect(self._export_stock_csv)
         srch_row.addWidget(export_btn)
         lay.addLayout(srch_row)
@@ -3519,7 +3533,7 @@ class AdminDashboard(QWidget):
 
         # Left: Top 10 Profitable
         left = QVBoxLayout()
-        left.addWidget(self._section_label("🏆  Top 10 Most Profitable Items"))
+        left.addWidget(self._section_label("Top 10 Most Profitable Items"))
 
         self._tbl_profitable = QTableWidget(0, 4)
         self._tbl_profitable.setHorizontalHeaderLabels(
@@ -3540,7 +3554,7 @@ class AdminDashboard(QWidget):
 
         # Right: Most Sold
         right = QVBoxLayout()
-        right.addWidget(self._section_label("📊  Most Sold Items"))
+        right.addWidget(self._section_label("Most Sold Items"))
 
         self._tbl_most_sold = QTableWidget(0, 3)
         self._tbl_most_sold.setHorizontalHeaderLabels(
@@ -3814,11 +3828,13 @@ class AdminDashboard(QWidget):
 
         self._tbl_profitable.setRowCount(0)
         top_p = sorted(profitable.items(), key=lambda x: x[1]["profit"], reverse=True)[:10]
+        medal_colors = {0: "#d4af37", 1: "#c0c0c0", 2: "#cd7f32"}
         for i, (name, d) in enumerate(top_p):
             r = self._tbl_profitable.rowCount()
             self._tbl_profitable.insertRow(r)
+            first_col_text = f" {name}" if i < 3 else f"{i+1}. {name}"
             vals = [
-                f"{'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {name}",
+                first_col_text,
                 f"{d['qty']:.0f}",
                 f"{d['margin']:.1f}%",
                 f"${d['profit']:,.2f}",
@@ -3832,6 +3848,8 @@ class AdminDashboard(QWidget):
             for ci, (val, aln) in enumerate(zip(vals, aligns)):
                 it = QTableWidgetItem(val)
                 it.setTextAlignment(aln)
+                if ci == 0 and i < 3:
+                    it.setIcon(qta.icon("fa5s.medal", color=medal_colors[i]))
                 if ci == 3:
                     it.setForeground(QColor(SUCCESS if d["profit"] >= 0 else DANGER))
                 self._tbl_profitable.setItem(r, ci, it)
@@ -3842,8 +3860,9 @@ class AdminDashboard(QWidget):
         for i, (name, d) in enumerate(top_s):
             r = self._tbl_most_sold.rowCount()
             self._tbl_most_sold.insertRow(r)
+            first_col_text = f" {name}" if i < 3 else f"{i+1}. {name}"
             vals = [
-                f"{'🏅' if i < 3 else f'{i+1}.'} {name}",
+                first_col_text,
                 f"{d['qty']:.0f}",
                 f"${d['revenue']:,.2f}",
             ]
@@ -3855,6 +3874,8 @@ class AdminDashboard(QWidget):
             for ci, (val, aln) in enumerate(zip(vals, aligns)):
                 it = QTableWidgetItem(val)
                 it.setTextAlignment(aln)
+                if ci == 0 and i < 3:
+                    it.setIcon(qta.icon("fa5s.medal", color="#777"))
                 if ci == 2:
                     it.setForeground(QColor(ACCENT))
                 self._tbl_most_sold.setItem(r, ci, it)
@@ -3881,7 +3902,7 @@ class AdminDashboard(QWidget):
                 ("user", lambda v: str(v)),
                 ("method", lambda v: str(v)),
                 ("total", lambda v: f"${float(v or 0):.2f}"),
-                ("synced", lambda v: "✓" if v else "—"),
+                ("synced", lambda v: "" if v else "—"),
             ]):
                 raw = s.get(key, "") or s.get("number", "") or ""
                 text = fmt(raw)
@@ -3892,6 +3913,8 @@ class AdminDashboard(QWidget):
                 if key == "total":
                     item.setForeground(QColor(ACCENT))
                 elif key == "synced":
+                    if s.get("synced"):
+                        item.setIcon(qta.icon("fa5s.check", color=SUCCESS))
                     item.setForeground(QColor(SUCCESS if s.get("synced") else MUTED))
                 self.sales_table.setItem(r, c, item)
             self.sales_table.setRowHeight(r, 34)
@@ -3909,9 +3932,14 @@ class AdminDashboard(QWidget):
             low = []
 
         if not low:
-            lbl = QLabel("✓  All stock levels OK")
+            row_w = QWidget(); row_w.setStyleSheet("background: transparent;")
+            rh = QHBoxLayout(row_w); rh.setContentsMargins(0, 0, 0, 0); rh.setSpacing(6)
+            ic = QLabel(); ic.setPixmap(qta.icon("fa5s.check", color=SUCCESS).pixmap(14, 14))
+            ic.setStyleSheet("background:transparent;")
+            lbl = QLabel("All stock levels OK")
             lbl.setStyleSheet(f"color:{SUCCESS}; font-size:12px; background:transparent;")
-            self._stock_alert_layout.addWidget(lbl)
+            rh.addWidget(ic); rh.addWidget(lbl); rh.addStretch()
+            self._stock_alert_layout.addWidget(row_w)
         else:
             for p in low[:12]:
                 row_w = QWidget()
@@ -4010,7 +4038,7 @@ class OptionsDialog(QDialog):
         title.setStyleSheet(
             f"font-size:15px; font-weight:bold; color:{WHITE}; background:transparent;"
         )
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton(); close_btn.setIcon(qta.icon("fa5s.times", color="white"))
         close_btn.setFixedSize(28, 28)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"""
@@ -4121,10 +4149,10 @@ class POSRulesDialog(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(52)
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(24, 0, 24, 0)
-        t = QLabel("🛡  POS Business Rules")
+        t = QLabel("POS Business Rules")
         t.setStyleSheet(f"font-size:16px; font-weight:bold; color:{WHITE}; background:transparent;")
         hl.addWidget(t); hl.addStretch()
-        close_x = QPushButton("✕")
+        close_x = QPushButton(); close_x.setIcon(qta.icon("fa5s.times", color="white"))
         close_x.setFixedSize(30, 30); close_x.setCursor(Qt.PointingHandCursor)
         close_x.setStyleSheet(
             f"QPushButton {{ background:{DANGER}; color:{WHITE}; border:none;"
@@ -4144,11 +4172,11 @@ class POSRulesDialog(QDialog):
         bl.addWidget(sec)
 
         rules = [
-            ("block_zero_price",  "🚫  Block Zero-Price Sales",
+            ("block_zero_price",  "Block Zero-Price Sales",
              "Prevent adding items with $0.00 price to the invoice.", True),
-            ("block_zero_stock",  "📦  Block Zero-Stock Sales",
+            ("block_zero_stock",  "Block Zero-Stock Sales",
              "Show 'Insufficient Stock' popup when item has no stock.", False),
-            ("use_pricing_rules", "💸  Apply Pricing Rules",
+            ("use_pricing_rules", "Apply Pricing Rules",
              "Auto-apply discount rules when adding items.", False),
         ]
         for key, label, desc, default in rules:
@@ -4160,7 +4188,7 @@ class POSRulesDialog(QDialog):
         bl.addWidget(sep); bl.addSpacing(8)
 
         note = QLabel(
-            "💡  Per-user permissions (Allow Discounts, Reprint, Credit Notes, Receipt)\n"
+            "Per-user permissions (Allow Discounts, Reprint, Credit Notes, Receipt)\n"
             "    are configured in  Maintenance → Users → edit a user."
         )
         note.setWordWrap(True)
@@ -4170,7 +4198,8 @@ class POSRulesDialog(QDialog):
         bl.addWidget(note)
         bl.addStretch()
 
-        save_btn = navy_btn("💾  Save Rules", height=42, color=SUCCESS, hover=SUCCESS_H)
+        save_btn = navy_btn("Save Rules", height=42, color=SUCCESS, hover=SUCCESS_H)
+        save_btn.setIcon(qta.icon("fa5s.save", color="white"))
         save_btn.clicked.connect(self._save)
         bl.addWidget(save_btn)
 
@@ -4308,13 +4337,14 @@ class UnsyncedPopup(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(54)
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
-        t = QLabel("⚠  Unsynced Items")
+        t = QLabel("Unsynced Items")
         t.setStyleSheet(
             f"font-size:15px; font-weight:bold; color:{WHITE}; background:transparent;")
         self._hdr_count = QLabel("")
         self._hdr_count.setStyleSheet(
             f"color:{MID}; font-size:12px; background:transparent;")
-        close_x = QPushButton("✕  Close")
+        close_x = QPushButton("Close")
+        close_x.setIcon(qta.icon("fa5s.times", color="white"))
         close_x.setFixedSize(92, 32); close_x.setCursor(Qt.PointingHandCursor)
         close_x.setStyleSheet(f"""
             QPushButton {{ background:{DANGER};color:{WHITE};border:none;
@@ -4351,7 +4381,7 @@ class UnsyncedPopup(QDialog):
 
         # Admin hint
         hint = QLabel(
-            "⚠️  Check above for any errors and just copy and send to admin "
+            "Check above for any errors and just copy and send to admin "
         )
         hint.setWordWrap(True)
         hint.setTextFormat(Qt.RichText)
@@ -4407,7 +4437,8 @@ class UnsyncedPopup(QDialog):
         # Copy button + retry button
         foot = QHBoxLayout(); foot.setSpacing(10)
 
-        copy_btn = QPushButton("📋  Copy Selected Error")
+        copy_btn = QPushButton("Copy Selected Error")
+        copy_btn.setIcon(qta.icon("fa5s.clipboard", color="white"))
         copy_btn.setFixedHeight(34); copy_btn.setCursor(Qt.PointingHandCursor)
         copy_btn.setStyleSheet(f"""
             QPushButton {{ background:{NAVY_2};color:{WHITE};border:none;
@@ -4416,7 +4447,8 @@ class UnsyncedPopup(QDialog):
         """)
         copy_btn.clicked.connect(lambda _=False, k=kind: self._copy_error(k))
 
-        refresh_btn = QPushButton("↻  Refresh")
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         refresh_btn.setFixedHeight(34); refresh_btn.setCursor(Qt.PointingHandCursor)
         refresh_btn.setStyleSheet(f"""
             QPushButton {{ background:{NAVY_2};color:{WHITE};border:none;
@@ -4425,7 +4457,8 @@ class UnsyncedPopup(QDialog):
         """)
         refresh_btn.clicked.connect(lambda _=False, k=kind: self._load_tab(k))
 
-        retry_btn = QPushButton("🔄  Retry Sync Now")
+        retry_btn = QPushButton("Retry Sync Now")
+        retry_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         retry_btn.setFixedHeight(34); retry_btn.setCursor(Qt.PointingHandCursor)
         retry_btn.setStyleSheet(f"""
             QPushButton {{ background:{ACCENT};color:{WHITE};border:none;
@@ -4787,7 +4820,7 @@ class UnsyncedPopup(QDialog):
                 from PySide6.QtGui import QCursor
                 tbl = self._tables.get(kind)
                 if tbl:
-                    QToolTip.showText(QCursor.pos(), "✅  Copied to clipboard!", tbl, tbl.rect(), 2000)
+                    QToolTip.showText(QCursor.pos(), "Copied to clipboard!", tbl, tbl.rect(), 2000)
             except Exception:
                 pass
 
@@ -4893,7 +4926,8 @@ class UnsyncedPopup(QDialog):
                 for child in tab.findChildren(QPushButton):
                     if "Retry" in child.text() or "Retrying" in child.text():
                         child.setEnabled(True)
-                        child.setText("🔄  Retry Sync Now")
+                        child.setText("Retry Sync Now")
+                        child.setIcon(qta.icon("fa5s.sync-alt", color="white"))
 from PySide6.QtCore import QThread, Signal as _Signal
 
 class _BadgeWorker(QThread):
@@ -5036,7 +5070,7 @@ class POSView(QWidget):
                 if dlg.exec() == QDialog.Accepted and dlg.selected_customer:
                     self._selected_customer = dlg.selected_customer
                     cname = self._selected_customer.get("customer_name", "")
-                    self._cust_btn.setText(f"👤  {cname[:22]}")
+                    self._cust_btn.setText(f"{cname[:22]}")
                     self._cust_btn.setStyleSheet(f"""
                         QPushButton {{
                             background-color: {ACCENT}; color: {WHITE};
@@ -5110,7 +5144,7 @@ class POSView(QWidget):
                 return
             self._selected_customer = dlg.selected_customer
             cname = self._selected_customer.get("customer_name", "")
-            self._cust_btn.setText(f"👤  {cname[:22]}")
+            self._cust_btn.setText(f"{cname[:22]}")
             self._cust_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {ACCENT}; color: {WHITE};
@@ -5219,7 +5253,7 @@ class POSView(QWidget):
             self._on_laybye() 
 
         if self.parent_window:
-            self.parent_window._set_status(f"✔ Laybye #{order_id} Saved Successfully")
+            self.parent_window._set_status(f"Laybye #{order_id} Saved Successfully")
     def _open_payment(self):
         """
         Opens the payment dialog and processes the sale.
@@ -5264,7 +5298,7 @@ class POSView(QWidget):
             
             self._selected_customer = _picker.selected_customer
             _name = self._selected_customer.get("customer_name", "")
-            self._cust_btn.setText(f"👤  {_name[:22]}")
+            self._cust_btn.setText(f"{_name[:22]}")
             self._cust_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {ACCENT}; color: {WHITE};
@@ -6130,7 +6164,8 @@ class POSView(QWidget):
             layout.addSpacing(10)
 
         # ── Customer selector ─────────────────────────────────────────────────
-        self._cust_btn = QPushButton("👤   Customer")
+        self._cust_btn = QPushButton("Customer")
+        self._cust_btn.setIcon(qta.icon("fa5s.user", color="white"))
         self._cust_btn.setFixedHeight(NAV_H)
         self._cust_btn.setMaximumWidth(170)
         self._cust_btn.setCursor(Qt.PointingHandCursor)
@@ -6300,7 +6335,7 @@ class POSView(QWidget):
                 suffix = f"{total_sync} !" if total_sync >= 5 else str(total_sync)
                 btn.setText(f"Q : {suffix}")
                 btn.setToolTip(
-                    f"⚠ {total_sync} unsynced record(s)\n"
+                    f"{total_sync} unsynced record(s)\n"
                     f"  SI={si_count}  CN={cn_count}  SO={so_count}\n"
                     f"  PAY={pay_count}  CUST={cust_count}"
                 )
@@ -6331,7 +6366,7 @@ class POSView(QWidget):
                 suffix = f"{fiscal_count} !" if fiscal_count >= 5 else str(fiscal_count)
                 z_btn.setText(f"Z : {suffix}")
                 z_btn.setToolTip(
-                    f"⚠ {fiscal_count} sale(s) pending fiscalization\n"
+                    f"{fiscal_count} sale(s) pending fiscalization\n"
                     f"Click to view and retry failed fiscalizations"
                 )
                 z_btn.setStyleSheet(f"""
@@ -6926,7 +6961,8 @@ class POSView(QWidget):
             layout.addSpacing(10)
 
         # ── Customer selector ─────────────────────────────────────────────────
-        self._cust_btn = QPushButton("👤   Customer")
+        self._cust_btn = QPushButton("Customer")
+        self._cust_btn.setIcon(qta.icon("fa5s.user", color="white"))
         self._cust_btn.setFixedHeight(NAV_H)
         self._cust_btn.setMaximumWidth(170)
         self._cust_btn.setCursor(Qt.PointingHandCursor)
@@ -7884,7 +7920,7 @@ class POSView(QWidget):
         root.setContentsMargins(28, 28, 28, 24)
         root.setSpacing(16)
 
-        hdr = QLabel("⚠  No Shift Running")
+        hdr = QLabel("No Shift Running")
         hdr.setAlignment(Qt.AlignCenter)
         hdr.setStyleSheet(f"""
             background:{ORANGE}; color:{WHITE};
@@ -8789,8 +8825,8 @@ class POSView(QWidget):
             QMenu::item:selected   {{ background-color: {ACCENT}; color: {WHITE}; }}
             QMenu::separator       {{ height: 1px; background: {BORDER}; margin: 4px 10px; }}
         """)
-        act_set    = menu.addAction("🖼  Set Image…")
-        act_remove = menu.addAction("🗑  Remove Image")
+        act_set    = menu.addAction(qta.icon("fa5s.image"), "Set Image…")
+        act_remove = menu.addAction(qta.icon("fa5s.trash"), "Remove Image")
         act_remove.setEnabled(bool(current_image))
         chosen = menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
         if chosen == act_set:
@@ -8857,7 +8893,8 @@ class POSView(QWidget):
             from models.shift import get_active_shift
             s = get_active_shift()
             if s:
-                self._shift_pill.setText(f"🟢  Shift #{s.get('shift_number', '')}")
+                self._shift_pill.setText(f"Shift #{s.get('shift_number', '')}")
+                self._shift_pill.setIcon(qta.icon("fa5s.circle", color="#2ecc71"))
                 self._shift_pill.setStyleSheet(f"""
                     QPushButton {{
                         background-color:{SUCCESS}; color:{WHITE}; border:none;
@@ -8869,7 +8906,8 @@ class POSView(QWidget):
                 """)
                 self._shift_pill.setToolTip("Shift is running — click to view details")
             else:
-                self._shift_pill.setText("⚫  No Shift")
+                self._shift_pill.setText("No Shift")
+                self._shift_pill.setIcon(qta.icon("fa5s.circle", color="#333333"))
                 self._shift_pill.setStyleSheet(f"""
                     QPushButton {{
                         background-color:{MUTED}; color:{WHITE}; border:none;
@@ -8904,7 +8942,7 @@ class POSView(QWidget):
             self._selected_customer = dlg.selected_customer
             if self._selected_customer:
                 name = self._selected_customer.get("customer_name", "")
-                self._cust_btn.setText(f"👤  {name[:22]}")
+                self._cust_btn.setText(f"{name[:22]}")
                 self._cust_btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {ACCENT}; color: {WHITE};
@@ -9132,7 +9170,7 @@ class POSView(QWidget):
         cname = self._selected_customer.get("customer_name", "")
         
         # Update customer button appearance to green
-        self._cust_btn.setText(f"👤  {cname[:22]}")
+        self._cust_btn.setText(f"{cname[:22]}")
         self._cust_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {SUCCESS}; color: {WHITE}; border: none;
@@ -9164,7 +9202,7 @@ class POSView(QWidget):
 
     def _reset_customer_btn(self):
         self._selected_customer = None
-        self._cust_btn.setText("👤  Customer")
+        self._cust_btn.setText("Customer")
         self._cust_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {NAVY_2}; color: {MID}; border: 1px solid {NAVY_3};
@@ -9179,7 +9217,7 @@ class POSView(QWidget):
         """Update the customer button label without clearing the selection."""
         if self._selected_customer:
             name = self._selected_customer.get("customer_name", "")
-            self._cust_btn.setText(f"👤  {name[:22]}")
+            self._cust_btn.setText(f"{name[:22]}")
             self._cust_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {ACCENT}; color: {WHITE};
@@ -9189,7 +9227,7 @@ class POSView(QWidget):
                 QPushButton:hover {{ background-color: {ACCENT_H}; }}
             """)
         else:
-            self._cust_btn.setText("👤  Customer")
+            self._cust_btn.setText("Customer")
             self._cust_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {NAVY_2}; color: {MID}; border: 1px solid {NAVY_3};
@@ -9739,7 +9777,7 @@ class POSView(QWidget):
         dlg_lay.setContentsMargins(24, 20, 24, 20)
         dlg_lay.setSpacing(12)
 
-        title_lbl = QLabel("🏷  Apply Discount")
+        title_lbl = QLabel("Apply Discount")
         title_lbl.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {NAVY};")
         dlg_lay.addWidget(title_lbl)
 
@@ -9830,14 +9868,14 @@ class POSView(QWidget):
                     entered_amt = line_total * (entered / 100.0)
                     if entered > limit:
                         hint_lbl.setText(
-                            f"❌  {entered:.1f}% exceeds your limit of <b>{limit}%</b>  "
+                            f"{entered:.1f}% exceeds your limit of <b>{limit}%</b>  "
                             f"(= ${line_total * entered / 100:.2f}).  "
                             f"Max you can give: <b>${max_allowed_amt:.2f}</b>"
                         )
                         hint_lbl.setStyleSheet(f"font-size:11px; color:{DANGER};")
                     elif entered > 0:
                         hint_lbl.setText(
-                            f"✅  {entered:.1f}% = <b>${entered_amt:.2f}</b> off  "
+                            f"{entered:.1f}% = <b>${entered_amt:.2f}</b> off  "
                             f"(limit: {limit}% = ${max_allowed_amt:.2f})"
                         )
                         hint_lbl.setStyleSheet(f"font-size:11px; color:{SUCCESS};")
@@ -9861,14 +9899,14 @@ class POSView(QWidget):
                     if line_total > 0 and limit < 100 and entered > max_allowed_amt:
                         implied = (entered / line_total) * 100
                         hint_lbl.setText(
-                            f"❌  ${entered:.2f} ({implied:.1f}%) exceeds your limit.  "
+                            f"${entered:.2f} ({implied:.1f}%) exceeds your limit.  "
                             f"Max allowed: <b>${max_allowed_amt:.2f}</b>"
                         )
                         hint_lbl.setStyleSheet(f"font-size:11px; color:{DANGER};")
                     elif entered > 0:
                         implied = (entered / line_total) * 100 if line_total > 0 else 0
                         hint_lbl.setText(
-                            f"✅  ${entered:.2f} ({implied:.1f}% off)  "
+                            f"${entered:.2f} ({implied:.1f}% off)  "
                             f"(limit: ${max_allowed_amt:.2f})"
                         )
                         hint_lbl.setStyleSheet(f"font-size:11px; color:{SUCCESS};")
@@ -9914,7 +9952,7 @@ class POSView(QWidget):
             if raw < 0 or raw > float(limit):
                 QMessageBox.warning(
                     self, "Discount Exceeds Limit",
-                    f"❌  {raw:.1f}% exceeds the maximum allowed discount of {limit}% "
+                    f"{raw:.1f}% exceeds the maximum allowed discount of {limit}% "
                     f"for cashier '{cashier_name}'.\n\n"
                     f"Please enter a value between 0% and {limit}%.\n\n"
                     f"A Manager PIN override is required to apply a higher discount."
@@ -9934,7 +9972,7 @@ class POSView(QWidget):
                     implied_pct = (disc_amount / line_total) * 100
                     QMessageBox.warning(
                         self, "Discount Exceeds Limit",
-                        f"❌  ${disc_amount:.2f} ({implied_pct:.1f}%) exceeds the maximum allowed "
+                        f"${disc_amount:.2f} ({implied_pct:.1f}%) exceeds the maximum allowed "
                         f"discount of {limit}% (${max_allowed_amt:.2f}) "
                         f"for cashier '{cashier_name}'.\n\n"
                         f"A Manager PIN override is required for a higher discount."
@@ -10004,7 +10042,7 @@ class POSView(QWidget):
             return
         self._selected_customer = dlg.selected_customer
         cname = self._selected_customer.get("customer_name", "")
-        self._cust_btn.setText(f"👤  {cname[:22]}")
+        self._cust_btn.setText(f"{cname[:22]}")
         self._cust_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {SUCCESS}; color: {WHITE}; border: none;
@@ -10132,9 +10170,14 @@ class MainWindow(QMainWindow):
         # #37 — logged-in user in footer
         _uname = self.user.get("username", "")
         _urole = self.user.get("role", "cashier")
-        _user_lbl = QLabel(f"  👤 {_uname} [{_urole.upper()}]  ")
+        _user_w = QWidget(); _user_w.setStyleSheet("background: transparent;")
+        _user_h = QHBoxLayout(_user_w); _user_h.setContentsMargins(6, 0, 6, 0); _user_h.setSpacing(4)
+        _user_ic = QLabel(); _user_ic.setPixmap(qta.icon("fa5s.user", color=MID).pixmap(12, 12))
+        _user_ic.setStyleSheet("background: transparent;")
+        _user_lbl = QLabel(f"{_uname} [{_urole.upper()}]")
         _user_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
-        self._status_bar.addPermanentWidget(_user_lbl)
+        _user_h.addWidget(_user_ic); _user_h.addWidget(_user_lbl)
+        self._status_bar.addPermanentWidget(_user_w)
 
         _sep1 = QLabel("|")
         _sep1.setStyleSheet(f"color: {NAVY_2}; background: transparent;")
@@ -10146,9 +10189,14 @@ class MainWindow(QMainWindow):
             _srv = _ghl()
         except Exception:
             _srv = "—"
-        _srv_lbl = QLabel(f"  🌐 {_srv}  ")
+        _srv_w = QWidget(); _srv_w.setStyleSheet("background: transparent;")
+        _srv_h = QHBoxLayout(_srv_w); _srv_h.setContentsMargins(6, 0, 6, 0); _srv_h.setSpacing(4)
+        _srv_ic = QLabel(); _srv_ic.setPixmap(qta.icon("fa5s.globe", color=MID).pixmap(12, 12))
+        _srv_ic.setStyleSheet("background: transparent;")
+        _srv_lbl = QLabel(f"{_srv}")
         _srv_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
-        self._status_bar.addPermanentWidget(_srv_lbl)
+        _srv_h.addWidget(_srv_ic); _srv_h.addWidget(_srv_lbl)
+        self._status_bar.addPermanentWidget(_srv_w)
 
         _sep2 = QLabel("|")
         _sep2.setStyleSheet(f"color: {NAVY_2}; background: transparent;")
@@ -10171,9 +10219,14 @@ class MainWindow(QMainWindow):
                 _sql = _d.get("db_server", "") or _d.get("server", "") or "localhost"
             except Exception:
                 _sql = "localhost"
-        _sql_lbl = QLabel(f"  🗄 {_sql}  ")
+        _sql_w = QWidget(); _sql_w.setStyleSheet("background: transparent;")
+        _sql_h = QHBoxLayout(_sql_w); _sql_h.setContentsMargins(6, 0, 6, 0); _sql_h.setSpacing(4)
+        _sql_ic = QLabel(); _sql_ic.setPixmap(qta.icon("fa5s.database", color=MID).pixmap(12, 12))
+        _sql_ic.setStyleSheet("background: transparent;")
+        _sql_lbl = QLabel(f"{_sql}")
         _sql_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
-        self._status_bar.addPermanentWidget(_sql_lbl)
+        _sql_h.addWidget(_sql_ic); _sql_h.addWidget(_sql_lbl)
+        self._status_bar.addPermanentWidget(_sql_w)
 
         # #18 — everyone lands on POS first, always
         self._stack.setCurrentIndex(0)
@@ -10408,7 +10461,7 @@ class MainWindow(QMainWindow):
     # =========================================================================
     def _on_sync_error(self, error_msg: str):
         """Show sync errors in the status bar."""
-        self._status_bar.showMessage(f"⚠️ {error_msg}", 5000)
+        self._status_bar.showMessage(f"{error_msg}", 5000)
     def _run_startup_sync(self):
         """
         Called automatically 2 seconds after MainWindow opens.
@@ -10566,8 +10619,9 @@ class MainWindow(QMainWindow):
 
         # Row 1: icon + title + close
         hrow = QHBoxLayout(); hrow.setSpacing(8)
-        icon_lbl = QLabel("❌")
-        icon_lbl.setStyleSheet("font-size:16px;")
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(qta.icon("fa5s.times-circle", color=DANGER).pixmap(16, 16))
+        icon_lbl.setStyleSheet("background:transparent;")
         _svc_map = {
             "SalesOrderUpload": "Sales Order Sync",
             "pos_upload":       "Invoice Sync",
@@ -10581,7 +10635,7 @@ class MainWindow(QMainWindow):
         title_lbl = QLabel(f"Sync Error — {svc_short}")
         title_lbl.setStyleSheet(
             f"font-size:12px; font-weight:bold; color:{WHITE};")
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton(); close_btn.setIcon(qta.icon("fa5s.times", color=MID))
         close_btn.setFixedSize(22, 22); close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"""
             QPushButton {{ background:transparent;color:{MID};border:none;font-size:12px; }}
@@ -10607,7 +10661,7 @@ class MainWindow(QMainWindow):
 
         # Row 4: admin hint
         hint_lbl = QLabel(
-            "💡 Contact your administrator if this keeps happening.\n"
+            "Contact your administrator if this keeps happening.\n"
             "Check: Stock Settings → Stock Reservation,\n"
             "Company Defaults → Warehouse / Cash Account."
         )
@@ -10616,7 +10670,8 @@ class MainWindow(QMainWindow):
         tl.addWidget(hint_lbl)
 
         # Row 5: details button
-        details_btn = QPushButton(f"🔍  View unsynced {kind}s")
+        details_btn = QPushButton(f"View unsynced {kind}s")
+        details_btn.setIcon(qta.icon("fa5s.search", color="white"))
         details_btn.setFixedHeight(28); details_btn.setCursor(Qt.PointingHandCursor)
         details_btn.setStyleSheet(f"""
             QPushButton {{ background:{ACCENT};color:{WHITE};border:none;
@@ -11372,7 +11427,8 @@ class CustomerPaymentDialog(QDialog):
             )
             return btn
         
-        bback = _numpad_btn("⌫", "del")
+        bback = _numpad_btn("", "del")
+        bback.setIcon(qta.icon("fa5s.backspace", color="white"))
         bback.clicked.connect(self._numpad_back)
         grid.addWidget(bback, 0, 0)
         
@@ -11682,7 +11738,7 @@ class ReprintDialog(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(52)
         hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
-        title = QLabel("🖨  Reprint")
+        title = QLabel("Reprint")
         title.setStyleSheet(f"color:{NAVY}; font-size:16px; font-weight:bold; background:transparent;")
         sub = QLabel("Choose Sales Invoice or Sales Order")
         sub.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
@@ -11741,7 +11797,8 @@ class ReprintDialog(QDialog):
         bcancel = QPushButton("Cancel"); bcancel.setFixedHeight(40); bcancel.setFixedWidth(90)
         bcancel.setCursor(Qt.PointingHandCursor); bcancel.setStyleSheet(self._BTN_CANCEL_SS)
         bcancel.clicked.connect(self.reject)
-        self._inv_btn = QPushButton("🖨  Reprint Invoice")
+        self._inv_btn = QPushButton("Reprint Invoice")
+        self._inv_btn.setIcon(qta.icon("fa5s.print", color="white"))
         self._inv_btn.setFixedHeight(40); self._inv_btn.setEnabled(False)
         self._inv_btn.setCursor(Qt.PointingHandCursor)
         self._inv_btn.setStyleSheet(self._BTN_REPRINT_SS)
@@ -11783,7 +11840,8 @@ class ReprintDialog(QDialog):
         bcancel = QPushButton("Cancel"); bcancel.setFixedHeight(40); bcancel.setFixedWidth(90)
         bcancel.setCursor(Qt.PointingHandCursor); bcancel.setStyleSheet(self._BTN_CANCEL_SS)
         bcancel.clicked.connect(self.reject)
-        self._so_btn = QPushButton("🖨  Reprint Sales Order")
+        self._so_btn = QPushButton("Reprint Sales Order")
+        self._so_btn.setIcon(qta.icon("fa5s.print", color="white"))
         self._so_btn.setFixedHeight(40); self._so_btn.setEnabled(False)
         self._so_btn.setCursor(Qt.PointingHandCursor)
         self._so_btn.setStyleSheet(self._BTN_REPRINT_SS)
@@ -12181,11 +12239,12 @@ class CreditNoteDialog(QDialog):
                 + f"   ·   {s.get('invoice_date', '')}"
             )
             if has_cn:
-                label += "   ⚠️ RETURN ALREADY PROCESSED"
-            
+                label += "   RETURN ALREADY PROCESSED"
+
             it = QListWidgetItem(label)
             it.setData(Qt.UserRole, s)
             if has_cn:
+                it.setIcon(qta.icon("fa5s.exclamation-triangle", color="#e67e22"))
                 it.setForeground(QColor(MUTED))
                 it.setFlags(it.flags() & ~Qt.ItemIsSelectable)  # Disable selection
             self._ac.addItem(it)
@@ -12272,7 +12331,8 @@ class AdvanceSettingsDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("🖨 Advanced Printing & Receipt Settings")
+        self.setWindowTitle("Advanced Printing & Receipt Settings")
+        self.setWindowIcon(qta.icon("fa5s.print"))
         self.setMinimumSize(920, 680)
         self.setModal(True)
         self.setStyleSheet(f"QDialog {{ background-color: {OFF_WHITE}; }}")
@@ -12319,7 +12379,8 @@ class AdvanceSettingsDialog(QDialog):
         reset_btn.setFixedHeight(40)
         reset_btn.clicked.connect(self._reset_to_defaults)
 
-        save_btn = navy_btn("💾 Save & Apply", height=40, color=SUCCESS, hover=SUCCESS_H)
+        save_btn = navy_btn("Save & Apply", height=40, color=SUCCESS, hover=SUCCESS_H)
+        save_btn.setIcon(qta.icon("fa5s.save", color="white"))
         save_btn.clicked.connect(self._save_and_close)
 
         cancel_btn = navy_btn("Cancel", height=40, color=DANGER, hover=DANGER_H)

@@ -586,8 +586,9 @@ def create_sale(
                 INSERT INTO sale_items (
                     sale_id, part_no, product_name, qty, price,
                     discount, tax, total,
-                    tax_type, tax_rate, tax_amount, remarks
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tax_type, tax_rate, tax_amount, remarks,
+                    is_pharmacy, dosage, batch_no, expiry_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 sale_id,
                 str(item.get("part_no", "")),
@@ -601,6 +602,10 @@ def create_sale(
                 float(item.get("tax_rate", 0.0)),
                 float(item.get("tax_amount", 0.0)),
                 str(item.get("remarks", "")),
+                1 if item.get("is_pharmacy") else 0,
+                item.get("dosage"),
+                item.get("batch_no"),
+                item.get("expiry_date"),
             ))
             item_insert_count += 1
 
@@ -1282,19 +1287,36 @@ def migrate():
 # =============================================================================
 
 def _fetch_items(sale_id: int, cur) -> list[dict]:
-    cur.execute("""
-        SELECT id, sale_id, part_no, product_name, qty, price,
-               discount, tax, total,
-               tax_type, tax_rate, tax_amount, remarks,
-               order_1, order_2, order_3, order_4, order_5, order_6
-        FROM sale_items
-        WHERE sale_id = ?
-        ORDER BY id
-    """, (sale_id,))
-    return [_item_to_dict(r) for r in fetchall_dicts(cur)]
+    # Pharmacy columns are selected defensively — the SELECT will fail if the
+    # migration hasn't run yet, so we fall back to the legacy column set.
+    try:
+        cur.execute("""
+            SELECT id, sale_id, part_no, product_name, qty, price,
+                   discount, tax, total,
+                   tax_type, tax_rate, tax_amount, remarks,
+                   order_1, order_2, order_3, order_4, order_5, order_6,
+                   is_pharmacy, dosage, batch_no, expiry_date
+            FROM sale_items
+            WHERE sale_id = ?
+            ORDER BY id
+        """, (sale_id,))
+        return [_item_to_dict(r) for r in fetchall_dicts(cur)]
+    except Exception:
+        cur.execute("""
+            SELECT id, sale_id, part_no, product_name, qty, price,
+                   discount, tax, total,
+                   tax_type, tax_rate, tax_amount, remarks,
+                   order_1, order_2, order_3, order_4, order_5, order_6
+            FROM sale_items
+            WHERE sale_id = ?
+            ORDER BY id
+        """, (sale_id,))
+        return [_item_to_dict(r) for r in fetchall_dicts(cur)]
 
 
 def _item_to_dict(row: dict) -> dict:
+    expiry = row.get("expiry_date")
+    expiry_str = expiry.isoformat() if hasattr(expiry, "isoformat") else (str(expiry) if expiry else None)
     return {
         "id":           row["id"],
         "sale_id":      row["sale_id"],
@@ -1315,6 +1337,11 @@ def _item_to_dict(row: dict) -> dict:
         "order_4":      bool(row.get("order_4", False)),
         "order_5":      bool(row.get("order_5", False)),
         "order_6":      bool(row.get("order_6", False)),
+        # ── Pharmacy-specific fields (safe default if columns absent) ────
+        "is_pharmacy":  bool(row.get("is_pharmacy", False)),
+        "dosage":       row.get("dosage"),
+        "batch_no":     row.get("batch_no"),
+        "expiry_date":  expiry_str,
     }
 
 

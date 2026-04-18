@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore  import Qt, QLocale
 from PySide6.QtGui   import QColor, QDoubleValidator
+import qtawesome as qta
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
@@ -128,7 +129,7 @@ class SplitPaymentDialog(QDialog):
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr)
         hl.setContentsMargins(24, 0, 24, 0)
-        hl.addWidget(self._lbl("⚡  Split Payment", WHITE, 16, bold=True))
+        hl.addWidget(self._lbl("Split Payment", WHITE, 16, bold=True))
         hl.addStretch()
         rate_hint = self._lbl(
             f"Rate: 1 USD = {self._zig_rate:.2f} ZIG", "#8fa8c8", 11
@@ -254,7 +255,8 @@ class SplitPaymentDialog(QDialog):
         """)
         bclear.clicked.connect(self._clear_all)
 
-        self._confirm_btn = QPushButton("✅  Confirm Payment")
+        self._confirm_btn = QPushButton("Confirm Payment")
+        self._confirm_btn.setIcon(qta.icon("fa5s.check", color="white"))
         self._confirm_btn.setFixedHeight(44)
         self._confirm_btn.setCursor(Qt.PointingHandCursor)
         self._confirm_btn.setEnabled(False)

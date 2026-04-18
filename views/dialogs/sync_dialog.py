@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui  import QColor
+import qtawesome as qta
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
@@ -60,10 +61,10 @@ class _SyncWorker(QObject):
             results["accounts"] = r.get("accounts", 0)
             results["rates"]    = r.get("rates",    0)
             self.progress.emit("GL Accounts & Rates",
-                f"✅ {r.get('accounts',0)} accounts, {r.get('rates',0)} rate(s)")
+                f"OK: {r.get('accounts',0)} accounts, {r.get('rates',0)} rate(s)")
         except Exception as e:
             results["accounts"] = results["rates"] = 0
-            self.progress.emit("GL Accounts & Rates", f"❌ {e}")
+            self.progress.emit("GL Accounts & Rates", f"FAIL: {e}")
 
         self.progress.emit("Products", "Syncing…")
         try:
@@ -73,20 +74,20 @@ class _SyncWorker(QObject):
             r2 = sync_products_smart(api_key, api_secret)
             results["products"] = r2.get("inserted", 0) + r2.get("updated", 0)
             self.progress.emit("Products",
-                f"✅ {r2.get('inserted',0)} new, {r2.get('updated',0)} updated")
+                f"OK: {r2.get('inserted',0)} new, {r2.get('updated',0)} updated")
         except Exception as e:
             results["products"] = 0
-            self.progress.emit("Products", f"❌ {e}")
+            self.progress.emit("Products", f"FAIL: {e}")
 
         self.progress.emit("Customers", "Syncing…")
         try:
             from services.customer_sync_service import sync_customers
             sync_customers()
             results["customers"] = "done"
-            self.progress.emit("Customers", "✅ Synced")
+            self.progress.emit("Customers", "OK: Synced")
         except Exception as e:
             results["customers"] = 0
-            self.progress.emit("Customers", f"❌ {e}")
+            self.progress.emit("Customers", f"FAIL: {e}")
 
         self.finished.emit(results)
 
@@ -146,11 +147,12 @@ class SyncDialog(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(52)
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
-        title = QLabel("🔄  Sync with Frappe")
+        title = QLabel("Sync with Frappe")
         title.setStyleSheet(
             f"font-size:16px; font-weight:bold; color:{WHITE}; background:transparent;"
         )
-        self._close_btn = QPushButton("✕  Close")
+        self._close_btn = QPushButton("Close")
+        self._close_btn.setIcon(qta.icon("fa5s.times", color="white"))
         self._close_btn.setFixedSize(90, 32)
         self._close_btn.setCursor(Qt.PointingHandCursor)
         self._close_btn.setStyleSheet(f"""
@@ -180,7 +182,8 @@ class SyncDialog(QDialog):
         bl.addWidget(self._status_tbl)
 
         # Sync Now button
-        self._sync_btn = QPushButton("🔄  Sync Now")
+        self._sync_btn = QPushButton("Sync Now")
+        self._sync_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         self._sync_btn.setFixedHeight(40)
         self._sync_btn.setCursor(Qt.PointingHandCursor)
         self._sync_btn.setStyleSheet(f"""
@@ -209,13 +212,13 @@ class SyncDialog(QDialog):
         self._accounts_tbl = _make_table(
             ["Account Name", "Type", "Currency", "Company"]
         )
-        self._tabs.addTab(self._accounts_tbl, "💳  GL Accounts")
+        self._tabs.addTab(self._accounts_tbl, qta.icon("fa5s.money-bill"), "GL Accounts")
 
         # Exchange Rates tab
         self._rates_tbl = _make_table(
             ["From", "To", "Rate", "Date"]
         )
-        self._tabs.addTab(self._rates_tbl, "💱  Exchange Rates")
+        self._tabs.addTab(self._rates_tbl, qta.icon("fa5s.exchange-alt"), "Exchange Rates")
 
         bl.addWidget(self._tabs, 1)
 
@@ -297,14 +300,15 @@ class SyncDialog(QDialog):
             item = self._status_tbl.item(self._status_rows[name], 1)
             item.setText(status)
             item.setForeground(QColor(
-                GREEN  if "✅" in status else
-                DANGER if "❌" in status else
+                GREEN  if status.startswith("OK") else
+                DANGER if status.startswith("FAIL") else
                 AMBER
             ))
 
     def _on_finished(self, results: dict):
         self._sync_btn.setEnabled(True)
-        self._sync_btn.setText("🔄  Sync Now")
+        self._sync_btn.setText("Sync Now")
+        self._sync_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         self._close_btn.setEnabled(True)
         # Refresh both data tables
         self._load_accounts()

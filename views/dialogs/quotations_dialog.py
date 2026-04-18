@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QDate, QSize
 from PySide6.QtGui import QColor, QFont, QClipboard
+import qtawesome as qta
 
 import json
 from datetime import datetime
@@ -173,7 +174,7 @@ class QuotationsDialog(QDialog):
             f"font-size:12px;background:transparent;color:#2ecc71;"
         )
         
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton(); close_btn.setIcon(qta.icon("fa5s.times", color="white"))
         close_btn.setFixedSize(30, 30)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"""
@@ -352,7 +353,7 @@ class QuotationsDialog(QDialog):
         self._detail_layout.setSpacing(16)
         
         # Placeholder text
-        placeholder = QLabel("👈 Select a quotation from the list to view details")
+        placeholder = QLabel("Select a quotation from the list to view details")
         placeholder.setAlignment(Qt.AlignCenter)
         placeholder.setStyleSheet(f"color:{MUTED};font-size:13px;background:transparent;padding:40px;")
         self._detail_layout.addWidget(placeholder)
@@ -540,7 +541,7 @@ class QuotationsDialog(QDialog):
             ("Company:", q.get("company", "—")),
             ("Status:", q.get("status", "—")),
             ("Grand Total:", f"${float(q.get('grand_total', 0)):,.2f}"),
-            ("Synced:", "✓ Yes" if q.get("synced") else "✗ No"),
+            ("Synced:", "Yes" if q.get("synced") else "No"),
         ]
         
         for label, value in fields:
@@ -654,7 +655,7 @@ class QuotationsDialog(QDialog):
             self._render(self._quotations)
             
             synced_count = sum(1 for q in self._quotations if q.get("synced"))
-            self._sync_stats.setText(f"📁 {synced_count}/{len(self._quotations)} synced")
+            self._sync_stats.setText(f"{synced_count}/{len(self._quotations)} synced")
             
         except Exception as e:
             self._show_status(f"Error loading: {e}", error=True)

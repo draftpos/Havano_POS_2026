@@ -1,4 +1,5 @@
 # views/dashboard_view.py
+import qtawesome as qta
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QFrame
@@ -21,7 +22,7 @@ class DashboardView(QWidget):
 
         # ── Header ───────────────────────────────────
         header = QHBoxLayout()
-        title = QLabel("📊  Sales Dashboard")
+        title = QLabel("Sales Dashboard")
         title.setStyleSheet("""
             font-size: 20px;
             font-weight: bold;
@@ -131,8 +132,9 @@ class DashboardView(QWidget):
 
         # icon + title row
         top_row = QHBoxLayout()
-        icon_label = QLabel(icon)
-        icon_label.setStyleSheet("font-size: 20px; background: transparent;")
+        icon_label = QLabel()
+        icon_label.setPixmap(qta.icon(icon, color=color).pixmap(20, 20))
+        icon_label.setStyleSheet("background: transparent;")
         top_row.addWidget(icon_label)
         top_row.addStretch()
         layout.addLayout(top_row)
@@ -175,13 +177,13 @@ class DashboardView(QWidget):
 
         # 3 stat cards with different colors and icons
         self.cards_row.addWidget(
-            self._stat_card("Total Sales",   str(count),         "🧾", "#cba6f7")
+            self._stat_card("Total Sales",   str(count),         "fa5s.receipt",    "#cba6f7")
         )
         self.cards_row.addWidget(
-            self._stat_card("Total Revenue", f"${revenue:.2f}",  "💰", "#a6e3a1")
+            self._stat_card("Total Revenue", f"${revenue:.2f}",  "fa5s.money-bill", "#a6e3a1")
         )
         self.cards_row.addWidget(
-            self._stat_card("Avg per Sale",  f"${avg:.2f}",      "📈", "#89dceb")
+            self._stat_card("Avg per Sale",  f"${avg:.2f}",      "fa5s.chart-line", "#89dceb")
         )
 
         # ── fill table ───────────────────────────

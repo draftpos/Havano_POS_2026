@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor
+import qtawesome as qta
 
 # Logic Imports
 from models.reports import get_sales_items_report
@@ -35,7 +36,7 @@ class POSReportsDialog(QDialog):
         layout.setSpacing(10)
 
         # Header Title
-        hdr = QLabel("📊 Business Intelligence Reports")
+        hdr = QLabel("Business Intelligence Reports")
         hdr.setStyleSheet(f"""
             background: {NAVY}; color: {WHITE}; 
             padding: 15px; font-size: 16px; 
@@ -52,12 +53,12 @@ class POSReportsDialog(QDialog):
         # Tab 1: X-Report (Requirement 5)
         self.tab_x = QWidget()
         self._setup_x_report_tab()
-        self.tabs.addTab(self.tab_x, "📋 X-Report (Shift History)")
+        self.tabs.addTab(self.tab_x, qta.icon("fa5s.clipboard"), "X-Report (Shift History)")
         
         # Tab 2: Sales Items Report (Requirement 7)
         self.tab_items = QWidget()
         self._setup_items_report_tab()
-        self.tabs.addTab(self.tab_items, "📦 Sales Items Summary")
+        self.tabs.addTab(self.tab_items, qta.icon("fa5s.box"), "Sales Items Summary")
         
         # ADDED: Stretch factor 1 ensures tabs fill the window
         layout.addWidget(self.tabs, 1) 
@@ -152,7 +153,8 @@ class POSReportsDialog(QDialog):
             d.setFixedWidth(130)
             d.setFixedHeight(35)
 
-        btn_load = QPushButton("📊 Generate Items Summary")
+        btn_load = QPushButton("Generate Items Summary")
+        btn_load.setIcon(qta.icon("fa5s.chart-bar"))
         btn_load.setFixedWidth(210)
         btn_load.setFixedHeight(35)
         btn_load.setCursor(Qt.PointingHandCursor)

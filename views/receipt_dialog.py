@@ -1,5 +1,6 @@
 # views/receipt_dialog.py
 import os
+import qtawesome as qta
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel,
     QPushButton, QFrame, QHBoxLayout, QFileDialog, QMessageBox
@@ -26,7 +27,7 @@ class ReceiptDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
 
         # Header
-        title = QLabel("🧾  MY POS SYSTEM")
+        title = QLabel("MY POS SYSTEM")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
         layout.addWidget(title)
@@ -71,7 +72,8 @@ class ReceiptDialog(QDialog):
         # Buttons row
         btn_row = QHBoxLayout()
 
-        download_btn = QPushButton("⬇  Download PDF")
+        download_btn = QPushButton("Download PDF")
+        download_btn.setIcon(qta.icon("fa5s.download"))
         download_btn.setFixedHeight(40)
         download_btn.setStyleSheet("""
             QPushButton {

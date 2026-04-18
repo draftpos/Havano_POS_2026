@@ -10,6 +10,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 import sys
 import os
+import qtawesome as qta
 
 # =============================================================================
 # Palette
@@ -240,7 +241,8 @@ class LoginDialog(QDialog):
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.addStretch()
 
-        self.close_btn = QPushButton("✕")
+        self.close_btn = QPushButton()
+        self.close_btn.setIcon(qta.icon("fa5s.times", color=WHITE))
         self.close_btn.setFixedSize(32, 32)
         self.close_btn.setCursor(Qt.PointingHandCursor)
         self.close_btn.setFocusPolicy(Qt.NoFocus)
@@ -315,8 +317,10 @@ class LoginDialog(QDialog):
         tl.setContentsMargins(28, 10, 28, 0)
         tl.setSpacing(8)
 
-        self._pin_tab   = QPushButton("  🔢  PIN")
-        self._email_tab = QPushButton("  🔑  Email Login")
+        self._pin_tab   = QPushButton("PIN")
+        self._pin_tab.setIcon(qta.icon("fa5s.hashtag"))
+        self._email_tab = QPushButton("Email Login")
+        self._email_tab.setIcon(qta.icon("fa5s.key"))
         for b in (self._pin_tab, self._email_tab):
             b.setFixedHeight(36)
             b.setCursor(Qt.PointingHandCursor)
@@ -359,8 +363,9 @@ class LoginDialog(QDialog):
         sql_link_l.setSpacing(6)
 
         sql_link_l.addStretch()
-        gear_lbl = QLabel("⚙️")
-        gear_lbl.setStyleSheet("background:transparent; font-size:11px;")
+        gear_lbl = QLabel()
+        gear_lbl.setPixmap(qta.icon("fa5s.cog", color=MUTED).pixmap(11, 11))
+        gear_lbl.setStyleSheet("background:transparent;")
         self._sql_link_btn = QPushButton("Database & Site Configuration")
         self._sql_link_btn.setCursor(Qt.PointingHandCursor)
         self._sql_link_btn.setFocusPolicy(Qt.NoFocus)
@@ -394,13 +399,20 @@ class LoginDialog(QDialog):
         )
         fl = QHBoxLayout(footer)
         fl.setContentsMargins(0, 0, 0, 0)
-        lbl = QLabel(f"🌐  {SITE_URL}")
+        fl.addStretch()
+        globe_lbl = QLabel()
+        globe_lbl.setPixmap(qta.icon("fa5s.globe", color=NAVY).pixmap(10, 10))
+        globe_lbl.setStyleSheet("background:transparent;")
+        lbl = QLabel(f"{SITE_URL}")
         lbl.setAlignment(Qt.AlignCenter)
         lbl.setStyleSheet(
             f"font-size:10px; color:{NAVY}; background:transparent; "
             "letter-spacing:0.5px; font-weight:bold;"
         )
+        fl.addWidget(globe_lbl)
+        fl.addSpacing(6)
         fl.addWidget(lbl)
+        fl.addStretch()
         vl.addWidget(footer)
 
         root.addWidget(card)
@@ -464,7 +476,7 @@ class LoginDialog(QDialog):
             ("1", "d"), ("2", "d"), ("3", "d"),
             ("4", "d"), ("5", "d"), ("6", "d"),
             ("7", "d"), ("8", "d"), ("9", "d"),
-            ("⌫", "b"), ("0", "d"), ("✓", "e"),
+            ("", "b"), ("0", "d"), ("", "e"),
         ]
         for i, (label, kind) in enumerate(keys):
             btn = QPushButton(label)
@@ -485,6 +497,8 @@ class LoginDialog(QDialog):
                 """)
                 btn.clicked.connect(lambda _, d=label: self._pin_press(d))
             elif kind == "b":
+                btn.setIcon(qta.icon("fa5s.backspace", color=MUTED))
+                btn.setIconSize(QSize(22, 22))
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background:{LIGHT}; color:{MUTED};
@@ -496,6 +510,8 @@ class LoginDialog(QDialog):
                 """)
                 btn.clicked.connect(self._pin_backspace)
             elif kind == "e":
+                btn.setIcon(qta.icon("fa5s.check", color=WHITE))
+                btn.setIconSize(QSize(22, 22))
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background:{ACCENT}; color:{WHITE};
@@ -560,7 +576,8 @@ class LoginDialog(QDialog):
         """)
         self.password_input.returnPressed.connect(self._login_email)
 
-        self._eye_btn = QPushButton("👁")
+        self._eye_btn = QPushButton()
+        self._eye_btn.setIcon(qta.icon("fa5s.eye", color=MUTED))
         self._eye_btn.setFixedSize(48, 48)
         self._eye_btn.setCursor(Qt.PointingHandCursor)
         self._eye_btn.setCheckable(True)
@@ -703,7 +720,7 @@ class LoginDialog(QDialog):
             user   = result["user"]
             source = result.get("source", "online")
             if source == "offline":
-                self._show_info("⚠️  Offline mode — using local account.")
+                self._show_info("Offline mode — using local account.")
             self._validate_and_accept(user, source)
             return
 
@@ -833,7 +850,7 @@ class LoginDialog(QDialog):
             ("1","d"),("2","d"),("3","d"),
             ("4","d"),("5","d"),("6","d"),
             ("7","d"),("8","d"),("9","d"),
-            ("⌫","b"),("0","d"),("✓","e"),
+            ("","b"),("0","d"),("","e"),
         ]
         for i, (label, kind) in enumerate(keys):
             btn = QPushButton(label)
@@ -853,6 +870,8 @@ class LoginDialog(QDialog):
                 """)
                 btn.clicked.connect(lambda _, d=label: self._pin_setup_press(d))
             elif kind == "b":
+                btn.setIcon(qta.icon("fa5s.backspace", color=MUTED))
+                btn.setIconSize(QSize(22, 22))
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background:{LIGHT}; color:{MUTED};
@@ -864,6 +883,8 @@ class LoginDialog(QDialog):
                 """)
                 btn.clicked.connect(self._pin_setup_backspace)
             elif kind == "e":
+                btn.setIcon(qta.icon("fa5s.check", color=WHITE))
+                btn.setIconSize(QSize(22, 22))
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background:{ACCENT}; color:{WHITE};

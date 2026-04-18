@@ -1,6 +1,9 @@
 # =============================================================================
 # INVENTORY LIST DIALOG
 # =============================================================================
+import qtawesome as qta
+
+
 class InventoryListDialog(QDialog):
     """Simple inventory list dialog showing products with stock levels."""
 
@@ -24,7 +27,7 @@ class InventoryListDialog(QDialog):
         hdr.setStyleSheet(f"background-color: {NAVY}; border-radius: 5px;")
         hl = QHBoxLayout(hdr)
         hl.setContentsMargins(16, 0, 16, 0)
-        title = QLabel("📦  Inventory List")
+        title = QLabel("Inventory List")
         title.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {WHITE}; background: transparent;")
         hl.addWidget(title)
         layout.addWidget(hdr)
@@ -33,12 +36,13 @@ class InventoryListDialog(QDialog):
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
         self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍  Search by product name or part number...")
+        self._search.setPlaceholderText("Search by product name or part number...")
         self._search.setFixedHeight(34)
         self._search.textChanged.connect(self._do_search)
         search_row.addWidget(self._search, 1)
         
-        refresh_btn = QPushButton("🔄  Refresh")
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setIcon(qta.icon("fa5s.sync-alt"))
         refresh_btn.setFixedHeight(34)
         refresh_btn.setCursor(Qt.PointingHandCursor)
         refresh_btn.setStyleSheet(f"""

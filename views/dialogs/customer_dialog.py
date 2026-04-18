@@ -2505,6 +2505,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui  import QColor
+import qtawesome as qta
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
@@ -2743,7 +2744,7 @@ class CreditNoteDialog(QDialog):
 
         self._tbl = QTableWidget(0, 6)
         self._tbl.setHorizontalHeaderLabels(
-            ["✓", "ITEM", "UNIT PRICE", "ORIG QTY", "RETURN QTY", "REASON"]
+            ["", "ITEM", "UNIT PRICE", "ORIG QTY", "RETURN QTY", "REASON"]
         )
         hh = self._tbl.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Fixed);  self._tbl.setColumnWidth(0, 36)
@@ -2793,7 +2794,8 @@ class CreditNoteDialog(QDialog):
         """)
         bcancel.clicked.connect(self.reject)
 
-        self._btn_confirm = QPushButton("✅  Issue Credit Note")
+        self._btn_confirm = QPushButton("Issue Credit Note")
+        self._btn_confirm.setIcon(qta.icon("fa5s.check", color="white"))
         self._btn_confirm.setFixedHeight(44)
         self._btn_confirm.setEnabled(False)
         self._btn_confirm.setCursor(Qt.PointingHandCursor)
@@ -3038,7 +3040,7 @@ class CreditNoteDialog(QDialog):
 
         QMessageBox.information(
             self, "Credit Note Issued",
-            f"✅  {cn['cn_number']} created.\n{extra}"
+            f"{cn['cn_number']} created.\n{extra}"
         )
 
         # Emit signal so POSView can load it into the main table

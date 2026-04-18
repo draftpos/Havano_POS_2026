@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QDoubleValidator
+import qtawesome as qta
 
 from models.product import (
     get_all_products,
@@ -178,7 +179,7 @@ class StockFileDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
 
-        title = QLabel("📦 Stock File & Inventory Management")
+        title = QLabel("Stock File & Inventory Management")
         title.setFixedHeight(40)
         title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {WHITE}; background: {NAVY}; border-radius: 6px; padding-left: 15px;")
         root.addWidget(title)
@@ -212,10 +213,14 @@ class StockFileDialog(QDialog):
 
         # Actions
         btn_row = QHBoxLayout()
-        self._new_btn = _btn("➕\nNew", ACCENT, ACCENT_H)
-        self._modify_btn = _btn("✏️\nModify", SUCCESS, SUCCESS_H)
-        self._clone_btn = _btn("📋\nClone", NAVY_2, NAVY_3)
-        self._close_btn = _btn("✕\nClose", DANGER, DANGER_H)
+        self._new_btn = _btn("New", ACCENT, ACCENT_H)
+        self._new_btn.setIcon(qta.icon("fa5s.plus", color="white"))
+        self._modify_btn = _btn("Modify", SUCCESS, SUCCESS_H)
+        self._modify_btn.setIcon(qta.icon("fa5s.edit", color="white"))
+        self._clone_btn = _btn("Clone", NAVY_2, NAVY_3)
+        self._clone_btn.setIcon(qta.icon("fa5s.clipboard", color="white"))
+        self._close_btn = _btn("Close", DANGER, DANGER_H)
+        self._close_btn.setIcon(qta.icon("fa5s.times", color="white"))
 
         self._new_btn.clicked.connect(self._on_new)
         self._modify_btn.clicked.connect(self._on_modify)

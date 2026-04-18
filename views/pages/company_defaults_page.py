@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Property as _Prop, QThread, Signal
 from PySide6.QtGui  import QPainter, QColor, QLinearGradient, QRadialGradient
+import qtawesome as qta
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
@@ -335,7 +336,8 @@ class CompanyDefaultsPage(QWidget):
         )
 
         # ── FISCALIZATION BUTTON ──────────────────────────────────────────────
-        fiscal_btn = QPushButton("  ⚙️ Fiscalization  ")
+        fiscal_btn = QPushButton("Fiscalization")
+        fiscal_btn.setIcon(qta.icon("fa5s.cog", color="white"))
         fiscal_btn.setFixedHeight(38)
         fiscal_btn.setCursor(Qt.PointingHandCursor)
         fiscal_btn.setStyleSheet(f"""
@@ -349,7 +351,8 @@ class CompanyDefaultsPage(QWidget):
         fiscal_btn.clicked.connect(self._open_fiscalization_dialog)
 
         # ── EXTERNAL SITE SETTINGS BUTTON ─────────────────────────────────────
-        external_btn = QPushButton("  🌐 External Site  ")
+        external_btn = QPushButton("External Site")
+        external_btn.setIcon(qta.icon("fa5s.globe", color="white"))
         external_btn.setFixedHeight(38)
         external_btn.setCursor(Qt.PointingHandCursor)
         external_btn.setStyleSheet(f"""
@@ -692,7 +695,8 @@ class CompanyDefaultsPage(QWidget):
         # Buttons
         btn_layout = QHBoxLayout()
         
-        test_btn = QPushButton("🔌 Test Connection")
+        test_btn = QPushButton("Test Connection")
+        test_btn.setIcon(qta.icon("fa5s.plug", color="white"))
         test_btn.setFixedHeight(40)
         test_btn.setCursor(Qt.PointingHandCursor)
         test_btn.setStyleSheet(f"""
@@ -704,7 +708,8 @@ class CompanyDefaultsPage(QWidget):
         """)
         test_btn.clicked.connect(self._test_fiscal_connection)
         
-        save_fiscal_btn = QPushButton("💾 Save Fiscal Settings")
+        save_fiscal_btn = QPushButton("Save Fiscal Settings")
+        save_fiscal_btn.setIcon(qta.icon("fa5s.save", color="white"))
         save_fiscal_btn.setFixedHeight(40)
         save_fiscal_btn.setCursor(Qt.PointingHandCursor)
         save_fiscal_btn.setStyleSheet(f"""
@@ -755,14 +760,14 @@ class CompanyDefaultsPage(QWidget):
                 
                 if settings.device_status == "online":
                     self._fiscal_status_label.setText(
-                        f"✅ Device Online\nLast ping: {settings.last_ping_time or 'Never'}"
+                        f"Device Online\nLast ping: {settings.last_ping_time or 'Never'}"
                     )
                     self._fiscal_status_label.setStyleSheet(f"color:{SUCCESS}; padding:8px;")
                 elif settings.device_status == "offline":
-                    self._fiscal_status_label.setText("⚠️ Device Offline - Last connection failed")
+                    self._fiscal_status_label.setText("Device Offline - Last connection failed")
                     self._fiscal_status_label.setStyleSheet(f"color:{ORANGE}; padding:8px;")
                 elif settings.device_status == "error":
-                    self._fiscal_status_label.setText("❌ Connection Error")
+                    self._fiscal_status_label.setText("Connection Error")
                     self._fiscal_status_label.setStyleSheet(f"color:{DANGER}; padding:8px;")
                 else:
                     self._fiscal_status_label.setText("Status unknown - Test connection to verify")
@@ -806,7 +811,7 @@ class CompanyDefaultsPage(QWidget):
         self._fiscal_progress.setVisible(False)
         
         if success:
-            self._fiscal_status_label.setText(f"✅ {message}")
+            self._fiscal_status_label.setText(f"{message}")
             self._fiscal_status_label.setStyleSheet(f"color:{SUCCESS}; padding:8px;")
             
             # Update device status to online in the database
@@ -823,7 +828,7 @@ class CompanyDefaultsPage(QWidget):
                 f"Successfully connected to ZIMRA!\n\n{message}\n\nYou can now save these settings."
             )
         else:
-            self._fiscal_status_label.setText(f"❌ {message}")
+            self._fiscal_status_label.setText(f"{message}")
             self._fiscal_status_label.setStyleSheet(f"color:{DANGER}; padding:8px;")
             
             # Update device status to offline/error
@@ -843,7 +848,7 @@ class CompanyDefaultsPage(QWidget):
     def _save_fiscal_settings(self, dialog: QDialog):
         """Save fiscal settings to database"""
         # Check if test was performed and successful
-        is_online = "✅" in self._fiscal_status_label.text() and "Connected" in self._fiscal_status_label.text()
+        is_online = "Connected" in self._fiscal_status_label.text() and SUCCESS in self._fiscal_status_label.styleSheet()
         
         if not is_online:
             reply = QMessageBox.question(
@@ -937,9 +942,9 @@ class CompanyDefaultsPage(QWidget):
         try:
             from models.company_defaults import save_defaults
             save_defaults(data)
-            self._show_status("✅  Saved successfully.")
+            self._show_status("Saved successfully.")
         except Exception as e:
-            self._show_status(f"❌  {e}", error=True)
+            self._show_status(f"{e}", error=True)
 
     def _show_status(self, msg, error=False):
         color = DANGER if error else "#2ecc71"

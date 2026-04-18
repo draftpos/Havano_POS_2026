@@ -1,4 +1,5 @@
 # views/pos_view.py
+import qtawesome as qta
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QListWidget, QLineEdit, QScrollArea
@@ -39,7 +40,7 @@ class POSView(QWidget):
 
         # Search bar
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍  Search products...")
+        self.search_input.setPlaceholderText("Search products...")
         self.search_input.setFixedHeight(44)
         self.search_input.setStyleSheet("""
             QLineEdit {
@@ -93,7 +94,7 @@ class POSView(QWidget):
         right_col.setContentsMargins(16, 16, 16, 16)
 
         # Cart header
-        cart_label = QLabel("🛒  Cart")
+        cart_label = QLabel("Cart")
         cart_label.setStyleSheet("""
             font-size: 16px;
             font-weight: bold;
@@ -140,7 +141,8 @@ class POSView(QWidget):
         right_col.addWidget(self.total_label)
 
         # Clear button
-        clear_btn = QPushButton("🗑  Clear Cart")
+        clear_btn = QPushButton("Clear Cart")
+        clear_btn.setIcon(qta.icon("fa5s.trash", color="#f38ba8"))
         clear_btn.setFixedHeight(38)
         clear_btn.setCursor(Qt.PointingHandCursor)
         clear_btn.setStyleSheet("""

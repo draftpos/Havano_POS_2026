@@ -563,6 +563,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui  import QColor, QFont
+import qtawesome as qta
 
 from models.sale import get_all_sales, delete_sale, get_sale_items
 
@@ -914,7 +915,7 @@ class SyncErrorPanel(QFrame):
             return
 
         if not failures:
-            self._set_pill(f"✅  {pushed} sale(s) synced successfully.", GREEN, "#e8f5e9")
+            self._set_pill(f"{pushed} sale(s) synced successfully.", GREEN, "#e8f5e9")
             self.show()
             from PySide6.QtCore import QTimer
             QTimer.singleShot(6000, self.hide)
@@ -922,10 +923,10 @@ class SyncErrorPanel(QFrame):
 
         # Has failures
         if pushed > 0:
-            label = f"⚠️  {pushed} synced, {len(failures)} failed — click to see details"
+            label = f"{pushed} synced, {len(failures)} failed — click to see details"
             color, bg = AMBER, "#fff3e0"
         else:
-            label = f"❌  {len(failures)} sale(s) failed to sync — click to see details"
+            label = f"{len(failures)} sale(s) failed to sync — click to see details"
             color, bg = DANGER, "#fdecea"
 
         self._set_pill(label, color, bg)
@@ -1135,12 +1136,17 @@ class SalesListPage(QWidget):
     def _build_ui(self):
         root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
 
-        self.print_btn  = _toolbar_btn("🖨  Print (F3)",  NAVY_2, NAVY_3)
-        self.recall_btn = _toolbar_btn("⟵  Recall",      ACCENT, ACCENT_H, size=(100,36))
-        self.delete_btn = _toolbar_btn("🗑  Delete (F4)", DANGER, DANGER_H)
-        self.sync_btn   = _toolbar_btn("⟳  Sync Now",    ACCENT, ACCENT_H, size=(120,36))
-        self.filter_btn = _toolbar_btn("⏳ Unsynced",    "#7d6608","#a07d0a", size=(110,36))
-        close_btn       = _toolbar_btn("✕  Close (Esc)", DANGER, DANGER_H)
+        self.print_btn  = _toolbar_btn("Print (F3)",  NAVY_2, NAVY_3)
+        self.print_btn.setIcon(qta.icon("fa5s.print", color="white"))
+        self.recall_btn = _toolbar_btn("Recall",      ACCENT, ACCENT_H, size=(100,36))
+        self.recall_btn.setIcon(qta.icon("fa5s.undo", color="white"))
+        self.delete_btn = _toolbar_btn("Delete (F4)", DANGER, DANGER_H)
+        self.delete_btn.setIcon(qta.icon("fa5s.trash", color="white"))
+        self.sync_btn   = _toolbar_btn("Sync Now",    ACCENT, ACCENT_H, size=(120,36))
+        self.sync_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
+        self.filter_btn = _toolbar_btn("Unsynced",    "#7d6608","#a07d0a", size=(110,36))
+        close_btn       = _toolbar_btn("Close (Esc)", DANGER, DANGER_H)
+        close_btn.setIcon(qta.icon("fa5s.times", color="white"))
 
         self.print_btn.setEnabled(False)
         self.recall_btn.setEnabled(False)
@@ -1153,7 +1159,7 @@ class SalesListPage(QWidget):
         self.filter_btn.clicked.connect(self._toggle_unsynced_filter)
         close_btn.clicked.connect(self.on_close)
 
-        root.addWidget(_build_toolbar("🧾  Sales List", right_widgets=[
+        root.addWidget(_build_toolbar("Sales List", right_widgets=[
             self.filter_btn, self.sync_btn,
             self.recall_btn, self.print_btn, self.delete_btn, close_btn,
         ]))
@@ -1277,7 +1283,7 @@ class SalesListPage(QWidget):
 
         for c, (_, key, _, align, _) in enumerate(_COLUMNS):
             if key == "synced":
-                text = "✅ Synced" if synced else "⏳ Pending"
+                text = "Synced" if synced else "Pending"
             elif key == "frappe_ref":
                 text = frappe_ref if frappe_ref else "—"
             elif key in ("amount", "tendered", "change_amount"):
@@ -1294,6 +1300,8 @@ class SalesListPage(QWidget):
             it.setTextAlignment(align)
 
             if key == "synced":
+                if synced:
+                    it.setIcon(qta.icon("fa5s.check", color=GREEN))
                 it.setForeground(QColor(GREEN if synced else AMBER))
                 f = it.font(); f.setBold(True); it.setFont(f)
             elif key == "frappe_ref":
@@ -1312,14 +1320,14 @@ class SalesListPage(QWidget):
         no_ref  = sum(1 for s in self._all_sales if s.get("synced") and not s.get("frappe_ref"))
 
         if pending:
-            text  = f"✅ {synced} synced  ⏳ {pending} pending"
+            text  = f"{synced} synced  ·  {pending} pending"
             color = AMBER
         else:
-            text  = f"✅ All {total} synced"
+            text  = f"All {total} synced"
             color = GREEN
 
         if no_ref:
-            text  += f"  ⚠️ {no_ref} missing Frappe ref"
+            text  += f"  ·  {no_ref} missing Frappe ref"
             color  = AMBER
 
         self.sync_lbl.setText(text)
@@ -1351,7 +1359,7 @@ class SalesListPage(QWidget):
             return
         items = get_sale_items(sale["id"])
         if not items:
-            self._show_status("⚠️  No items found for this invoice.", color=AMBER)
+            self._show_status("No items found for this invoice.", color=AMBER)
             return
         self.on_recall(sale, items)
 
@@ -1360,14 +1368,16 @@ class SalesListPage(QWidget):
     def _toggle_unsynced_filter(self):
         self._show_unsynced_only = not self._show_unsynced_only
         if self._show_unsynced_only:
-            self.filter_btn.setText("📋 Show All")
+            self.filter_btn.setText("Show All")
+            self.filter_btn.setIcon(qta.icon("fa5s.clipboard", color="white"))
             self.filter_btn.setStyleSheet(f"""
                 QPushButton {{ background-color:{AMBER};color:{WHITE};border:none;
                                border-radius:6px;font-size:12px;font-weight:bold; }}
                 QPushButton:hover {{ background-color:#c8860e; }}
             """)
         else:
-            self.filter_btn.setText("⏳ Unsynced")
+            self.filter_btn.setText("Unsynced")
+            self.filter_btn.setIcon(qta.icon("fa5s.hourglass-half", color="white"))
             self.filter_btn.setStyleSheet(f"""
                 QPushButton {{ background-color:#7d6608;color:{WHITE};border:none;
                                border-radius:6px;font-size:12px;font-weight:bold; }}
@@ -1382,7 +1392,7 @@ class SalesListPage(QWidget):
             return
         pending = [s for s in self._all_sales if not s.get("synced")]
         if not pending:
-            self._show_status("✅ All sales are already synced.", color=GREEN)
+            self._show_status("All sales are already synced.", color=GREEN)
             self._error_panel.hide()
             return
 
@@ -1401,17 +1411,18 @@ class SalesListPage(QWidget):
 
     def _on_sync_done(self, pushed: int, failed: int, results: list):
         self.sync_btn.setEnabled(True)
-        self.sync_btn.setText("⟳  Sync Now")
+        self.sync_btn.setText("Sync Now")
+        self.sync_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
 
         if failed == -1:
             # Special: worker itself crashed before processing any sale
-            self._show_status("❌  Sync could not start — see details below.", color=DANGER)
+            self._show_status("Sync could not start — see details below.", color=DANGER)
         elif failed > 0:
             self._show_status(
-                f"⚠️  {pushed} pushed, {failed} failed — see details below.", color=AMBER
+                f"{pushed} pushed, {failed} failed — see details below.", color=AMBER
             )
         else:
-            self._show_status(f"✅  {pushed} sale(s) pushed to Frappe.", color=GREEN)
+            self._show_status(f"{pushed} sale(s) pushed to Frappe.", color=GREEN)
 
         # Always pass results to the panel; it decides what to show
         self._error_panel.show_results(results)
@@ -1536,7 +1547,7 @@ class SalesListDialog(QMainWindow):
 
         cust_name = (sale.get("customer_name") or "").strip()
         if cust_name and hasattr(pos, "_cust_btn"):
-            pos._cust_btn.setText(f"👤  {cust_name}")
+            pos._cust_btn.setText(f"{cust_name}")
             try:
                 from models.customer import get_customer_by_name
                 cust = get_customer_by_name(cust_name)
