@@ -325,6 +325,10 @@ def _parse_product(p: dict) -> dict | None:
             uom_prices.append({"uom": uom_name, "price": rp_price})
             seen_uoms.add(uom_name)
 
+    # Batches from the server — list of {batch_no, expiry_date, qty}.
+    # Safe default to empty list; the sync writer wipes + rewrites per product.
+    raw_batches = p.get("batches") or []
+
     result = {
         "part_no":             part_no,
         "name":                name,
@@ -333,6 +337,7 @@ def _parse_product(p: dict) -> dict | None:
         "stock":               stock,
         "uom_prices":          uom_prices,
         "is_pharmacy_product": bool(p.get("is_pharmacy_product") or 0),
+        "batches":             raw_batches,
     }
 
     if tax_info:
@@ -551,6 +556,17 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                 result["inserted"] += 1
                 log.debug("[sync] Inserted: %s  tax_rate=%.4f  tax_type=%s",
                           p["part_no"], tax_rate, tax_type)
+
+            # ── Upsert batches (pharmacy expiry tracking) ────────────────────
+            # Wipe + insert fresh per product; server is the source of truth.
+            try:
+                from models.product import upsert_batches_for_product_by_part_no
+                batch_count = upsert_batches_for_product_by_part_no(
+                    p["part_no"], p.get("batches") or [])
+                if batch_count:
+                    log.debug("[sync] %s — %d batch(es) synced", p["part_no"], batch_count)
+            except Exception as _be:
+                log.warning("[sync] batch upsert failed for %s: %s", p.get("part_no"), _be)
 
             # ── Upsert UOM prices ────────────────────────────────────────────
             for up in (p.get("uom_prices") or []):

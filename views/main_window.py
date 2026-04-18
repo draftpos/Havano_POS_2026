@@ -6570,14 +6570,27 @@ class POSView(QWidget):
             f"font-size: 12px; font-weight: bold; color: {NAVY}; margin-top: 4px;")
         lay.addWidget(dosage_hdr)
 
-        lay.addWidget(QLabel("Choose saved dosage:"))
+        lay.addWidget(QLabel("Search saved dosage (type code or description):"))
         cbo = QComboBox()
+        cbo.setEditable(True)
+        cbo.setInsertPolicy(QComboBox.NoInsert)
         cbo.addItem("— none —", "")
         for d in dosages:
             desc = getattr(d, "description", "") or ""
             code = getattr(d, "code", "") or ""
             label = f"{code} — {desc}" if desc else code
             cbo.addItem(label, code)
+        # Make the built-in completer match anywhere in the string, not just prefix
+        try:
+            _cmp = cbo.completer()
+            if _cmp is not None:
+                from PySide6.QtWidgets import QCompleter as _QCmp
+                _cmp.setCompletionMode(_QCmp.PopupCompletion)
+                _cmp.setFilterMode(Qt.MatchContains)
+                _cmp.setCaseSensitivity(Qt.CaseInsensitive)
+        except Exception:
+            pass
+        cbo.setMinimumHeight(32)
         lay.addWidget(cbo)
 
         lay.addWidget(QLabel("Or quick dosage (not saved):"))
@@ -6601,12 +6614,25 @@ class POSView(QWidget):
             batch_cbo.addItem("— no batches registered —", None)
             batch_cbo.setEnabled(False)
         else:
+            batch_cbo.setEditable(True)
+            batch_cbo.setInsertPolicy(QComboBox.NoInsert)
             for b in batches:
                 bn  = b.get("batch_no") or "(no batch no)"
                 exp = b.get("expiry_date") or "?"
                 qty = b.get("qty", 0)
                 label = f"{bn}  —  expires {exp}   |   qty: {qty}"
                 batch_cbo.addItem(label, b)
+            # Contains-filter completer so users can type batch number anywhere in the label
+            try:
+                _bcmp = batch_cbo.completer()
+                if _bcmp is not None:
+                    from PySide6.QtWidgets import QCompleter as _QCmp
+                    _bcmp.setCompletionMode(_QCmp.PopupCompletion)
+                    _bcmp.setFilterMode(Qt.MatchContains)
+                    _bcmp.setCaseSensitivity(Qt.CaseInsensitive)
+            except Exception:
+                pass
+        batch_cbo.setMinimumHeight(32)
         lay.addWidget(batch_cbo)
 
         # --- Buttons ---
@@ -6633,13 +6659,14 @@ class POSView(QWidget):
         use_btn.clicked.connect(_use)
         skip_btn.clicked.connect(_skip)
 
+        popup.setMinimumWidth(520)
+        popup.setMinimumHeight(380)
         try:
             origin = self.invoice_table.mapToGlobal(self.invoice_table.rect().topLeft())
             popup.adjustSize()
-            popup.move(origin.x() + 60, origin.y() + 40)
+            popup.move(origin.x() + 40, origin.y() + 30)
         except Exception:
             pass
-        popup.setMinimumWidth(360)
         # Qt.Popup + local event loop → modal-ish without the QDialog heft
         from PySide6.QtCore import QEventLoop
         loop = QEventLoop()

@@ -262,3 +262,52 @@ def get_batches_for_product(product_id: int) -> list[dict]:
             "qty":         float(r.get("qty") or 0),
         })
     return out
+
+
+def upsert_batches_for_product_by_part_no(part_no: str, batches: list) -> int:
+    """Replace the local batch set for the product identified by part_no with
+    the server-returned batches (wipe + insert fresh). Batches are pull-only
+    from ERPNext; no partial merge is needed. Returns rows inserted."""
+    if not part_no:
+        return 0
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT id FROM products WHERE part_no = ?",
+            (part_no.strip().upper(),),
+        )
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            return 0
+        product_id = int(row[0])
+
+        cur.execute("DELETE FROM product_batches WHERE product_id = ?", (product_id,))
+
+        count = 0
+        for b in (batches or []):
+            bn = (b.get("batch_no") or "").strip()
+            if not bn:
+                continue
+            cur.execute("""
+                INSERT INTO product_batches
+                    (product_id, batch_no, expiry_date, qty, synced)
+                VALUES (?, ?, ?, ?, 1)
+            """, (
+                product_id, bn,
+                b.get("expiry_date"),
+                float(b.get("qty") or 0),
+            ))
+            count += 1
+
+        conn.commit()
+        conn.close()
+        return count
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        print(f"[product] upsert_batches_for_product_by_part_no failed for {part_no}: {e}")
+        return 0
