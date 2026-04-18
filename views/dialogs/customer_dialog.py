@@ -3160,22 +3160,33 @@ class QuickAddCustomerDialog(QDialog):
                 selection-background-color: {ACCENT}; selection-color: {WHITE};
             }}
         """)
-        # Blank first item — doctor is optional
-        self._doctor_combo.addItem("— none —", None)
-        try:
-            from models.doctor import list_doctors
-            for _doc in (list_doctors() or []):
-                _name = _doc.full_name or ""
-                if _doc.practice_no:
-                    _label = f"{_name}  ({_doc.practice_no})"
-                else:
-                    _label = _name
-                self._doctor_combo.addItem(_label, _doc.id)
-        except Exception as _e:
-            print(f"[QuickAddCustomer] Could not load doctors: {_e}")
+        # Populate doctor combo (blank first item, then all doctors)
+        self._populate_doctor_combo()
+
+        # ── Quick-add doctor "+" button (opens DoctorFormDialog) ──────────────
+        self._doctor_add_btn = QPushButton()
+        self._doctor_add_btn.setIcon(qta.icon("fa5s.plus", color=WHITE))
+        self._doctor_add_btn.setFixedSize(38, 38)
+        self._doctor_add_btn.setCursor(Qt.PointingHandCursor)
+        self._doctor_add_btn.setToolTip("Add new doctor")
+        self._doctor_add_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {SUCCESS}; color: {WHITE}; border: none;
+                border-radius: 6px;
+            }}
+            QPushButton:hover   {{ background: {SUCCESS_H}; }}
+            QPushButton:pressed {{ background: {NAVY_2}; }}
+        """)
+        self._doctor_add_btn.clicked.connect(self._on_add_doctor)
+
+        _docrow = QHBoxLayout()
+        _docrow.setContentsMargins(0, 0, 0, 0)
+        _docrow.setSpacing(6)
+        _docrow.addWidget(self._doctor_combo, 1)
+        _docrow.addWidget(self._doctor_add_btn)
 
         fl.addWidget(self._doctor_lbl)
-        fl.addWidget(self._doctor_combo)
+        fl.addLayout(_docrow)
 
         # Show the doctor row only in pharmacy mode
         try:
@@ -3186,6 +3197,7 @@ class QuickAddCustomerDialog(QDialog):
             _pharm_on = False
         self._doctor_lbl.setVisible(_pharm_on)
         self._doctor_combo.setVisible(_pharm_on)
+        self._doctor_add_btn.setVisible(_pharm_on)
 
         # ── status label ──────────────────────────────────────────────────────
         self._status = QLabel("")
@@ -3238,6 +3250,84 @@ class QuickAddCustomerDialog(QDialog):
 
         # focus the first field
         self._f_first.setFocus()
+
+    # -------------------------------------------------------------------------
+    def _populate_doctor_combo(self, select_id: int | None = None):
+        """
+        (Re)populate the doctor QComboBox. Always keeps the blank "— none —"
+        item at index 0. If select_id is given, selects that doctor by local id.
+        """
+        try:
+            self._doctor_combo.blockSignals(True)
+            self._doctor_combo.clear()
+            self._doctor_combo.addItem("— none —", None)
+            from models.doctor import list_doctors
+            for _doc in (list_doctors() or []):
+                _name = _doc.full_name or ""
+                if _doc.practice_no:
+                    _label = f"{_name}  ({_doc.practice_no})"
+                else:
+                    _label = _name
+                self._doctor_combo.addItem(_label, _doc.id)
+
+            # Select the newly-created doctor if requested
+            if select_id is not None:
+                for i in range(self._doctor_combo.count()):
+                    if self._doctor_combo.itemData(i) == select_id:
+                        self._doctor_combo.setCurrentIndex(i)
+                        break
+        except Exception as _e:
+            print(f"[QuickAddCustomer] Could not load doctors: {_e}")
+        finally:
+            self._doctor_combo.blockSignals(False)
+
+    # -------------------------------------------------------------------------
+    def _on_add_doctor(self):
+        """
+        Quick-add doctor flow: open DoctorFormDialog → save locally → push to
+        Frappe in the background (QTimer.singleShot so the dialog closes first)
+        → refresh the combo and auto-select the new doctor.
+        """
+        try:
+            from views.dialogs.pharmacy_masters_dialog import DoctorFormDialog
+            from models.doctor import create_doctor_local
+        except Exception as _e:
+            print(f"[QuickAddCustomer] Doctor form/model import failed: {_e}")
+            return
+
+        dlg = DoctorFormDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        data = dlg.result_data or {}
+        try:
+            new_id = create_doctor_local(
+                full_name=data.get("full_name") or "",
+                practice_no=data.get("practice_no"),
+                qualification=data.get("qualification"),
+                school=data.get("school"),
+                phone=data.get("phone"),
+            )
+            print(f"[QuickAddCustomer] ✅ Doctor created locally id={new_id} "
+                  f"name='{data.get('full_name')}'")
+        except Exception as e:
+            print(f"[QuickAddCustomer] ❌ Could not create doctor: {e}")
+            return
+
+        # Fire-and-forget push (runs after dialog paints)
+        def _push_bg():
+            try:
+                from services.doctor_push_service import push_unsynced_doctors
+                res = push_unsynced_doctors() or {}
+                print(f"[QuickAddCustomer] Doctor push → "
+                      f"pushed={res.get('pushed', 0)} errors={res.get('errors', 0)}")
+            except Exception as e:
+                print(f"[QuickAddCustomer] Doctor push failed: {e}")
+
+        QTimer.singleShot(0, _push_bg)
+
+        # Refresh the combo and select the new doctor
+        self._populate_doctor_combo(select_id=new_id)
 
     # -------------------------------------------------------------------------
     def _save(self):

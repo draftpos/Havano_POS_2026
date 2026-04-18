@@ -75,6 +75,137 @@ def get_doctor_by_frappe_name(name: str) -> Optional[Doctor]:
 # WRITE
 # =============================================================================
 
+def create_doctor_local(
+    full_name: str,
+    practice_no: Optional[str] = None,
+    qualification: Optional[str] = None,
+    school: Optional[str] = None,
+    phone: Optional[str] = None,
+) -> int:
+    """
+    INSERT a new local Doctor record. Marked unsynced (synced=0, frappe_name=NULL)
+    so the push service picks it up. Returns the new local id.
+    """
+    full_name = (full_name or "").strip()
+    if not full_name:
+        raise ValueError("Doctor full_name is required")
+
+    def _n(v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    practice_no   = _n(practice_no)
+    qualification = _n(qualification)
+    school        = _n(school)
+    phone         = _n(phone)
+
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO doctors (
+                frappe_name, full_name, practice_no, qualification,
+                school, phone, synced, sync_date
+            )
+            OUTPUT INSERTED.id
+            VALUES (NULL, ?, ?, ?, ?, ?, 0, NULL)
+        """, (full_name, practice_no, qualification, school, phone))
+        new_id = int(cur.fetchone()[0])
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def update_doctor_local(doctor_id: int, **fields) -> bool:
+    """
+    UPDATE an existing local Doctor record. Any content-field change resets
+    synced=0 so the push service re-pushes it on next run. Returns True on
+    success, False if the row was not found.
+
+    Accepts kwargs: full_name, practice_no, qualification, school, phone.
+    """
+    allowed = ("full_name", "practice_no", "qualification", "school", "phone")
+
+    def _n(v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    updates: dict = {}
+    for k in allowed:
+        if k in fields:
+            v = fields[k]
+            # full_name cannot be empty
+            if k == "full_name":
+                s = (str(v) if v is not None else "").strip()
+                if not s:
+                    raise ValueError("Doctor full_name cannot be empty")
+                updates[k] = s
+            else:
+                updates[k] = _n(v)
+
+    if not updates:
+        return True  # nothing to do
+
+    set_parts = [f"{col} = ?" for col in updates.keys()]
+    # Any write to content fields resets synced so push picks it up
+    set_parts.append("synced = 0")
+    set_parts.append("sync_date = NULL")
+    params = list(updates.values()) + [doctor_id]
+
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute(
+            f"UPDATE doctors SET {', '.join(set_parts)} WHERE id = ?",
+            params,
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        return ok
+    finally:
+        conn.close()
+
+
+def mark_doctor_synced(doctor_id: int, frappe_name: str) -> None:
+    """Flag a local Doctor row as synced (synced=1, sync_date=now, frappe_name=?)."""
+    if not frappe_name:
+        return
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE doctors
+               SET synced      = 1,
+                   sync_date   = SYSDATETIME(),
+                   frappe_name = ?
+             WHERE id = ?
+        """, (str(frappe_name), int(doctor_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_unsynced_doctors() -> list[Doctor]:
+    """Return doctors where synced=0 (both brand-new and locally edited)."""
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT id, frappe_name, full_name, practice_no, qualification,
+               school, phone, synced, sync_date
+          FROM doctors
+         WHERE synced = 0
+         ORDER BY id
+    """)
+    rows = fetchall_dicts(cur)
+    conn.close()
+    return [d for d in (_to_doctor(r) for r in rows) if d is not None]
+
+
 def upsert_doctor_from_frappe(payload: dict) -> int:
     """
     Upsert a doctor record using the payload from Frappe's get_doctors endpoint.

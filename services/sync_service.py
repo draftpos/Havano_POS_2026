@@ -69,6 +69,32 @@ def sync_from_login_response(login_data: dict) -> dict:
         result["doctors_synced"] = 0
         result["dosages_synced"] = 0
 
+    # Pharmacy push — retry any local doctor/dosage rows never pushed yet.
+    # Wrapped independently so one side's failure doesn't block the other.
+    try:
+        from services.doctor_push_service import push_unsynced_doctors
+        doc_push = push_unsynced_doctors() or {}
+        result["doctors_pushed"] = int(doc_push.get("pushed", 0))
+        result["doctors_push_errors"] = int(doc_push.get("errors", 0))
+        print(f"[sync] ✅ Doctors pushed: {result['doctors_pushed']} "
+              f"(errors: {result['doctors_push_errors']})")
+    except Exception as e:
+        log.warning("Doctor push during login failed: %s", e)
+        result["doctors_pushed"] = 0
+        result["doctors_push_errors"] = 0
+
+    try:
+        from services.dosage_push_service import push_unsynced_dosages
+        dos_push = push_unsynced_dosages() or {}
+        result["dosages_pushed"] = int(dos_push.get("pushed", 0))
+        result["dosages_push_errors"] = int(dos_push.get("errors", 0))
+        print(f"[sync] ✅ Dosages pushed: {result['dosages_pushed']} "
+              f"(errors: {result['dosages_push_errors']})")
+    except Exception as e:
+        log.warning("Dosage push during login failed: %s", e)
+        result["dosages_pushed"] = 0
+        result["dosages_push_errors"] = 0
+
     return result
 
 

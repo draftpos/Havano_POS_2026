@@ -56,6 +56,124 @@ def get_dosage_by_code(code: str) -> Optional[Dosage]:
 # WRITE
 # =============================================================================
 
+def create_dosage_local(code: str, description: Optional[str] = None) -> int:
+    """
+    INSERT a new local Dosage record. Marked unsynced (synced=0, frappe_name=NULL)
+    so the push service picks it up. Returns the new local id.
+    """
+    code = (code or "").strip()
+    if not code:
+        raise ValueError("Dosage code is required")
+
+    def _n(v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    description = _n(description)
+
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO dosages (
+                frappe_name, code, description, synced, sync_date
+            )
+            OUTPUT INSERTED.id
+            VALUES (NULL, ?, ?, 0, NULL)
+        """, (code, description))
+        new_id = int(cur.fetchone()[0])
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def update_dosage_local(dosage_id: int, **fields) -> bool:
+    """
+    UPDATE an existing local Dosage record. Any content-field change resets
+    synced=0 so the push service re-pushes it. Returns True on success,
+    False if the row was not found.
+
+    Accepts kwargs: code, description.
+    """
+    allowed = ("code", "description")
+
+    def _n(v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    updates: dict = {}
+    for k in allowed:
+        if k in fields:
+            v = fields[k]
+            if k == "code":
+                s = (str(v) if v is not None else "").strip()
+                if not s:
+                    raise ValueError("Dosage code cannot be empty")
+                updates[k] = s
+            else:
+                updates[k] = _n(v)
+
+    if not updates:
+        return True
+
+    set_parts = [f"{col} = ?" for col in updates.keys()]
+    set_parts.append("synced = 0")
+    set_parts.append("sync_date = NULL")
+    params = list(updates.values()) + [dosage_id]
+
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute(
+            f"UPDATE dosages SET {', '.join(set_parts)} WHERE id = ?",
+            params,
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        return ok
+    finally:
+        conn.close()
+
+
+def mark_dosage_synced(dosage_id: int, frappe_name: str) -> None:
+    """Flag a local Dosage row as synced (synced=1, sync_date=now, frappe_name=?)."""
+    if not frappe_name:
+        return
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE dosages
+               SET synced      = 1,
+                   sync_date   = SYSDATETIME(),
+                   frappe_name = ?
+             WHERE id = ?
+        """, (str(frappe_name), int(dosage_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_unsynced_dosages() -> list[Dosage]:
+    """Return dosages where synced=0 (both brand-new and locally edited)."""
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT id, frappe_name, code, description, synced, sync_date
+          FROM dosages
+         WHERE synced = 0
+         ORDER BY id
+    """)
+    rows = fetchall_dicts(cur)
+    conn.close()
+    return [d for d in (_to_dosage(r) for r in rows) if d is not None]
+
+
 def upsert_dosage_from_frappe(payload: dict) -> int:
     """
     Upsert a dosage record using the payload from Frappe's get_dosages endpoint.
