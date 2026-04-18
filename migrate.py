@@ -175,8 +175,8 @@ def migrate():
         )
     """)
     print("[migrate] ✅  customers")
-    _add_column_if_missing(cur, conn, "customers", "frappe_synced", "BIT NOT NULL DEFAULT 0")
-    _add_column_if_missing(cur, conn, "customers", "laybye_balance", "DECIMAL(18,2) NULL DEFAULT 0")
+    _add_column_if_missing("customers", "frappe_synced", "BIT NOT NULL DEFAULT 0")
+    _add_column_if_missing("customers", "laybye_balance", "DECIMAL(18,2) NULL DEFAULT 0")
 
     # ── products ──────────────────────────────────────────────────────────────
     cur.execute("""
@@ -264,7 +264,7 @@ def migrate():
         )
     """)
     print("[migrate] ✅  sales")
-    _add_column_if_missing(cur, conn, "sales", "is_on_account", "BIT NOT NULL DEFAULT 0")
+    _add_column_if_missing("sales", "is_on_account", "BIT NOT NULL DEFAULT 0")
 
     # ── sale_items ────────────────────────────────────────────────────────────
     cur.execute("""

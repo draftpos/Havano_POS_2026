@@ -201,6 +201,7 @@ class QuotationDialog(QDialog):
 
         self.date_filter = QComboBox()
         self.date_filter.addItems(["All", "Today", "Yesterday", "This Week", "This Month", "Custom"])
+        self.date_filter.setCurrentText("Today")
         self.date_filter.setFixedWidth(130)
         self.date_filter.currentTextChanged.connect(self._on_date_filter_changed)
         toolbar_layout.addWidget(self.date_filter)

@@ -95,6 +95,7 @@ def get_product_by_part_no(part_no: str) -> dict | None:
 def create_product(part_no: str, name: str, price: float,
                    stock: int = 0, category: str = "",
                    uom: str = "Unit", conversion_factor: float = 1.0,
+                   is_pharmacy_product: bool = False,
                    **orders) -> dict:
     """
     orders kwargs: order_1=True, order_2=False, … (all default False)
@@ -104,11 +105,12 @@ def create_product(part_no: str, name: str, price: float,
     cur  = conn.cursor()
     cur.execute(f"""
         INSERT INTO products (part_no, name, price, stock, category, uom, conversion_factor,
-                              {_ORDER_SEL})
+                              is_pharmacy_product, {_ORDER_SEL})
         OUTPUT INSERTED.id
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (part_no.upper().strip(), name.strip(), float(price),
-          int(stock), category.strip(), uom.strip(), float(conversion_factor), *order_vals))
+          int(stock), category.strip(), uom.strip(), float(conversion_factor),
+          int(bool(is_pharmacy_product)), *order_vals))
     new_id = int(cur.fetchone()[0])
     conn.commit()
     conn.close()
@@ -117,9 +119,11 @@ def create_product(part_no: str, name: str, price: float,
 
 def update_product(product_id: int, part_no: str = None, name: str = None,
                    price: float = None, stock: int = None,
-                   category: str = None, uom: str = None, 
-                   conversion_factor: float = None, **orders) -> dict | None:
-    
+                   category: str = None, uom: str = None,
+                   conversion_factor: float = None,
+                   is_pharmacy_product: bool = None,
+                   **orders) -> dict | None:
+
     product = get_product_by_id(product_id)
     if not product:
         return None
@@ -131,6 +135,8 @@ def update_product(product_id: int, part_no: str = None, name: str = None,
     new_category = category.strip()        if category is not None else product["category"]
     new_uom      = uom.strip()             if uom      is not None else product["uom"]
     new_conv     = float(conversion_factor) if conversion_factor is not None else product["conversion_factor"]
+    new_pharmacy = int(bool(is_pharmacy_product)) if is_pharmacy_product is not None \
+                   else int(bool(product.get("is_pharmacy_product", 0)))
 
     new_orders = [
         int(bool(orders[f"order_{i}"])) if f"order_{i}" in orders
@@ -145,10 +151,11 @@ def update_product(product_id: int, part_no: str = None, name: str = None,
     cur.execute(f"""
         UPDATE products
         SET part_no=?, name=?, price=?, stock=?, category=?, uom=?, conversion_factor=?,
+            is_pharmacy_product=?,
             {order_set}
         WHERE id=?
     """, (new_part_no, new_name, new_price, new_stock, new_category, new_uom, new_conv,
-          *new_orders, product_id))
+          new_pharmacy, *new_orders, product_id))
     conn.commit()
     conn.close()
     return get_product_by_id(product_id)

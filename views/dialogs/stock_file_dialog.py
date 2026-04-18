@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QComboBox, QFrame, QGroupBox,
-    QMessageBox, QSizePolicy, QFormLayout
+    QMessageBox, QSizePolicy, QFormLayout, QCheckBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QDoubleValidator
@@ -116,6 +116,8 @@ class StockEditDialog(QDialog):
         self.f_conv = QLineEdit("1.0")
         self.f_conv.setValidator(QDoubleValidator(0, 1000, 4))
 
+        self.f_pharmacy = QCheckBox("Requires prescription / pharmacist to add to cart")
+
         form.addRow("Part Number:", self.f_part)
         form.addRow("Product Name:", self.f_name)
         form.addRow("Category:", self.f_cat)
@@ -123,6 +125,7 @@ class StockEditDialog(QDialog):
         form.addRow("Conv. Factor:", self.f_conv)
         form.addRow("Retail Price ($):", self.f_price)
         form.addRow("Initial Stock:", self.f_stock)
+        form.addRow("Pharmacy Product:", self.f_pharmacy)
         
         layout.addLayout(form)
         
@@ -144,6 +147,7 @@ class StockEditDialog(QDialog):
         self.f_cat.setCurrentText(self.product['category'])
         self.f_uom.setCurrentText(self.product.get('uom', 'Unit'))
         self.f_conv.setText(str(self.product.get('conversion_factor', 1.0)))
+        self.f_pharmacy.setChecked(bool(self.product.get('is_pharmacy_product', 0)))
 
     def _on_save(self):
         if not self.f_part.text() or not self.f_name.text():
@@ -157,7 +161,8 @@ class StockEditDialog(QDialog):
             "stock": float(self.f_stock.text() or 0),
             "category": self.f_cat.currentText(),
             "uom": self.f_uom.currentText(),
-            "conversion_factor": float(self.f_conv.text() or 1.0)
+            "conversion_factor": float(self.f_conv.text() or 1.0),
+            "is_pharmacy_product": self.f_pharmacy.isChecked(),
         }
         self.accept()
 
