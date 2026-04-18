@@ -401,6 +401,9 @@ def get_all_quotations() -> List[Quotation]:
         
         items = []
         for item_row in items_rows:
+            # Pharmacy fields: persisted alongside other item columns
+            _exp = item_row.get("expiry_date")
+            _exp_str = _exp.isoformat() if hasattr(_exp, "isoformat") else (str(_exp) if _exp else None)
             items.append(QuotationItem(
                 item_code=item_row["item_code"],
                 item_name=item_row.get("local_product_name") or item_row["item_name"],
@@ -410,7 +413,11 @@ def get_all_quotations() -> List[Quotation]:
                 amount=float(item_row["amount"]),
                 uom=item_row.get("uom", "Nos"),
                 product_id=item_row.get("product_id"),
-                part_no=item_row.get("part_no")
+                part_no=item_row.get("part_no"),
+                is_pharmacy=bool(item_row.get("is_pharmacy", False)),
+                dosage=item_row.get("dosage"),
+                batch_no=item_row.get("batch_no"),
+                expiry_date=_exp_str,
             ))
         
         quotations.append(Quotation(
@@ -456,17 +463,26 @@ def get_unsynced_quotations() -> List[Quotation]:
         """, (row["id"],))
         items_rows = fetchall_dicts(cur)
         
-        items = [QuotationItem(
-            item_code=r["item_code"],
-            item_name=r.get("local_product_name") or r["item_name"],
-            description=r.get("description", ""),
-            qty=float(r["qty"]),
-            rate=float(r["rate"]),
-            amount=float(r["amount"]),
-            uom=r.get("uom", "Nos"),
-            product_id=r.get("product_id"),
-            part_no=r.get("part_no")
-        ) for r in items_rows]
+        # Pharmacy: pull through is_pharmacy/dosage/batch_no/expiry_date
+        def _mk_qi(r):
+            _exp = r.get("expiry_date")
+            _exp_str = _exp.isoformat() if hasattr(_exp, "isoformat") else (str(_exp) if _exp else None)
+            return QuotationItem(
+                item_code=r["item_code"],
+                item_name=r.get("local_product_name") or r["item_name"],
+                description=r.get("description", ""),
+                qty=float(r["qty"]),
+                rate=float(r["rate"]),
+                amount=float(r["amount"]),
+                uom=r.get("uom", "Nos"),
+                product_id=r.get("product_id"),
+                part_no=r.get("part_no"),
+                is_pharmacy=bool(r.get("is_pharmacy", False)),
+                dosage=r.get("dosage"),
+                batch_no=r.get("batch_no"),
+                expiry_date=_exp_str,
+            )
+        items = [_mk_qi(r) for r in items_rows]
         
         quotations.append(Quotation(
             name=row["name"],
@@ -539,6 +555,9 @@ def get_quotation_by_name(name: str) -> Optional[Quotation]:
         print(f"[DEBUG]   DB row → item_code={r.get('item_code')!r} | part_no={r.get('part_no')!r} | "
               f"product_id={r.get('product_id')!r} | local_product_name={r.get('local_product_name')!r} | "
               f"qty={r.get('qty')!r} | rate={r.get('rate')!r}")
+        # Pharmacy: populate dosage/batch/expiry so cart round-trip preserves them
+        _exp = r.get("expiry_date")
+        _exp_str = _exp.isoformat() if hasattr(_exp, "isoformat") else (str(_exp) if _exp else None)
         items.append(QuotationItem(
             item_code=r["item_code"],
             item_name=r.get("local_product_name") or r["item_name"],
@@ -548,7 +567,11 @@ def get_quotation_by_name(name: str) -> Optional[Quotation]:
             amount=float(r["amount"]),
             uom=r.get("uom", "Nos"),
             product_id=r.get("product_id"),
-            part_no=r.get("part_no")
+            part_no=r.get("part_no"),
+            is_pharmacy=bool(r.get("is_pharmacy", False)),
+            dosage=r.get("dosage"),
+            batch_no=r.get("batch_no"),
+            expiry_date=_exp_str,
         ))
     
     conn.close()
@@ -670,15 +693,24 @@ def get_quotations_by_customer(customer_name: str) -> List[Quotation]:
         cur.execute("SELECT * FROM quotation_items WHERE quotation_id = ?", (row["id"],))
         items_rows = fetchall_dicts(cur)
         
-        items = [QuotationItem(
-            item_code=r["item_code"],
-            item_name=r["item_name"],
-            description=r.get("description", ""),
-            qty=float(r["qty"]),
-            rate=float(r["rate"]),
-            amount=float(r["amount"]),
-            uom=r.get("uom", "Nos")
-        ) for r in items_rows]
+        # Pharmacy: pull through is_pharmacy/dosage/batch_no/expiry_date
+        def _mk_qi2(r):
+            _exp = r.get("expiry_date")
+            _exp_str = _exp.isoformat() if hasattr(_exp, "isoformat") else (str(_exp) if _exp else None)
+            return QuotationItem(
+                item_code=r["item_code"],
+                item_name=r["item_name"],
+                description=r.get("description", ""),
+                qty=float(r["qty"]),
+                rate=float(r["rate"]),
+                amount=float(r["amount"]),
+                uom=r.get("uom", "Nos"),
+                is_pharmacy=bool(r.get("is_pharmacy", False)),
+                dosage=r.get("dosage"),
+                batch_no=r.get("batch_no"),
+                expiry_date=_exp_str,
+            )
+        items = [_mk_qi2(r) for r in items_rows]
         
         quotations.append(Quotation(
             name=row["name"],

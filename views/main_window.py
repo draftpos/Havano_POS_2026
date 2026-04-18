@@ -4084,8 +4084,25 @@ class OptionsDialog(QDialog):
 
         bl.addWidget(_row("Create Credit Note  (Return)",
                           self._do_credit_note, AMBER, ORANGE))
-        bl.addWidget(_row("Save / Print Quotation",
-                          self._do_save_quotation, NAVY_3, NAVY_2))
+        # Pharmacy: relabel "Save / Print Quotation" → "Dispense" for Pharmacist users
+        self._save_quote_btn = _row("Save / Print Quotation",
+                          self._do_save_quotation, NAVY_3, NAVY_2)
+        try:
+            from utils.roles import is_pharmacist as _is_pharm
+            _user = getattr(self._pos, "user", None) if self._pos else None
+            if _is_pharm(_user):
+                self._save_quote_btn.setText("Dispense")
+                try:
+                    # Prefer prescription-bottle-alt; fall back silently on missing glyph
+                    self._save_quote_btn.setIcon(qta.icon("fa5s.prescription-bottle-alt", color="white"))
+                except Exception:
+                    try:
+                        self._save_quote_btn.setIcon(qta.icon("fa5s.pills", color="white"))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        bl.addWidget(self._save_quote_btn)
         bl.addWidget(_row("Manage Quotations",
                           self._do_manage_quotations, NAVY, NAVY_2))
         bl.addWidget(_row("Reprint Invoice",
@@ -5625,6 +5642,20 @@ class POSView(QWidget):
             row_item = self.invoice_table.item(r, 0)
             if row_item:
                 row_item.setData(Qt.UserRole, product_id)
+                # Pharmacy: restore dosage/batch metadata on loaded quotation rows
+                if item.get("is_pharmacy"):
+                    row_item.setData(self.PHARMACY_META_ROLE, {
+                        "is_pharmacy": True,
+                        "dosage":      item.get("dosage"),
+                        "batch_no":    item.get("batch_no"),
+                        "expiry_date": item.get("expiry_date"),
+                        "product_id":  product_id,
+                    })
+                    try:
+                        row_item.setIcon(qta.icon("fa5s.prescription-bottle-alt",
+                                                  color="#6a1b9a"))
+                    except Exception:
+                        pass
             self._block_signals = False
             self._recalc_row(r)
             self._last_filled_row = r
@@ -5884,7 +5915,12 @@ class POSView(QWidget):
                 rate=discounted_rate,
                 amount=amount,
                 uom=uom,
-                part_no=part_no
+                part_no=part_no,
+                # Pharmacy fields — propagate dosage/batch from row metadata
+                is_pharmacy=bool(it.get("is_pharmacy", False)),
+                dosage=it.get("dosage"),
+                batch_no=it.get("batch_no"),
+                expiry_date=it.get("expiry_date"),
             ))
         
         # Create quotation object
@@ -6376,6 +6412,202 @@ class POSView(QWidget):
                     }}
                     QPushButton:hover {{ background-color: {hov}; }}
                 """)
+    # Pharmacy user-role key used on invoice_table cells (Qt.UserRole is already
+    # used for product_id on col 0, so we stamp pharmacy meta on +1)
+    PHARMACY_META_ROLE = Qt.UserRole + 1
+
+    def _is_pharmacy_product_lookup(self, product_id, part_no: str) -> bool:
+        """Fetch is_pharmacy_product from DB; returns False if unresolved."""
+        try:
+            if product_id:
+                from models.product import get_product_by_id
+                prod = get_product_by_id(int(product_id))
+                if prod:
+                    return bool(prod.get("is_pharmacy_product", False))
+            if part_no:
+                from database.db import get_connection
+                conn = get_connection(); cur = conn.cursor()
+                cur.execute(
+                    "SELECT COALESCE(is_pharmacy_product, 0) FROM products WHERE part_no = ?",
+                    (part_no,),
+                )
+                row = cur.fetchone(); conn.close()
+                if row:
+                    return bool(row[0])
+        except Exception as e:
+            print(f"[Pharmacy] is_pharmacy_product lookup failed: {e}")
+        return False
+
+    def _prompt_dosage(self) -> str | None:
+        """Pharmacy: small inline dosage popup — not a full QDialog."""
+        try:
+            from models.dosage import list_dosages
+            dosages = list_dosages() or []
+        except Exception as e:
+            print(f"[Pharmacy] list_dosages failed: {e}")
+            dosages = []
+
+        popup = QFrame(self, Qt.Popup)
+        popup.setAttribute(Qt.WA_DeleteOnClose, True)
+        popup.setStyleSheet(f"""
+            QFrame {{
+                background: {WHITE}; border: 1px solid {BORDER};
+                border-radius: 6px;
+            }}
+            QLabel {{ color: {NAVY}; background: transparent; }}
+        """)
+        lay = QVBoxLayout(popup)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+
+        title = QLabel("Dosage")
+        try:
+            title.setPixmap(qta.icon("fa5s.prescription-bottle-alt",
+                                     color=NAVY).pixmap(14, 14))
+        except Exception:
+            pass
+        title.setText("   Dosage")
+        title.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {NAVY};")
+        lay.addWidget(title)
+
+        lay.addWidget(QLabel("Choose saved dosage:"))
+        cbo = QComboBox()
+        cbo.addItem("— none —", "")
+        for d in dosages:
+            desc = getattr(d, "description", "") or ""
+            code = getattr(d, "code", "") or ""
+            label = f"{code} — {desc}" if desc else code
+            cbo.addItem(label, code)
+        lay.addWidget(cbo)
+
+        lay.addWidget(QLabel("Or quick dosage (not saved):"))
+        edit = QLineEdit()
+        edit.setPlaceholderText("e.g. 1 tab TID x 5d")
+        lay.addWidget(edit)
+
+        # Track which input the user touched last
+        state = {"last": "combo"}
+        edit.textEdited.connect(lambda _t: state.update({"last": "edit"}))
+        cbo.activated.connect(lambda _i: state.update({"last": "combo"}))
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        use_btn  = navy_btn("Use",  height=28, color=SUCCESS, hover=SUCCESS_H)
+        skip_btn = navy_btn("Skip", height=28, color=NAVY_2,  hover=NAVY_3)
+        btn_row.addStretch(); btn_row.addWidget(skip_btn); btn_row.addWidget(use_btn)
+        lay.addLayout(btn_row)
+
+        result = {"value": None, "committed": False}
+        def _use():
+            if state["last"] == "edit" and edit.text().strip():
+                result["value"] = edit.text().strip()
+            else:
+                result["value"] = cbo.currentData() or None
+            result["committed"] = True
+            popup.close()
+        def _skip():
+            result["value"] = None
+            result["committed"] = True
+            popup.close()
+        use_btn.clicked.connect(_use)
+        skip_btn.clicked.connect(_skip)
+
+        # Position below the invoice table
+        try:
+            origin = self.invoice_table.mapToGlobal(self.invoice_table.rect().topLeft())
+            popup.adjustSize()
+            popup.move(origin.x() + 60, origin.y() + 40)
+        except Exception:
+            pass
+        popup.setMinimumWidth(320)
+        # Qt.Popup + local event loop → modal-ish without the QDialog heft
+        from PySide6.QtCore import QEventLoop
+        loop = QEventLoop()
+        popup.destroyed.connect(loop.quit)
+        popup.show()
+        loop.exec()
+        return result["value"]
+
+    def _prompt_batch(self, product_id) -> dict:
+        """Pharmacy: batch picker popup. Returns {'batch_no', 'expiry_date'} or nulls."""
+        try:
+            from models.product import get_batches_for_product
+            batches = get_batches_for_product(int(product_id)) if product_id else []
+        except Exception as e:
+            print(f"[Pharmacy] get_batches_for_product failed: {e}")
+            batches = []
+
+        if not batches:
+            try:
+                from utils.toast import show_toast
+                show_toast(self, "No batches registered for this product",
+                           duration_ms=2500, kind="warn")
+            except Exception:
+                pass
+            return {"batch_no": None, "expiry_date": None}
+
+        if len(batches) == 1:
+            b = batches[0]
+            return {"batch_no": b.get("batch_no") or None,
+                    "expiry_date": b.get("expiry_date")}
+
+        popup = QFrame(self, Qt.Popup)
+        popup.setAttribute(Qt.WA_DeleteOnClose, True)
+        popup.setStyleSheet(f"""
+            QFrame {{
+                background: {WHITE}; border: 1px solid {BORDER};
+                border-radius: 6px;
+            }}
+            QLabel {{ color: {NAVY}; background: transparent; }}
+        """)
+        lay = QVBoxLayout(popup)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+
+        title = QLabel("Pick a batch")
+        title.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {NAVY};")
+        lay.addWidget(title)
+
+        lst = QListWidget()
+        for b in batches:
+            bn  = b.get("batch_no") or "(no batch no)"
+            exp = b.get("expiry_date") or "?"
+            qty = b.get("qty", 0)
+            it = QListWidgetItem(f"{bn}  —  expires {exp}   |   qty: {qty}")
+            it.setData(Qt.UserRole, b)
+            lst.addItem(it)
+        lst.setStyleSheet(f"""
+            QListWidget {{ background: {WHITE}; color: {NAVY}; border: 1px solid {BORDER}; }}
+            QListWidget::item:selected {{ background: {ACCENT}; color: {WHITE}; }}
+        """)
+        lay.addWidget(lst)
+
+        result = {"chosen": None, "done": False}
+        def _pick(item):
+            b = item.data(Qt.UserRole) or {}
+            result["chosen"] = {"batch_no": b.get("batch_no") or None,
+                                "expiry_date": b.get("expiry_date")}
+            result["done"] = True
+            popup.close()
+        lst.itemClicked.connect(_pick)
+
+        try:
+            origin = self.invoice_table.mapToGlobal(self.invoice_table.rect().topLeft())
+            popup.setMinimumWidth(360)
+            popup.adjustSize()
+            popup.move(origin.x() + 60, origin.y() + 40)
+        except Exception:
+            pass
+        popup.show()
+        from PySide6.QtCore import QEventLoop
+        loop = QEventLoop()
+        popup.destroyed.connect(loop.quit)
+        loop.exec()
+
+        if result["chosen"]:
+            return result["chosen"]
+        return {"batch_no": None, "expiry_date": None}
+
     def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None):
         # ── Always close any open inline search before we touch the table ─────
         self._close_inline_search()
@@ -6383,6 +6615,38 @@ class POSView(QWidget):
         # ── #0 Require a running shift ───────────────────────────────────────────
         if not self._require_active_shift():
             return
+
+        # ── Pharmacy gate + dosage/batch capture ─────────────────────────────────
+        pharmacy_meta = None
+        if self._is_pharmacy_product_lookup(product_id, part_no):
+            from utils.roles import is_pharmacist as _is_pharm
+            if not _is_pharm(self.user):
+                try:
+                    QApplication.beep()
+                except Exception:
+                    pass
+                try:
+                    from utils.toast import show_toast
+                    show_toast(
+                        self,
+                        "Only pharmacists can add pharmacy products — "
+                        "ask a pharmacist to create a quote.",
+                        duration_ms=3500, kind="warn",
+                    )
+                except Exception:
+                    pass
+                print(f"[Pharmacy] Blocked add — user is not pharmacist: {name}")
+                return
+            # Pharmacist — prompt for dosage then batch
+            dosage_val = self._prompt_dosage()
+            batch_val  = self._prompt_batch(product_id)
+            pharmacy_meta = {
+                "is_pharmacy": True,
+                "dosage":      dosage_val,
+                "batch_no":    batch_val.get("batch_no"),
+                "expiry_date": batch_val.get("expiry_date"),
+                "product_id":  product_id,
+            }
 
         # ── #3 Block zero-price ───────────────────────────────────────────────
         if price <= 0 and self._get_pos_rule("block_zero_price", default=True):
@@ -6539,6 +6803,14 @@ class POSView(QWidget):
                 item0 = self.invoice_table.item(dest, 0)
                 if item0:
                     item0.setData(Qt.UserRole, saved_pid)
+                    # Pharmacy meta survives row compaction: re-stamp if we had it
+                    if pharmacy_meta:
+                        item0.setData(self.PHARMACY_META_ROLE, pharmacy_meta)
+                        try:
+                            item0.setIcon(qta.icon("fa5s.prescription-bottle-alt",
+                                                   color="#6a1b9a"))
+                        except Exception:
+                            pass
                 qty_item = self.invoice_table.item(dest, 3)
                 if qty_item:
                     qty_item.setTextAlignment(Qt.AlignCenter)
@@ -6575,8 +6847,16 @@ class POSView(QWidget):
         self._init_row(r, part_no=part_no, details=name, qty="1",
                        amount=f"{price:.2f}", disc="0.00", tax=tax_display)
         item = self.invoice_table.item(r, 0)
-        if item: 
+        if item:
             item.setData(Qt.UserRole, product_id)
+            # Pharmacy: stamp the row with dosage/batch metadata for save path + Phase 7
+            if pharmacy_meta:
+                item.setData(self.PHARMACY_META_ROLE, pharmacy_meta)
+                try:
+                    item.setIcon(qta.icon("fa5s.prescription-bottle-alt",
+                                          color="#6a1b9a"))
+                except Exception:
+                    pass
         self._block_signals = False
         self._recalc_row(r)
         self._last_filled_row = r
@@ -6658,6 +6938,15 @@ class POSView(QWidget):
                 print(f"[Tax] Error collecting item: {e}")
                 continue
             
+            # Pharmacy meta (if stamped by _add_product_to_invoice)
+            pharm = None
+            try:
+                cell0 = self.invoice_table.item(r, 0)
+                if cell0:
+                    pharm = cell0.data(self.PHARMACY_META_ROLE)
+            except Exception:
+                pharm = None
+
             items.append({
                 "part_no": part_no,
                 "product_name": product_name,
@@ -6670,8 +6959,13 @@ class POSView(QWidget):
                 "tax_rate": tax_rate,      # ADD THIS - numeric rate
                 "tax_type": tax_type,      # ADD THIS - text type
                 "tax_amount": total * (tax_rate / 100) if tax_rate > 0 else 0,
+                # Pharmacy round-trip fields (None if not a pharmacy row)
+                "is_pharmacy": bool(pharm.get("is_pharmacy")) if pharm else False,
+                "dosage":      pharm.get("dosage") if pharm else None,
+                "batch_no":    pharm.get("batch_no") if pharm else None,
+                "expiry_date": pharm.get("expiry_date") if pharm else None,
             })
-        
+
         print(f"[Tax] Total items collected: {len(items)}")
         return items
 
@@ -7164,9 +7458,183 @@ class POSView(QWidget):
         panel.setMinimumHeight(290)
         layout = QVBoxLayout(panel)
         layout.setSpacing(0); layout.setContentsMargins(0, 0, 0, 0)
+        # Inline customer search strip (applies in all modes; pharmacy or not)
+        layout.addWidget(self._build_customer_search_strip())
         layout.addWidget(self._build_invoice_table(), 1)
         layout.addWidget(self._build_invoice_footer())
         return panel
+
+    # =========================================================================
+    # INLINE CUSTOMER SEARCH STRIP (pharmacy phase — GLOBAL, not pharmacy-only)
+    # =========================================================================
+    def _build_customer_search_strip(self) -> QWidget:
+        """Inline customer search row above the cart — attach/replace active customer."""
+        wrap = QWidget()
+        wrap.setFixedHeight(46)
+        wrap.setStyleSheet(f"background: {OFF_WHITE}; border-bottom: 1px solid {BORDER};")
+        lay = QHBoxLayout(wrap)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(6)
+
+        # Leading icon
+        icon_lbl = QLabel()
+        try:
+            icon_lbl.setPixmap(qta.icon("fa5s.user", color=NAVY).pixmap(14, 14))
+        except Exception:
+            icon_lbl.setText("👤")
+        icon_lbl.setStyleSheet("background: transparent;")
+        lay.addWidget(icon_lbl)
+
+        # Search input
+        self._cust_search_edit = QLineEdit()
+        self._cust_search_edit.setPlaceholderText("Search customer by name or phone...")
+        self._cust_search_edit.setClearButtonEnabled(True)
+        try:
+            self._cust_search_edit.addAction(
+                qta.icon("fa5s.search", color=MUTED),
+                QLineEdit.LeadingPosition,
+            )
+        except Exception:
+            pass
+        self._cust_search_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background: {WHITE}; color: {DARK_TEXT};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: 4px 8px; font-size: 12px;
+            }}
+            QLineEdit:focus {{ border: 1.5px solid {ACCENT}; }}
+        """)
+        self._cust_search_edit.textEdited.connect(self._on_cust_search_edited)
+        self._cust_search_edit.returnPressed.connect(self._on_cust_search_enter)
+        lay.addWidget(self._cust_search_edit, 1)
+
+        # Completer (dropdown suggestions) — updated on textEdited
+        self._cust_completer = QCompleter([], self._cust_search_edit)
+        self._cust_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._cust_completer.setFilterMode(Qt.MatchContains)
+        self._cust_completer.activated.connect(self._on_cust_completer_activated)
+        self._cust_search_edit.setCompleter(self._cust_completer)
+        self._cust_completer_cache: dict[str, dict] = {}
+
+        # "+" Add-new button
+        add_btn = QPushButton()
+        try:
+            add_btn.setIcon(qta.icon("fa5s.plus", color="white"))
+        except Exception:
+            add_btn.setText("+")
+        add_btn.setFixedSize(32, 30)
+        add_btn.setCursor(Qt.PointingHandCursor)
+        add_btn.setToolTip("Add new customer")
+        add_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ACCENT}; color: {WHITE}; border: none;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{ background: {ACCENT_H}; }}
+        """)
+        add_btn.clicked.connect(self._inline_add_new_customer)
+        lay.addWidget(add_btn)
+
+        # Selected customer label
+        self._cust_inline_label = QLabel("No customer")
+        self._cust_inline_label.setStyleSheet(
+            f"color: {MUTED}; font-size: 11px; background: transparent; padding: 0 6px;"
+        )
+        self._cust_inline_label.setMinimumWidth(160)
+        self._cust_inline_label.setMaximumWidth(260)
+        lay.addWidget(self._cust_inline_label)
+
+        return wrap
+
+    def _on_cust_search_edited(self, text: str):
+        """Update completer suggestions as user types (name or phone)."""
+        query = (text or "").strip()
+        if len(query) < 2:
+            return
+        try:
+            from models.customer import search_customers
+            results = search_customers(query) or []
+        except Exception as e:
+            print(f"[CustSearch] search error: {e}")
+            results = []
+        labels = []
+        cache: dict[str, dict] = {}
+        for c in results[:25]:
+            nm = c.get("customer_name", "") or ""
+            ph = c.get("custom_telephone_number", "") or ""
+            label = f"{nm}  —  {ph}" if ph else nm
+            labels.append(label)
+            cache[label] = c
+        self._cust_completer_cache = cache
+        # Rebuild completer model
+        from PySide6.QtCore import QStringListModel
+        self._cust_completer.setModel(QStringListModel(labels))
+
+    def _on_cust_completer_activated(self, label: str):
+        """Pick a suggested customer — attach as active customer."""
+        cust = self._cust_completer_cache.get(label)
+        if not cust:
+            return
+        self._attach_inline_customer(cust)
+
+    def _on_cust_search_enter(self):
+        """Enter with no selection — pick the top match if available."""
+        text = (self._cust_search_edit.text() or "").strip()
+        if not text:
+            return
+        # Prefer an exact match in cache, else the first entry
+        exact = next((v for k, v in self._cust_completer_cache.items() if k.lower() == text.lower()), None)
+        if exact:
+            self._attach_inline_customer(exact)
+            return
+        if self._cust_completer_cache:
+            first = next(iter(self._cust_completer_cache.values()))
+            self._attach_inline_customer(first)
+
+    def _attach_inline_customer(self, cust: dict):
+        """Set the given customer dict as active on the cart (same slot as old flow)."""
+        if not cust:
+            return
+        self._selected_customer = cust
+        name = cust.get("customer_name", "") or ""
+        # Update the inline label
+        self._cust_inline_label.setText(f"Customer: {name}")
+        self._cust_inline_label.setStyleSheet(
+            f"color: {NAVY}; font-size: 11px; font-weight: bold; "
+            f"background: transparent; padding: 0 6px;"
+        )
+        # Update the nav-bar customer button so both UIs stay in sync
+        try:
+            self._refresh_customer_btn()
+        except Exception:
+            pass
+        # Clear the edit so the next search starts fresh
+        try:
+            self._cust_search_edit.blockSignals(True)
+            self._cust_search_edit.clear()
+            self._cust_search_edit.blockSignals(False)
+        except Exception:
+            pass
+        if self.parent_window:
+            try:
+                self.parent_window._set_status(f"Customer: {name}")
+            except Exception:
+                pass
+
+    def _inline_add_new_customer(self):
+        """Open the existing QuickAddCustomerDialog and auto-attach on success."""
+        try:
+            from views.dialogs.customer_dialog import QuickAddCustomerDialog
+        except Exception as e:
+            QMessageBox.warning(self, "Error",
+                                f"Customer dialog not available:\n{e}")
+            return
+        dlg = QuickAddCustomerDialog(self)
+        try:
+            dlg.customer_created.connect(self._attach_inline_customer)
+        except Exception:
+            pass
+        dlg.exec()
 
     # ── Invoice table ─────────────────────────────────────────────────────────
     # ── Invoice column labels — edit here to rename ──────────────────────────
@@ -9226,6 +9694,13 @@ class POSView(QWidget):
                 }}
                 QPushButton:hover {{ background-color: {ACCENT_H}; }}
             """)
+            # Keep inline strip label in sync (if the strip has been built)
+            if hasattr(self, "_cust_inline_label") and self._cust_inline_label is not None:
+                self._cust_inline_label.setText(f"Customer: {name}")
+                self._cust_inline_label.setStyleSheet(
+                    f"color: {NAVY}; font-size: 11px; font-weight: bold; "
+                    f"background: transparent; padding: 0 6px;"
+                )
         else:
             self._cust_btn.setText("Customer")
             self._cust_btn.setStyleSheet(f"""
@@ -9235,6 +9710,11 @@ class POSView(QWidget):
                 }}
                 QPushButton:hover {{ background-color: {NAVY_3}; color: {WHITE}; }}
             """)
+            if hasattr(self, "_cust_inline_label") and self._cust_inline_label is not None:
+                self._cust_inline_label.setText("No customer")
+                self._cust_inline_label.setStyleSheet(
+                    f"color: {MUTED}; font-size: 11px; background: transparent; padding: 0 6px;"
+                )
 
     # =========================================================================
     # DEFAULT CUSTOMER — auto-selected on startup / payment
