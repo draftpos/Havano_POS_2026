@@ -119,8 +119,16 @@ def upsert_from_frappe(c: dict):
 
 def create_customer(customer_name: str, customer_group_id: int,
                     custom_warehouse_id: int, custom_cost_center_id: int,
-                    default_price_list_id: int, **kwargs) -> dict:
-    """Manual creation helper."""
+                    default_price_list_id: int,
+                    doctor_id: int | None = None,
+                    doctor_frappe_name: str | None = None,
+                    **kwargs) -> dict:
+    """Manual creation helper.
+
+    ``doctor_id`` / ``doctor_frappe_name`` are optional pharmacy-mode fields;
+    they are always inserted (as NULL if not supplied) so pharmacy-label
+    lookup can fall through frappe_name → doctor_id resolution paths.
+    """
     conn = get_connection(); cur = conn.cursor()
     cur.execute("""
         INSERT INTO customers (
@@ -128,41 +136,66 @@ def create_customer(customer_name: str, customer_group_id: int,
             custom_trade_name, custom_telephone_number, custom_email_address,
             custom_city, custom_house_no,
             custom_warehouse_id, custom_cost_center_id, default_price_list_id,
+            doctor_id, doctor_frappe_name,
             laybye_balance, frappe_synced
-        ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+        ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
     """, (customer_name.strip(), customer_group_id, kwargs.get("customer_type", "Individual"),
-          kwargs.get("custom_trade_name", ""), kwargs.get("custom_telephone_number", ""), 
-          kwargs.get("custom_email_address", ""), kwargs.get("custom_city", ""), 
+          kwargs.get("custom_trade_name", ""), kwargs.get("custom_telephone_number", ""),
+          kwargs.get("custom_email_address", ""), kwargs.get("custom_city", ""),
           kwargs.get("custom_house_no", ""),
-          custom_warehouse_id, custom_cost_center_id, default_price_list_id))
+          custom_warehouse_id, custom_cost_center_id, default_price_list_id,
+          doctor_id, doctor_frappe_name))
     new_id = int(cur.fetchone()[0]); conn.commit(); conn.close()
     return get_customer_by_id(new_id)
 
-def update_customer(customer_id: int, **kwargs) -> dict | None:
-    """Manual update helper."""
+def update_customer(customer_id: int,
+                    doctor_id: int | None = None,
+                    doctor_frappe_name: str | None = None,
+                    **kwargs) -> dict | None:
+    """Manual update helper.
+
+    ``doctor_id`` / ``doctor_frappe_name`` are optional; if present in the
+    kwargs/positional list they are included in the dynamic UPDATE set so
+    callers who don't care about pharmacy fields aren't forced to pass them.
+    """
     c = get_customer_by_id(customer_id)
     if not c: return None
-    
+
+    # Base update set — existing fields (unchanged behaviour)
+    set_clauses = [
+        "customer_name=?", "customer_group_id=?", "customer_type=?",
+        "custom_trade_name=?", "custom_telephone_number=?", "custom_email_address=?",
+        "custom_city=?", "custom_house_no=?",
+        "custom_warehouse_id=?", "custom_cost_center_id=?", "default_price_list_id=?",
+    ]
+    params = [
+        kwargs.get("customer_name", c["customer_name"]),
+        kwargs.get("customer_group_id", c["customer_group_id"]),
+        kwargs.get("customer_type", c["customer_type"]),
+        kwargs.get("custom_trade_name", c["custom_trade_name"]),
+        kwargs.get("custom_telephone_number", c["custom_telephone_number"]),
+        kwargs.get("custom_email_address", c["custom_email_address"]),
+        kwargs.get("custom_city", c["custom_city"]),
+        kwargs.get("custom_house_no", c["custom_house_no"]),
+        kwargs.get("custom_warehouse_id", c["custom_warehouse_id"]),
+        kwargs.get("custom_cost_center_id", c["custom_cost_center_id"]),
+        kwargs.get("default_price_list_id", c["default_price_list_id"]),
+    ]
+
+    # Pharmacy fields: only update when explicitly provided. Treat the
+    # sentinel default (None + NOT in kwargs) as "leave untouched".
+    if doctor_id is not None or "doctor_id" in kwargs:
+        set_clauses.append("doctor_id=?")
+        params.append(kwargs.get("doctor_id", doctor_id))
+    if doctor_frappe_name is not None or "doctor_frappe_name" in kwargs:
+        set_clauses.append("doctor_frappe_name=?")
+        params.append(kwargs.get("doctor_frappe_name", doctor_frappe_name))
+
+    params.append(customer_id)
+    sql = f"UPDATE customers SET {', '.join(set_clauses)} WHERE id=?"
+
     conn = get_connection(); cur = conn.cursor()
-    cur.execute("""
-        UPDATE customers SET
-            customer_name=?, customer_group_id=?, customer_type=?,
-            custom_trade_name=?, custom_telephone_number=?, custom_email_address=?,
-            custom_city=?, custom_house_no=?,
-            custom_warehouse_id=?, custom_cost_center_id=?, default_price_list_id=?
-        WHERE id=?
-    """, (kwargs.get("customer_name", c["customer_name"]), 
-          kwargs.get("customer_group_id", c["customer_group_id"]), 
-          kwargs.get("customer_type", c["customer_type"]),
-          kwargs.get("custom_trade_name", c["custom_trade_name"]), 
-          kwargs.get("custom_telephone_number", c["custom_telephone_number"]), 
-          kwargs.get("custom_email_address", c["custom_email_address"]),
-          kwargs.get("custom_city", c["custom_city"]), 
-          kwargs.get("custom_house_no", c["custom_house_no"]),
-          kwargs.get("custom_warehouse_id", c["custom_warehouse_id"]), 
-          kwargs.get("custom_cost_center_id", c["custom_cost_center_id"]),
-          kwargs.get("default_price_list_id", c["default_price_list_id"]), 
-          customer_id))
+    cur.execute(sql, tuple(params))
     conn.commit(); conn.close()
     return get_customer_by_id(customer_id)
 

@@ -3142,6 +3142,51 @@ class QuickAddCustomerDialog(QDialog):
             fl.addWidget(lbl)
             fl.addWidget(widget)
 
+        # ── Doctor picker (pharmacy mode only) ────────────────────────────────
+        self._doctor_lbl   = QLabel("DOCTOR")
+        self._doctor_lbl.setObjectName("section")
+        self._doctor_combo = QComboBox()
+        self._doctor_combo.setFixedHeight(38)
+        self._doctor_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {OFF_WHITE}; color: {DARK_TEXT};
+                border: 1.5px solid {BORDER}; border-radius: 6px;
+                font-size: 13px; padding: 0 10px;
+            }}
+            QComboBox:focus {{ border: 1.5px solid {ACCENT}; background: {WHITE}; }}
+            QComboBox::drop-down {{ border: none; width: 22px; }}
+            QComboBox QAbstractItemView {{
+                background: {WHITE}; border: 1px solid {BORDER};
+                selection-background-color: {ACCENT}; selection-color: {WHITE};
+            }}
+        """)
+        # Blank first item — doctor is optional
+        self._doctor_combo.addItem("— none —", None)
+        try:
+            from models.doctor import list_doctors
+            for _doc in (list_doctors() or []):
+                _name = _doc.full_name or ""
+                if _doc.practice_no:
+                    _label = f"{_name}  ({_doc.practice_no})"
+                else:
+                    _label = _name
+                self._doctor_combo.addItem(_label, _doc.id)
+        except Exception as _e:
+            print(f"[QuickAddCustomer] Could not load doctors: {_e}")
+
+        fl.addWidget(self._doctor_lbl)
+        fl.addWidget(self._doctor_combo)
+
+        # Show the doctor row only in pharmacy mode
+        try:
+            from settings.pharmacy_settings import get_pharmacy_mode
+            _pharm_on = bool(get_pharmacy_mode())
+        except Exception as _e:
+            print(f"[QuickAddCustomer] get_pharmacy_mode failed: {_e}")
+            _pharm_on = False
+        self._doctor_lbl.setVisible(_pharm_on)
+        self._doctor_combo.setVisible(_pharm_on)
+
         # ── status label ──────────────────────────────────────────────────────
         self._status = QLabel("")
         self._status.setStyleSheet(
@@ -3253,6 +3298,26 @@ class QuickAddCustomerDialog(QDialog):
             print(f"[QuickAddCustomer] IDs → warehouse={warehouse_id}  "
                   f"cost_center={cost_center_id}  price_list={price_list_id}  group={group_id}")
 
+            # ── Resolve optional doctor selection (pharmacy mode only) ────────
+            doctor_id = None
+            doctor_frappe_name = None
+            try:
+                if getattr(self, "_doctor_combo", None) is not None \
+                        and self._doctor_combo.isVisible():
+                    sel = self._doctor_combo.currentData()
+                    if sel is not None:
+                        doctor_id = int(sel)
+                        from models.doctor import get_doctor_by_id
+                        _doc = get_doctor_by_id(doctor_id)
+                        if _doc:
+                            doctor_frappe_name = _doc.frappe_name
+                        print(f"[QuickAddCustomer] Doctor selected: "
+                              f"id={doctor_id}  frappe_name='{doctor_frappe_name}'")
+            except Exception as _e:
+                print(f"[QuickAddCustomer] Doctor resolve failed: {_e}")
+                doctor_id = None
+                doctor_frappe_name = None
+
             # Direct INSERT — pass None for any FK that couldn't be resolved
             conn2 = get_connection()
             cur2  = conn2.cursor()
@@ -3261,13 +3326,15 @@ class QuickAddCustomerDialog(QDialog):
                     customer_name, customer_group_id, customer_type,
                     custom_trade_name, custom_telephone_number, custom_email_address,
                     custom_city, custom_house_no,
-                    custom_warehouse_id, custom_cost_center_id, default_price_list_id
-                ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    custom_warehouse_id, custom_cost_center_id, default_price_list_id,
+                    doctor_id, doctor_frappe_name
+                ) OUTPUT INSERTED.id VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 full_name, group_id, "Individual",
                 "", phone, "",
                 city, "",
                 warehouse_id, cost_center_id, price_list_id,
+                doctor_id, doctor_frappe_name,
             ))
             new_id = int(cur2.fetchone()[0])
             conn2.commit()

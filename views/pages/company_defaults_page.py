@@ -365,6 +365,28 @@ class CompanyDefaultsPage(QWidget):
         """)
         external_btn.clicked.connect(self._open_external_site_settings)
 
+        # ── PHARMACY MASTERS BUTTON (visible only in pharmacy mode) ──────────
+        pharmacy_btn = QPushButton("Pharmacy Masters")
+        pharmacy_btn.setIcon(qta.icon("fa5s.prescription-bottle-alt", color="white"))
+        pharmacy_btn.setFixedHeight(38)
+        pharmacy_btn.setCursor(Qt.PointingHandCursor)
+        pharmacy_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY_2}; color:{WHITE}; border:1px solid #7c3aed;
+                border-radius:6px; font-size:12px; font-weight:bold; padding:0 16px;
+            }}
+            QPushButton:hover   {{ background:{NAVY_3}; border:1px solid #9461ff; }}
+            QPushButton:pressed {{ background:{NAVY}; }}
+        """)
+        pharmacy_btn.clicked.connect(self._open_pharmacy_masters_dialog)
+        try:
+            from settings.pharmacy_settings import get_pharmacy_mode
+            _pharmacy_on = bool(get_pharmacy_mode())
+        except Exception as _e:
+            print(f"[CompanyDefaults] get_pharmacy_mode failed: {_e}")
+            _pharmacy_on = False
+        pharmacy_btn.setVisible(_pharmacy_on)
+
         # ── SAVE CHANGES BUTTON ───────────────────────────────────────────────
         save_btn = QPushButton("  Save Changes  ")
         save_btn.setFixedHeight(38)
@@ -384,6 +406,7 @@ class CompanyDefaultsPage(QWidget):
         hl.addWidget(self._status_lbl)
         hl.addWidget(fiscal_btn)
         hl.addWidget(external_btn)  # External site button after fiscalization
+        hl.addWidget(pharmacy_btn)  # Pharmacy masters (hidden unless pharmacy mode)
         hl.addWidget(save_btn)
         outer.addWidget(hdr)
 
@@ -640,6 +663,17 @@ class CompanyDefaultsPage(QWidget):
             dialog.exec()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open external site settings:\n{e}")
+
+    # ── Pharmacy Masters (Doctors / Dosages) ──────────────────────────────────
+
+    def _open_pharmacy_masters_dialog(self):
+        """Open the read-only pharmacy masters viewer (Doctors + Dosages)."""
+        try:
+            from views.dialogs.pharmacy_masters_dialog import PharmacyMastersDialog
+            PharmacyMastersDialog(self).exec()
+        except Exception as e:
+            QMessageBox.warning(self, "Error",
+                                f"Could not open pharmacy masters:\n{e}")
 
     # ── Fiscalization Dialog ─────────────────────────────────────────────────
 
