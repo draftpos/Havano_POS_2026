@@ -397,6 +397,23 @@ def _upsert_product(raw: dict) -> bool:
     group   = str(raw.get("groupname") or "")[:100]
     uom     = str((raw.get("uom") or {}).get("stock_uom") or "Nos").strip()
 
+    # Extract tax info from raw payload (no fallbacks)
+    taxes = raw.get("taxes") or []
+    tax_rate = 0.0
+    tax_type = None
+    if taxes:
+        t_row = taxes[0]
+        tax_rate = float(t_row.get("minimum_net_rate") or 0)
+        tax_type = t_row.get("tax_category")
+
+    # Extract order items flags from raw payload
+    o1 = int(bool(raw.get("custom_is_order_item_1")))
+    o2 = int(bool(raw.get("custom_is_order_item_2")))
+    o3 = int(bool(raw.get("custom_is_order_item_3")))
+    o4 = int(bool(raw.get("custom_is_order_item_4")))
+    o5 = int(bool(raw.get("custom_is_order_item_5")))
+    o6 = int(bool(raw.get("custom_is_order_item_6")))
+
     stock = 0.0
     for wh in (raw.get("warehouses") or []):
         try:
@@ -431,9 +448,18 @@ def _upsert_product(raw: dict) -> bool:
                     stock    = ?,
                     uom      = ?,
                     price    = ?,
-                    category = CASE WHEN ? <> '' THEN ? ELSE category END
+                    category = CASE WHEN ? <> '' THEN ? ELSE category END,
+                    tax_rate = ?,
+                    tax_type = ?,
+                    order_1  = ?,
+                    order_2  = ?,
+                    order_3  = ?,
+                    order_4  = ?,
+                    order_5  = ?,
+                    order_6  = ?
                 WHERE part_no = ?
-            """, (name, stock, uom, new_price, category, category, part_no))
+            """, (name, stock, uom, new_price, category, category, 
+                  tax_rate, tax_type, o1, o2, o3, o4, o5, o6, part_no))
             conn.commit()
             _upsert_uom_prices(cur, part_no, raw.get("prices") or [])
             conn.commit()
@@ -443,15 +469,18 @@ def _upsert_product(raw: dict) -> bool:
                 INSERT INTO products
                     (part_no, name, price, stock, category,
                      uom, conversion_factor,
+                     tax_rate, tax_type,
                      order_1, order_2, order_3, order_4, order_5, order_6)
-                VALUES (?, ?, ?, ?, ?, ?, 1.0, 0, 0, 0, 0, 0, 0)
-            """, (part_no, name, server_price, stock, category, uom))
+                VALUES (?, ?, ?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (part_no, name, server_price, stock, category, uom,
+                  tax_rate, tax_type, o1, o2, o3, o4, o5, o6))
             conn.commit()
             _upsert_uom_prices(cur, part_no, raw.get("prices") or [])
             conn.commit()
             return True
     finally:
         conn.close()
+
 
 
 def _upsert_uom_prices(cur, part_no: str, prices: list) -> None:
