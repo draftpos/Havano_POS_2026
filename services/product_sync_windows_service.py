@@ -326,12 +326,13 @@ def _parse_product(p: dict) -> dict | None:
             seen_uoms.add(uom_name)
 
     result = {
-        "part_no":    part_no,
-        "name":       name,
-        "category":   category,
-        "price":      price,
-        "stock":      stock,
-        "uom_prices": uom_prices,
+        "part_no":             part_no,
+        "name":                name,
+        "category":            category,
+        "price":               price,
+        "stock":               stock,
+        "uom_prices":          uom_prices,
+        "is_pharmacy_product": bool(p.get("is_pharmacy_product") or 0),
     }
 
     if tax_info:
@@ -514,34 +515,37 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
             tax_type          = p.get("tax_type",          "VAT")
             item_tax_template = p.get("item_tax_template", "")
 
+            is_pharm = 1 if p.get("is_pharmacy_product") else 0
+
             if p["part_no"] in local_part_nos:
                 cur.execute("""
                     UPDATE products
-                    SET    name              = ?,
-                           price             = ?,
-                           stock             = ?,
-                           category          = ?,
-                           tax_rate          = ?,
-                           tax_type          = ?,
-                           item_tax_template = ?
+                    SET    name                = ?,
+                           price               = ?,
+                           stock               = ?,
+                           category            = ?,
+                           tax_rate            = ?,
+                           tax_type            = ?,
+                           item_tax_template   = ?,
+                           is_pharmacy_product = ?
                     WHERE  part_no = ?
                 """, (
                     p["name"], p["price"], p["stock"], p["category"],
-                    tax_rate, tax_type, item_tax_template,
+                    tax_rate, tax_type, item_tax_template, is_pharm,
                     p["part_no"],
                 ))
                 result["updated"] += 1
-                log.debug("[sync] Updated: %s  tax_rate=%.4f  tax_type=%s",
-                          p["part_no"], tax_rate, tax_type)
+                log.debug("[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  pharmacy=%d",
+                          p["part_no"], tax_rate, tax_type, is_pharm)
             else:
                 cur.execute("""
                     INSERT INTO products
                         (part_no, name, price, stock, category,
-                         tax_rate, tax_type, item_tax_template)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         tax_rate, tax_type, item_tax_template, is_pharmacy_product)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     p["part_no"], p["name"], p["price"], p["stock"], p["category"],
-                    tax_rate, tax_type, item_tax_template,
+                    tax_rate, tax_type, item_tax_template, is_pharm,
                 ))
                 local_part_nos.add(p["part_no"])
                 result["inserted"] += 1

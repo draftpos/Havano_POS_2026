@@ -231,76 +231,54 @@ def sync_exchange_rates(api_key: str, api_secret: str, host: str) -> int:
 def sync_modes_of_payment(api_key: str, api_secret: str,
                            host: str, company: str) -> int:
     """
-    Fetches all Mode of Payment records from Frappe and stores them locally.
-    For each MOP reads the accounts child table to get the correct GL account
-    and currency for this company.
-    Returns count of MOP records successfully synced.
-    """
-    from models.gl_account import upsert_mop, get_account_by_name
+    Fetches all enabled Modes of Payment from saas_api (ignore_permissions) and
+    stores them locally. Single round-trip — the endpoint pre-filters the
+    accounts child rows to the requested company and resolves the account
+    currency server-side. Returns count of MOP records successfully synced.
 
-    # Step 1 — get the list of all MOP names
-    fields   = json.dumps(["name", "type"])
-    list_url = (
-        f"{host}/api/resource/Mode%20of%20Payment"
-        f"?fields={urllib.parse.quote(fields)}&limit=100"
+    The older implementation hit /api/resource/Mode of Payment directly, which
+    runs under the caller's session and 403s for any role (e.g. Pharmacist)
+    that lacks read perm on the Mode of Payment doctype. The saas_api endpoint
+    bypasses that check since this is internal master-data refresh.
+    """
+    from models.gl_account import upsert_mop
+
+    url = (
+        f"{host}/api/method/saas_api.www.api.get_modes_of_payment"
+        f"?company={urllib.parse.quote(company or '')}"
     )
-    req = urllib.request.Request(list_url)
+    req = urllib.request.Request(url)
     req.add_header("Authorization", f"token {api_key}:{api_secret}")
 
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            mop_list = json.loads(r.read().decode()).get("data", [])
+            payload = json.loads(r.read().decode())
     except Exception as e:
         log.warning("MOP list fetch failed: %s", e)
         return 0
 
+    msg = payload.get("message") or payload
+    mop_list = (msg or {}).get("data") or []
+
     count = 0
     for mop in mop_list:
-        mop_name = mop.get("name", "").strip()
+        mop_name = (mop.get("name") or "").strip()
         if not mop_name:
             continue
-
-        # Step 2 — fetch the detail record to get the accounts child table
-        detail_url = (
-            f"{host}/api/resource/Mode%20of%20Payment/"
-            f"{urllib.parse.quote(mop_name)}"
-        )
-        req2 = urllib.request.Request(detail_url)
-        req2.add_header("Authorization", f"token {api_key}:{api_secret}")
-
         try:
-            with urllib.request.urlopen(req2, timeout=30) as r2:
-                detail   = json.loads(r2.read().decode()).get("data", {})
-                accounts = detail.get("accounts", [])
-
-            # Prefer the account row for our company, fall back to first row
-            acct_row = next(
-                (a for a in accounts if a.get("company") == company),
-                accounts[0] if accounts else {}
-            )
-
-            gl_account_name = acct_row.get("default_account", "")
-
-            # Resolve currency — try the child row first, then look up locally
-            currency = (acct_row.get("account_currency") or "").strip().upper()
-            if not currency and gl_account_name:
-                local_acct = get_account_by_name(gl_account_name)
-                if local_acct:
-                    currency = local_acct.get("account_currency", "USD")
-            currency = currency or "USD"
-
+            currency = (mop.get("account_currency") or "USD").strip().upper() or "USD"
             upsert_mop({
                 "name":             mop_name,
-                "mop_type":         mop.get("type", "Cash"),
-                "company":          acct_row.get("company", company),
-                "gl_account":       gl_account_name,
+                "mop_type":         mop.get("type") or "Cash",
+                "company":          mop.get("company") or company,
+                "gl_account":       mop.get("default_account") or "",
                 "account_currency": currency,
             })
-            log.debug("MOP synced: %s → %s (%s)", mop_name, gl_account_name, currency)
+            log.debug("MOP synced: %s → %s (%s)",
+                      mop_name, mop.get("default_account", ""), currency)
             count += 1
-
         except Exception as e:
-            log.warning("Failed to fetch MOP detail for '%s': %s", mop_name, e)
+            log.warning("Failed to upsert MOP '%s': %s", mop_name, e)
 
     log.info("Modes of Payment synced: %d", count)
     print(f"[sync] ✅ Modes of Payment synced: {count}")
