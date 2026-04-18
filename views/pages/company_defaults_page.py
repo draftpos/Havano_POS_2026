@@ -495,6 +495,26 @@ class CompanyDefaultsPage(QWidget):
         pcl.addWidget(self._allow_credit_chk)
         pcl.addSpacing(8)
         pcl.addWidget(hint)
+
+        # Pharmacy Mode — terminal-local, persisted to app_data/pharmacy_settings.json
+        self._pharmacy_mode_chk = _ToggleSwitch(
+            "Pharmacy Mode  (enables dosage + batch prompts)", size=20)
+        pharm_hint = QLabel(
+            "When enabled on this terminal, pharmacy-flagged products prompt "
+            "for dosage and batch at add-to-cart, and cashiers are blocked "
+            "from modifying pharmacy lines on existing quotes. Saved per "
+            "terminal (not synced)."
+        )
+        pharm_hint.setWordWrap(True)
+        pharm_hint.setStyleSheet(
+            f"color:{MUTED}; font-size:11px; background:{LIGHT};"
+            f" border:1px solid {BORDER}; border-radius:6px; padding:10px 12px;"
+        )
+        pcl.addSpacing(12)
+        pcl.addWidget(self._pharmacy_mode_chk)
+        pcl.addSpacing(8)
+        pcl.addWidget(pharm_hint)
+
         pcl.addStretch()
 
         row1.addWidget(rc,  3)
@@ -923,6 +943,14 @@ class CompanyDefaultsPage(QWidget):
         self._allow_credit_chk.setChecked(
             str(data.get("allow_credit_sales", "0")).strip() == "1"
         )
+
+        # Pharmacy mode — terminal-local (not in company_defaults DB record)
+        try:
+            from settings.pharmacy_settings import get_pharmacy_mode
+            self._pharmacy_mode_chk.setChecked(bool(get_pharmacy_mode()))
+        except Exception as e:
+            print(f"[CompanyDefaultsPage] pharmacy_mode load skipped: {e}")
+
         self._update_preview()
 
     # ── Save ─────────────────────────────────────────────────────────────────
@@ -934,6 +962,13 @@ class CompanyDefaultsPage(QWidget):
         data["invoice_prefix"]       = self._prefix_inp.text().strip().upper()
         data["invoice_start_number"] = str(self._start_num.value())
         data["allow_credit_sales"]   = "1" if self._allow_credit_chk.isChecked() else "0"
+
+        # Pharmacy mode — terminal-local, saved to app_data/pharmacy_settings.json
+        try:
+            from settings.pharmacy_settings import set_pharmacy_mode
+            set_pharmacy_mode(bool(self._pharmacy_mode_chk.isChecked()))
+        except Exception as e:
+            print(f"[CompanyDefaultsPage] pharmacy_mode save skipped: {e}")
 
         for key, lbl in self._ro_labels.items():
             v = lbl.text()

@@ -995,51 +995,7 @@ class SettingsDialog(QDialog):
             # ("fa5s.print", "Advanced Printing",  _open_adv_printing),
         ])
 
-        # ── TERMINAL OPTIONS ──────────────────────────────────────────────────
-        # Pharmacy Mode toggle — terminal-local, saved immediately (no Save button).
-        ml.addWidget(_section_divider("TERMINAL OPTIONS"))
-        try:
-            from settings.pharmacy_settings import get_pharmacy_mode, set_pharmacy_mode
-            pharm_row = QWidget()
-            pharm_row.setFixedHeight(44)
-            pharm_row.setStyleSheet(f"background:{WHITE}; border-bottom:1px solid {BORDER};")
-            prh = QHBoxLayout(pharm_row)
-            prh.setContentsMargins(16, 0, 16, 0)
-            prh.setSpacing(10)
-            prh_icon = QLabel()
-            prh_icon.setPixmap(qta.icon("fa5s.prescription-bottle-alt", color=DARK_TEXT).pixmap(16, 16))
-            prh_icon.setStyleSheet("background:transparent;")
-            prh_lbl = QLabel("Pharmacy Mode")
-            prh_lbl.setStyleSheet(f"background:transparent; color:{DARK_TEXT}; font-size:13px;")
-            self._pharmacy_toggle = QCheckBox()
-            self._pharmacy_toggle.setChecked(bool(get_pharmacy_mode()))
-            # Live-save on toggle — the surrounding dialog has no Save/Apply button.
-            self._pharmacy_toggle.stateChanged.connect(
-                lambda s: set_pharmacy_mode(s == Qt.Checked)
-            )
-            prh.addWidget(prh_icon)
-            prh.addWidget(prh_lbl)
-            prh.addStretch()
-            prh.addWidget(self._pharmacy_toggle)
-            ml.addWidget(pharm_row)
-
-            # Small UX touch — show who's logged in so the terminal owner knows
-            # which account the pharmacy-mode toggle is being set under.
-            _uname = (self.user or {}).get("username") or ""
-            _urole = (self.user or {}).get("role") or ""
-            if _uname:
-                who_row = QWidget()
-                who_row.setFixedHeight(28)
-                who_row.setStyleSheet(f"background:{WHITE}; border-bottom:1px solid {BORDER};")
-                wh = QHBoxLayout(who_row)
-                wh.setContentsMargins(16, 0, 16, 0)
-                who_lbl = QLabel(f"Current user: {_uname} ({_urole})" if _urole else f"Current user: {_uname}")
-                who_lbl.setStyleSheet(f"background:transparent; color:{MUTED}; font-size:11px;")
-                wh.addWidget(who_lbl)
-                wh.addStretch()
-                ml.addWidget(who_row)
-        except Exception as _e:
-            print(f"[settings] ⚠️  Pharmacy Mode toggle unavailable: {_e}")
+        # Pharmacy Mode toggle moved to Company Defaults → Payment Settings card.
 
         scroll_area.setWidget(menu)
         root.addWidget(scroll_area, 1)

@@ -6,6 +6,18 @@ import sys
 import os
 import traceback
 from pathlib import Path
+
+# Reconfigure stdout/stderr to UTF-8 so dev-log emojis in migrate.py etc. don't
+# crash on Windows cp1252 consoles. In --windowed PyInstaller builds stdout is
+# None, so the calls are guarded.
+try:
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr is not None:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt

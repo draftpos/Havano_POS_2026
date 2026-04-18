@@ -1538,6 +1538,16 @@ def run():
         print(f"[setup_database] ! Error seeding admin user: {e}")
     print("======================================\n")
 
+    # Apply migrate.py schema additions (doctors, dosages, product_batches,
+    # pharmacy columns on products/customers/quote-items/sale-items,
+    # quotations.cashier_name, sale_items.uom). All calls are idempotent
+    # (IF NOT EXISTS guards), so this is safe to run on every boot.
+    try:
+        from migrate import migrate as _apply_migrations
+        _apply_migrations()
+    except Exception as e:
+        print(f"[setup_database] ! migrate.py additions failed: {e}")
+
 
 if __name__ == "__main__":
     run()
