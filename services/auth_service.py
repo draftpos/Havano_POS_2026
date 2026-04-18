@@ -175,16 +175,24 @@ def _parse_online_success(data: dict, username: str) -> dict:
     raw_cost_center= (user_block.get("cost_center") or data.get("cost_center") or "")
     full_name    = user_block.get("full_name") or data.get("full_name") or raw_username
 
-    # Role normalization:
-    #   saas_api.www.api.login returns user.role as a single string
-    #   (derived from user.role_select — e.g., "Pharmacist", "Cashier").
-    #   Older havano_pos_integration shape returned user.roles as a list.
-    # Support both — _map_role treats whatever we pass as a list.
-    roles = user_block.get("roles") or []
-    if not roles:
-        single = user_block.get("role")
-        if single:
-            roles = [single]
+    # Role priority:
+    #   1. user.user_rights.profile_name — the authoritative User Rights
+    #      Profile; this is what actually governs permissions in ERPNext.
+    #   2. user.roles (list) — legacy havano_pos_integration shape.
+    #   3. user.role (string) — role_select custom field on the User doc.
+    # The profile takes precedence because role_select can drift from the
+    # assigned profile; e.g. a user configured with the "Pharmacist" profile
+    # may still have role_select="Admin" set, which would otherwise mis-map.
+    user_rights = user_block.get("user_rights") or {}
+    profile_name = user_rights.get("profile_name") if isinstance(user_rights, dict) else None
+    if profile_name:
+        roles = [profile_name]
+    else:
+        roles = user_block.get("roles") or []
+        if not roles:
+            single = user_block.get("role")
+            if single:
+                roles = [single]
 
     user = {
         "id":           None,

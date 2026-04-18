@@ -248,10 +248,11 @@ def upsert_frappe_user(u: dict) -> dict | None:
     company     = (u.get("company")     or "").strip()
     cost_center = (u.get("cost_center") or "").strip()
     warehouse   = (u.get("warehouse")   or "").strip()
-    role_select = (u.get("role_select") or "Cashier").strip().lower()
-    if role_select == "admin":
+    # Prefer user_rights_profile (authoritative) over role_select (legacy).
+    raw_role = (u.get("user_rights_profile") or u.get("role_select") or "Cashier").strip().lower()
+    if raw_role in ("admin", "administrator", "system manager"):
         role = "admin"
-    elif role_select == "pharmacist":
+    elif raw_role == "pharmacist":
         # Preserve title-case so utils.roles.is_pharmacist() can match it
         role = "Pharmacist"
     else:

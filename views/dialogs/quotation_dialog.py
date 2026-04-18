@@ -169,6 +169,19 @@ class QuotationDialog(QDialog):
         self.refresh_btn.clicked.connect(self._load_quotations)
         header_row.addWidget(self.refresh_btn)
 
+        # Back to POS — lets the user close the Quotations view and return to
+        # the cart (important for pharmacists who auto-land here on login).
+        self.back_to_pos_btn = QPushButton("Back to POS")
+        self.back_to_pos_btn.setObjectName("secondaryBtn")
+        self.back_to_pos_btn.setToolTip("Close Quotations and return to the POS cart")
+        if qta is not None:
+            try:
+                self.back_to_pos_btn.setIcon(qta.icon("fa5s.arrow-left", color="white"))
+            except Exception:
+                pass
+        self.back_to_pos_btn.clicked.connect(self.reject)
+        header_row.addWidget(self.back_to_pos_btn)
+
         main_layout.addLayout(header_row)
 
         # ── Search / filter toolbar ───────────────────────────────────
