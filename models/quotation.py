@@ -87,6 +87,9 @@ class Quotation:
     local_id: Optional[int] = None  # Local database ID
     sync_date: Optional[str] = None  # When it was synced
     frappe_ref: Optional[str] = None  # Reference to Frappe document
+    # Creator of the quotation — used by pharmacy label preview so a quote
+    # opened by a different user later still shows the original cashier.
+    cashier_name: Optional[str] = None
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Quotation':
@@ -108,9 +111,10 @@ class Quotation:
             synced=data.get("synced", False),
             local_id=data.get("local_id"),
             sync_date=data.get("sync_date"),
-            frappe_ref=data.get("frappe_ref")
+            frappe_ref=data.get("frappe_ref"),
+            cashier_name=data.get("cashier_name"),
         )
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
@@ -126,7 +130,8 @@ class Quotation:
             "synced": self.synced,
             "local_id": self.local_id,
             "sync_date": self.sync_date,
-            "frappe_ref": self.frappe_ref
+            "frappe_ref": self.frappe_ref,
+            "cashier_name": self.cashier_name,
         }
     
     def link_items_to_products(self) -> int:
@@ -226,6 +231,7 @@ def create_quotations_table():
             frappe_ref         NVARCHAR(80) NULL,
             sync_date          DATETIME2 NULL,
             raw_data           NVARCHAR(MAX) NULL,
+            cashier_name       NVARCHAR(120) NULL,
             created_at         DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
             updated_at         DATETIME2 NOT NULL DEFAULT SYSDATETIME()
         )
@@ -274,7 +280,7 @@ def save_quotation(quotation: Quotation) -> int:
         # Update existing
         quotation_id = existing[0]
         cur.execute("""
-            UPDATE quotations 
+            UPDATE quotations
             SET transaction_date = ?,
                 valid_till = ?,
                 grand_total = ?,
@@ -285,6 +291,7 @@ def save_quotation(quotation: Quotation) -> int:
                 customer = ?,
                 synced = ?,
                 frappe_ref = ?,
+                cashier_name = ?,
                 updated_at = SYSDATETIME()
             WHERE id = ?
         """, (
@@ -298,6 +305,7 @@ def save_quotation(quotation: Quotation) -> int:
             quotation.customer,
             1 if quotation.synced else 0,
             quotation.frappe_ref,
+            quotation.cashier_name,
             quotation_id
         ))
         
@@ -308,10 +316,11 @@ def save_quotation(quotation: Quotation) -> int:
         cur.execute("""
             INSERT INTO quotations (
                 name, transaction_date, valid_till, grand_total, docstatus,
-                company, reference_number, status, customer, synced, frappe_ref
+                company, reference_number, status, customer, synced, frappe_ref,
+                cashier_name
             )
             OUTPUT INSERTED.id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             quotation.name,
             quotation.transaction_date,
@@ -323,7 +332,8 @@ def save_quotation(quotation: Quotation) -> int:
             quotation.status,
             quotation.customer,
             1 if quotation.synced else 0,
-            quotation.frappe_ref
+            quotation.frappe_ref,
+            quotation.cashier_name
         ))
         
         row = cur.fetchone()
@@ -434,9 +444,10 @@ def get_all_quotations() -> List[Quotation]:
             synced=bool(row.get("synced", False)),
             local_id=row["id"],
             frappe_ref=row.get("frappe_ref"),
-            sync_date=row.get("sync_date")
+            sync_date=row.get("sync_date"),
+            cashier_name=row.get("cashier_name"),
         ))
-    
+
     conn.close()
     return quotations
 
@@ -497,9 +508,10 @@ def get_unsynced_quotations() -> List[Quotation]:
             items=items,
             synced=bool(row.get("synced", False)),
             local_id=row["id"],
-            frappe_ref=row.get("frappe_ref")
+            frappe_ref=row.get("frappe_ref"),
+            cashier_name=row.get("cashier_name"),
         ))
-    
+
     conn.close()
     return quotations
 
@@ -589,7 +601,8 @@ def get_quotation_by_name(name: str) -> Optional[Quotation]:
         items=items,
         synced=bool(row.get("synced", False)),
         local_id=row["id"],
-        frappe_ref=row.get("frappe_ref")
+        frappe_ref=row.get("frappe_ref"),
+        cashier_name=row.get("cashier_name"),
     )
 
 
@@ -725,9 +738,10 @@ def get_quotations_by_customer(customer_name: str) -> List[Quotation]:
             items=items,
             synced=bool(row.get("synced", False)),
             local_id=row["id"],
-            frappe_ref=row.get("frappe_ref")
+            frappe_ref=row.get("frappe_ref"),
+            cashier_name=row.get("cashier_name"),
         ))
-    
+
     conn.close()
     return quotations
 

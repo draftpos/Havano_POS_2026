@@ -5923,6 +5923,18 @@ class POSView(QWidget):
                 expiry_date=it.get("expiry_date"),
             ))
         
+        # Resolve a stable cashier_name for this quote so the pharmacy label
+        # preview later can show the original creator even if a different
+        # user opens the quote.
+        _user_ctx = (getattr(self, 'user', None) or
+                     (getattr(self.parent_window, 'user', {}) if self.parent_window else {}) or
+                     {})
+        quote_cashier_name = (
+            _user_ctx.get("username")
+            or _user_ctx.get("full_name")
+            or "Unknown"
+        )
+
         # Create quotation object
         quotation = Quotation(
             name=qtn_name,
@@ -5935,7 +5947,8 @@ class POSView(QWidget):
             items=quotation_items,
             valid_till=None,
             reference_number=None,
-            synced=False  # ← NOT SYNCED YET - local only
+            synced=False,  # ← NOT SYNCED YET - local only
+            cashier_name=quote_cashier_name,
         )
         
         # Save to database
@@ -6969,6 +6982,19 @@ class POSView(QWidget):
             except Exception:
                 pharm = None
 
+            # UOM: look up from the product row (cart doesn't store uom on the
+            # table item today). Falls back to empty string so label just
+            # renders qty alone — never block the save on a missing uom.
+            uom_val = ""
+            if product_id:
+                try:
+                    from models.product import get_product_by_id
+                    _p = get_product_by_id(product_id)
+                    if _p:
+                        uom_val = str(_p.get("uom") or "").strip()
+                except Exception as _e:
+                    print(f"[UOM] Could not resolve uom for product_id={product_id}: {_e}")
+
             items.append({
                 "part_no": part_no,
                 "product_name": product_name,
@@ -6981,6 +7007,9 @@ class POSView(QWidget):
                 "tax_rate": tax_rate,      # ADD THIS - numeric rate
                 "tax_type": tax_type,      # ADD THIS - text type
                 "tax_amount": total * (tax_rate / 100) if tax_rate > 0 else 0,
+                # Unit of measure — populated for both sale & quotation paths.
+                # Empty string when unresolvable (legacy product rows).
+                "uom":         uom_val,
                 # Pharmacy round-trip fields (None if not a pharmacy row)
                 "is_pharmacy": bool(pharm.get("is_pharmacy")) if pharm else False,
                 "dosage":      pharm.get("dosage") if pharm else None,

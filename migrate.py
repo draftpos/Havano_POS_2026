@@ -630,6 +630,19 @@ def migrate():
     _add_column_if_missing("sale_items", "expiry_date", "DATE NULL")
     print("[migrate] ✅  sale_items pharmacy columns")
 
+    # ── Pharmacy label data gaps (Phase 9) ────────────────────────────────────
+    # quotations.cashier_name — the creator of the quote, used on label preview
+    # as the pharmacist name. Legacy rows stay NULL and fall back to the
+    # current logged-in user.
+    _add_column_if_missing("quotations", "cashier_name", "NVARCHAR(120) NULL")
+    print("[migrate] ✅  quotations.cashier_name")
+
+    # sale_items.uom — so sale labels can render "30 tablets" instead of just
+    # "30". Populated from the cart at save time; legacy rows stay NULL and
+    # render as empty string on the label.
+    _add_column_if_missing("sale_items", "uom", "NVARCHAR(20) NULL")
+    print("[migrate] ✅  sale_items.uom")
+
     # ── Seed default admin if users table is empty ────────────────────────────
     cur.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:

@@ -587,8 +587,9 @@ def create_sale(
                     sale_id, part_no, product_name, qty, price,
                     discount, tax, total,
                     tax_type, tax_rate, tax_amount, remarks,
-                    is_pharmacy, dosage, batch_no, expiry_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_pharmacy, dosage, batch_no, expiry_date,
+                    uom
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 sale_id,
                 str(item.get("part_no", "")),
@@ -606,6 +607,7 @@ def create_sale(
                 item.get("dosage"),
                 item.get("batch_no"),
                 item.get("expiry_date"),
+                (str(item.get("uom")) if item.get("uom") else None),
             ))
             item_insert_count += 1
 
@@ -1242,7 +1244,8 @@ def migrate():
             order_3      BIT           NOT NULL DEFAULT 0,
             order_4      BIT           NOT NULL DEFAULT 0,
             order_5      BIT           NOT NULL DEFAULT 0,
-            order_6      BIT           NOT NULL DEFAULT 0
+            order_6      BIT           NOT NULL DEFAULT 0,
+            uom          NVARCHAR(20)  NULL
         )
     """)
 
@@ -1259,6 +1262,7 @@ def migrate():
         ("order_4",    "BIT           NOT NULL DEFAULT 0"),
         ("order_5",    "BIT           NOT NULL DEFAULT 0"),
         ("order_6",    "BIT           NOT NULL DEFAULT 0"),
+        ("uom",        "NVARCHAR(20)  NULL"),
     ]:
         cur.execute(f"""
             IF NOT EXISTS (
@@ -1287,15 +1291,16 @@ def migrate():
 # =============================================================================
 
 def _fetch_items(sale_id: int, cur) -> list[dict]:
-    # Pharmacy columns are selected defensively — the SELECT will fail if the
-    # migration hasn't run yet, so we fall back to the legacy column set.
+    # Pharmacy columns + uom are selected defensively — the SELECT will fail
+    # if the migration hasn't run yet, so we fall back to the legacy column set.
     try:
         cur.execute("""
             SELECT id, sale_id, part_no, product_name, qty, price,
                    discount, tax, total,
                    tax_type, tax_rate, tax_amount, remarks,
                    order_1, order_2, order_3, order_4, order_5, order_6,
-                   is_pharmacy, dosage, batch_no, expiry_date
+                   is_pharmacy, dosage, batch_no, expiry_date,
+                   COALESCE(uom, '') AS uom
             FROM sale_items
             WHERE sale_id = ?
             ORDER BY id
@@ -1342,6 +1347,8 @@ def _item_to_dict(row: dict) -> dict:
         "dosage":       row.get("dosage"),
         "batch_no":     row.get("batch_no"),
         "expiry_date":  expiry_str,
+        # UOM from cart (empty string when column is NULL or missing)
+        "uom":          row.get("uom") or "",
     }
 
 

@@ -257,16 +257,29 @@ def _fetch_pharmacy_items_for_quotation(quotation_id: int) -> list[dict]:
 
 
 def _fetch_quotation_header(quotation_id: int) -> Optional[dict]:
-    """Return {customer, name} for a quotation id, or None if missing."""
+    """Return {customer, name, cashier_name} for a quotation id, or None if missing."""
     from database.db import get_connection, fetchone_dict
     conn = get_connection()
     cur  = conn.cursor()
     try:
-        cur.execute(
-            "SELECT id, name, customer FROM quotations WHERE id = ?",
-            (quotation_id,),
-        )
-        row = fetchone_dict(cur)
+        # cashier_name may be missing on legacy DBs that haven't migrated yet —
+        # so guard the SELECT with a fallback to the legacy column set.
+        try:
+            cur.execute(
+                "SELECT id, name, customer, "
+                "       COALESCE(cashier_name, '') AS cashier_name "
+                "FROM quotations WHERE id = ?",
+                (quotation_id,),
+            )
+            row = fetchone_dict(cur)
+        except Exception:
+            cur.execute(
+                "SELECT id, name, customer FROM quotations WHERE id = ?",
+                (quotation_id,),
+            )
+            row = fetchone_dict(cur)
+            if row is not None:
+                row["cashier_name"] = ""
     finally:
         conn.close()
     return row
@@ -281,8 +294,12 @@ def _build_labels_for_quotation(quotation_id: int) -> list[dict]:
 
     pharm = _get_pharmacy_context()
     doctor_name = _resolve_doctor_name_for_customer(customer_name)
-    # Quotation table has no creator column — fall back to the logged-in user.
-    pharmacist_name = _get_current_pharmacist_fallback()
+    # Prefer the creator stamped on the quote itself (Phase 9). Only fall back
+    # to the currently-logged-in user when the quote predates that column or
+    # was saved before the field was populated.
+    pharmacist_name = (header.get("cashier_name") or "").strip()
+    if not pharmacist_name:
+        pharmacist_name = _get_current_pharmacist_fallback()
 
     line_items = _fetch_pharmacy_items_for_quotation(quotation_id)
 
@@ -330,9 +347,8 @@ def _build_labels_for_sale(sale_id: int) -> list[dict]:
             # sale items store the product name under 'product_name'
             "item_name":       it.get("product_name") or it.get("part_no") or "",
             "qty":             it.get("qty"),
-            # sale_items table has no uom column — leave blank so the label
-            # just shows "30" instead of "30 tablets". If a uom is ever
-            # added to sale_items, it'll flow through automatically.
+            # Phase 9: sale_items.uom is now populated from the cart on save.
+            # Legacy rows stay empty and render qty alone.
             "uom":             it.get("uom") or "",
             "dosage":          it.get("dosage"),
             "batch_no":        it.get("batch_no"),
