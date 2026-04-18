@@ -6608,6 +6608,28 @@ class POSView(QWidget):
             return result["chosen"]
         return {"batch_no": None, "expiry_date": None}
 
+    def _is_pharmacy_row_locked(self, row: int) -> bool:
+        # Cashiers cannot modify or delete rows stamped as pharmacy line items.
+        if row is None or row < 0:
+            return False
+        col0 = self.invoice_table.item(row, 0)
+        if not col0 or not col0.data(self.PHARMACY_META_ROLE):
+            return False
+        try:
+            from utils.roles import is_pharmacist
+            return not is_pharmacist(getattr(self, "user", None))
+        except Exception:
+            return False
+
+    def _notify_pharmacy_locked(self):
+        try:
+            from utils.toast import show_toast
+            show_toast(self, "Pharmacy line items are locked — only a pharmacist can modify them.",
+                       duration_ms=3000, kind="warn")
+        except Exception:
+            pass
+        QApplication.beep()
+
     def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None):
         # ── Always close any open inline search before we touch the table ─────
         self._close_inline_search()
@@ -7815,6 +7837,11 @@ class POSView(QWidget):
     # INLINE CELL SEARCH
     # =========================================================================
     def _open_inline_search(self, row, col):
+        # Pharmacy lock: cashiers cannot replace/edit the product on a pharmacy row
+        if self._is_pharmacy_row_locked(row):
+            self._notify_pharmacy_locked()
+            return
+
         self._close_inline_search()
 
         self._inline_row = row
@@ -8779,6 +8806,10 @@ class POSView(QWidget):
             self.invoice_table.setCurrentCell(r, 3)
         if self._active_col in (2, 5, 6):
             return
+        # Pharmacy lock: cashiers cannot modify qty/discount on pharmacy rows
+        if self._active_col in (3, 4) and self._is_pharmacy_row_locked(self._active_row):
+            self._notify_pharmacy_locked()
+            return
         # #23 — block discount entry if not permitted
         if self._active_col == 4 and not self._check_permission(
                 "allow_discount", "Apply Discounts"):
@@ -8799,6 +8830,10 @@ class POSView(QWidget):
             self._recalc_row(self._active_row)
 
     def _numpad_clear(self):
+        # Pharmacy lock: cashiers cannot clear qty/discount on pharmacy rows
+        if self._active_col in (3, 4) and self._is_pharmacy_row_locked(self._active_row):
+            self._notify_pharmacy_locked()
+            return
         self._numpad_buffer = ""
         if self._active_row >= 0 and self._active_col >= 0:
             self._block_signals = True
@@ -8810,19 +8845,24 @@ class POSView(QWidget):
 
     def _numpad_del_line(self):
         """
-        Requirement 8: Clears the row, resets the input buffer, 
+        Requirement 8: Clears the row, resets the input buffer,
         and jumps the cursor back to the LAST column (Total $)
         to signal the line is empty and deleted.
         """
         row = self.invoice_table.currentRow()
         if row < 0:
             row = self._last_filled_row
-            
-        if row < 0: 
+
+        if row < 0:
+            return
+
+        # Pharmacy lock: cashiers cannot delete pharmacy rows
+        if self._is_pharmacy_row_locked(row):
+            self._notify_pharmacy_locked()
             return
 
         # 1. Clear the typing buffer so new typing doesn't include old character data
-        self._numpad_buffer = "" 
+        self._numpad_buffer = ""
 
         self._block_signals = True
         # 2. Wipe every cell in the row and clear hidden UserRole data (product IDs)
@@ -8908,6 +8948,11 @@ class POSView(QWidget):
         if row < 0: row = self._active_row
         if row < 0: row = self.invoice_table.currentRow()
         if row < 0: return
+
+        # Pharmacy lock: cashiers cannot change qty on pharmacy rows
+        if self._is_pharmacy_row_locked(row):
+            self._notify_pharmacy_locked()
+            return
 
         name_item = self.invoice_table.item(row, 1)
         product_name = name_item.text().strip() if name_item else ""
