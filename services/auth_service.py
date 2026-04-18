@@ -192,6 +192,10 @@ def _map_role(roles: list, username: str) -> str:
         admin_kw = ("administrator", "system manager", "admin", "manager")
         if any(kw in r.lower() for r in roles for kw in admin_kw):
             return "admin"
+        # Pharmacist role — preserved verbatim (title-case) so downstream
+        # checks like utils.roles.is_pharmacist() can match it.
+        if any("pharmacist" in r.lower() for r in roles):
+            return "Pharmacist"
     if username.lower() in ("administrator", "admin"):
         return "admin"
     return "cashier"

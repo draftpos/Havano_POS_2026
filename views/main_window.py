@@ -10231,6 +10231,17 @@ class MainWindow(QMainWindow):
         # #18 — everyone lands on POS first, always
         self._stack.setCurrentIndex(0)
 
+        # Pharmacist landing — users whose ERPNext role is "Pharmacist" should
+        # land straight on the Quotations list so they can pick up a quote
+        # instead of hunting through the menu for it. Deferred via
+        # QTimer.singleShot(0, ...) so MainWindow finishes showing first.
+        try:
+            from utils.roles import is_pharmacist
+            if is_pharmacist(self.user):
+                QTimer.singleShot(0, self._open_quotations_for_pharmacist)
+        except Exception as _e:
+            print(f"[main_window] pharmacist redirect skipped: {_e}")
+
         # ── Background sync services ──────────────────────────────────────────
         # Product sync (every 15 s) — keeps local product list up to date
         try:
@@ -10330,6 +10341,19 @@ class MainWindow(QMainWindow):
         # cashier having to click anything manually.
         QTimer.singleShot(2000, self._run_startup_sync)   # 2 s delay lets the
         # UI finish rendering before the network calls start.
+
+    # =========================================================================
+    # PHARMACIST LANDING — open the Quotations list dialog right after login
+    # for users whose role == "Pharmacist".  Follows the same invocation style
+    # as _open_quotation_manager() in POSView (modal dlg.exec()).
+    # =========================================================================
+    def _open_quotations_for_pharmacist(self):
+        try:
+            from views.dialogs.quotation_dialog import QuotationDialog
+            dlg = QuotationDialog(self)
+            dlg.exec()
+        except Exception as e:
+            print(f"[main_window] Could not open Quotations for pharmacist: {e}")
 
     # =========================================================================
     # STARTUP SYNC — runs once on login, in a background thread so the UI

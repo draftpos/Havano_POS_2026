@@ -249,7 +249,13 @@ def upsert_frappe_user(u: dict) -> dict | None:
     cost_center = (u.get("cost_center") or "").strip()
     warehouse   = (u.get("warehouse")   or "").strip()
     role_select = (u.get("role_select") or "Cashier").strip().lower()
-    role        = "admin" if role_select == "admin" else "cashier"
+    if role_select == "admin":
+        role = "admin"
+    elif role_select == "pharmacist":
+        # Preserve title-case so utils.roles.is_pharmacist() can match it
+        role = "Pharmacist"
+    else:
+        role = "cashier"
     username    = full_name if full_name else email
 
     conn = get_connection()
