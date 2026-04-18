@@ -5114,8 +5114,8 @@ class POSView(QWidget):
                 self.parent_window._set_status("MODE: Laybye Active")
         
         else:
-            # Reset Main Action Button to Standard Green
-            self.btn_pay.setText("PAY  F5")
+            # Reset Main Action Button (pharmacy-aware: PAY / FINALIZE QUOTE / DISPENSE)
+            self._refresh_pay_button_label()
             self.btn_pay.setStyleSheet(
                 f"background-color: {SUCCESS}; color: {WHITE}; font-weight: bold; "
                 f"border-radius: 6px; font-size: 17px;"
@@ -5271,16 +5271,55 @@ class POSView(QWidget):
 
         if self.parent_window:
             self.parent_window._set_status(f"Laybye #{order_id} Saved Successfully")
+    def _refresh_pay_button_label(self):
+        # Set the main action button's label based on pharmacy mode + user role.
+        #   Pharmacy mode OFF                  → "PAY  F5"
+        #   Pharmacy mode ON, non-pharmacist   → "FINALIZE\nQUOTE"
+        #   Pharmacy mode ON, pharmacist       → "DISPENSE"
+        # Behavior change lives in _open_payment — this method only paints text.
+        if not hasattr(self, "btn_pay") or self.btn_pay is None:
+            return
+        try:
+            from settings.pharmacy_settings import get_pharmacy_mode
+            pharmacy_on = bool(get_pharmacy_mode())
+        except Exception:
+            pharmacy_on = False
+
+        if pharmacy_on:
+            try:
+                from utils.roles import is_pharmacist
+                if is_pharmacist(getattr(self, "user", None)):
+                    self.btn_pay.setText("DISPENSE")
+                else:
+                    self.btn_pay.setText("FINALIZE\nQUOTE")
+            except Exception:
+                self.btn_pay.setText("FINALIZE\nQUOTE")
+        else:
+            self.btn_pay.setText("PAY  F5")
+
     def _open_payment(self):
         """
         Opens the payment dialog and processes the sale.
         Redirects to Laybye flow if toggled ON.
+        In pharmacy mode, reroutes to save+print quotation (the "Dispense"
+        path for pharmacists, "Finalize Quote" for everyone else).
         """
         # ── 0. SHIFT GUARD ─────────────────────────────────────────────────────────────
         if not self._require_active_shift():
             return
 
-        # ── 0. REDIRECTION LOGIC (Laybye Check) ─────────────────────────────
+        # ── 0a. PHARMACY MODE REROUTE ─────────────────────────────────────────
+        # Every finalize becomes a quotation save when pharmacy mode is on —
+        # labelled "Dispense" for pharmacists, "Finalize Quote" for others.
+        try:
+            from settings.pharmacy_settings import get_pharmacy_mode
+            if get_pharmacy_mode():
+                self._save_quotation()
+                return
+        except Exception as _e:
+            print(f"[POSView] pharmacy_mode reroute skipped: {_e}")
+
+        # ── 0b. REDIRECTION LOGIC (Laybye Check) ─────────────────────────────
         # If the laybye switcher is toggled ON, execute the Laybye flow instead
         if hasattr(self, 'laybye_btn') and self.laybye_btn.isChecked():
             # This calls the full Laybye Flow (Confirmation -> Deposit -> Save)
@@ -8776,6 +8815,8 @@ class POSView(QWidget):
             QPushButton:pressed {{ background-color: {NAVY_3}; }}
         """)
         self.btn_pay.clicked.connect(self._open_payment)
+        # Pharmacy-aware label: PAY → FINALIZE QUOTE / DISPENSE when pharmacy mode on
+        self._refresh_pay_button_label()
         bottom_row.addWidget(self.btn_pay)
 
         layout.addLayout(bottom_row)

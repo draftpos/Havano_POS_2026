@@ -74,13 +74,12 @@ def sync_users() -> dict:
             continue
 
         try:
-            # upsert_frappe_user(u)
+            upsert_frappe_user(u)
             result["synced"] += 1
             log.info("[user-sync] ✅ Synced: %s", name)
         except Exception as e:
             log.error("[user-sync] ❌ Error upserting %s: %s", name, e)
-            # result["errors"] += 1
-            result["synced"] += 1
+            result["errors"] += 1
 
     log.info(
         "[user-sync] Done — %d synced, %d skipped, %d errors.",
