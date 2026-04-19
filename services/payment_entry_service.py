@@ -325,7 +325,9 @@ def create_payment_entry(sale: dict, override_rate: float = None,
                 reference_no, reference_date,
                 remarks, synced,
                 amount_usd, amount_zwd, amount_zwg, exchange_rate
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+            )
+            OUTPUT INSERTED.id
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
         """, (
             sale["id"], inv_no,
             frappe_ref,  # Use the properly resolved frappe_ref
@@ -341,8 +343,8 @@ def create_payment_entry(sale: dict, override_rate: float = None,
             amount_usd, amount_zwd, amount_zwg, exch_rate,
         ))
 
+        new_id = cur.fetchone()[0]
         conn.commit()
-        new_id = cur.lastrowid
         conn.close()
 
         log.info(
@@ -352,6 +354,14 @@ def create_payment_entry(sale: dict, override_rate: float = None,
             amount, exch_rate,
             received_amount, currency,
             frappe_ref
+        )
+
+        log.info(
+            "[create_PE] Outgoing -> Frappe  PE=%s  sale_id=%s  inv=%s  party=%s  "
+            "%s %.4f (USD %.4f)  mop=%s  frappe_ref=%s",
+            new_id, sale.get("id"), inv_no, customer,
+            currency, received_amount, amount_usd,
+            mop_name, frappe_ref or "(pending)",
         )
 
         # Trigger an immediate sync so this entry doesn't wait for the next daemon tick

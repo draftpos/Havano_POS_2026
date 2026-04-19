@@ -279,7 +279,9 @@ def create_payment_entry(sale: dict, override_rate: float = None,
                 reference_no, reference_date,
                 remarks, synced,
                 amount_usd, amount_zwd, amount_zwg, exchange_rate
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+            )
+            OUTPUT INSERTED.id
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
         """, (
             sale["id"], inv_no,
             sale.get("frappe_ref") or None,
@@ -293,8 +295,8 @@ def create_payment_entry(sale: dict, override_rate: float = None,
             amount_usd, amount_zwd, amount_zwg, exch_rate,
         ))
 
+        new_id = cur.fetchone()[0]
         conn.commit()
-        new_id = cur.lastrowid
         conn.close()
 
         log.info(
