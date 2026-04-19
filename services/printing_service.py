@@ -1062,9 +1062,13 @@ class PrintingService:
             y += 10
 
             # Amount tendered + change — ALWAYS in base currency (USD).
+            # Tendered is the SUM across all payment methods (see sale.py —
+            # create_sale recomputes tendered_usd from splits when present).
+            # Change always prints alongside it (even if 0.00) so cashiers
+            # always see the pair on the slip.
             _tendered_base = float(getattr(receipt, "amountTendered", 0) or 0)
             _change_base   = float(getattr(receipt, "change",         0) or 0)
-            if _tendered_base > 0.005 or _change_base > 0.005:
+            if _tendered_base > 0.005:
                 draw_total("Amount Tendered", _tendered_base, "USD")
                 draw_total("Change",          _change_base,   "USD")
 

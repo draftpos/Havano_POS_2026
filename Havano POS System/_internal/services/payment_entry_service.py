@@ -488,7 +488,7 @@ def _build_payload(pe: dict, defaults: dict,
             "reference_name": frappe_inv,
             "allocated_amount": paid_amount_for_frappe,
         }]
-
+    print(payload)
     return payload
 
 

@@ -1,29 +1,30 @@
 {
-  "main_printer": "POS-80C (copy 5)",
+  "main_printer": "POS-80C",
+  "kitchen_printing_enabled": true,
   "orders": {
     "Order 1": {
       "active": true,
-      "printer": "POS-80C (copy 5)"
+      "printer": "POS-80C (copy 1)"
     },
     "Order 2": {
-      "active": false,
-      "printer": "(None)"
+      "active": true,
+      "printer": "POS-80C"
     },
     "Order 3": {
-      "active": false,
-      "printer": "(None)"
+      "active": true,
+      "printer": "Microsoft Print to PDF"
     },
     "Order 4": {
-      "active": false,
-      "printer": "(None)"
+      "active": true,
+      "printer": "POS-80C"
     },
     "Order 5": {
-      "active": false,
-      "printer": "(None)"
+      "active": true,
+      "printer": "Microsoft Print to PDF"
     },
     "Order 6": {
-      "active": false,
-      "printer": "(None)"
+      "active": true,
+      "printer": "POS-80C (copy 1)"
     }
   }
 }

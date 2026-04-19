@@ -503,6 +503,30 @@ def create_sale(
     else:
         change_val = max(0.0, tendered_amount - total_amount)
 
+    # When the POS passed a splits list (multi-method / split payment), the
+    # single-active-method `tendered_amount` arg represents only one row, not
+    # the real total tendered. Sum the splits' base_value (USD) so tendered_usd,
+    # tendered_zwd and change_val reflect every method the cashier took.
+    # This must run AFTER change_val is first assigned above so it overrides
+    # the single-method calculation.
+    if splits:
+        try:
+            _splits_usd = sum(float(s.get("base_value") or 0) for s in splits)
+            if _splits_usd > 0:
+                _tendered_usd = round(_splits_usd, 4)
+                _z = sum(
+                    float(s.get("native_amount") or 0)
+                    for s in splits
+                    if (s.get("native_currency") or "").upper() in ("ZWD", "ZWG")
+                )
+                if _z > 0:
+                    _tendered_zwd = round(_z, 4)
+                change_val = round(max(_tendered_usd - _total_usd, 0.0), 4)
+                print(f"[create_sale] splits recalc → tendered_usd={_tendered_usd} "
+                      f"tendered_zwd={_tendered_zwd} change_val={change_val}")
+        except Exception as _e:
+            print(f"[create_sale] splits tendered_usd recalc failed: {_e}")
+
     seq             = get_next_invoice_number()
     invoice_no      = _format_invoice_no(seq)
     invoice_date    = date.today().isoformat()
@@ -1028,10 +1052,18 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
 
     # Tendered + change are ALWAYS shown in the business's base currency (USD
     # per company_defaults default) so the cashier doesn't have to mental-math
-    # multi-currency splits. total_usd / tendered_usd are stored at sale time.
-    _total_usd    = float(sale.get("total_usd")    or 0) or float(total or 0)
-    _tendered_usd = float(sale.get("tendered_usd") or 0) or float(tendered or 0)
-    _change_usd   = max(_tendered_usd - _total_usd, 0.0)
+    # multi-currency splits. Priority for tendered:
+    #   1. Sum of sale["splits"][i].base_value  — definitive multi-method total
+    #   2. sale.tendered_usd                    — stored on the sales row
+    #   3. tendered arg (single-method fallback)
+    _total_usd    = float(sale.get("total_usd") or 0) or float(total or 0)
+    _splits       = sale.get("splits") or []
+    _splits_usd   = sum(float(s.get("base_value") or 0) for s in _splits)
+    if _splits_usd > 0:
+        _tendered_usd = round(_splits_usd, 4)
+    else:
+        _tendered_usd = float(sale.get("tendered_usd") or 0) or float(tendered or 0)
+    _change_usd = round(max(_tendered_usd - _total_usd, 0.0), 4)
 
     try:
         receipt = ReceiptData(
