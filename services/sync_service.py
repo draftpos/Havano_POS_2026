@@ -443,9 +443,70 @@ def _upsert_product(raw: dict) -> bool:
     conn = get_connection()
     cur  = conn.cursor()
     try:
+        # Bound the SELECT so a hang gets diagnosed instead of stalling login.
+        try:
+            cur.execute("SET LOCK_TIMEOUT 5000")
+        except Exception:
+            pass
+
         print(f"[sync]     ↳ {part_no}: select", flush=True)
-        cur.execute("SELECT id, price FROM products WHERE part_no = ?", (part_no,))
-        existing = fetchone_dict(cur)
+        try:
+            cur.execute("SELECT id, price FROM products WHERE part_no = ?", (part_no,))
+            existing = fetchone_dict(cur)
+        except Exception as _se:
+            print(f"[sync]     ↳ {part_no}: SELECT failed/timed-out: "
+                  f"{type(_se).__name__}: {_se}", flush=True)
+            # Dump who's holding locks on the products table
+            try:
+                cur.execute("SET LOCK_TIMEOUT -1")
+                cur.execute("""
+                    SELECT
+                      tl.request_session_id   AS sid,
+                      tl.resource_type        AS res_type,
+                      tl.request_mode         AS mode,
+                      tl.request_status       AS status,
+                      es.login_name,
+                      es.program_name,
+                      es.host_name
+                    FROM sys.dm_tran_locks tl
+                    JOIN sys.dm_exec_sessions es
+                      ON tl.request_session_id = es.session_id
+                    WHERE tl.resource_type = 'OBJECT'
+                      AND tl.resource_associated_entity_id = OBJECT_ID('products')
+                """)
+                rows = cur.fetchall() or []
+                print(f"[sync]     ↳ locks on products table: {len(rows)} row(s)",
+                      flush=True)
+                for r in rows:
+                    print(f"[sync]       sid={r.sid} mode={r.mode} "
+                          f"status={r.status} login={r.login_name!r} "
+                          f"prog={r.program_name!r} host={r.host_name!r}",
+                          flush=True)
+                # Also show what each blocking session is currently doing
+                cur.execute("""
+                    SELECT DISTINCT
+                      r.session_id     AS sid,
+                      r.status,
+                      r.command,
+                      r.wait_type,
+                      r.blocking_session_id AS blocker,
+                      SUBSTRING(t.text, 1, 200) AS sql_text
+                    FROM sys.dm_exec_requests r
+                    OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) t
+                    WHERE r.session_id IN (
+                      SELECT request_session_id FROM sys.dm_tran_locks
+                      WHERE resource_associated_entity_id = OBJECT_ID('products')
+                    )
+                """)
+                reqs = cur.fetchall() or []
+                for r in reqs:
+                    print(f"[sync]       sid={r.sid} status={r.status!r} "
+                          f"cmd={r.command!r} wait={r.wait_type!r} "
+                          f"blocker={r.blocker} sql={r.sql_text!r}",
+                          flush=True)
+            except Exception as _le:
+                print(f"[sync]     ↳ could not query lock info: {_le}", flush=True)
+            raise
 
         if existing:
             local_price = float(existing.get("price") or 0)
