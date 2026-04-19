@@ -1538,6 +1538,18 @@ def run():
         print(f"[setup_database] ! Error seeding admin user: {e}")
     print("======================================\n")
 
+    # Close this function's DB connection BEFORE calling migrate.py — pyodbc
+    # runs in implicit-transaction mode by default, so keeping this connection
+    # open after the last commit leaves an idle transaction holding locks on
+    # any tables touched here (products, users, etc.). Those locks then block
+    # subsequent SELECTs from sync_service.sync_products, which manifests as a
+    # login hang at "upsert <first-product>: select".
+    try:
+        conn.commit()
+        conn.close()
+    except Exception as _e:
+        print(f"[setup_database] ! Error closing setup conn: {_e}")
+
     # Apply migrate.py schema additions (doctors, dosages, product_batches,
     # pharmacy columns on products/customers/quote-items/sale-items,
     # quotations.cashier_name, sale_items.uom). All calls are idempotent
