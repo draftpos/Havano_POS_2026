@@ -399,9 +399,15 @@ def create_split_payment_entries(sale: dict, splits: list[dict]) -> list[int]:
     _defaults  = _get_defaults()
     _base_curr = _defaults.get("server_company_currency", "USD").strip().upper()
 
+    # Track the invoice's remaining USD allocation — each PE gets capped at the
+    # remainder so Frappe receives only what's REQUIRED on that mode, not what
+    # the customer tendered. Overpayment / change stays on the receipt side.
+    sale_total_usd  = float(sale.get("total_usd") or sale.get("total") or 0)
+    remaining_usd   = sale_total_usd if sale_total_usd > 0 else float("inf")
+
     log.info("[create_split_PE] ========== START ==========")
-    log.info("[create_split_PE] Sale ID: %s  Total splits: %d",
-             sale.get("id"), len(splits))
+    log.info("[create_split_PE] Sale ID: %s  Total splits: %d  total_usd=%.4f",
+             sale.get("id"), len(splits), sale_total_usd)
     log.info("[create_split_PE] Parent sale frappe_ref: %s", sale.get("frappe_ref"))
 
     for idx, split in enumerate(splits):
@@ -458,6 +464,19 @@ def create_split_payment_entries(sale: dict, splits: list[dict]) -> list[int]:
         else:
             amount_usd = amount_local   # USD leg
 
+        # Cap at the invoice's remaining allocation — we never push more
+        # than what was required on this mode, even if the customer tendered
+        # extra cash (the surplus prints as change on the receipt).
+        if remaining_usd != float("inf") and amount_usd > remaining_usd + 0.005:
+            log.info(
+                "[create_split_PE] capping %s: tendered_USD=%.4f -> allocation_USD=%.4f "
+                "(remaining=%.4f)", method, amount_usd, remaining_usd, remaining_usd)
+            amount_usd = round(remaining_usd, 4)
+
+        if amount_usd <= 0.005:
+            log.info("[create_split_PE] Split %d: allocation exhausted — skipping", idx + 1)
+            continue
+
         log.info(
             "[create_split_PE] method=%s  currency=%s  local_amount=%.4f %s  "
             "rate=%.6f (local/USD)  -> paid_amount(USD)=%.6f  "
@@ -492,13 +511,17 @@ def create_split_payment_entries(sale: dict, splits: list[dict]) -> list[int]:
         )
         if new_id:
             ids.append(new_id)
+            if remaining_usd != float("inf"):
+                remaining_usd = max(remaining_usd - amount_usd, 0.0)
             log.info(
                 "[create_split_PE] Created PE %d for %s "
-                "(local=%.4f %s  paid_USD=%.6f  rate=%.6f  received=%.4f %s)",
+                "(local=%.4f %s  paid_USD=%.6f  rate=%.6f  received=%.4f %s  "
+                "remaining_usd=%.4f)",
                 new_id, method,
                 amount_local, currency,
                 amount_usd, rate,
                 round(amount_usd * rate, 4), currency,
+                remaining_usd if remaining_usd != float("inf") else -1,
             )
         else:
             log.warning("[create_split_PE] Failed to create PE for %s", method)

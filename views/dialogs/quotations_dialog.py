@@ -756,20 +756,26 @@ class QuotationsDialog(QDialog):
         """Print the selected quotation to the main receipt printer."""
         if not self._selected:
             return
-        q_name = self._selected.get("name", "")
-        if not q_name:
+        # Pass the full dict so print_quotation can fall back to local_id when
+        # this is an unsynced Draft (name may be blank before the Frappe push).
+        q_name = (self._selected.get("name") or "").strip()
+        q_lid  = self._selected.get("local_id") or self._selected.get("id")
+        if not q_name and not q_lid:
             self._show_status("No quotation reference — cannot print.", error=True)
             return
         try:
             from services.quotation_print import print_quotation
-            ok = print_quotation(q_name)
+            ok = print_quotation(self._selected)
         except Exception as e:
+            import traceback; traceback.print_exc()
             self._show_status(f"Print error: {e}", error=True)
             return
         if ok:
-            self._show_status(f"Quotation {q_name} sent to printer.")
+            label = q_name or f"#{q_lid}"
+            self._show_status(f"Quotation {label} sent to printer.")
         else:
-            self._show_status("Print failed — check printer settings.", error=True)
+            self._show_status("Print failed — check the log (hardware_settings.json "
+                              "main_printer + quotation exists locally).", error=True)
     
     # -------------------------------------------------------------------------
     def _show_status(self, msg: str, error: bool = False):

@@ -122,18 +122,48 @@ def _build_receipt(quotation) -> "ReceiptData":
     return receipt
 
 
-def print_quotation(quotation_name: str) -> bool:
-    from models.quotation import get_quotation_by_name
+def print_quotation(ref) -> bool:
+    """
+    Print a quotation to the main receipt printer.
+
+    `ref` may be:
+      - a Quotation name string (Frappe name, e.g. "QUO-0001")
+      - an int local id (for Drafts that haven't been pushed to Frappe)
+      - a dict (the row from QuotationsDialog / get_all_quotations().to_dict())
+        — we pull name → falls back to local_id if name is blank.
+    """
+    from models.quotation import get_quotation_by_name, get_quotation_by_local_id
     from services.printing_service import printing_service
 
-    quotation = get_quotation_by_name(quotation_name)
+    quotation = None
+    resolved  = None
+
+    if isinstance(ref, dict):
+        name      = (ref.get("name") or "").strip()
+        local_id  = ref.get("local_id") or ref.get("id")
+        if name:
+            quotation = get_quotation_by_name(name)
+            resolved  = name
+        if quotation is None and local_id:
+            quotation = get_quotation_by_local_id(int(local_id))
+            resolved  = f"local_id={local_id}"
+    elif isinstance(ref, int):
+        quotation = get_quotation_by_local_id(ref)
+        resolved  = f"local_id={ref}"
+    else:
+        name = (str(ref) or "").strip()
+        if name:
+            quotation = get_quotation_by_name(name)
+            resolved  = name
+
     if not quotation:
-        log.error("print_quotation: '%s' not found", quotation_name)
+        log.error("print_quotation: quotation not found (ref=%r, resolved=%r)", ref, resolved)
         return False
 
     printers = _get_active_printers()
     if not printers:
-        log.warning("print_quotation: no active printer configured")
+        log.warning("print_quotation: no active printer configured in "
+                    "hardware_settings.json (main_printer)")
         return False
 
     receipt = _build_receipt(quotation)
@@ -142,7 +172,7 @@ def print_quotation(quotation_name: str) -> bool:
         try:
             success = printing_service.print_receipt(receipt, printer_name=printer_name)
             if success:
-                log.info("Quotation %s printed -> %s", quotation_name, printer_name)
+                log.info("Quotation %s printed -> %s", quotation.name or resolved, printer_name)
                 ok = True
             else:
                 log.warning("Quotation print failed on %s", printer_name)

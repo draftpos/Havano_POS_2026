@@ -1619,6 +1619,7 @@ def print_kitchen_orders(sale: dict):
                 invoiceNo=sale["invoice_no"],
                 KOT=order_key,
                 cashierName=sale.get("cashier_name", ""),
+                orderNumber=int(sale.get("order_number", 0) or 0),
                 items=[Item(
                     productName=it["product_name"],
                     qty=float(it["qty"]),

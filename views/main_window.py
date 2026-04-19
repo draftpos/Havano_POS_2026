@@ -6322,29 +6322,53 @@ class POSView(QWidget):
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"QPushButton {{ background:{NAVY}; color:{WHITE}; border:none; border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }} QPushButton:hover {{ background:{NAVY_2}; }}")
         
-        # Print button shows message that printing is disabled for now
-        print_btn.clicked.connect(lambda: (QMessageBox.information(self, "Print", "Printing is temporarily disabled.\nQuotation saved to database.\n\nSync to Frappe is running in background."), dlg.accept()))
+        # Print fires services.quotation_print directly and closes the preview
+        # silently — no "Printing is temporarily disabled" popup, no final
+        # "Success" dialog. Any failure is surfaced on the parent status bar.
+        def _do_print_and_close():
+            try:
+                from services.quotation_print import print_quotation
+                ok = print_quotation({"name": qtn_name, "local_id": local_id})
+            except Exception as _pe:
+                ok = False
+                print(f"[Quotation] print_quotation raised: {_pe}")
+            if self.parent_window and hasattr(self.parent_window, "_set_status"):
+                self.parent_window._set_status(
+                    f"Quotation {qtn_name} sent to printer."
+                    if ok else
+                    f"Quotation {qtn_name} saved; print failed — check printer."
+                )
+            dlg.accept()
+
+        print_btn.clicked.connect(_do_print_and_close)
         close_btn.clicked.connect(dlg.accept)
-        
+
         br.addStretch()
         br.addWidget(print_btn)
         br.addWidget(close_btn)
         lay.addLayout(br)
-        
+
         dlg.exec()
-        
-        # Clear cart and exit quotation mode
+
+        # Clear cart + fully exit quotation mode (both flags + navbar pill +
+        # PAY button label). No "Success" popup — status bar already carries
+        # the print result.
         self._clear_cart()
         self._quotation_mode = False
+        self._cart_mode = "sales"
         if hasattr(self, '_quotation_mode_btn'):
             self._quotation_mode_btn.setChecked(False)
-        
-        QMessageBox.information(self, "Success", 
-            f"Quotation {qtn_name} saved successfully!\n\n"
-            f"Local ID: {local_id}\n"
-            f"Status: Draft\n\n"
-            f"Sync is running in background.\n"
-            f"You can check sync status in the Quotations dialog.")
+        if hasattr(self, 'quote_mode_btn') and self.quote_mode_btn is not None:
+            try:
+                self.quote_mode_btn.blockSignals(True)
+                self.quote_mode_btn.setChecked(False)
+                self.quote_mode_btn.blockSignals(False)
+            except Exception:
+                pass
+        try:
+            self._refresh_pay_button_label()
+        except Exception:
+            pass
 
     # =========================================================================
     # NAV BAR
@@ -10945,14 +10969,27 @@ class POSView(QWidget):
             self.parent_window._set_status(
                 f"Quotation mode — Customer: {cname}  — Add items then use Options › Save Quotation")
 
-        # ── Step 3: Set quotation mode flag and notify ────────────────────────
+        # ── Step 3: Set quotation mode flag and flip the PAY button label ────
+        # _quotation_mode is the legacy flag; _cart_mode is what
+        # _refresh_pay_button_label reads, so both get set. The Quote Mode
+        # toggle pill in the navbar is kept in sync (blockSignals prevents
+        # _on_quote_mode_toggle from firing and looping).
         self._quotation_mode = True
-        QMessageBox.information(
-            self, "Quotation Mode Active",
-            f"Quotation started for:  {cname}\n\n"
-            "Add items to the cart normally.\n"
-            "When ready, go to  Options → Save / Print Quotation."
-        )
+        self._cart_mode = "quote"
+        try:
+            if hasattr(self, "quote_mode_btn") and self.quote_mode_btn is not None:
+                self.quote_mode_btn.blockSignals(True)
+                self.quote_mode_btn.setChecked(True)
+                self.quote_mode_btn.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            self._refresh_pay_button_label()
+        except Exception as _e:
+            print(f"[_on_quotation] pay button refresh failed: {_e}")
+
+        # No confirmation popup — PAY now reads "FINALIZE QUOTE" and the
+        # status bar already shows "Quotation mode — Customer: <name>".
 
     
 
