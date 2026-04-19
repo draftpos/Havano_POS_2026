@@ -744,6 +744,120 @@ class PrintingService:
         return self.print_receipt(receipt, printer_name=printer_name)
 
     # =========================================================================
+    # KITCHEN ORDER TICKET (KOT)
+    # =========================================================================
+    def print_kitchen_order(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+        """
+        Kitchen Order Ticket — prints only qty + item name grouped by station.
+        Intentionally carries NO prices, tax, totals, payment or company block —
+        it's a production slip, not a customer-facing receipt. Triggered from
+        models/sale.print_kitchen_orders when kitchen_printing_enabled is True.
+        """
+        settings = AdvanceSettings.load_from_file()
+
+        painter = None
+        try:
+            printer = QPrinter(QPrinter.HighResolution)
+            if printer_name and printer_name != "(None)":
+                info = QPrinterInfo.printerInfo(printer_name)
+                if not info.isNull():
+                    printer.setPrinterName(printer_name)
+
+            printer.setPageSize(QPageSize(QSizeF(100, 1000), QPageSize.Millimeter))
+            printer.setFullPage(True)
+            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+
+            painter = QPainter(printer)
+            rect = printer.pageRect(QPrinter.DevicePixel)
+            painter.translate(0, -rect.top())
+            y = 20
+
+            normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
+            bold_font   = self._make_bold(normal_font)
+            # Order-number header — slightly larger + bold so kitchen staff
+            # can read it from across the bench.
+            header_font = self._make_bold(self._create_font(settings.contentFontName,
+                                                            settings.contentFontSize + 2,
+                                                            settings.contentFontStyle))
+            # Terminal line at the footer uses a small font — roughly footer size
+            # so it doesn't compete with the main order-number header.
+            small_font = self._create_font(settings.contentFontName,
+                                           max(settings.contentFontSize - 2, 6),
+                                           settings.contentFontStyle)
+
+            station = (getattr(receipt, "KOT", "") or "KITCHEN").strip() or "KITCHEN"
+            order_no = int(getattr(receipt, "orderNumber", 0) or 0)
+
+            # Order number is the KOT header (falls back to invoice no on pre-
+            # migration rows where order_number = 0).
+            painter.setFont(header_font)
+            if order_no > 0:
+                header_text = f"Order #{order_no}"
+            else:
+                header_text = f"Invoice: {receipt.invoiceNo or '—'}"
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
+                             Qt.AlignCenter, header_text)
+            y += 44
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 22
+
+            # Meta — cashier + time (invoice already up top)
+            painter.setFont(normal_font)
+            if receipt.cashierName:
+                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 26,
+                                 Qt.AlignCenter, f"Cashier: {receipt.cashierName}")
+                y += 28
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 26,
+                             Qt.AlignCenter, f"Time: {datetime.now().strftime('%Y-%m-%d  %H:%M')}")
+            y += 34
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+
+            # Items — qty and product name only.  Grouped by product name so
+            # multiple cart rows of the same dish merge into a single line.
+            grouped: dict[str, float] = {}
+            for it in receipt.items:
+                name = (getattr(it, "productName", "") or "").strip() or "(item)"
+                qty  = float(getattr(it, "qty", 1) or 1)
+                grouped[name] = grouped.get(name, 0.0) + qty
+
+            painter.setFont(bold_font)
+            for name, qty in grouped.items():
+                qty_txt = str(int(qty)) if qty == int(qty) else f"{qty:.2f}"
+                line = f"{qty_txt:>4}  x  {name}"
+                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 32,
+                                 Qt.AlignLeft, line)
+                y += 34
+
+            y += 16
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 24
+
+            painter.setFont(normal_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 26,
+                             Qt.AlignCenter, "— end of order —")
+            y += 28
+
+            # Terminal tag — small, footer-sized text under the end-of-order
+            # line so kitchen staff see which printer/station the slip came
+            # from when tearing it off, without competing with the header.
+            painter.setFont(small_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 22,
+                             Qt.AlignCenter, f"Terminal: {station}")
+
+            painter.end()
+            print(f"✅ KOT printed for {station} → {printer_name or 'Default'}")
+            return True
+
+        except Exception as e:
+            print(f"❌ KOT print failed for {printer_name}: {e}")
+            if painter and painter.isActive():
+                painter.end()
+            return False
+
+    # =========================================================================
     # INVOICE RECEIPT
     # =========================================================================
     def print_invoice_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
@@ -813,16 +927,22 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 25
 
-            # Receipt Heading
+            # Receipt Heading — configurable via Company Settings → Receipt Header
             painter.setFont(bold_font)
+            _heading = (getattr(receipt, "receiptHeader", "") or "").strip() or "*** SALES RECEIPT ***"
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 44,
-                             Qt.AlignCenter, "*** SALES RECEIPT ***")
+                             Qt.AlignCenter, _heading)
             y += 56
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 25
 
             # Invoice Details
             painter.setFont(normal_font)
+            _order_no = int(getattr(receipt, "orderNumber", 0) or 0)
+            if _order_no > 0:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
+                                 Qt.AlignCenter, f"Order   : #{_order_no}")
+                y += 30
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30, Qt.AlignCenter, f"Invoice : {receipt.invoiceNo or 'N/A'}")
             y += 30
             
@@ -909,19 +1029,84 @@ class PrintingService:
             fm = painter.fontMetrics()
             line_h = fm.height() + 6
 
-            def draw_total(label: str, value: float):
+            def draw_total(label: str, value: float, currency: str = None):
                 nonlocal y
-                text = f"{receipt.currency or 'USD'} {value:,.2f}"
+                _cur = (currency or receipt.currency or "USD")
+                text = f"{_cur} {value:,.2f}"
                 w = fm.horizontalAdvance(text)
-                painter.drawText(self.margin, y, 200, line_h, Qt.AlignLeft,  label)
+                painter.drawText(self.margin, y, 260, line_h, Qt.AlignLeft,  label)
                 painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
                 y += line_h
 
-            if receipt.totalVat > 0:
-                draw_total("VAT", receipt.totalVat)
-            
+            # Amount BEFORE tax — reverse calculation off the tax-inclusive total.
+            # Subtotal + VAT lines are fiscalisation-only — when fiscalisation is
+            # off the slip is not a tax invoice, so only the GRAND TOTAL matters.
+            _grand = float(receipt.grandTotal or 0)
+            _vat   = float(receipt.totalVat   or 0)
+            _net   = max(_grand - _vat, 0.0)
+            try:
+                _fiscal_on = bool(get_fiscalization_service()
+                                  and get_fiscalization_service().is_fiscalization_enabled())
+            except Exception:
+                _fiscal_on = False
+
+            if _fiscal_on:
+                draw_total("Subtotal (excl. tax)", _net)
+                if _vat > 0:
+                    draw_total("VAT", _vat)
+
             painter.setFont(bold_font)
-            draw_total("GRAND TOTAL", receipt.grandTotal)
+            draw_total("GRAND TOTAL", _grand)
+            painter.setFont(normal_font)
+
+            y += 10
+
+            # Amount tendered + change — ALWAYS in base currency (USD).
+            _tendered_base = float(getattr(receipt, "amountTendered", 0) or 0)
+            _change_base   = float(getattr(receipt, "change",         0) or 0)
+            if _tendered_base > 0.005 or _change_base > 0.005:
+                draw_total("Amount Tendered", _tendered_base, "USD")
+                draw_total("Change",          _change_base,   "USD")
+
+            # Payment Details — modes + amounts per currency.
+            # paymentItems is populated by _print_receipt; each carries
+            #   productName = MOP name
+            #   productid   = native currency code
+            #   price       = native amount
+            #   amount      = USD base equivalent
+            payment_items = getattr(receipt, "paymentItems", None) or []
+            if payment_items:
+                y += 10
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 14
+
+                painter.setFont(bold_font)
+                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, line_h,
+                                 Qt.AlignLeft, "PAYMENT DETAILS")
+                y += line_h + 4
+
+                painter.setFont(normal_font)
+                for _pi in payment_items:
+                    method_name = (getattr(_pi, "productName", "") or "").strip() or "PAYMENT"
+                    native_cur  = (getattr(_pi, "productid",   "") or "USD").strip().upper()
+                    native_amt  = float(getattr(_pi, "price",  0) or 0)
+                    usd_amt     = float(getattr(_pi, "amount", 0) or 0)
+
+                    # "<Method>                     <NATIVE> 123.00"
+                    right_text = f"{native_cur} {native_amt:,.2f}"
+                    w = fm.horizontalAdvance(right_text)
+                    painter.drawText(self.margin, y, 260, line_h, Qt.AlignLeft, method_name)
+                    painter.drawText(self.paper_width - self.margin - w, y, w, line_h,
+                                     Qt.AlignRight, right_text)
+                    y += line_h
+
+                    # # Show USD equivalent on its own line when native != USD
+                    # if native_cur != "USD" and usd_amt > 0.005:
+                    #     eq_text = f"(= USD {usd_amt:,.2f})"
+                    #     w2 = fm.horizontalAdvance(eq_text)
+                    #     painter.drawText(self.paper_width - self.margin - w2, y, w2, line_h,
+                    #                      Qt.AlignRight, eq_text)
+                    #     y += line_h
 
             y += 20
 
@@ -1005,13 +1190,17 @@ class PrintingService:
                     painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                     y += 20
 
-            # Footer
+            # Footer — fully user-configurable via Company Defaults → Footer Text.
+            # Multi-line values are rendered as separate centered lines so the
+            # user can put "Thank you for your purchase!" / "Come again soon!"
+            # / anything else in the settings instead of shipping a hardcoded
+            # second line.
             painter.setFont(normal_font)
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
-                             Qt.AlignCenter, receipt.footer or "Thank you for your purchase!")
-            y += 26
-            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 20,
-                             Qt.AlignCenter, "Come again soon!")
+            _footer_raw = (receipt.footer or "Thank you for your purchase!").strip()
+            for _line in _footer_raw.splitlines():
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
+                                 Qt.AlignCenter, _line)
+                y += 22
 
             painter.end()
             print(f"✅ INVOICE printed successfully → {printer_name or 'Default'}")
