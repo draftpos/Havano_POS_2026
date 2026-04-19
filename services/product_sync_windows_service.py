@@ -558,15 +558,35 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                           p["part_no"], tax_rate, tax_type)
 
             # ── Upsert batches (pharmacy expiry tracking) ────────────────────
-            # Wipe + insert fresh per product; server is the source of truth.
+            # Wipe + insert fresh per product using the outer transaction's
+            # cursor. Do NOT open a separate connection here — the outer
+            # UPDATE/INSERT above has not yet been committed, so SQL Server
+            # holds an exclusive row lock; a second connection's SELECT on
+            # the same row would deadlock and hang the whole login sync.
             try:
-                from models.product import upsert_batches_for_product_by_part_no
-                batch_count = upsert_batches_for_product_by_part_no(
-                    p["part_no"], p.get("batches") or [])
-                if batch_count:
-                    log.debug("[sync] %s — %d batch(es) synced", p["part_no"], batch_count)
+                cur.execute(
+                    "DELETE FROM product_batches "
+                    "WHERE product_id IN (SELECT id FROM products WHERE part_no = ?)",
+                    (p["part_no"],),
+                )
+                raw_batches = p.get("batches") or []
+                for b in raw_batches:
+                    bn = (b.get("batch_no") or "").strip()
+                    if not bn:
+                        continue
+                    cur.execute(
+                        "INSERT INTO product_batches "
+                        "    (product_id, batch_no, expiry_date, qty, synced) "
+                        "SELECT id, ?, ?, ?, 1 FROM products WHERE part_no = ?",
+                        (bn, b.get("expiry_date"), float(b.get("qty") or 0),
+                         p["part_no"]),
+                    )
+                if raw_batches:
+                    log.debug("[sync] %s — %d batch(es) synced",
+                              p["part_no"], len(raw_batches))
             except Exception as _be:
-                log.warning("[sync] batch upsert failed for %s: %s", p.get("part_no"), _be)
+                log.warning("[sync] batch upsert failed for %s: %s",
+                            p.get("part_no"), _be)
 
             # ── Upsert UOM prices ────────────────────────────────────────────
             for up in (p.get("uom_prices") or []):
