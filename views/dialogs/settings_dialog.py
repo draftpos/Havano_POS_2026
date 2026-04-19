@@ -774,6 +774,26 @@ class HardwareDialog(_Base):
         pr_row.addWidget(pr_lbl); pr_row.addStretch(); pr_row.addWidget(self._main_printer); pr_row.addWidget(test_main)
         lay.addLayout(pr_row); lay.addSpacing(10); lay.addWidget(_hr()); lay.addSpacing(10)
 
+        # --- Kitchen printing master switch -----------------------------------
+        from PySide6.QtWidgets import QCheckBox
+        self._kitchen_enabled_chk = QCheckBox("Enable Kitchen Printing")
+        self._kitchen_enabled_chk.setChecked(bool(hw.get("kitchen_printing_enabled", False)))
+        self._kitchen_enabled_chk.setStyleSheet(f"""
+            QCheckBox {{
+                color:{DARK_TEXT}; font-size:13px; font-weight:bold;
+                background:transparent; padding:4px 0;
+            }}
+            QCheckBox::indicator {{
+                width:18px; height:18px;
+            }}
+        """)
+        self._kitchen_enabled_chk.setToolTip(
+            "When on, every sale fans out grouped items to the Order 1–6 printers below.\n"
+            "Kitchen slips print item + qty only (no prices, no totals)."
+        )
+        lay.addWidget(self._kitchen_enabled_chk)
+        lay.addSpacing(10)
+
         # --- Order Stations ---
         ord_lbl = QLabel("Assign Kitchen / Order Station Printers")
         ord_lbl.setStyleSheet(f"font-size:13px;font-weight:bold;color:{NAVY};background:transparent;")
@@ -867,16 +887,17 @@ class HardwareDialog(_Base):
         try:
             data = {
                 "main_printer": self._main_printer.currentText(),
+                "kitchen_printing_enabled": bool(self._kitchen_enabled_chk.isChecked()),
                 "orders": {}
             }
-            
+
             for combo, name in self._station_widgets:
                 p_name = combo.currentText()
                 data["orders"][name] = {
                     "active": p_name != "(None)",
                     "printer": p_name
                 }
-            
+
             _save_hw(data)
             
             QMessageBox.information(

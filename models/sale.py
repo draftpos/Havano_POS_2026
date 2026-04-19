@@ -364,6 +364,11 @@ def create_sale(
     #                If currency == "USD" this is always 1.0.
     total_usd:         float = None,
     exchange_rate:     float = None,
+    # Per-method payment breakdown used for the receipt's Payment Details block.
+    # Each dict is expected to carry: method, base_value (USD), native_amount,
+    # native_currency, is_credit. Stashed on the sale dict so _print_receipt
+    # can render a multi-currency breakdown without re-querying payment_entries.
+    splits:            list | None = None,
 ) -> dict:
     """
     Creates a single invoice and triggers fiscalization in background.
@@ -511,6 +516,22 @@ def create_sale(
     conn = get_connection()
     cur  = conn.cursor()
 
+    # Per-shift order number — resets to 1 whenever a new shift opens.
+    # Falls back gracefully if the column doesn't exist yet (pre-migration).
+    order_number = 1
+    if shift_id:
+        try:
+            cur.execute(
+                "SELECT ISNULL(MAX(order_number), 0) + 1 FROM sales WHERE shift_id = ?",
+                (shift_id,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                order_number = int(row[0])
+        except Exception as _oe:
+            print(f"[create_sale] order_number lookup skipped: {_oe}")
+            order_number = 1
+
     # Check if fiscal_status column exists
     has_fiscal = False
     try:
@@ -534,10 +555,11 @@ def create_sale(
                     receipt_type, footer, synced,
                     total_items, change_amount, is_on_account,
                     shift_id, fiscal_status,
-                    total_usd, total_zwd, tendered_usd, tendered_zwd, exchange_rate
+                    total_usd, total_zwd, tendered_usd, tendered_zwd, exchange_rate,
+                    order_number
                 )
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 seq, invoice_no, invoice_date,
                 total_amount, tendered_amount, method, cashier_id,
@@ -547,7 +569,8 @@ def create_sale(
                 receipt_type, footer, 0,
                 float(total_items_val), float(change_val), 1 if is_on_account else 0,
                 shift_id, "pending",
-                _total_usd, _total_zwd, _tendered_usd, _tendered_zwd, _exch
+                _total_usd, _total_zwd, _tendered_usd, _tendered_zwd, _exch,
+                order_number,
             ))
         else:
             cur.execute("""
@@ -560,10 +583,11 @@ def create_sale(
                     receipt_type, footer, synced,
                     total_items, change_amount, is_on_account,
                     shift_id,
-                    total_usd, total_zwd, tendered_usd, tendered_zwd, exchange_rate
+                    total_usd, total_zwd, tendered_usd, tendered_zwd, exchange_rate,
+                    order_number
                 )
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 seq, invoice_no, invoice_date,
                 total_amount, tendered_amount, method, cashier_id,
@@ -573,26 +597,54 @@ def create_sale(
                 receipt_type, footer, 0,
                 float(total_items_val), float(change_val), 1 if is_on_account else 0,
                 shift_id,
-                _total_usd, _total_zwd, _tendered_usd, _tendered_zwd, _exch
+                _total_usd, _total_zwd, _tendered_usd, _tendered_zwd, _exch,
+                order_number,
             ))
 
         sale_id = int(cur.fetchone()[0])
         print(f"[create_sale] Created sale ID: {sale_id}")
 
+        # Pre-fetch order_1..6 (kitchen-printer routing flags) for every part_no
+        # in the cart. Cart items don't carry these fields through the UI, so we
+        # resolve them from the products table in a single batch query.
+        part_nos = {str(it.get("part_no", "")).strip() for it in items if it.get("part_no")}
+        order_map: dict[str, tuple] = {}
+        if part_nos:
+            placeholders = ",".join("?" * len(part_nos))
+            try:
+                cur.execute(
+                    f"SELECT part_no, order_1, order_2, order_3, order_4, order_5, order_6 "
+                    f"FROM products WHERE part_no IN ({placeholders})",
+                    tuple(part_nos),
+                )
+                for row in cur.fetchall():
+                    order_map[(row[0] or "").strip()] = tuple(1 if row[i] else 0 for i in range(1, 7))
+            except Exception as _oe:
+                print(f"[create_sale] order_N lookup failed: {_oe}")
+
         # Insert sale items
         item_insert_count = 0
         for idx, item in enumerate(items):
+            part_no = str(item.get("part_no", "")).strip()
+            # Prefer the item's own order_N if already set (quotations / laybye
+            # conversions carry them forward); else fall back to the product lookup.
+            if any(item.get(f"order_{i}") is not None for i in range(1, 7)):
+                order_flags = tuple(1 if item.get(f"order_{i}") else 0 for i in range(1, 7))
+            else:
+                order_flags = order_map.get(part_no, (0, 0, 0, 0, 0, 0))
+
             cur.execute("""
                 INSERT INTO sale_items (
                     sale_id, part_no, product_name, qty, price,
                     discount, tax, total,
                     tax_type, tax_rate, tax_amount, remarks,
                     is_pharmacy, dosage, batch_no, expiry_date,
-                    uom
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    uom,
+                    order_1, order_2, order_3, order_4, order_5, order_6
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 sale_id,
-                str(item.get("part_no", "")),
+                part_no,
                 str(item.get("product_name", "")),
                 float(item.get("qty", 1)),
                 float(item.get("price", 0)),
@@ -608,6 +660,7 @@ def create_sale(
                 item.get("batch_no"),
                 item.get("expiry_date"),
                 (str(item.get("uom")) if item.get("uom") else None),
+                *order_flags,
             ))
             item_insert_count += 1
 
@@ -627,6 +680,12 @@ def create_sale(
         print(f"[create_sale] Successfully created sale ID: {sale_id} with invoice: {invoice_no}")
 
         sale = get_sale_by_id(sale_id)
+
+        # Stash the payment split list on the sale dict so _print_receipt /
+        # receipt builders can render Payment Details without re-querying
+        # payment_entries (which are created AFTER this create_sale call).
+        if splits:
+            sale["splits"] = list(splits)
 
         # Fiscalization starts FIRST so the print-wait poll has something to detect.
         _trigger_fiscalization_background(sale_id)
@@ -903,7 +962,17 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
         print("⚠️ No active printers configured")
         return
 
-    footer = sale.get("footer_text", footer_text or "Thank you for your purchase!")
+    # Pull receipt header + footer from company_defaults so the printed slip
+    # picks up whatever the user saved in Maintenance → Company Defaults
+    # instead of a hardcoded heading/footer.
+    try:
+        from models.company_defaults import get_defaults
+        _co = get_defaults() or {}
+    except Exception:
+        _co = {}
+    receipt_header = (_co.get("receipt_header") or "").strip()
+
+    footer = sale.get("footer_text") or footer_text or _co.get("footer_text") or "Thank you for your purchase!"
     total  = sale["total"]
     paid   = sale["tendered"]
     outstanding = total - paid
@@ -957,6 +1026,13 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
     else:
         fiscal_ready = bool(fiscal_qr_code and fiscal_qr_code.strip())
 
+    # Tendered + change are ALWAYS shown in the business's base currency (USD
+    # per company_defaults default) so the cashier doesn't have to mental-math
+    # multi-currency splits. total_usd / tendered_usd are stored at sale time.
+    _total_usd    = float(sale.get("total_usd")    or 0) or float(total or 0)
+    _tendered_usd = float(sale.get("tendered_usd") or 0) or float(tendered or 0)
+    _change_usd   = max(_tendered_usd - _total_usd, 0.0)
+
     try:
         receipt = ReceiptData(
             invoiceNo=sale["invoice_no"],
@@ -979,16 +1055,45 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
             customerContact=sale.get("customer_contact", customer_contact),
             customerTin="",
             customerVat="",
-            amountTendered=tendered,
-            change=change,
+            amountTendered=_tendered_usd,
+            change=_change_usd,
             grandTotal=total,
             subtotal=float(sale.get("subtotal", total)),
             totalVat=float(sale.get("total_vat", 0)),
             currency=currency,
+            receiptHeader=receipt_header,
             footer=footer,
             KOT=kot or "",
             paymentMode=method,
+            orderNumber=int(sale.get("order_number", 0) or 0),
         )
+
+        # Payment Details breakdown — one row per split (method + currency).
+        # Non-split sales get a single synthetic split so the block still renders.
+        _splits = sale.get("splits") or []
+        if not _splits:
+            _splits = [{
+                "method":          method or sale.get("method", "CASH"),
+                "base_value":      _total_usd,
+                "native_amount":   float(tendered or _total_usd),
+                "native_currency": (currency or "USD").upper(),
+                "is_credit":       bool(sale.get("is_on_account", False)),
+            }]
+        try:
+            from models.receipt import Item as _RItem
+            receipt.paymentItems = [
+                _RItem(
+                    productName = str(s.get("method", "CASH")),
+                    productid   = (s.get("native_currency") or "USD").upper(),
+                    qty         = 1,
+                    price       = float(s.get("native_amount") or s.get("base_value") or 0),
+                    amount      = float(s.get("base_value") or 0),   # USD-basis
+                    tax_amount  = 0.0,
+                )
+                for s in _splits
+            ]
+        except Exception as _pe:
+            print(f"[_print_receipt] could not build paymentItems: {_pe}")
 
         # Add fiscal QR code if available
         if fiscal_qr_code and fiscal_qr_code.strip():
@@ -1423,6 +1528,7 @@ def _sale_to_dict(row: dict) -> dict:
         "tendered_usd":  float(row.get("tendered_usd", 0) or 0),
         "tendered_zwd":  float(row.get("tendered_zwd", 0) or 0),
         "exchange_rate": float(row.get("exchange_rate", 1) or 1),
+        "order_number":  int(row.get("order_number",   0) or 0),
     }
 
 
@@ -1448,11 +1554,16 @@ def _get_active_printers() -> list[str]:
 # =============================================================================
 
 def print_kitchen_orders(sale: dict):
-    """Print separate KOT for every active Order 1–6 station."""
+    """Print separate KOT for every active Order 1–6 station.
+    Gated on hardware_settings.kitchen_printing_enabled — when off this is a
+    no-op so non-restaurant tills don't spam empty KOTs."""
     try:
         hw_file = Path("app_data/hardware_settings.json")
         with open(hw_file, "r", encoding="utf-8") as f:
             hw = json.load(f)
+
+        if not bool(hw.get("kitchen_printing_enabled", False)):
+            return
 
         orders_config = hw.get("orders", {})
 
