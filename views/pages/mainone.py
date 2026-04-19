@@ -429,7 +429,10 @@ class UomPickerDialog(QDialog):
         """)
         self.selected_uom   = None
         self.selected_price = None
+        self._uom_buttons: list[tuple[QPushButton, str, float]] = []
+        self._active_idx = 0
         self._build(product_name, uom_prices)
+        self._refresh_active_highlight()
 
     def _build(self, product_name: str, uom_prices: list[dict]):
         root = QVBoxLayout(self)
@@ -506,6 +509,7 @@ class UomPickerDialog(QDialog):
                 }}
             """)
             btn.clicked.connect(lambda _, u=uom, pr=price: self._pick(u, pr))
+            self._uom_buttons.append((btn, uom, price))
             root.addWidget(btn)
             if i < len(uom_prices) - 1:
                 root.addSpacing(8)
@@ -539,6 +543,60 @@ class UomPickerDialog(QDialog):
         self.selected_uom   = uom
         self.selected_price = price
         self.accept()
+
+    # ── Keyboard navigation ──────────────────────────────────────────────
+    def _refresh_active_highlight(self):
+        """Apply a bright border to the active button, neutral to the rest.
+        Buttons have Qt.NoFocus, so we style manually instead of relying on focus."""
+        for i, (btn, _u, _p) in enumerate(self._uom_buttons):
+            if i == self._active_idx:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {ACCENT};
+                        border: 2px solid {NAVY};
+                        border-radius: 10px;
+                    }}
+                    QPushButton QLabel {{ color: white; }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {LIGHT};
+                        border: 2px solid {BORDER};
+                        border-radius: 10px;
+                    }}
+                    QPushButton:hover {{
+                        background: {ACCENT};
+                        border-color: {ACCENT};
+                    }}
+                    QPushButton:hover QLabel {{ color: white; }}
+                    QPushButton:pressed {{
+                        background: {NAVY};
+                        border-color: {NAVY};
+                    }}
+                """)
+
+    def keyPressEvent(self, event):
+        k = event.key()
+        n = len(self._uom_buttons)
+        if n == 0:
+            return super().keyPressEvent(event)
+        if k == Qt.Key_Up:
+            self._active_idx = (self._active_idx - 1) % n
+            self._refresh_active_highlight()
+            return
+        if k == Qt.Key_Down:
+            self._active_idx = (self._active_idx + 1) % n
+            self._refresh_active_highlight()
+            return
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            _btn, uom, price = self._uom_buttons[self._active_idx]
+            self._pick(uom, price)
+            return
+        if k == Qt.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(event)
 
 
 class ProductSearchDialog(QDialog):
@@ -5539,21 +5597,34 @@ class POSView(QWidget):
         return panel
 
     # ── Invoice table ─────────────────────────────────────────────────────────
+    # Column indices — change here only, every lookup uses these constants.
+    # UOM sits next to Qty, between Qty and Disc.
+    COL_PART_NO  = 0
+    COL_NAME     = 1
+    COL_PRICE    = 2
+    COL_QTY      = 3
+    COL_UOM      = 4
+    COL_DISC     = 5
+    COL_TAX      = 6
+    COL_TOTAL    = 7
+    INVOICE_COL_COUNT = 8
+
     # ── Invoice column labels — edit here to rename ──────────────────────────
-    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "Disc", "TAX", "Total $"]
+    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "UOM", "Disc", "TAX", "Total $"]
 
     def _build_invoice_table(self):
         self.invoice_table = QTableWidget()
-        self.invoice_table.setColumnCount(7)
+        self.invoice_table.setColumnCount(self.INVOICE_COL_COUNT)
         self.invoice_table.setHorizontalHeaderLabels(self.INVOICE_COL_LABELS)
         hh = self.invoice_table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(0, 95)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(2, 90)
-        hh.setSectionResizeMode(3, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(3, 90)
-        hh.setSectionResizeMode(4, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(4, 65)
-        hh.setSectionResizeMode(5, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(5, 45)
-        hh.setSectionResizeMode(6, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(6, 90)
+        hh.setSectionResizeMode(self.COL_PART_NO, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_PART_NO, 95)
+        hh.setSectionResizeMode(self.COL_NAME,    QHeaderView.Stretch)
+        hh.setSectionResizeMode(self.COL_PRICE,   QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_PRICE, 90)
+        hh.setSectionResizeMode(self.COL_QTY,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_QTY, 90)
+        hh.setSectionResizeMode(self.COL_UOM,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_UOM, 60)
+        hh.setSectionResizeMode(self.COL_DISC,    QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_DISC, 65)
+        hh.setSectionResizeMode(self.COL_TAX,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_TAX, 45)
+        hh.setSectionResizeMode(self.COL_TOTAL,   QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_TOTAL, 90)
 
         self.invoice_table.verticalHeader().setVisible(False)
         self.invoice_table.setAlternatingRowColors(False)
@@ -5598,14 +5669,15 @@ class POSView(QWidget):
         return self.invoice_table
 
     def _init_row(self, r, part_no="", details="", qty="",
-                  amount="", disc="", tax="", total=""):
-        vals = [part_no, details, amount, qty, disc, tax, total]
+                  amount="", uom="", disc="", tax="", total=""):
+        # vals order must match COL_* constants (Part, Name, Price, Qty, UOM, Disc, TAX, Total)
+        vals = [part_no, details, amount, qty, uom, disc, tax, total]
         for c, val in enumerate(vals):
             item = QTableWidgetItem(str(val))
-            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if c == 1 else Qt.AlignCenter)
-            if c in (2, 6):
+            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if c == self.COL_NAME else Qt.AlignCenter)
+            if c in (self.COL_PRICE, self.COL_TOTAL):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                item.setForeground(QColor(ACCENT) if c == 6 else QColor(NAVY))
+                item.setForeground(QColor(ACCENT) if c == self.COL_TOTAL else QColor(NAVY))
             else:
                 item.setForeground(QColor(NAVY))
             self.invoice_table.setItem(r, c, item)
@@ -5632,34 +5704,34 @@ class POSView(QWidget):
 
         for r in range(self.invoice_table.rowCount()):
             is_active = (r == row)
-            for c in range(7):
+            for c in range(self.INVOICE_COL_COUNT):
                 item = self.invoice_table.item(r, c)
                 if not item:
                     continue
                 if is_active:
                     item.setBackground(ACTIVE_BG)
-                    item.setForeground(ACTIVE_FG if c != 6 else QColor(ACCENT))
+                    item.setForeground(ACTIVE_FG if c != self.COL_TOTAL else QColor(ACCENT))
                 else:
                     bg = FILLED_BG if r % 2 == 0 else ALT_BG
                     item.setBackground(bg)
-                    item.setForeground(FILLED_FG if c != 6 else QColor(ACCENT))
+                    item.setForeground(FILLED_FG if c != self.COL_TOTAL else QColor(ACCENT))
 
     # ── Calculation engine ────────────────────────────────────────────────────
     def _recalc_row(self, r):
         if self._block_signals:
             return
         try:
-            amount      = float(self.invoice_table.item(r, 2).text() or "0")
-            qty         = float(self.invoice_table.item(r, 3).text() or "0")
-            disc_amount = float((self.invoice_table.item(r, 4).text() or "0").replace('%', '').strip())
+            amount      = float(self.invoice_table.item(r, self.COL_PRICE).text() or "0")
+            qty         = float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
+            disc_amount = float((self.invoice_table.item(r, self.COL_DISC).text() or "0").replace('%', '').strip())
             total       = max(qty * amount - disc_amount, 0.0)
         except (ValueError, AttributeError):
             total = 0.0
         self._block_signals = True
-        item = self.invoice_table.item(r, 6)
+        item = self.invoice_table.item(r, self.COL_TOTAL)
         if item:
             # Only show a value when the row has an actual product entry
-            details = self.invoice_table.item(r, 1)
+            details = self.invoice_table.item(r, self.COL_NAME)
             has_product = bool(details and details.text().strip())
             item.setText(f"{total:.2f}" if has_product else "")
             item.setForeground(QColor(ACCENT))
@@ -5671,8 +5743,8 @@ class POSView(QWidget):
         qty_total = 0.0
         for r in range(self.invoice_table.rowCount()):
             try:
-                subtotal  += float(self.invoice_table.item(r, 6).text() or "0")
-                qty_total += float(self.invoice_table.item(r, 3).text() or "0")
+                subtotal  += float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
+                qty_total += float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
             except (ValueError, AttributeError):
                 pass
 
@@ -5935,8 +6007,10 @@ class POSView(QWidget):
         NOT already on the invoice (called from _add_product_to_invoice new-row path)."""
         self._block_signals = True
         self._init_row(row, part_no=product["part_no"], details=product["name"],
-                       qty="1", amount=f"{product['price']:.2f}", disc="0.00", tax="")
-        item0 = self.invoice_table.item(row, 0)
+                       qty="1", amount=f"{product['price']:.2f}",
+                       uom=product.get("uom") or "",
+                       disc="0.00", tax="")
+        item0 = self.invoice_table.item(row, self.COL_PART_NO)
         if item0: item0.setData(Qt.UserRole, product.get("id"))
         self._block_signals = False
         self._recalc_row(row)
@@ -6031,7 +6105,7 @@ class POSView(QWidget):
             # #36 Tab — cycle Code→Qty→Disc, wrap to next/prev row
             if key == Qt.Key_Tab:
                 self._close_inline_search()
-                _TAB = [0, 3, 4]
+                _TAB = [self.COL_PART_NO, self.COL_QTY, self.COL_DISC]
                 reverse = bool(mods & Qt.ShiftModifier)
                 if reverse:
                     _TAB = list(reversed(_TAB))
@@ -6113,12 +6187,14 @@ class POSView(QWidget):
             uom, price = result
             self._block_signals = True
             self._init_row(row, part_no=p["part_no"], details=p["name"],
-                           qty="1", amount=f"{price:.2f}", disc="0.00", tax="")
-            item0 = self.invoice_table.item(row, 0)
+                           qty="1", amount=f"{price:.2f}",
+                           uom=uom or "",
+                           disc="0.00", tax="")
+            item0 = self.invoice_table.item(row, self.COL_PART_NO)
             if item0: item0.setData(Qt.UserRole, p.get("id"))
             self._block_signals = False
             self._recalc_row(row)
-            self.invoice_table.setCurrentCell(row, 3)
+            self.invoice_table.setCurrentCell(row, self.COL_QTY)
             self._active_row = row; self._active_col = 3; self._numpad_buffer = ""
 
     def _on_product_btn_clicked(self, product: dict):
@@ -6491,7 +6567,7 @@ class POSView(QWidget):
                     if not next_name:
                         break
                     # copy shift+1 → shift
-                    for col in range(7):
+                    for col in range(self.INVOICE_COL_COUNT):
                         src = self.invoice_table.item(shift + 1, col)
                         dst = self.invoice_table.item(shift, col)
                         if src and dst:
@@ -6927,7 +7003,7 @@ class POSView(QWidget):
                 break
                 
             # Copy data from the row below to the current row
-            for col in range(7):
+            for col in range(self.INVOICE_COL_COUNT):
                 src = self.invoice_table.item(shift + 1, col)
                 dst = self.invoice_table.item(shift, col)
                 if src and dst:
@@ -7517,25 +7593,28 @@ class POSView(QWidget):
         items = []
         for r in range(self.invoice_table.rowCount()):
             try:
-                qty = float(self.invoice_table.item(r, 3).text() or "0")
+                qty = float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
             except (ValueError, AttributeError):
                 qty = 0.0
             if qty <= 0:
                 continue
             try:
-                part_no      = self.invoice_table.item(r, 0).text()
-                product_name = self.invoice_table.item(r, 1).text()
-                price        = float(self.invoice_table.item(r, 2).text() or "0")
-                disc         = float((self.invoice_table.item(r, 4).text() or "0").replace('%', '').strip())
-                tax          = self.invoice_table.item(r, 5).text()
-                total        = float(self.invoice_table.item(r, 6).text() or "0")
-                product_id   = self.invoice_table.item(r, 0).data(Qt.UserRole)
+                part_no      = self.invoice_table.item(r, self.COL_PART_NO).text()
+                product_name = self.invoice_table.item(r, self.COL_NAME).text()
+                price        = float(self.invoice_table.item(r, self.COL_PRICE).text() or "0")
+                uom_item     = self.invoice_table.item(r, self.COL_UOM)
+                uom          = uom_item.text().strip() if uom_item else ""
+                disc         = float((self.invoice_table.item(r, self.COL_DISC).text() or "0").replace('%', '').strip())
+                tax          = self.invoice_table.item(r, self.COL_TAX).text()
+                total        = float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
+                product_id   = self.invoice_table.item(r, self.COL_PART_NO).data(Qt.UserRole)
             except (ValueError, AttributeError):
                 continue
             items.append({
                 "part_no": part_no, "product_name": product_name,
                 "qty": qty, "price": price, "discount": disc,
                 "tax": tax, "total": total, "product_id": product_id,
+                "uom": uom,
             })
         return items
 
@@ -7706,6 +7785,7 @@ class POSView(QWidget):
                 discAmt         = float(sale.get("discount_amount", 0)),
                 paymentMode     = sale.get("method", "CASH"),
                 currency        = sale.get("currency", "USD"),
+                receiptHeader   = co.get("receipt_header", ""),
                 footer          = co.get("footer_text", "Thank you for your purchase!"),
             )
 
@@ -7849,7 +7929,7 @@ class POSView(QWidget):
                 discount_pct = getattr(self, "current_discount_percent", 0.0)
                 try:
                     subtotal_raw = sum(
-                        float(self.invoice_table.item(r, 6).text() or "0")
+                        float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
                         for r in range(self.invoice_table.rowCount())
                     )
                 except Exception:
@@ -8159,17 +8239,17 @@ class POSView(QWidget):
         items = []
         for r in range(self.invoice_table.rowCount()):
             try:
-                qty = float(self.invoice_table.item(r, 3).text() or "0")
+                qty = float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
             except (ValueError, AttributeError):
                 qty = 0.0
             if qty <= 0:
                 continue
             try:
-                part_no  = self.invoice_table.item(r, 0).text()
-                name     = self.invoice_table.item(r, 1).text()
-                price    = float(self.invoice_table.item(r, 2).text() or "0")
-                total_ln = float(self.invoice_table.item(r, 6).text() or "0")
-                product_id = self.invoice_table.item(r, 0).data(Qt.UserRole)
+                part_no  = self.invoice_table.item(r, self.COL_PART_NO).text()
+                name     = self.invoice_table.item(r, self.COL_NAME).text()
+                price    = float(self.invoice_table.item(r, self.COL_PRICE).text() or "0")
+                total_ln = float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
+                product_id = self.invoice_table.item(r, self.COL_PART_NO).data(Qt.UserRole)
             except (ValueError, AttributeError):
                 continue
             items.append({
@@ -8410,7 +8490,7 @@ class POSView(QWidget):
             limit = manager.get("max_discount_percent", 100) or 100
 
         # ── 5. Read existing value to pre-fill ───────────────────────────────
-        existing = self.invoice_table.item(row, 4)
+        existing = self.invoice_table.item(row, self.COL_DISC)
         current_val = 0.0
         if existing and existing.text().strip():
             try:
@@ -8422,8 +8502,8 @@ class POSView(QWidget):
 
         # ── 6. Get line total for conversion ─────────────────────────────────
         try:
-            line_price = float(self.invoice_table.item(row, 2).text() or "0")
-            line_qty   = float(self.invoice_table.item(row, 3).text() or "1")
+            line_price = float(self.invoice_table.item(row, self.COL_PRICE).text() or "0")
+            line_qty   = float(self.invoice_table.item(row, self.COL_QTY).text() or "1")
             line_total = line_price * line_qty
         except (ValueError, AttributeError):
             line_total = 0.0
@@ -8658,7 +8738,7 @@ class POSView(QWidget):
 
         print(f"[discount] dialog result: disc_amount={disc_amount:.2f}")
 
-        # ── 8. Write plain amount to col 4 and recalc ────────────────────────
+        # ── 8. Write plain amount to the Disc column and recalc ──────────────
         disc_item = QTableWidgetItem(f"{disc_amount:.2f}")
         disc_item.setTextAlignment(Qt.AlignCenter)
         if disc_amount > 0:
@@ -8668,7 +8748,7 @@ class POSView(QWidget):
         else:
             disc_item.setForeground(QColor(NAVY))
 
-        self.invoice_table.setItem(row, 4, disc_item)
+        self.invoice_table.setItem(row, self.COL_DISC, disc_item)
         self._recalc_row(row)
         self._recalc_totals()
 
@@ -8709,6 +8789,20 @@ class POSView(QWidget):
                 manager = authenticate_by_pin(pin)
                 if not manager or manager.get("role") != "admin":
                     QMessageBox.critical(self, "Access Denied", "Invalid Manager PIN.")
+                    self.laybye_btn.setChecked(False)
+                    return
+
+            # ── Customer required for Laybye ──────────────────────────────────
+            # Prompt to pick or quick-add a customer BEFORE switching to Deposit
+            # mode. If the user cancels, revert the toggle so cashier can retry.
+            from views.dialogs.laybye_confirm_dialog import _is_walk_in
+            if not self._selected_customer or _is_walk_in(self._selected_customer):
+                self._select_customer()  # opens CustomerSearchPopup (incl. + New quick-add)
+                if not self._selected_customer or _is_walk_in(self._selected_customer):
+                    QMessageBox.information(
+                        self, "Customer Required",
+                        "Please select or create a customer before starting a Laybye."
+                    )
                     self.laybye_btn.setChecked(False)
                     return
 
@@ -10846,6 +10940,7 @@ class ReprintDialog(QDialog):
                 discAmt             = float(sale.get("discount_amount", 0)),
                 paymentMode         = sale.get("method", "CASH"),
                 currency            = sale.get("currency", "USD"),
+                receiptHeader       = co.get("receipt_header", ""),
                 footer              = co.get("footer_text", "Thank you for your purchase!"),
             )
 
