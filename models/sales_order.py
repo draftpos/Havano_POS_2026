@@ -555,6 +555,37 @@ def get_order_by_id(order_id: int) -> dict | None:
 
     return order_dict
 
+
+def list_orders(status_filter: str | None = None) -> list[dict]:
+    """Return every sales_order row as a plain dict, newest first.
+    Pass e.g. 'open' to include only orders with a non-zero balance,
+    or 'ready' to include only zero-balance non-completed orders."""
+    ensure_tables()
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT id, order_no, customer_id, customer_name, company,
+               order_date, delivery_date, order_type,
+               total, deposit_amount, deposit_method, balance_due,
+               status, synced, frappe_ref, created_at
+        FROM   sales_order
+        ORDER BY CASE WHEN created_at IS NULL THEN 1 ELSE 0 END,
+                 created_at DESC, id DESC
+    """)
+    rows = [_dict_row(cur, r) for r in cur.fetchall()]
+    conn.close()
+
+    if not status_filter:
+        return rows
+    key = status_filter.strip().lower()
+    if key == "open":
+        return [r for r in rows if float(r.get("balance_due") or 0) > 0.005
+                                  and (r.get("status") or "").lower() != "completed"]
+    if key == "ready":
+        return [r for r in rows if float(r.get("balance_due") or 0) <= 0.005
+                                  and (r.get("status") or "").lower() not in ("completed", "cancelled")]
+    return [r for r in rows if (r.get("status") or "").lower() == key]
+
 def sync_customer_laybye_balance(customer_id: int):
     if not customer_id:
         return
@@ -574,3 +605,76 @@ def sync_customer_laybye_balance(customer_id: int):
     cur.execute("UPDATE customers SET laybye_balance = ? WHERE id = ?", (total_due, customer_id))
     conn.commit()
     log.info("Synced Customer ID %d: New Laybye Balance = %.2f", customer_id, total_due)
+
+
+# =============================================================================
+# CONVERT ORDER → SALE INVOICE (Task 15)
+# =============================================================================
+
+def convert_order_to_sale(order_id: int, cashier_id=None, cashier_name: str = "") -> dict | None:
+    """Promote a fully-paid Sales Order into a Sales Invoice (local sale row).
+
+    Guard: only runs when the SO's balance_due is effectively zero — i.e. the
+    customer has finished all laybye deposits. Items are passed straight into
+    create_sale which then pushes through the normal sale sync pipeline.
+    Returns the created sale dict, or None on any validation failure."""
+    order = get_order_by_id(order_id)
+    if not order:
+        log.warning("[SO→Sale] order %d not found", order_id)
+        return None
+
+    balance = float(order.get("balance_due") or 0)
+    if balance > 0.005:
+        log.warning("[SO→Sale] order %d still has balance_due=%.2f — refusing convert",
+                    order_id, balance)
+        return None
+
+    current_status = (order.get("status") or "").strip().lower()
+    if current_status in ("completed", "cancelled"):
+        log.warning("[SO→Sale] order %d is %s — nothing to convert", order_id, current_status)
+        return None
+
+    raw_items = order.get("items") or []
+    items: list[dict] = []
+    for it in raw_items:
+        items.append({
+            "part_no":      it.get("item_code", ""),
+            "product_name": it.get("item_name", ""),
+            "qty":          float(it.get("qty",    0) or 0),
+            "price":        float(it.get("rate",   0) or 0),
+            "total":        float(it.get("amount", 0) or 0),
+            "discount":     0.0,
+            "tax":          "",
+        })
+    if not items:
+        log.warning("[SO→Sale] order %d has no items", order_id)
+        return None
+
+    total = float(order.get("total") or sum(i["total"] for i in items))
+
+    from models.sale import create_sale
+    sale = create_sale(
+        items=items,
+        total=total,
+        tendered=total,                 # already collected as deposits on the SO
+        change_amount=0.0,
+        method=order.get("deposit_method") or "Laybye Conversion",
+        cashier_id=cashier_id,
+        cashier_name=cashier_name or "",
+        customer_name=order.get("customer_name", "") or "",
+        customer_contact="",
+        currency="USD",                 # deposits were aggregated in USD basis
+    )
+
+    update_order_status(order_id, "Completed")
+    try:
+        customer_id = order.get("customer_id")
+        if customer_id:
+            sync_customer_laybye_balance(int(customer_id))
+    except Exception as e:
+        log.warning("[SO→Sale] could not refresh laybye balance for customer %s: %s",
+                    order.get("customer_id"), e)
+
+    log.info("[SO→Sale] order %d (%s) converted to invoice %s",
+             order_id, order.get("order_no", "?"), (sale or {}).get("invoice_no", "?"))
+    return sale
