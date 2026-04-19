@@ -182,7 +182,9 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[startup] Site configuration error: {e}")
 
-    # 5. Database Schema Migration
+    # 5. Database Schema Migration (short-circuits when schema version matches)
+    import time as _timing
+    _t_mig = _timing.perf_counter()
     print("[startup] Running database migrations...")
     try:
         from setup_database import run as setup_db
@@ -190,14 +192,25 @@ if __name__ == "__main__":
     except Exception as e:
         QMessageBox.critical(None, "Database Error", f"Failed to initialize database:\n{e}")
         sys.exit(1)
+    print(f"[startup] migrations phase: {int((_timing.perf_counter() - _t_mig) * 1000)} ms")
 
     # 6. Execution Flow (Login -> Main)
+    _t_login = _timing.perf_counter()
     login_dlg = LoginDialog()
-    if login_dlg.exec() == QDialog.Accepted:
+    login_result = login_dlg.exec()
+    print(f"[startup] login dialog (user interaction included): "
+          f"{int((_timing.perf_counter() - _t_login) * 1000)} ms")
+    if login_result == QDialog.Accepted:
         try:
             print(f"[startup] Login successful. Launching MainWindow for {login_dlg.logged_in_user.get('username')}...")
+            _t_mw = _timing.perf_counter()
             window = MainWindow(user=login_dlg.logged_in_user)
+            print(f"[startup] MainWindow __init__: "
+                  f"{int((_timing.perf_counter() - _t_mw) * 1000)} ms")
+            _t_show = _timing.perf_counter()
             window.show()
+            print(f"[startup] window.show(): "
+                  f"{int((_timing.perf_counter() - _t_show) * 1000)} ms")
             
             # Use app.exec() for the main loop
             exit_code = app.exec()

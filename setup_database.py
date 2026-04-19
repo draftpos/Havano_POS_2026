@@ -1,10 +1,85 @@
 import sys
 import os
+import json
 import hashlib
+import time
+
+
+# Bump this whenever setup_database.py (or migrate.py) gains a new column /
+# table / index. Mismatches between this constant and schema_info.version
+# trigger a full migration pass on next launch; matches short-circuit so
+# startup doesn't burn 5–15s on INFORMATION_SCHEMA round-trips every time.
+SCHEMA_VERSION = "2026.04.19.2"
 
 
 def _hash(pw: str) -> str:
     return hashlib.sha256(pw.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Startup skip helpers
+# ---------------------------------------------------------------------------
+
+def _sql_settings_path() -> str:
+    # Mirrors database/db.py's resolution — works in dev and PyInstaller builds
+    here = os.path.dirname(os.path.abspath(__file__))
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(os.path.dirname(sys.executable), "app_data", "sql_settings.json")
+    return os.path.join(here, "app_data", "sql_settings.json")
+
+
+def _force_migrations_flag() -> bool:
+    """Read `force_migrations` from sql_settings.json — when true, migrations
+    run regardless of the stored schema_info.version. Developer escape hatch
+    for when you want to re-run everything by hand."""
+    try:
+        p = _sql_settings_path()
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                return bool((json.load(f) or {}).get("force_migrations", False))
+    except Exception:
+        pass
+    return False
+
+
+def _read_stored_schema_version(conn) -> str | None:
+    """Best-effort read — returns None if the table doesn't exist yet."""
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='schema_info'
+        """)
+        if c.fetchone() is None:
+            return None
+        c.execute("SELECT TOP 1 version FROM schema_info")
+        row = c.fetchone()
+        return (row[0] or "").strip() if row else None
+    except Exception:
+        return None
+
+
+def _write_schema_version(conn, version: str) -> None:
+    try:
+        c = conn.cursor()
+        c.execute("""
+            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                           WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='schema_info')
+                CREATE TABLE [dbo].[schema_info] (
+                    [id] INT IDENTITY(1,1) PRIMARY KEY,
+                    [version] NVARCHAR(50) NOT NULL,
+                    [updated_at] DATETIME2(7) NOT NULL DEFAULT SYSDATETIME()
+                )
+        """)
+        c.execute("""
+            IF EXISTS (SELECT 1 FROM schema_info)
+                UPDATE schema_info SET version = ?, updated_at = SYSDATETIME()
+            ELSE
+                INSERT INTO schema_info (version) VALUES (?)
+        """, (version, version))
+        conn.commit()
+    except Exception as e:
+        print(f"[setup_database] ! could not stamp schema version: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -25,6 +100,22 @@ def run():
     except Exception as e:
         print(f"[setup_database] Cannot open DB connection: {e}")
         return
+
+    # Short-circuit when the DB schema is already at the current code version.
+    # Skips ~200 INFORMATION_SCHEMA round-trips → shaves 5–15s on remote SQL.
+    _t0 = time.perf_counter()
+    stored = _read_stored_schema_version(conn)
+    forced = _force_migrations_flag()
+    if stored == SCHEMA_VERSION and not forced:
+        print(f"[setup_database] schema at {SCHEMA_VERSION} — skipping migrations "
+              f"({int((time.perf_counter() - _t0) * 1000)} ms)")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+    print(f"[setup_database] schema stored={stored!r} current={SCHEMA_VERSION!r} "
+          f"forced={forced} — running full migration pass")
 
     cur = conn.cursor()
 
@@ -112,6 +203,7 @@ def run():
                 [vat_number]               NVARCHAR(100) NOT NULL DEFAULT '',
                 [tin_number]               NVARCHAR(100) NOT NULL DEFAULT '',
                 [footer_text]              NVARCHAR(500) NOT NULL DEFAULT '',
+                [receipt_header]           NVARCHAR(200) NOT NULL DEFAULT '',
                 [terms_and_conditions]     NVARCHAR(MAX) NOT NULL DEFAULT '',
                 [zimra_serial_no]          NVARCHAR(100) NOT NULL DEFAULT '',
                 [zimra_device_id]          NVARCHAR(100) NOT NULL DEFAULT '',
@@ -174,6 +266,7 @@ def run():
             ("api_key",                  "NVARCHAR(200) NOT NULL DEFAULT ''"),
             ("api_secret",               "NVARCHAR(200) NOT NULL DEFAULT ''"),
             ("terms_and_conditions",     "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+            ("receipt_header",            "NVARCHAR(200) NOT NULL DEFAULT ''"),
         ]:
             add_col("company_defaults", col, defn)
         
@@ -462,6 +555,9 @@ def run():
                 [tendered_usd]    DECIMAL(14,4) NULL DEFAULT 0,
                 [tendered_zwd]    DECIMAL(14,4) NULL DEFAULT 0,
                 [exchange_rate]   DECIMAL(18,8) NULL DEFAULT 1,
+                -- Per-shift running counter — resets to 1 whenever a new shift
+                -- opens. Shown on receipts and is the KOT header line.
+                [order_number]    INT           NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -496,6 +592,7 @@ def run():
         ("tendered_usd",  "DECIMAL(14,4) NULL DEFAULT 0"),
         ("tendered_zwd",  "DECIMAL(14,4) NULL DEFAULT 0"),
         ("exchange_rate", "DECIMAL(18,8) NULL DEFAULT 1"),
+        ("order_number",  "INT           NULL"),
     ]:
         add_col("sales", col, defn)
 
@@ -1366,6 +1463,7 @@ def run():
                 [gl_account_name]  NVARCHAR(255) NULL,
                 [company]          NVARCHAR(255) NOT NULL DEFAULT '',
                 [synced_from_api]  BIT           NOT NULL DEFAULT 0,
+                [display_order]    INT           NOT NULL DEFAULT 0,
                 [created_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 [updated_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 PRIMARY KEY CLUSTERED ([id] ASC),
@@ -1385,6 +1483,7 @@ def run():
             ("gl_account_name",  "NVARCHAR(255) NULL"),
             ("company",          "NVARCHAR(255) NOT NULL DEFAULT ''"),
             ("synced_from_api",  "BIT           NOT NULL DEFAULT 0"),
+            ("display_order",    "INT           NOT NULL DEFAULT 0"),
             ("created_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
             ("updated_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
         ]:
@@ -1559,6 +1658,16 @@ def run():
         _apply_migrations()
     except Exception as e:
         print(f"[setup_database] ! migrate.py additions failed: {e}")
+
+    # Stamp the new schema version so next launch short-circuits. Opens a
+    # fresh connection because the earlier one was closed above.
+    try:
+        _v_conn = get_connection()
+        _write_schema_version(_v_conn, SCHEMA_VERSION)
+        _v_conn.close()
+        print(f"[setup_database] stamped schema_info.version = {SCHEMA_VERSION}")
+    except Exception as _e:
+        print(f"[setup_database] ! stamp failed: {_e}")
 
 
 if __name__ == "__main__":
