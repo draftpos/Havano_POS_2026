@@ -802,8 +802,14 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 22
 
-            # Meta — cashier + time (invoice already up top)
+            # Meta — invoice, cashier, time.
+            # Invoice prints here (below the Order # header) when we have both,
+            # so kitchen staff can still cross-reference the bar/till slip.
             painter.setFont(normal_font)
+            if order_no > 0 and receipt.invoiceNo:
+                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 26,
+                                 Qt.AlignCenter, f"Invoice: {receipt.invoiceNo}")
+                y += 28
             if receipt.cashierName:
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 26,
                                  Qt.AlignCenter, f"Cashier: {receipt.cashierName}")

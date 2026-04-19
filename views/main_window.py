@@ -4253,21 +4253,33 @@ class OptionsDialog(QDialog):
         self._sync_thread.start()
 
     def _on_sync_products_done(self, res: dict):
-        if hasattr(self, "_sync_products_btn"):
-            self._sync_products_btn.setEnabled(True)
-        if not hasattr(self, "_sync_status_lbl"):
-            return
-        inserted = res.get("inserted", 0)
-        updated  = res.get("updated", 0)
-        total    = res.get("total_api", 0)
-        errors   = res.get("errors", 0)
-        msg = f"Done — {inserted} new, {updated} updated (of {total} from server)"
-        if errors:
-            msg += f", {errors} error(s)"
-        self._sync_status_lbl.setStyleSheet(
-            f"font-size:11px; color:{SUCCESS}; background:transparent; padding:0 4px; font-weight:bold;"
-        )
-        self._sync_status_lbl.setText(msg)
+        # Refresh the POS product grid so newly-synced items appear without a
+        # restart. _reload_current_category preserves the active category/page.
+        try:
+            if self._pos and hasattr(self._pos, "_reload_current_category"):
+                self._pos._reload_current_category()
+        except Exception as e:
+            print(f"[OptionsDialog] product grid refresh failed: {e}")
+
+        # Surface the sync summary on the parent status bar (dialog is about
+        # to close so writing to the inline status line would be invisible).
+        try:
+            inserted = res.get("inserted", 0)
+            updated  = res.get("updated", 0)
+            total    = res.get("total_api", 0)
+            errors   = res.get("errors", 0)
+            msg = f"Sync done — {inserted} new, {updated} updated (of {total})"
+            if errors:
+                msg += f", {errors} error(s)"
+            pw = getattr(self._pos, "parent_window", None)
+            if pw and hasattr(pw, "_set_status"):
+                pw._set_status(msg)
+            else:
+                print(f"[OptionsDialog] {msg}")
+        except Exception:
+            pass
+
+        self.accept()
 
     def _on_sync_products_failed(self, msg: str):
         if hasattr(self, "_sync_products_btn"):

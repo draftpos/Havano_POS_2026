@@ -113,6 +113,7 @@ _SALE_SELECT = """
        COALESCE(s.tendered_usd,  0)    AS tendered_usd,
        COALESCE(s.tendered_zwd,  0)    AS tendered_zwd,
        COALESCE(s.exchange_rate, 1)    AS exchange_rate,
+       COALESCE(s.order_number,  0)    AS order_number,
        COALESCE(C.company_name,  '')  AS company_name,
        COALESCE(C.address_1,     '')  AS address_1,
        COALESCE(C.address_2,     '')  AS address_2,
