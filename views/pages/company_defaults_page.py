@@ -556,7 +556,15 @@ class CompanyDefaultsPage(QWidget):
         fcl = QVBoxLayout(fc)
         fcl.setContentsMargins(28, 20, 28, 24)
         fcl.setSpacing(ROW_SP)
-        _section_header(fcl, "Footer Text", top_margin=0)
+
+        # Receipt Header — single line printed bold/centered below company block.
+        # Blank falls back to "*** SALES RECEIPT ***" in services/printing_service.py.
+        _section_header(fcl, "Receipt Header", top_margin=0)
+        self._receipt_header = _inp()
+        self._receipt_header.setPlaceholderText("*** SALES RECEIPT ***")
+        fcl.addLayout(_field_row("Header", self._receipt_header, lw=70))
+
+        _section_header(fcl, "Footer Text")
         self._footer = QTextEdit()
         self._footer.setMinimumHeight(160)
         self._footer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -961,6 +969,7 @@ class CompanyDefaultsPage(QWidget):
                 val = data.get("server_company", "")
             inp.setText(val)
 
+        self._receipt_header.setText(data.get("receipt_header", ""))
         self._footer.setPlainText(data.get("footer_text", ""))
         self._terms.setPlainText(data.get("terms_and_conditions", ""))
 
@@ -991,6 +1000,7 @@ class CompanyDefaultsPage(QWidget):
 
     def _save(self):
         data = {k: i.text().strip() for k, i in self._inputs.items()}
+        data["receipt_header"]       = self._receipt_header.text().strip()
         data["footer_text"]          = self._footer.toPlainText().strip()
         data["terms_and_conditions"] = self._terms.toPlainText().strip()
         data["invoice_prefix"]       = self._prefix_inp.text().strip().upper()

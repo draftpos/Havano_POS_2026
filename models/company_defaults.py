@@ -8,6 +8,9 @@ _BLANK = {
     # Editable — receipt header
     "company_name": "", "address_1": "", "address_2": "",
     "email": "", "phone": "", "vat_number": "", "tin_number": "",
+    # Editable — receipt header (shown bold/centered below the company block
+    # on every sales receipt). Falls back to "*** SALES RECEIPT ***" when blank.
+    "receipt_header": "",
     # Editable — receipt footer
     "footer_text": "",
     "allow_credit_sales": "0",
@@ -66,6 +69,7 @@ def save_defaults(data: dict) -> None:
                 vat_number            = ?,
                 tin_number            = ?,
                 footer_text           = ?,
+                receipt_header        = ?,
                 terms_and_conditions  = ?,
                 zimra_serial_no       = ?,
                 zimra_device_id       = ?,
@@ -97,6 +101,7 @@ def save_defaults(data: dict) -> None:
             str(data.get("vat_number",            "")),
             str(data.get("tin_number",            "")),
             str(data.get("footer_text",           "")),
+            str(data.get("receipt_header",        "")),
             str(data.get("terms_and_conditions",  "")),
             str(data.get("zimra_serial_no",       "")),
             str(data.get("zimra_device_id",       "")),

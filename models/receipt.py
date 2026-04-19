@@ -172,6 +172,8 @@ class ReceiptData:
     invoiceNo: str = ""
     invoiceDate: str = ""
     cashierName: str = ""
+    # Per-shift running order number. 0 = unset / not yet migrated.
+    orderNumber: int = 0
 
     customerName: str = ""
     customerContact: str = ""
@@ -187,6 +189,7 @@ class ReceiptData:
     qrCodePath: str = ""
     qrCodePath2: str = ""
     currency: str = "USD"
+    receiptHeader: str = ""
     footer: str = "Thank you for your purchase!"
 
     multiCurrencyDetails: List[MultiCurrencyDetail] = field(default_factory=list)
