@@ -165,8 +165,15 @@ class Quotation:
         return len(self.items)
     
     def can_convert_to_sale(self) -> bool:
-        """Check if quotation can be converted to a sale"""
-        return self.is_submitted and not self.is_cancelled
+        """Check if quotation can be loaded into the cart for conversion to a sale.
+        Drafts and Submitted both qualify — pharmacists need to be able to
+        revise an in-progress draft and then finalise it as a sale. Only
+        Cancelled quotes and already-Converted quotes are blocked."""
+        if self.is_cancelled:
+            return False
+        if (self.status or "").lower() in ("converted", "invoiced", "ordered", "lost"):
+            return False
+        return True
 
 
 @dataclass

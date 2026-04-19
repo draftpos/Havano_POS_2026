@@ -723,7 +723,7 @@ class QuotationDialog(QDialog):
             QMessageBox.warning(
                 self, "Cannot Load",
                 f"This quotation has status '{self.current_quotation.status}'.\n"
-                "Only Submitted quotations can be loaded into the cart."
+                "Cancelled or already-converted quotations cannot be loaded."
             )
             return
 

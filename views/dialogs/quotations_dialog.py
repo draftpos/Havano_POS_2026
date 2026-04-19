@@ -333,6 +333,11 @@ class QuotationsDialog(QDialog):
         hdr_layout.addWidget(self._detail_title)
         hdr_layout.addStretch()
         
+        self._print_btn = _action_btn("Print", color=WHITE, hover=LIGHT, text_color=DARK_TEXT, border=BORDER)
+        self._print_btn.clicked.connect(self._print_selected)
+        self._print_btn.setEnabled(False)
+        hdr_layout.addWidget(self._print_btn)
+
         self._copy_btn = _action_btn("Copy", color=WHITE, hover=LIGHT, text_color=DARK_TEXT, border=BORDER)
         self._copy_btn.clicked.connect(self._copy_to_clipboard)
         self._copy_btn.setEnabled(False)
@@ -505,6 +510,7 @@ class QuotationsDialog(QDialog):
         """)
         
         self._copy_btn.setEnabled(True)
+        self._print_btn.setEnabled(True)
         self._show_quotation_details(q)
     
     # -------------------------------------------------------------------------
@@ -744,6 +750,26 @@ class QuotationsDialog(QDialog):
             clipboard = QApplication.clipboard()
             clipboard.setText(json.dumps(self._selected, indent=2, default=str))
             self._show_status("Copied to clipboard!")
+
+    # -------------------------------------------------------------------------
+    def _print_selected(self):
+        """Print the selected quotation to the main receipt printer."""
+        if not self._selected:
+            return
+        q_name = self._selected.get("name", "")
+        if not q_name:
+            self._show_status("No quotation reference — cannot print.", error=True)
+            return
+        try:
+            from services.quotation_print import print_quotation
+            ok = print_quotation(q_name)
+        except Exception as e:
+            self._show_status(f"Print error: {e}", error=True)
+            return
+        if ok:
+            self._show_status(f"Quotation {q_name} sent to printer.")
+        else:
+            self._show_status("Print failed — check printer settings.", error=True)
     
     # -------------------------------------------------------------------------
     def _show_status(self, msg: str, error: bool = False):
