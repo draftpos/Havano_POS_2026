@@ -223,9 +223,11 @@ def _extract_tax_info(taxes: list, part_no: str = "") -> dict | None:
     """
     Extract tax information from the taxes array.
 
-    Tries all common field names for the rate so we never silently get 0.
-    Infers tax_category from item_tax_template when the category field is blank.
-    Applies a 15.5% VAT fallback when rate is still 0 for a VAT category item.
+    Matches the Flutter/Android POS's behaviour: `maximum_net_rate` on the
+    product's tax row is the authoritative rate. Everything else just mirrors
+    what Frappe already ships in the payload — no extra HTTP calls, no
+    hardcoded VAT fallback. If Frappe sends 0 the rate is 0; fix it upstream
+    (in the Item Tax Template / Tax Rule) instead of papering over it here.
     """
     if not taxes:
         log.debug("[TAX] %s — no taxes array, will default to ZERO RATED", part_no)
@@ -236,13 +238,9 @@ def _extract_tax_info(taxes: list, part_no: str = "") -> dict | None:
     # Log the raw tax object for every product
     log.info("[TAX RAW] %s -> %s", part_no or "?", json.dumps(tax, default=str))
 
-    # Try every common field name for the rate; take first non-zero value
-    tax_rate = (
-        float(tax.get("tax_rate")        or 0)
-        or float(tax.get("rate")             or 0)
-        or float(tax.get("minimum_net_rate") or 0)
-        or float(tax.get("maximum_net_rate") or 0)
-    )
+    # Single authoritative rate source — same as Android
+    # (lib/core/services/products_service.dart:865 → `taxRate: t.maximumNetRate`).
+    tax_rate = float(tax.get("maximum_net_rate") or 0)
 
     tax_category      = str(tax.get("tax_category")      or "").strip()
     item_tax_template = str(tax.get("item_tax_template") or "").strip()
@@ -262,11 +260,6 @@ def _extract_tax_info(taxes: list, part_no: str = "") -> dict | None:
             tax_category = "ZERO RATED"
             log.debug("[TAX] %s — inferred category=ZERO RATED from template '%s'",
                       part_no, item_tax_template)
-
-    # VAT rate fallback (15.5%) when rate is still 0
-    if tax_rate == 0 and tax_category.upper() == "VAT":
-        tax_rate = 15.5
-        log.debug("[TAX] %s — rate was 0 for VAT category, defaulted to 15.5", part_no)
 
     log.info(
         "[TAX RESOLVED] %s -> rate=%.4f  category='%s'  template='%s'",
@@ -335,10 +328,18 @@ def _parse_product(p: dict) -> dict | None:
         "category":            category,
         "price":               price,
         "stock":               stock,
+        "uom":                 stock_uom,
         "uom_prices":          uom_prices,
         "is_pharmacy_product": bool(p.get("is_pharmacy_product") or 0),
         "batches":             raw_batches,
     }
+
+    # Kitchen-printer routing flags from Frappe (custom_is_order_item_1..6)
+    # Stored locally as order_1..6 on the products table; used later to fan
+    # out KOTs to Order 1–6 printers (services/product_sync_windows_service →
+    # products.order_N → sale_items.order_N → models/sale.print_kitchen_orders).
+    for i in range(1, 7):
+        result[f"order_{i}"] = 1 if p.get(f"custom_is_order_item_{i}") else 0
 
     if tax_info:
         result["tax_rate"]          = tax_info["tax_rate"]
@@ -522,6 +523,8 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
 
             is_pharm = 1 if p.get("is_pharmacy_product") else 0
 
+            order_flags = tuple(int(p.get(f"order_{i}", 0) or 0) for i in range(1, 7))
+
             if p["part_no"] in local_part_nos:
                 cur.execute("""
                     UPDATE products
@@ -532,30 +535,43 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                            tax_rate            = ?,
                            tax_type            = ?,
                            item_tax_template   = ?,
-                           is_pharmacy_product = ?
+                           is_pharmacy_product = ?,
+                           uom                 = ?,
+                           order_1             = ?,
+                           order_2             = ?,
+                           order_3             = ?,
+                           order_4             = ?,
+                           order_5             = ?,
+                           order_6             = ?
                     WHERE  part_no = ?
                 """, (
                     p["name"], p["price"], p["stock"], p["category"],
                     tax_rate, tax_type, item_tax_template, is_pharm,
+                    p.get("uom") or None,
+                    *order_flags,
                     p["part_no"],
                 ))
                 result["updated"] += 1
-                log.debug("[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  pharmacy=%d",
-                          p["part_no"], tax_rate, tax_type, is_pharm)
+                log.debug("[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  pharmacy=%d  orders=%s",
+                          p["part_no"], tax_rate, tax_type, is_pharm, order_flags)
             else:
                 cur.execute("""
                     INSERT INTO products
                         (part_no, name, price, stock, category,
-                         tax_rate, tax_type, item_tax_template, is_pharmacy_product)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         tax_rate, tax_type, item_tax_template, is_pharmacy_product,
+                         uom,
+                         order_1, order_2, order_3, order_4, order_5, order_6)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     p["part_no"], p["name"], p["price"], p["stock"], p["category"],
                     tax_rate, tax_type, item_tax_template, is_pharm,
+                    p.get("uom") or None,
+                    *order_flags,
                 ))
                 local_part_nos.add(p["part_no"])
                 result["inserted"] += 1
-                log.debug("[sync] Inserted: %s  tax_rate=%.4f  tax_type=%s",
-                          p["part_no"], tax_rate, tax_type)
+                log.debug("[sync] Inserted: %s  tax_rate=%.4f  tax_type=%s  orders=%s",
+                          p["part_no"], tax_rate, tax_type, order_flags)
 
             # ── Upsert batches (pharmacy expiry tracking) ────────────────────
             # Wipe + insert fresh per product using the outer transaction's
