@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QAbstractItemView, QLineEdit,
     QMessageBox, QPushButton, QFrame, QTabWidget, QWidget
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 from datetime import datetime
 from decimal import Decimal
@@ -992,14 +992,27 @@ class ShiftReconciliationDialog(QDialog):
                 )
 
             QMessageBox.information(
-                self, 
-                "Success", 
+                self,
+                "Success",
                 f"Shift #{active.get('shift_number')} closed successfully.\n\nReconciliation ID: {reconciliation_id}"
             )
             print("="*80)
             print("DEBUG: _on_finalize - SUCCESS")
             print("="*80 + "\n")
             self.accept()
+
+            # Shift is now closed — return to login screen so the next cashier
+            # (or the same one starting a fresh shift) sees a clean prompt.
+            try:
+                mw = self.window()
+                while mw is not None and not hasattr(mw, "_logout_after_shift_close"):
+                    mw = mw.parent() if hasattr(mw, "parent") else None
+                if mw is not None:
+                    QTimer.singleShot(0, mw._logout_after_shift_close)
+                else:
+                    print("[shift close] could not find MainWindow for logout — staying open.")
+            except Exception as _e:
+                print(f"[shift close] logout trigger failed: {_e}")
 
         except Exception as e:
             print(f"[DEBUG] Error in _on_finalize: {e}")
