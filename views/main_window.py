@@ -5279,18 +5279,21 @@ class POSView(QWidget):
         # Behavior change lives in _open_payment — this method only paints text.
         if not hasattr(self, "btn_pay") or self.btn_pay is None:
             return
-        mode = getattr(self, "_cart_mode", "sales")
+        mode  = getattr(self, "_cart_mode", "sales")
+        _user = getattr(self, "user", None)
+        _role = (_user or {}).get("role") if isinstance(_user, dict) else None
+        _is_p = False
         if mode == "quote":
             try:
                 from utils.roles import is_pharmacist
-                if is_pharmacist(getattr(self, "user", None)):
-                    self.btn_pay.setText("DISPENSE")
-                else:
-                    self.btn_pay.setText("FINALIZE QUOTE")
-            except Exception:
-                self.btn_pay.setText("FINALIZE QUOTE")
+                _is_p = bool(is_pharmacist(_user))
+            except Exception as _re:
+                print(f"[POSView] is_pharmacist import failed: {_re}", flush=True)
+            self.btn_pay.setText("DISPENSE" if _is_p else "FINALIZE QUOTE")
         else:
             self.btn_pay.setText("PAY  F5")
+        print(f"[POSView] PAY label refresh: mode={mode!r} role={_role!r} "
+              f"is_pharmacist={_is_p} → {self.btn_pay.text()!r}", flush=True)
 
     def _on_quote_mode_toggle(self, checked: bool):
         # Flip cart mode and repaint the PAY button. Behavior switch happens
@@ -6529,10 +6532,15 @@ class POSView(QWidget):
         return False
 
     def _prompt_dosage_and_batch(self, product_id) -> dict:
-        """Pharmacy: single popup that captures dosage AND batch together.
+        """Pharmacy: modal dialog that captures dosage AND batch together.
         Returns {'dosage': str|None, 'batch_no': str|None, 'expiry_date': str|None}.
         Skipping returns all-None; no-batches path still allows the dosage
-        to be captured and the cart add to proceed."""
+        to be captured and the cart add to proceed.
+
+        Uses QDialog (not Qt.Popup) so the QComboBox drop-down lists inside
+        are actually clickable — Qt.Popup-flagged windows auto-close as soon
+        as their focus is stolen by a child popup, which made the dosage
+        search combobox effectively dead."""
         try:
             from models.dosage import list_dosages
             dosages = list_dosages() or []
@@ -6547,31 +6555,46 @@ class POSView(QWidget):
             print(f"[Pharmacy] get_batches_for_product failed: {e}")
             batches = []
 
-        popup = QFrame(self, Qt.Popup)
-        popup.setAttribute(Qt.WA_DeleteOnClose, True)
-        popup.setStyleSheet(f"""
-            QFrame {{
-                background: {WHITE}; border: 1px solid {BORDER};
-                border-radius: 6px;
+        # Sort batches by expiry ascending so the soonest-to-expire comes first
+        # (becomes the default-selected combobox item for FIFO dispensing).
+        def _exp_key(b):
+            e = b.get("expiry_date") or ""
+            return (e == "", str(e))  # empties last
+        batches = sorted(batches, key=_exp_key)
+
+        print(f"[Pharmacy] dosage_and_batch: {len(dosages)} dosage(s), "
+              f"{len(batches)} batch(es) for product_id={product_id}", flush=True)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Dispense Item — Dosage & Batch")
+        dlg.setModal(True)
+        dlg.setMinimumSize(560, 420)
+        dlg.setStyleSheet(f"""
+            QDialog {{ background: {WHITE}; }}
+            QLabel  {{ color: {NAVY}; background: transparent; }}
+            QComboBox, QLineEdit {{
+                background: {WHITE}; color: {NAVY};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: 4px 8px; font-size: 13px; min-height: 28px;
             }}
-            QLabel {{ color: {NAVY}; background: transparent; }}
+            QComboBox:focus, QLineEdit:focus {{ border: 1px solid {ACCENT}; }}
         """)
-        lay = QVBoxLayout(popup)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(6)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
 
         title = QLabel("Dispense Item — Dosage & Batch")
-        title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {NAVY};")
+        title.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {NAVY};")
         lay.addWidget(title)
 
         # --- Dosage section ---
         dosage_hdr = QLabel("Dosage")
         dosage_hdr.setStyleSheet(
-            f"font-size: 12px; font-weight: bold; color: {NAVY}; margin-top: 4px;")
+            f"font-size: 12px; font-weight: bold; color: {NAVY}; margin-top: 6px;")
         lay.addWidget(dosage_hdr)
 
         lay.addWidget(QLabel("Search saved dosage (type code or description):"))
-        cbo = QComboBox()
+        cbo = QComboBox(dlg)
         cbo.setEditable(True)
         cbo.setInsertPolicy(QComboBox.NoInsert)
         cbo.addItem("— none —", "")
@@ -6580,7 +6603,7 @@ class POSView(QWidget):
             code = getattr(d, "code", "") or ""
             label = f"{code} — {desc}" if desc else code
             cbo.addItem(label, code)
-        # Make the built-in completer match anywhere in the string, not just prefix
+        # Contains-mode case-insensitive completer for substring search
         try:
             _cmp = cbo.completer()
             if _cmp is not None:
@@ -6590,11 +6613,10 @@ class POSView(QWidget):
                 _cmp.setCaseSensitivity(Qt.CaseInsensitive)
         except Exception:
             pass
-        cbo.setMinimumHeight(32)
         lay.addWidget(cbo)
 
         lay.addWidget(QLabel("Or quick dosage (not saved):"))
-        edit = QLineEdit()
+        edit = QLineEdit(dlg)
         edit.setPlaceholderText("e.g. 1 tab TID x 5d")
         lay.addWidget(edit)
 
@@ -6606,10 +6628,10 @@ class POSView(QWidget):
         # --- Batch section ---
         batch_hdr = QLabel("Batch & Expiry")
         batch_hdr.setStyleSheet(
-            f"font-size: 12px; font-weight: bold; color: {NAVY}; margin-top: 6px;")
+            f"font-size: 12px; font-weight: bold; color: {NAVY}; margin-top: 8px;")
         lay.addWidget(batch_hdr)
 
-        batch_cbo = QComboBox()
+        batch_cbo = QComboBox(dlg)
         if not batches:
             batch_cbo.addItem("— no batches registered —", None)
             batch_cbo.setEnabled(False)
@@ -6622,7 +6644,9 @@ class POSView(QWidget):
                 qty = b.get("qty", 0)
                 label = f"{bn}  —  expires {exp}   |   qty: {qty}"
                 batch_cbo.addItem(label, b)
-            # Contains-filter completer so users can type batch number anywhere in the label
+            # FIFO default: select the earliest-expiring batch (index 0 after sort)
+            batch_cbo.setCurrentIndex(0)
+            # Contains-filter completer so users can type batch number or date
             try:
                 _bcmp = batch_cbo.completer()
                 if _bcmp is not None:
@@ -6632,14 +6656,15 @@ class POSView(QWidget):
                     _bcmp.setCaseSensitivity(Qt.CaseInsensitive)
             except Exception:
                 pass
-        batch_cbo.setMinimumHeight(32)
         lay.addWidget(batch_cbo)
+
+        lay.addStretch()
 
         # --- Buttons ---
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        use_btn  = navy_btn("Use",  height=28, color=SUCCESS, hover=SUCCESS_H)
-        skip_btn = navy_btn("Skip", height=28, color=NAVY_2,  hover=NAVY_3)
+        btn_row.setSpacing(8)
+        use_btn  = navy_btn("Use",  height=34, color=SUCCESS, hover=SUCCESS_H)
+        skip_btn = navy_btn("Skip", height=34, color=NAVY_2,  hover=NAVY_3)
         btn_row.addStretch(); btn_row.addWidget(skip_btn); btn_row.addWidget(use_btn)
         lay.addLayout(btn_row)
 
@@ -6653,26 +6678,13 @@ class POSView(QWidget):
             if b:
                 result["batch_no"] = b.get("batch_no") or None
                 result["expiry_date"] = b.get("expiry_date")
-            popup.close()
+            dlg.accept()
         def _skip():
-            popup.close()
+            dlg.reject()
         use_btn.clicked.connect(_use)
         skip_btn.clicked.connect(_skip)
 
-        popup.setMinimumWidth(520)
-        popup.setMinimumHeight(380)
-        try:
-            origin = self.invoice_table.mapToGlobal(self.invoice_table.rect().topLeft())
-            popup.adjustSize()
-            popup.move(origin.x() + 40, origin.y() + 30)
-        except Exception:
-            pass
-        # Qt.Popup + local event loop → modal-ish without the QDialog heft
-        from PySide6.QtCore import QEventLoop
-        loop = QEventLoop()
-        popup.destroyed.connect(loop.quit)
-        popup.show()
-        loop.exec()
+        dlg.exec()
 
         return {
             "dosage":      result["dosage"],
