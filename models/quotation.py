@@ -613,6 +613,23 @@ def get_quotation_by_name(name: str) -> Optional[Quotation]:
     )
 
 
+def get_quotation_by_local_id(local_id: int) -> Optional[Quotation]:
+    """Fetch by the local autoincrement id — used for Drafts that haven't
+    been pushed to Frappe yet (so `name` may still be blank/placeholder)."""
+    if not local_id:
+        return None
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute("SELECT name FROM quotations WHERE id = ?", (int(local_id),))
+        row = fetchone_dict(cur)
+    finally:
+        conn.close()
+    if not row or not row.get("name"):
+        return None
+    return get_quotation_by_name(row["name"])
+
+
 def convert_quotation_to_cart(quotation: Quotation) -> list[dict]:
     """
     Convert a quotation to cart items for POS sale.

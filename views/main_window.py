@@ -4253,21 +4253,33 @@ class OptionsDialog(QDialog):
         self._sync_thread.start()
 
     def _on_sync_products_done(self, res: dict):
-        if hasattr(self, "_sync_products_btn"):
-            self._sync_products_btn.setEnabled(True)
-        if not hasattr(self, "_sync_status_lbl"):
-            return
-        inserted = res.get("inserted", 0)
-        updated  = res.get("updated", 0)
-        total    = res.get("total_api", 0)
-        errors   = res.get("errors", 0)
-        msg = f"Done — {inserted} new, {updated} updated (of {total} from server)"
-        if errors:
-            msg += f", {errors} error(s)"
-        self._sync_status_lbl.setStyleSheet(
-            f"font-size:11px; color:{SUCCESS}; background:transparent; padding:0 4px; font-weight:bold;"
-        )
-        self._sync_status_lbl.setText(msg)
+        # Refresh the POS product grid so newly-synced items appear without a
+        # restart. _reload_current_category preserves the active category/page.
+        try:
+            if self._pos and hasattr(self._pos, "_reload_current_category"):
+                self._pos._reload_current_category()
+        except Exception as e:
+            print(f"[OptionsDialog] product grid refresh failed: {e}")
+
+        # Surface the sync summary on the parent status bar (dialog is about
+        # to close so writing to the inline status line would be invisible).
+        try:
+            inserted = res.get("inserted", 0)
+            updated  = res.get("updated", 0)
+            total    = res.get("total_api", 0)
+            errors   = res.get("errors", 0)
+            msg = f"Sync done — {inserted} new, {updated} updated (of {total})"
+            if errors:
+                msg += f", {errors} error(s)"
+            pw = getattr(self._pos, "parent_window", None)
+            if pw and hasattr(pw, "_set_status"):
+                pw._set_status(msg)
+            else:
+                print(f"[OptionsDialog] {msg}")
+        except Exception:
+            pass
+
+        self.accept()
 
     def _on_sync_products_failed(self, msg: str):
         if hasattr(self, "_sync_products_btn"):
@@ -6338,9 +6350,9 @@ class POSView(QWidget):
 
         dlg.exec()
 
-        # Clear cart and exit quotation mode — status bar already shows the
-        # print result; no "Success" popup so the cashier goes straight to
-        # the next sale.
+        # Clear cart + fully exit quotation mode (both flags + navbar pill +
+        # PAY button label). No "Success" popup — status bar already carries
+        # the print result.
         self._clear_cart()
         self._quotation_mode = False
         self._cart_mode = "sales"
@@ -10957,17 +10969,15 @@ class POSView(QWidget):
             self.parent_window._set_status(
                 f"Quotation mode — Customer: {cname}  — Add items then use Options › Save Quotation")
 
-        # ── Step 3: Set quotation mode flag and notify ────────────────────────
-        # Also flip _cart_mode + refresh the PAY button so it reads
-        # "FINALIZE QUOTE" for non-pharmacist users. Previously this handler
-        # only set the legacy _quotation_mode flag which nothing else reads,
-        # so the PAY label stayed as "PAY F5" and cashiers had no visual cue.
+        # ── Step 3: Set quotation mode flag and flip the PAY button label ────
+        # _quotation_mode is the legacy flag; _cart_mode is what
+        # _refresh_pay_button_label reads, so both get set. The Quote Mode
+        # toggle pill in the navbar is kept in sync (blockSignals prevents
+        # _on_quote_mode_toggle from firing and looping).
         self._quotation_mode = True
         self._cart_mode = "quote"
         try:
-            # Keep the "Quote Mode" toggle pill in the navbar in sync if present
             if hasattr(self, "quote_mode_btn") and self.quote_mode_btn is not None:
-                # blockSignals prevents _on_quote_mode_toggle from firing again
                 self.quote_mode_btn.blockSignals(True)
                 self.quote_mode_btn.setChecked(True)
                 self.quote_mode_btn.blockSignals(False)
@@ -10978,9 +10988,8 @@ class POSView(QWidget):
         except Exception as _e:
             print(f"[_on_quotation] pay button refresh failed: {_e}")
 
-        # No confirmation popup — the PAY button now reads "FINALIZE QUOTE"
-        # and the status bar already shows "Quotation mode — Customer: <name>",
-        # which is enough feedback without an extra click.
+        # No confirmation popup — PAY now reads "FINALIZE QUOTE" and the
+        # status bar already shows "Quotation mode — Customer: <name>".
 
     
 
