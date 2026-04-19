@@ -105,16 +105,20 @@ def _load_payment_methods(company: str) -> list[dict]:
         # Only pull MOPs with a real gl_account; skip group/parent accounts
         # (group accounts have no account_type row in gl_accounts — they just
         #  appear as parent_account of other rows).
+        # ORDER BY display_order first so cashiers can set a preferred order
+        # (top row is the default selected method in the payment dialog);
+        # fall back to alphabetical for ties / unmigrated rows (all zero).
         cur.execute("""
             SELECT
                 m.name            AS mop_name,
                 m.gl_account      AS gl_account,
-                m.account_currency AS currency
+                m.account_currency AS currency,
+                COALESCE(m.display_order, 0) AS display_order
             FROM modes_of_payment m
             WHERE m.gl_account IS NOT NULL
               AND m.gl_account <> ''
               AND m.enabled = 1
-            ORDER BY m.name
+            ORDER BY display_order, m.name
         """)
         rows = fetchall_dicts(cur)
         conn.close()
@@ -788,8 +792,11 @@ class PaymentDialog(QDialog):
                 f" background:{WHITE}; border:1px solid {BORDER};"
                 f" border-radius:6px; padding:0 10px;")
 
+        # Keep Print enabled even when short — _save() shows an
+        # "Insufficient Amount" popup so cashier gets a clear message
+        # instead of a silently-disabled button.
         if self._print_btn is not None:
-            self._print_btn.setEnabled(settled)
+            self._print_btn.setEnabled(True)
 
     def _get_tendered(self) -> float:
         return sum(self._get_paid_usd(m) for m in self._method_rows)
@@ -831,6 +838,93 @@ class PaymentDialog(QDialog):
             print(f"[WARNING] Could not check for duplicate: {e}")
             return False
 
+    def _show_big_warning(self, title: str, primary: str, secondary: str = "") -> None:
+        """Large, readable warning modal — used for 'Insufficient Amount' /
+        'No Amount' at the register. Replaces the tiny default QMessageBox
+        so a cashier glancing up sees the blocker at arm's length."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title.title())
+        dlg.setModal(True)
+        dlg.setWindowFlag(Qt.FramelessWindowHint, False)
+        dlg.setFixedSize(600, 340)
+        dlg.setStyleSheet(f"QDialog {{ background:{WHITE}; }}")
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Amber warning band — big & impossible to miss
+        band = QWidget()
+        band.setFixedHeight(84)
+        band.setStyleSheet(f"background:{ORANGE};")
+        bl = QVBoxLayout(band)
+        bl.setContentsMargins(24, 0, 24, 0)
+        bl.setSpacing(0)
+        title_lbl = QLabel(title.upper())
+        title_lbl.setAlignment(Qt.AlignCenter)
+        title_lbl.setStyleSheet(
+            f"color:{WHITE}; font-size:26px; font-weight:900; letter-spacing:2px;"
+            f" background:transparent;"
+        )
+        bl.addWidget(title_lbl)
+        root.addWidget(band)
+
+        # Body
+        body = QWidget()
+        body.setStyleSheet(f"background:{WHITE};")
+        bl2 = QVBoxLayout(body)
+        bl2.setContentsMargins(28, 26, 28, 22)
+        bl2.setSpacing(14)
+
+        primary_lbl = QLabel(primary)
+        primary_lbl.setAlignment(Qt.AlignCenter)
+        primary_lbl.setWordWrap(True)
+        primary_lbl.setStyleSheet(
+            f"color:{DANGER}; font-size:28px; font-weight:bold;"
+            f" font-family:'Segoe UI',sans-serif; background:transparent;"
+        )
+        bl2.addWidget(primary_lbl)
+
+        if secondary:
+            secondary_lbl = QLabel(secondary)
+            secondary_lbl.setAlignment(Qt.AlignCenter)
+            secondary_lbl.setWordWrap(True)
+            secondary_lbl.setStyleSheet(
+                f"color:{DARK_TEXT}; font-size:17px; background:transparent;"
+            )
+            bl2.addWidget(secondary_lbl)
+
+        bl2.addStretch()
+
+        ok_btn = QPushButton("OK")
+        ok_btn.setFixedHeight(54)
+        ok_btn.setMinimumWidth(220)
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{ACCENT}; color:{WHITE};
+                border:none; border-radius:8px;
+                font-size:18px; font-weight:bold; padding:0 28px;
+            }}
+            QPushButton:hover {{ background:{ACCENT_H}; }}
+            QPushButton:pressed {{ background:{NAVY_3}; }}
+        """)
+        ok_btn.clicked.connect(dlg.accept)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(ok_btn)
+        row.addStretch()
+        bl2.addLayout(row)
+
+        root.addWidget(body, 1)
+
+        # Make Enter / Escape both dismiss
+        ok_btn.setDefault(True)
+        ok_btn.setAutoDefault(True)
+        ok_btn.setFocus()
+
+        dlg.exec()
+
     def _save(self):
         """Save the sale with duplicate prevention."""
         
@@ -843,17 +937,20 @@ class PaymentDialog(QDialog):
         on_account_amount = self._get_paid_usd(self._OA_LABEL)
 
         if paid_usd <= 0:
-            QMessageBox.warning(self, "No Amount",
-                "Please enter an amount to proceed.")
+            self._show_big_warning(
+                "NO AMOUNT",
+                "Please enter an amount to proceed.",
+            )
             self._active_field().setFocus()
             return
 
         rem = self.total - paid_usd
         if rem > 0.005:
-            QMessageBox.warning(
-                self, "Insufficient Amount",
-                f"Amount still due:  USD  {rem:.2f}\n"
-                "Please enter the full amount.")
+            self._show_big_warning(
+                "INSUFFICIENT AMOUNT",
+                f"Amount still due:  USD  {rem:,.2f}",
+                "Please enter the full amount before printing.",
+            )
             self._active_field().setFocus()
             self._active_field().selectAll()
             return
@@ -1007,6 +1104,7 @@ class PaymentDialog(QDialog):
                 skip_print=False,
                 shift_id=self.shift_id,
                 idempotency_key=transaction_hash,  # ✅ Pass transaction hash
+                splits=splits,                     # ✅ Per-method breakdown for receipt Payment Details
             )
             
             # Check if sale was created successfully
@@ -1159,6 +1257,21 @@ class PaymentDialog(QDialog):
             return
         if k == Qt.Key_Escape:
             self.reject()
+            return
+
+        # Up/Down arrows cycle through payment methods regardless of focus —
+        # arrows don't conflict with numeric entry in QLineEdits.
+        if k in (Qt.Key_Up, Qt.Key_Down) and self._methods:
+            try:
+                cur_idx = next(
+                    i for i, m in enumerate(self._methods)
+                    if m.get("label") == self._active_method
+                )
+            except StopIteration:
+                cur_idx = 0
+            step = -1 if k == Qt.Key_Up else 1
+            new_idx = (cur_idx + step) % len(self._methods)
+            self._activate_method(self._methods[new_idx]["label"])
             return
 
         focused = self.focusWidget()
