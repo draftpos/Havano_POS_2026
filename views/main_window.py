@@ -431,7 +431,10 @@ class UomPickerDialog(QDialog):
         """)
         self.selected_uom   = None
         self.selected_price = None
+        self._uom_buttons: list[tuple[QPushButton, str, float]] = []
+        self._active_idx = 0
         self._build(product_name, uom_prices)
+        self._refresh_active_highlight()
 
     def _build(self, product_name: str, uom_prices: list[dict]):
         root = QVBoxLayout(self)
@@ -508,6 +511,7 @@ class UomPickerDialog(QDialog):
                 }}
             """)
             btn.clicked.connect(lambda _, u=uom, pr=price: self._pick(u, pr))
+            self._uom_buttons.append((btn, uom, price))
             root.addWidget(btn)
             if i < len(uom_prices) - 1:
                 root.addSpacing(8)
@@ -541,6 +545,60 @@ class UomPickerDialog(QDialog):
         self.selected_uom   = uom
         self.selected_price = price
         self.accept()
+
+    # ── Keyboard navigation ──────────────────────────────────────────────
+    def _refresh_active_highlight(self):
+        """Apply a bright border to the active button, neutral to the rest.
+        Buttons have Qt.NoFocus, so we style manually instead of relying on focus."""
+        for i, (btn, _u, _p) in enumerate(self._uom_buttons):
+            if i == self._active_idx:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {ACCENT};
+                        border: 2px solid {NAVY};
+                        border-radius: 10px;
+                    }}
+                    QPushButton QLabel {{ color: white; }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {LIGHT};
+                        border: 2px solid {BORDER};
+                        border-radius: 10px;
+                    }}
+                    QPushButton:hover {{
+                        background: {ACCENT};
+                        border-color: {ACCENT};
+                    }}
+                    QPushButton:hover QLabel {{ color: white; }}
+                    QPushButton:pressed {{
+                        background: {NAVY};
+                        border-color: {NAVY};
+                    }}
+                """)
+
+    def keyPressEvent(self, event):
+        k = event.key()
+        n = len(self._uom_buttons)
+        if n == 0:
+            return super().keyPressEvent(event)
+        if k == Qt.Key_Up:
+            self._active_idx = (self._active_idx - 1) % n
+            self._refresh_active_highlight()
+            return
+        if k == Qt.Key_Down:
+            self._active_idx = (self._active_idx + 1) % n
+            self._refresh_active_highlight()
+            return
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            _btn, uom, price = self._uom_buttons[self._active_idx]
+            self._pick(uom, price)
+            return
+        if k == Qt.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(event)
 
 
 class ProductSearchDialog(QDialog):
@@ -4010,7 +4068,7 @@ class OptionsDialog(QDialog):
         super().__init__(parent)
         self._pos = pos_view
         self.setWindowTitle("Options")
-        self.setFixedSize(360, 320)  # Increased height to accommodate new button
+        self.setFixedSize(380, 420)  # Sized for the full button list + sync status line
         self.setModal(True)
         self.setWindowFlags(
             self.windowFlags()
@@ -4107,6 +4165,18 @@ class OptionsDialog(QDialog):
                           self._do_manage_quotations, NAVY, NAVY_2))
         bl.addWidget(_row("Reprint Invoice",
                           self._do_reprint, NAVY, NAVY_2))
+        self._sync_products_btn = _row("Sync Products from Server",
+                                       self._do_sync_products, ACCENT, ACCENT_H)
+        bl.addWidget(self._sync_products_btn)
+
+        # Inline status line for the sync action
+        from PySide6.QtWidgets import QLabel as _QL
+        self._sync_status_lbl = _QL("")
+        self._sync_status_lbl.setStyleSheet(
+            f"font-size:11px; color:{MUTED}; background:transparent; padding:0 4px;"
+        )
+        self._sync_status_lbl.setWordWrap(True)
+        bl.addWidget(self._sync_status_lbl)
 
         bl.addStretch()
         root.addWidget(body, 1)
@@ -4137,6 +4207,76 @@ class OptionsDialog(QDialog):
     def _do_pos_rules(self):
         self.accept()
         POSRulesDialog(self.parent()).exec()
+
+    # =========================================================================
+    # PRODUCT SYNC — one-shot pull from Frappe
+    # =========================================================================
+    def _do_sync_products(self):
+        """Fire a one-shot product sync in the background. Keeps the dialog
+        open so the cashier sees the status line; disables the button while
+        running so double-taps don't stack requests."""
+        from PySide6.QtCore import QThread, Signal as _Sig, QObject as _QObj
+
+        class _ProductSyncJob(_QObj):
+            done   = _Sig(dict)
+            failed = _Sig(str)
+
+            def run(self):
+                try:
+                    from services.credentials import get_credentials
+                    key, secret = get_credentials()
+                    if not key or not secret:
+                        self.failed.emit("No credentials — log in once so the sync can authenticate.")
+                        return
+                    from services.product_sync_windows_service import sync_products_smart
+                    res = sync_products_smart(key, secret) or {}
+                    self.done.emit(res)
+                except Exception as e:
+                    self.failed.emit(str(e))
+
+        self._sync_products_btn.setEnabled(False)
+        self._sync_status_lbl.setStyleSheet(
+            f"font-size:11px; color:{MUTED}; background:transparent; padding:0 4px;"
+        )
+        self._sync_status_lbl.setText("Syncing products from server…")
+
+        self._sync_thread = QThread(self)
+        self._sync_job    = _ProductSyncJob()
+        self._sync_job.moveToThread(self._sync_thread)
+        self._sync_thread.started.connect(self._sync_job.run)
+        self._sync_job.done.connect(self._on_sync_products_done)
+        self._sync_job.failed.connect(self._on_sync_products_failed)
+        self._sync_job.done.connect(self._sync_thread.quit)
+        self._sync_job.failed.connect(self._sync_thread.quit)
+        self._sync_thread.finished.connect(self._sync_job.deleteLater)
+        self._sync_thread.finished.connect(self._sync_thread.deleteLater)
+        self._sync_thread.start()
+
+    def _on_sync_products_done(self, res: dict):
+        if hasattr(self, "_sync_products_btn"):
+            self._sync_products_btn.setEnabled(True)
+        if not hasattr(self, "_sync_status_lbl"):
+            return
+        inserted = res.get("inserted", 0)
+        updated  = res.get("updated", 0)
+        total    = res.get("total_api", 0)
+        errors   = res.get("errors", 0)
+        msg = f"Done — {inserted} new, {updated} updated (of {total} from server)"
+        if errors:
+            msg += f", {errors} error(s)"
+        self._sync_status_lbl.setStyleSheet(
+            f"font-size:11px; color:{SUCCESS}; background:transparent; padding:0 4px; font-weight:bold;"
+        )
+        self._sync_status_lbl.setText(msg)
+
+    def _on_sync_products_failed(self, msg: str):
+        if hasattr(self, "_sync_products_btn"):
+            self._sync_products_btn.setEnabled(True)
+        if hasattr(self, "_sync_status_lbl"):
+            self._sync_status_lbl.setStyleSheet(
+                f"font-size:11px; color:{DANGER}; background:transparent; padding:0 4px; font-weight:bold;"
+            )
+            self._sync_status_lbl.setText(f"Failed: {msg[:120]}")
 # =============================================================================
 # POS RULES DIALOG  —  standalone, accessible from Options menu & Maintenance
 # =============================================================================
@@ -5611,6 +5751,19 @@ class POSView(QWidget):
         self._build_ui()
         QTimer.singleShot(0, self._ensure_default_customer)
 
+        # Enable global Up/Down → cart navigation. Installing POSView as an
+        # event filter on QApplication lets us catch Up/Down from any focused
+        # child (product grid buttons, category buttons, etc.) and route them
+        # to the cart table. Text inputs still keep their own behaviour —
+        # see the Up/Down branch at the top of eventFilter().
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
+                self._global_cart_nav_ready = True
+        except Exception as _e:
+            print(f"[POSView] global cart nav install failed: {_e}")
+
     # =========================================================================
     # QUOTATION MANAGEMENT METHODS
     # =========================================================================
@@ -5632,10 +5785,21 @@ class POSView(QWidget):
         cart_items = data.get("cart_items", [])
         customer = data.get("customer", "")
         quotation_name = data.get("quotation_name", "")
-        
+
+        # Loading a quotation converts it into an active sale — exit any active
+        # Quote mode so the PAY button finalises a sale instead of saving back
+        # into the quotation.
+        if getattr(self, "_quotation_mode", False):
+            self._quotation_mode = False
+            try:
+                if hasattr(self, "quote_btn") and hasattr(self.quote_btn, "setChecked"):
+                    self.quote_btn.setChecked(False)
+            except Exception:
+                pass
+
         # Check if cart has items
         if self._collect_invoice_items():
-            reply = QMessageBox.question(self, "Clear Cart", 
+            reply = QMessageBox.question(self, "Clear Cart",
                 f"Load quotation {quotation_name}? This will clear the current cart.",
                 QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
@@ -6217,6 +6381,7 @@ class POSView(QWidget):
         # ── Sales button ──────────────────────────────────────────────────────
         sales_menu_btn = HoverMenuButton("Sales ▾", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Payments", self._open_customer_payment_entry)
         sales_menu_btn.addSeparator()
@@ -6262,6 +6427,7 @@ class POSView(QWidget):
             maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
             maint_btn.addItem("POS Rules",          _sd("POSRulesDialog"))
             maint_btn.addItem("Hardware Settings",  _sd("HardwareDialog"))
+            maint_btn.addItem("Payment Modes",      self._open_payment_modes_dialog)
             maint_btn.addItem("Advanced Printing",  self._open_adv_printing_nav)
             maint_btn.addSeparator()
             maint_btn.addItem("Sync Queue",         self._open_sales_list)
@@ -6743,7 +6909,7 @@ class POSView(QWidget):
             pass
         QApplication.beep()
 
-    def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None):
+    def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None, uom=""):
         # ── Always close any open inline search before we touch the table ─────
         self._close_inline_search()
 
@@ -6885,13 +7051,14 @@ class POSView(QWidget):
                     it = self.invoice_table.item(row, col)
                     return it.data(Qt.UserRole) if it else None
 
-                saved_part_no    = _cell_text(r, 0)
-                saved_pid        = _cell_data(r, 0)
-                saved_name       = _cell_text(r, 1)
-                saved_price      = _cell_text(r, 2)
-                saved_disc       = _cell_text(r, 4)
+                saved_part_no    = _cell_text(r, self.COL_PART_NO)
+                saved_pid        = _cell_data(r, self.COL_PART_NO)
+                saved_name       = _cell_text(r, self.COL_NAME)
+                saved_price      = _cell_text(r, self.COL_PRICE)
+                saved_uom        = _cell_text(r, self.COL_UOM)
+                saved_disc       = _cell_text(r, self.COL_DISC)
                 # Use existing tax or new tax display
-                existing_tax = _cell_text(r, 5)
+                existing_tax = _cell_text(r, self.COL_TAX)
                 saved_tax = existing_tax if existing_tax else tax_display
 
                 # ── Remove this row and compact upward ────────────────────────
@@ -6906,7 +7073,7 @@ class POSView(QWidget):
                     if not next_name:
                         break
                     # copy shift+1 → shift
-                    for col in range(7):
+                    for col in range(self.INVOICE_COL_COUNT):
                         src = self.invoice_table.item(shift + 1, col)
                         dst = self.invoice_table.item(shift, col)
                         if src and dst:
@@ -6933,6 +7100,7 @@ class POSView(QWidget):
                 self._block_signals = True
                 self._init_row(dest, part_no=saved_part_no, details=saved_name,
                                qty=f"{new_qty:.4g}", amount=saved_price,
+                               uom=saved_uom,
                                disc=saved_disc or "0.00", tax=saved_tax)
                 item0 = self.invoice_table.item(dest, 0)
                 if item0:
@@ -6978,9 +7146,30 @@ class POSView(QWidget):
         # ── New row with tax info ─────────────────────────────────────────────
         r = self._find_next_empty_row()
         self._block_signals = True
-        self._init_row(r, part_no=part_no, details=name, qty="1",
-                       amount=f"{price:.2f}", disc="0.00", tax=tax_display)
-        item = self.invoice_table.item(r, 0)
+        # Fall back to the product's stock UOM when the caller didn't pass one
+        # (callers that went through _maybe_pick_uom always set `uom`).
+        _row_uom = uom
+        if not _row_uom and product_id:
+            try:
+                from models.product import get_product_by_id
+                _p = get_product_by_id(product_id)
+                if _p:
+                    _row_uom = str(_p.get("uom") or "").strip()
+            except Exception:
+                _row_uom = ""
+        # Pharmacy: surface the dosage on the cart so the cashier can see
+        # what was captured in the dispense popup — appended to the details
+        # cell as "<name>  ·  <dosage>". Full metadata still lives in
+        # PHARMACY_META_ROLE so save_sale keeps its fields intact.
+        _display_name = name
+        if pharmacy_meta and pharmacy_meta.get("dosage"):
+            _display_name = f"{name}  ·  {str(pharmacy_meta['dosage']).strip()}"
+
+        self._init_row(r, part_no=part_no, details=_display_name, qty="1",
+                       amount=f"{price:.2f}",
+                       uom=_row_uom,
+                       disc="0.00", tax=tax_display)
+        item = self.invoice_table.item(r, self.COL_PART_NO)
         if item:
             item.setData(Qt.UserRole, product_id)
             # Pharmacy: stamp the row with dosage/batch metadata for save path + Phase 7
@@ -7018,19 +7207,24 @@ class POSView(QWidget):
         
         for r in range(self.invoice_table.rowCount()):
             try:
-                qty = float(self.invoice_table.item(r, 3).text() or "0")
+                qty = float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
             except (ValueError, AttributeError):
                 qty = 0.0
             if qty <= 0:
                 continue
             try:
-                part_no      = self.invoice_table.item(r, 0).text()
-                product_name = self.invoice_table.item(r, 1).text()
-                price        = float(self.invoice_table.item(r, 2).text() or "0")
-                disc         = float((self.invoice_table.item(r, 4).text() or "0").replace('%', '').strip())
-                tax_text     = self.invoice_table.item(r, 5).text() or ""
-                total        = float(self.invoice_table.item(r, 6).text() or "0")
-                product_id   = self.invoice_table.item(r, 0).data(Qt.UserRole)
+                part_no      = self.invoice_table.item(r, self.COL_PART_NO).text()
+                # Name cell may be decorated with " · <dosage>" for pharmacy rows;
+                # keep product_name canonical so sale_items / Frappe see the raw name.
+                _name_cell   = self.invoice_table.item(r, self.COL_NAME).text()
+                product_name = _name_cell.split("  ·  ", 1)[0].strip()
+                price        = float(self.invoice_table.item(r, self.COL_PRICE).text() or "0")
+                disc         = float((self.invoice_table.item(r, self.COL_DISC).text() or "0").replace('%', '').strip())
+                tax_text     = self.invoice_table.item(r, self.COL_TAX).text() or ""
+                total        = float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
+                product_id   = self.invoice_table.item(r, self.COL_PART_NO).data(Qt.UserRole)
+                _uom_item    = self.invoice_table.item(r, self.COL_UOM)
+                uom_cell     = _uom_item.text().strip() if _uom_item else ""
                 
                 # Parse tax rate from tax column
                 tax_rate = 0.0
@@ -7081,11 +7275,10 @@ class POSView(QWidget):
             except Exception:
                 pharm = None
 
-            # UOM: look up from the product row (cart doesn't store uom on the
-            # table item today). Falls back to empty string so label just
-            # renders qty alone — never block the save on a missing uom.
-            uom_val = ""
-            if product_id:
+            # UOM: prefer the cart cell (reflects the user's UOM-picker choice);
+            # fall back to the product row so legacy adds still carry the stock UOM.
+            uom_val = uom_cell
+            if not uom_val and product_id:
                 try:
                     from models.product import get_product_by_id
                     _p = get_product_by_id(product_id)
@@ -7348,6 +7541,7 @@ class POSView(QWidget):
         # ── Sales button ──────────────────────────────────────────────────────
         sales_menu_btn = HoverMenuButton("Sales ▾", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Payments", self._open_customer_payment_entry)
         sales_menu_btn.addSeparator()
@@ -7393,6 +7587,7 @@ class POSView(QWidget):
             maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
             maint_btn.addItem("POS Rules",          _sd("POSRulesDialog"))
             maint_btn.addItem("Hardware Settings",  _sd("HardwareDialog"))
+            maint_btn.addItem("Payment Modes",      self._open_payment_modes_dialog)
             maint_btn.addItem("Advanced Printing",  self._open_adv_printing_nav)
             maint_btn.addSeparator()
             maint_btn.addItem("Sync Queue",         self._open_sales_list)
@@ -7787,21 +7982,34 @@ class POSView(QWidget):
         dlg.exec()
 
     # ── Invoice table ─────────────────────────────────────────────────────────
+    # Column indices — change here only, every lookup uses these constants.
+    # UOM sits next to Qty, between Qty and Disc.
+    COL_PART_NO  = 0
+    COL_NAME     = 1
+    COL_PRICE    = 2
+    COL_QTY      = 3
+    COL_UOM      = 4
+    COL_DISC     = 5
+    COL_TAX      = 6
+    COL_TOTAL    = 7
+    INVOICE_COL_COUNT = 8
+
     # ── Invoice column labels — edit here to rename ──────────────────────────
-    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "Disc", "TAX", "Total $"]
+    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "UOM", "Disc", "TAX", "Total $"]
 
     def _build_invoice_table(self):
         self.invoice_table = QTableWidget()
-        self.invoice_table.setColumnCount(7)
+        self.invoice_table.setColumnCount(self.INVOICE_COL_COUNT)
         self.invoice_table.setHorizontalHeaderLabels(self.INVOICE_COL_LABELS)
         hh = self.invoice_table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(0, 95)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(2, 90)
-        hh.setSectionResizeMode(3, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(3, 90)
-        hh.setSectionResizeMode(4, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(4, 65)
-        hh.setSectionResizeMode(5, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(5, 45)
-        hh.setSectionResizeMode(6, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(6, 90)
+        hh.setSectionResizeMode(self.COL_PART_NO, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_PART_NO, 95)
+        hh.setSectionResizeMode(self.COL_NAME,    QHeaderView.Stretch)
+        hh.setSectionResizeMode(self.COL_PRICE,   QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_PRICE, 90)
+        hh.setSectionResizeMode(self.COL_QTY,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_QTY, 90)
+        hh.setSectionResizeMode(self.COL_UOM,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_UOM, 60)
+        hh.setSectionResizeMode(self.COL_DISC,    QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_DISC, 65)
+        hh.setSectionResizeMode(self.COL_TAX,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_TAX, 45)
+        hh.setSectionResizeMode(self.COL_TOTAL,   QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_TOTAL, 90)
 
         self.invoice_table.verticalHeader().setVisible(False)
         self.invoice_table.setAlternatingRowColors(False)
@@ -7846,14 +8054,15 @@ class POSView(QWidget):
         return self.invoice_table
 
     def _init_row(self, r, part_no="", details="", qty="",
-                  amount="", disc="", tax="", total=""):
-        vals = [part_no, details, amount, qty, disc, tax, total]
+                  amount="", uom="", disc="", tax="", total=""):
+        # vals order must match COL_* constants (Part, Name, Price, Qty, UOM, Disc, TAX, Total)
+        vals = [part_no, details, amount, qty, uom, disc, tax, total]
         for c, val in enumerate(vals):
             item = QTableWidgetItem(str(val))
-            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if c == 1 else Qt.AlignCenter)
-            if c in (2, 6):
+            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if c == self.COL_NAME else Qt.AlignCenter)
+            if c in (self.COL_PRICE, self.COL_TOTAL):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                item.setForeground(QColor(ACCENT) if c == 6 else QColor(NAVY))
+                item.setForeground(QColor(ACCENT) if c == self.COL_TOTAL else QColor(NAVY))
             else:
                 item.setForeground(QColor(NAVY))
             self.invoice_table.setItem(r, c, item)
@@ -7880,34 +8089,34 @@ class POSView(QWidget):
 
         for r in range(self.invoice_table.rowCount()):
             is_active = (r == row)
-            for c in range(7):
+            for c in range(self.INVOICE_COL_COUNT):
                 item = self.invoice_table.item(r, c)
                 if not item:
                     continue
                 if is_active:
                     item.setBackground(ACTIVE_BG)
-                    item.setForeground(ACTIVE_FG if c != 6 else QColor(ACCENT))
+                    item.setForeground(ACTIVE_FG if c != self.COL_TOTAL else QColor(ACCENT))
                 else:
                     bg = FILLED_BG if r % 2 == 0 else ALT_BG
                     item.setBackground(bg)
-                    item.setForeground(FILLED_FG if c != 6 else QColor(ACCENT))
+                    item.setForeground(FILLED_FG if c != self.COL_TOTAL else QColor(ACCENT))
 
     # ── Calculation engine ────────────────────────────────────────────────────
     def _recalc_row(self, r):
         if self._block_signals:
             return
         try:
-            amount      = float(self.invoice_table.item(r, 2).text() or "0")
-            qty         = float(self.invoice_table.item(r, 3).text() or "0")
-            disc_amount = float((self.invoice_table.item(r, 4).text() or "0").replace('%', '').strip())
+            amount      = float(self.invoice_table.item(r, self.COL_PRICE).text() or "0")
+            qty         = float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
+            disc_amount = float((self.invoice_table.item(r, self.COL_DISC).text() or "0").replace('%', '').strip())
             total       = max(qty * amount - disc_amount, 0.0)
         except (ValueError, AttributeError):
             total = 0.0
         self._block_signals = True
-        item = self.invoice_table.item(r, 6)
+        item = self.invoice_table.item(r, self.COL_TOTAL)
         if item:
             # Only show a value when the row has an actual product entry
-            details = self.invoice_table.item(r, 1)
+            details = self.invoice_table.item(r, self.COL_NAME)
             has_product = bool(details and details.text().strip())
             item.setText(f"{total:.2f}" if has_product else "")
             item.setForeground(QColor(ACCENT))
@@ -7919,8 +8128,8 @@ class POSView(QWidget):
         qty_total = 0.0
         for r in range(self.invoice_table.rowCount()):
             try:
-                subtotal  += float(self.invoice_table.item(r, 6).text() or "0")
-                qty_total += float(self.invoice_table.item(r, 3).text() or "0")
+                subtotal  += float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
+                qty_total += float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
             except (ValueError, AttributeError):
                 pass
 
@@ -8136,6 +8345,7 @@ class POSView(QWidget):
                 price=price,
                 part_no=product.get("part_no", ""),
                 product_id=product.get("id"),
+                uom=uom,
             )
         else:
             # #31 — show popup then reopen search on the same row
@@ -8181,6 +8391,7 @@ class POSView(QWidget):
             part_no=product.get("part_no", ""),
             product_id=product.get("id"),
             stock=product.get("stock"),
+            uom=uom,
         )
 
     def _fill_row_from_product(self, row, product):
@@ -8188,14 +8399,16 @@ class POSView(QWidget):
         NOT already on the invoice (called from _add_product_to_invoice new-row path)."""
         self._block_signals = True
         self._init_row(row, part_no=product["part_no"], details=product["name"],
-                       qty="1", amount=f"{product['price']:.2f}", disc="0.00", tax="")
-        item0 = self.invoice_table.item(row, 0)
+                       qty="1", amount=f"{product['price']:.2f}",
+                       uom=(product.get("uom") or ""),
+                       disc="0.00", tax="")
+        item0 = self.invoice_table.item(row, self.COL_PART_NO)
         if item0: item0.setData(Qt.UserRole, product.get("id"))
         self._block_signals = False
         self._recalc_row(row)
-        self.invoice_table.setCurrentCell(row, 3)
+        self.invoice_table.setCurrentCell(row, self.COL_QTY)
         self._active_row      = row
-        self._active_col      = 3
+        self._active_col      = self.COL_QTY
         self._last_filled_row = row
         self._numpad_buffer   = ""
         self._highlight_active_row(row)
@@ -8219,6 +8432,41 @@ class POSView(QWidget):
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
+
+        # ── Global Up/Down → cart navigation ─────────────────────────────────
+        # When the cashier is on the POS screen but focus is on a button / the
+        # product grid / anywhere that isn't a text input, Up/Down should move
+        # through the cart rows. The per-widget branches below still own the
+        # specific behaviours (inline-search popup, table's own edit triggers).
+        if event.type() == QEvent.KeyPress and getattr(self, "_global_cart_nav_ready", False):
+            _k = event.key()
+            if _k in (Qt.Key_Up, Qt.Key_Down):
+                from PySide6.QtWidgets import QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox
+                fw = QApplication.focusWidget()
+                # Skip if the invoice_table or inline search already handle Up/Down
+                # (their own branches below fire with the correct context).
+                if fw is self.invoice_table or fw is getattr(self, "_inline_edit", None):
+                    pass  # fall through to specific branches
+                elif isinstance(fw, (QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox)):
+                    pass  # let text inputs handle Up/Down themselves
+                elif hasattr(self, "invoice_table") and self.invoice_table is not None:
+                    delta = -1 if _k == Qt.Key_Up else 1
+                    cur_r = getattr(self, "_active_row", 0)
+                    cur_r = cur_r if cur_r >= 0 else 0
+                    target = max(0, min(cur_r + delta, self.invoice_table.rowCount() - 1))
+                    self._active_row = target
+                    col = getattr(self, "_active_col", self.COL_PART_NO)
+                    col = col if col >= 0 else self.COL_PART_NO
+                    self.invoice_table.setCurrentCell(target, col)
+                    self._highlight_active_row(target)
+                    try:
+                        self.invoice_table.scrollToItem(
+                            self.invoice_table.item(target, col),
+                            QAbstractItemView.EnsureVisible)
+                    except Exception:
+                        pass
+                    self.invoice_table.setFocus()
+                    return True
 
         # ── inline search edit ────────────────────────────────────────────────
         if obj is self._inline_edit and event.type() == QEvent.KeyPress:
@@ -8253,7 +8501,9 @@ class POSView(QWidget):
                 self._numpad_enter()
                 return True
 
-            # #36 Up arrow — move to row above
+            # #36 Up arrow — move to row above.
+            # Inline search only re-opens when the destination row is empty —
+            # navigating across filled rows shouldn't spawn a search popup.
             if key == Qt.Key_Up:
                 self._close_inline_search()
                 target = max(0, self._active_row - 1)
@@ -8263,11 +8513,13 @@ class POSView(QWidget):
                 self.invoice_table.scrollToItem(
                     self.invoice_table.item(target, self._active_col),
                     QAbstractItemView.EnsureVisible)
-                if self._active_col in (0, 1):
-                    self._open_inline_search(target, self._active_col)
+                if self._active_col in (self.COL_PART_NO, self.COL_NAME):
+                    _n = self.invoice_table.item(target, self.COL_NAME)
+                    if not (_n and _n.text().strip()):
+                        self._open_inline_search(target, self._active_col)
                 return True
 
-            # #36 Down arrow — move to row below
+            # #36 Down arrow — move to row below. Same skip-on-filled rule.
             if key == Qt.Key_Down:
                 self._close_inline_search()
                 target = min(self._active_row + 1, self.invoice_table.rowCount() - 1)
@@ -8277,14 +8529,16 @@ class POSView(QWidget):
                 self.invoice_table.scrollToItem(
                     self.invoice_table.item(target, self._active_col),
                     QAbstractItemView.EnsureVisible)
-                if self._active_col in (0, 1):
-                    self._open_inline_search(target, self._active_col)
+                if self._active_col in (self.COL_PART_NO, self.COL_NAME):
+                    _n = self.invoice_table.item(target, self.COL_NAME)
+                    if not (_n and _n.text().strip()):
+                        self._open_inline_search(target, self._active_col)
                 return True
 
             # #36 Tab — cycle Code→Qty→Disc, wrap to next/prev row
             if key == Qt.Key_Tab:
                 self._close_inline_search()
-                _TAB = [0, 3, 4]
+                _TAB = [self.COL_PART_NO, self.COL_QTY, self.COL_DISC]
                 reverse = bool(mods & Qt.ShiftModifier)
                 if reverse:
                     _TAB = list(reversed(_TAB))
@@ -8342,11 +8596,21 @@ class POSView(QWidget):
         self._active_row    = row
         self._active_col    = col
         self._numpad_buffer = ""
-        if col == 5:
+        if col == self.COL_TAX:
             item = self.invoice_table.item(row, col)
             if item: item.setText("" if item.text() == "T" else "T")
-        elif col in (0, 1):
-            self._open_inline_search(row, col)
+        elif col in (self.COL_PART_NO, self.COL_NAME):
+            # Open inline search ONLY on empty rows. Clicking an existing
+            # cart line should just move the active row (so Up/Down arrow
+            # navigation keeps working) — the search popup stole focus before.
+            name_item = self.invoice_table.item(row, self.COL_NAME)
+            is_filled = bool(name_item and name_item.text().strip())
+            if is_filled:
+                self._close_inline_search()
+                self._highlight_active_row(row)
+                self.invoice_table.setFocus()
+            else:
+                self._open_inline_search(row, col)
         else:
             # Clicking price/qty/disc cols — close search, ready for keyboard/numpad
             self._close_inline_search()
@@ -8367,13 +8631,15 @@ class POSView(QWidget):
             uom, price = result
             self._block_signals = True
             self._init_row(row, part_no=p["part_no"], details=p["name"],
-                           qty="1", amount=f"{price:.2f}", disc="0.00", tax="")
-            item0 = self.invoice_table.item(row, 0)
+                           qty="1", amount=f"{price:.2f}",
+                           uom=(uom or ""),
+                           disc="0.00", tax="")
+            item0 = self.invoice_table.item(row, self.COL_PART_NO)
             if item0: item0.setData(Qt.UserRole, p.get("id"))
             self._block_signals = False
             self._recalc_row(row)
-            self.invoice_table.setCurrentCell(row, 3)
-            self._active_row = row; self._active_col = 3; self._numpad_buffer = ""
+            self.invoice_table.setCurrentCell(row, self.COL_QTY)
+            self._active_row = row; self._active_col = self.COL_QTY; self._numpad_buffer = ""
 
     def _on_product_btn_clicked(self, product: dict):
         """Called when a product tile button is clicked — shows UOM picker if needed."""
@@ -8398,6 +8664,7 @@ class POSView(QWidget):
                 part_no=product.get("part_no", ""),
                 product_id=product.get("id"),
                 stock=product.get("stock"),
+                uom=uom,
             )
 
     def _get_uom_prices(self, part_no: str) -> list[dict]:
@@ -8518,13 +8785,28 @@ class POSView(QWidget):
     # =========================================================================
     # SHIFT GUARD  — called before any transaction action
     # =========================================================================
+    def _prompt_open_shift_if_missing(self):
+        """Called once after MainWindow is shown. If no shift is active, goes
+        straight into the open-shift flow so the cashier can start selling
+        without chasing down a button. No-op when a shift is already open."""
+        try:
+            from models.shift import get_active_shift
+            if get_active_shift():
+                return
+        except Exception:
+            return
+        try:
+            self._open_shift_chooser()
+        except Exception as e:
+            print(f"[MainWindow] auto-prompt open-shift failed: {e}")
+
     def _require_active_shift(self) -> bool:
         """
         Returns True immediately when a shift is running (zero UI overhead).
-        If no shift is active, shows a styled modal with a Start Shift button
-        that fires the exact same _open_shift_chooser() flow as the right-panel
-        button, then refreshes btn_shift_action label/colour.
-        Always returns False after showing the popup so the caller aborts.
+        If no shift is active, opens the shift chooser directly — the old
+        intermediate "No Shift Running" modal was one click of pure friction
+        before every POS session. The caller still aborts (returns False)
+        after the chooser closes; the next user action triggers a re-check.
         """
         try:
             from models.shift import get_active_shift
@@ -8533,97 +8815,18 @@ class POSView(QWidget):
         except Exception:
             return True   # can't check → fail open, don't block
 
-        dlg = QDialog(self)
-        dlg.setWindowTitle("No Active Shift")
-        dlg.setModal(True)
-        dlg.setFixedWidth(420)
-        dlg.setStyleSheet(f"QDialog {{ background:{WHITE}; }}")
-
-        root = QVBoxLayout(dlg)
-        root.setContentsMargins(28, 28, 28, 24)
-        root.setSpacing(16)
-
-        hdr = QLabel("No Shift Running")
-        hdr.setAlignment(Qt.AlignCenter)
-        hdr.setStyleSheet(f"""
-            background:{ORANGE}; color:{WHITE};
-            font-size:15px; font-weight:bold;
-            border-radius:6px; padding:12px 0;
-        """)
-        root.addWidget(hdr)
-
-        body = QLabel(
-            "You must start a shift before adding items\n"
-            "or processing payments.\n\n"
-            "Use the <b>Start / Close Shift</b> button on the\n"
-            "right panel, or press <b>Start Shift</b> below."
-        )
-        body.setAlignment(Qt.AlignCenter)
-        body.setWordWrap(True)
-        body.setStyleSheet(f"color:{DARK_TEXT}; font-size:13px; background:transparent;")
-        root.addWidget(body)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
-
-        start_btn = QPushButton("▶  Start Shift")
-        start_btn.setFixedHeight(44)
-        start_btn.setCursor(Qt.PointingHandCursor)
-        start_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{SUCCESS}; color:{WHITE}; border:none;
-                border-radius:6px; font-size:13px; font-weight:bold;
-            }}
-            QPushButton:hover   {{ background:{SUCCESS_H}; }}
-            QPushButton:pressed {{ background:{NAVY_3}; }}
-        """)
-
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setFixedHeight(44)
-        cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{LIGHT}; color:{DARK_TEXT}; border:1px solid {BORDER};
-                border-radius:6px; font-size:13px;
-            }}
-            QPushButton:hover {{ background:{BORDER}; }}
-        """)
-
-        def _launch_shift():
-            dlg.accept()
+        # No active shift — jump straight into the chooser/open-shift dialog.
+        try:
             self._open_shift_chooser()
-            # Sync the right-panel Start/Close Shift button label
-            if hasattr(self, "btn_shift_action"):
-                try:
-                    from models.shift import get_active_shift as _gas
-                    active = _gas()
-                    if active:
-                        label = f"CLOSE\nSHIFT #{active.get('shift_number', '')}"
-                        bg, hov = ORANGE, AMBER
-                    else:
-                        label = "START\nSHIFT (F2)"
-                        bg, hov = SUCCESS, SUCCESS_H
-                    self.btn_shift_action.setText(label)
-                    self.btn_shift_action.setStyleSheet(f"""
-                        QPushButton {{
-                            background-color:{bg}; color:{WHITE}; border:none;
-                            border-radius:6px; font-size:11px; font-weight:bold;
-                        }}
-                        QPushButton:hover   {{ background-color:{hov}; }}
-                        QPushButton:pressed {{ background-color:{NAVY_3}; }}
-                    """)
-                except Exception:
-                    pass
-
-        start_btn.clicked.connect(_launch_shift)
-        cancel_btn.clicked.connect(dlg.reject)
-
-        btn_row.addWidget(start_btn, 2)
-        btn_row.addWidget(cancel_btn, 1)
-        root.addLayout(btn_row)
-
-        dlg.exec()
-        return False   # always block; user re-tries after starting shift
+        except Exception as e:
+            print(f"[_require_active_shift] open-shift launch failed: {e}")
+        # Re-check: if user completed opening a shift inside the chooser,
+        # let the caller proceed instead of bouncing them out.
+        try:
+            from models.shift import get_active_shift
+            return bool(get_active_shift())
+        except Exception:
+            return False
 
     # POS RULES HELPERS  (#3 #4 #7)
     # =========================================================================
@@ -9014,7 +9217,7 @@ class POSView(QWidget):
                 break
                 
             # Copy data from the row below to the current row
-            for col in range(7):
+            for col in range(self.INVOICE_COL_COUNT):
                 src = self.invoice_table.item(shift + 1, col)
                 dst = self.invoice_table.item(shift, col)
                 if src and dst:
@@ -9605,6 +9808,26 @@ class POSView(QWidget):
             dlg.show()
         else:
             coming_soon(self, "Sales List — add views/dialogs/sales_list_dialog.py")
+
+    def _open_sales_order_list(self):
+        """Open the Sales Orders list (laybyes + any pulled SO from Frappe).
+        Cashiers can convert fully-paid orders into invoices here."""
+        try:
+            from views.dialogs.sales_order_list_dialog import SalesOrderListDialog
+            dlg = SalesOrderListDialog(self, user=getattr(self, "user", None))
+            dlg.exec()
+        except Exception as e:
+            QMessageBox.warning(self, "Sales Orders",
+                f"Could not open Sales Orders list:\n{e}")
+
+    def _open_payment_modes_dialog(self):
+        """Maintenance → Payment Modes. Reorder MOPs, set exchange rates."""
+        try:
+            from views.dialogs.payment_modes_dialog import PaymentModesDialog
+            PaymentModesDialog(self).exec()
+        except Exception as e:
+            QMessageBox.warning(self, "Payment Modes",
+                f"Could not open Payment Modes dialog:\n{e}")
     
     
 
@@ -9741,6 +9964,7 @@ class POSView(QWidget):
                 discAmt         = float(sale.get("discount_amount", 0)),
                 paymentMode     = sale.get("method", "CASH"),
                 currency        = sale.get("currency", "USD"),
+                receiptHeader   = co.get("receipt_header", ""),
                 footer          = co.get("footer_text", "Thank you for your purchase!"),
             )
 
@@ -10114,11 +10338,11 @@ class POSView(QWidget):
             if qty <= 0:
                 continue
             try:
-                part_no  = self.invoice_table.item(r, 0).text()
-                name     = self.invoice_table.item(r, 1).text()
-                price    = float(self.invoice_table.item(r, 2).text() or "0")
-                total_ln = float(self.invoice_table.item(r, 6).text() or "0")
-                product_id = self.invoice_table.item(r, 0).data(Qt.UserRole)
+                part_no  = self.invoice_table.item(r, self.COL_PART_NO).text()
+                name     = self.invoice_table.item(r, self.COL_NAME).text()
+                price    = float(self.invoice_table.item(r, self.COL_PRICE).text() or "0")
+                total_ln = float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
+                product_id = self.invoice_table.item(r, self.COL_PART_NO).data(Qt.UserRole)
             except (ValueError, AttributeError):
                 continue
             items.append({
@@ -10389,7 +10613,7 @@ class POSView(QWidget):
             limit = manager.get("max_discount_percent", 100) or 100
 
         # ── 5. Read existing value to pre-fill ───────────────────────────────
-        existing = self.invoice_table.item(row, 4)
+        existing = self.invoice_table.item(row, self.COL_DISC)
         current_val = 0.0
         if existing and existing.text().strip():
             try:
@@ -10401,8 +10625,8 @@ class POSView(QWidget):
 
         # ── 6. Get line total for conversion ─────────────────────────────────
         try:
-            line_price = float(self.invoice_table.item(row, 2).text() or "0")
-            line_qty   = float(self.invoice_table.item(row, 3).text() or "1")
+            line_price = float(self.invoice_table.item(row, self.COL_PRICE).text() or "0")
+            line_qty   = float(self.invoice_table.item(row, self.COL_QTY).text() or "1")
             line_total = line_price * line_qty
         except (ValueError, AttributeError):
             line_total = 0.0
@@ -10647,7 +10871,7 @@ class POSView(QWidget):
         else:
             disc_item.setForeground(QColor(NAVY))
 
-        self.invoice_table.setItem(row, 4, disc_item)
+        self.invoice_table.setItem(row, self.COL_DISC, disc_item)
         self._recalc_row(row)
         self._recalc_totals()
 
@@ -10889,6 +11113,12 @@ class MainWindow(QMainWindow):
         # The mode is toggleable from the POS navbar at any time.
         self._stack.setCurrentIndex(0)
 
+        # Proactively prompt for a shift right after login if none is running.
+        # Deferred via singleShot so the main window finishes painting first;
+        # the chooser then opens immediately without an intermediate popup.
+        # The method lives on POSView — MainWindow doesn't own the shift UI.
+        QTimer.singleShot(0, self._pos_view._prompt_open_shift_if_missing)
+
         # ── Background sync services ──────────────────────────────────────────
         # Product sync (every 15 s) — keeps local product list up to date
         try:
@@ -10939,6 +11169,16 @@ class MainWindow(QMainWindow):
             import logging
             logging.getLogger("MainWindow").warning(
                 "Accounts sync could not start: %s", _e)
+
+        # Sales Order pull — pulls Frappe Sales Orders → local DB every 5 min
+        # so cashiers can finalise fully-paid laybyes into invoices offline.
+        try:
+            from services.sales_order_pull_service import start_sales_order_pull_daemon
+            self._sales_order_pull = start_sales_order_pull_daemon()
+        except Exception as _e:
+            import logging
+            logging.getLogger("MainWindow").warning(
+                "Sales Order pull could not start: %s", _e)
 
         # Credit note sync (every 60s) -- pushes ready CNs to server
         try:
@@ -11112,6 +11352,7 @@ class MainWindow(QMainWindow):
         sales_menu = mb.addMenu("Sales")
         for label, fn in [
             ("Sales Invoice List", self._pos_view._open_sales_list),
+            ("Sales Orders",       self._pos_view._open_sales_order_list),
             (None, None),
             ("Payments",           self._pos_view._open_customer_payment_entry),
             (None, None),
@@ -11399,6 +11640,7 @@ class MainWindow(QMainWindow):
         sales_menu = mb.addMenu("Sales")
         for label, fn in [
             ("Sales Invoice List", self._pos_view._open_sales_list),
+            ("Sales Orders",       self._pos_view._open_sales_order_list),
             (None, None),
             ("Payments",           self._pos_view._open_customer_payment_entry),
             (None, None),
@@ -11528,23 +11770,35 @@ class MainWindow(QMainWindow):
             self, "Logout", "Logout and return to login screen?",
             QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            self.hide()
-            # Do NOT release the instance lock here.  The lock lives at class
-            # level for the whole process.  Releasing it would let a second
-            # EXE start before the login dialog finishes.
-            try:
-                from views.login_dialog import LoginDialog
-                dlg = LoginDialog()
-                if dlg.exec() == QDialog.Accepted:
-                    new_win = MainWindow(user=dlg.logged_in_user)
-                    new_win.show()
-                    # Keep a reference so the window is not garbage-collected.
-                    self._next_window = new_win
-                else:
-                    QApplication.quit()
-            except Exception:
+            self._do_logout()
+
+    def _logout_after_shift_close(self):
+        """Shift was just reconciled — skip the "Logout?" confirmation and
+        return straight to the login screen so the next cashier can open
+        a new shift without the old one lingering."""
+        self._do_logout()
+
+    def _do_logout(self):
+        """Hide the current main window, show LoginDialog, on success launch
+        a fresh MainWindow. Shared by the user-initiated Logout button and
+        the automatic post-shift-close flow."""
+        self.hide()
+        # Do NOT release the instance lock here.  The lock lives at class
+        # level for the whole process.  Releasing it would let a second
+        # EXE start before the login dialog finishes.
+        try:
+            from views.login_dialog import LoginDialog
+            dlg = LoginDialog()
+            if dlg.exec() == QDialog.Accepted:
+                new_win = MainWindow(user=dlg.logged_in_user)
+                new_win.show()
+                # Keep a reference so the window is not garbage-collected.
+                self._next_window = new_win
+            else:
                 QApplication.quit()
-            self.close()
+        except Exception:
+            QApplication.quit()
+        self.close()
 # =============================================================================
 # CUSTOMER PAYMENT ENTRY DIALOG
 # Clean version - No confirmations, just save and close
@@ -12620,6 +12874,7 @@ class ReprintDialog(QDialog):
                 discAmt             = float(sale.get("discount_amount", 0)),
                 paymentMode         = sale.get("method", "CASH"),
                 currency            = sale.get("currency", "USD"),
+                receiptHeader       = co.get("receipt_header", ""),
                 footer              = co.get("footer_text", "Thank you for your purchase!"),
             )
 
