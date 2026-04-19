@@ -372,11 +372,12 @@ def sync_products(api_key: str = "", api_secret: str = "",
 
         print(f"[sync]   {len(products)} products on page {current_page}/{total_pages}")
 
-        for raw in products:
+        for idx, raw in enumerate(products, start=1):
             item_code = str(raw.get("itemcode") or "").strip()
             if not item_code:
                 result["skipped"] += 1
                 continue
+            print(f"[sync]   [{idx}/{len(products)}] upsert {item_code}...", flush=True)
             try:
                 inserted = _upsert_product(raw)
                 result["products_synced"] += 1
@@ -389,7 +390,7 @@ def sync_products(api_key: str = "", api_secret: str = "",
                 err_msg = f"{item_code}: {e}"
                 result["errors"].append(err_msg)
                 if result["skipped"] <= 5:
-                    print(f"[sync] ❌ {err_msg}")
+                    print(f"[sync] ❌ {err_msg}", flush=True)
 
         if page is not None:
             break
@@ -435,41 +436,74 @@ def _upsert_product(raw: dict) -> bool:
                 pass
 
     category = group if group not in ("All Item Groups", "") else ""
+    is_pharmacy = 1 if raw.get("is_pharmacy_product") else 0
+    batches     = raw.get("batches") or []
 
+    print(f"[sync]     ↳ {part_no}: connect", flush=True)
     conn = get_connection()
     cur  = conn.cursor()
     try:
+        print(f"[sync]     ↳ {part_no}: select", flush=True)
         cur.execute("SELECT id, price FROM products WHERE part_no = ?", (part_no,))
         existing = fetchone_dict(cur)
 
         if existing:
             local_price = float(existing.get("price") or 0)
             new_price   = server_price if server_price > 0 else local_price
+            print(f"[sync]     ↳ {part_no}: update", flush=True)
             cur.execute("""
                 UPDATE products
-                SET name     = ?,
-                    stock    = ?,
-                    uom      = ?,
-                    price    = ?,
-                    category = CASE WHEN ? <> '' THEN ? ELSE category END
+                SET name                = ?,
+                    stock               = ?,
+                    uom                 = ?,
+                    price               = ?,
+                    category            = CASE WHEN ? <> '' THEN ? ELSE category END,
+                    is_pharmacy_product = ?
                 WHERE part_no = ?
-            """, (name, stock, uom, new_price, category, category, part_no))
+            """, (name, stock, uom, new_price, category, category, is_pharmacy, part_no))
             conn.commit()
-            _upsert_uom_prices(cur, part_no, raw.get("prices") or [])
-            conn.commit()
-            return False
+            is_new = False
         else:
+            print(f"[sync]     ↳ {part_no}: insert", flush=True)
             cur.execute("""
                 INSERT INTO products
                     (part_no, name, price, stock, category,
-                     uom, conversion_factor,
+                     uom, conversion_factor, is_pharmacy_product,
                      order_1, order_2, order_3, order_4, order_5, order_6)
-                VALUES (?, ?, ?, ?, ?, ?, 1.0, 0, 0, 0, 0, 0, 0)
-            """, (part_no, name, server_price, stock, category, uom))
+                VALUES (?, ?, ?, ?, ?, ?, 1.0, ?, 0, 0, 0, 0, 0, 0)
+            """, (part_no, name, server_price, stock, category, uom, is_pharmacy))
             conn.commit()
-            _upsert_uom_prices(cur, part_no, raw.get("prices") or [])
+            is_new = True
+
+        print(f"[sync]     ↳ {part_no}: uom_prices", flush=True)
+        _upsert_uom_prices(cur, part_no, raw.get("prices") or [])
+        conn.commit()
+
+        # Batches: DELETE + INSERT using the same cursor (no separate connection
+        # to avoid the deadlock we previously hit on product_sync_windows_service).
+        print(f"[sync]     ↳ {part_no}: batches ({len(batches)})", flush=True)
+        try:
+            cur.execute(
+                "DELETE FROM product_batches "
+                "WHERE product_id IN (SELECT id FROM products WHERE part_no = ?)",
+                (part_no,),
+            )
+            for b in batches:
+                bn = (b.get("batch_no") or "").strip()
+                if not bn:
+                    continue
+                cur.execute(
+                    "INSERT INTO product_batches "
+                    "    (product_id, batch_no, expiry_date, qty, synced) "
+                    "SELECT id, ?, ?, ?, 1 FROM products WHERE part_no = ?",
+                    (bn, b.get("expiry_date"), float(b.get("qty") or 0), part_no),
+                )
             conn.commit()
-            return True
+        except Exception as _be:
+            print(f"[sync]     ↳ {part_no}: batch upsert failed: {_be}", flush=True)
+
+        print(f"[sync]     ↳ {part_no}: done", flush=True)
+        return is_new
     finally:
         conn.close()
 
