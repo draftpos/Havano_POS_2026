@@ -113,6 +113,7 @@ _SALE_SELECT = """
        COALESCE(s.tendered_usd,  0)    AS tendered_usd,
        COALESCE(s.tendered_zwd,  0)    AS tendered_zwd,
        COALESCE(s.exchange_rate, 1)    AS exchange_rate,
+       COALESCE(s.order_number,  0)    AS order_number,
        COALESCE(C.company_name,  '')  AS company_name,
        COALESCE(C.address_1,     '')  AS address_1,
        COALESCE(C.address_2,     '')  AS address_2,
@@ -1618,6 +1619,7 @@ def print_kitchen_orders(sale: dict):
                 invoiceNo=sale["invoice_no"],
                 KOT=order_key,
                 cashierName=sale.get("cashier_name", ""),
+                orderNumber=int(sale.get("order_number", 0) or 0),
                 items=[Item(
                     productName=it["product_name"],
                     qty=float(it["qty"]),
