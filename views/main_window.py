@@ -5272,28 +5272,33 @@ class POSView(QWidget):
         if self.parent_window:
             self.parent_window._set_status(f"Laybye #{order_id} Saved Successfully")
     def _refresh_pay_button_label(self):
-        # Set the main action button's label based on cart mode + user role.
-        #   Sales mode                     → "PAY  F5"
-        #   Quote mode, non-pharmacist     → "FINALIZE QUOTE"
-        #   Quote mode, pharmacist         → "DISPENSE"
-        # Behavior change lives in _open_payment — this method only paints text.
+        # Pharmacists always dispense (Quote workflow, no payment). Everyone
+        # else follows the explicit cart-mode toggle. Checking is_pharmacist
+        # live on every call — not relying on the potentially-stale
+        # _cart_mode — means the label is always correct for the current
+        # session regardless of init-time timing.
         if not hasattr(self, "btn_pay") or self.btn_pay is None:
             return
-        mode  = getattr(self, "_cart_mode", "sales")
         _user = getattr(self, "user", None)
         _role = (_user or {}).get("role") if isinstance(_user, dict) else None
         _is_p = False
-        if mode == "quote":
-            try:
-                from utils.roles import is_pharmacist
-                _is_p = bool(is_pharmacist(_user))
-            except Exception as _re:
-                print(f"[POSView] is_pharmacist import failed: {_re}", flush=True)
-            self.btn_pay.setText("DISPENSE" if _is_p else "FINALIZE QUOTE")
+        try:
+            from utils.roles import is_pharmacist
+            _is_p = bool(is_pharmacist(_user))
+        except Exception as _re:
+            print(f"[POSView] is_pharmacist import failed: {_re}", flush=True)
+
+        if _is_p:
+            # Lock pharmacists into Quote mode so _open_payment reroutes too
+            self._cart_mode = "quote"
+            self.btn_pay.setText("DISPENSE")
+        elif getattr(self, "_cart_mode", "sales") == "quote":
+            self.btn_pay.setText("FINALIZE QUOTE")
         else:
             self.btn_pay.setText("PAY  F5")
-        print(f"[POSView] PAY label refresh: mode={mode!r} role={_role!r} "
-              f"is_pharmacist={_is_p} → {self.btn_pay.text()!r}", flush=True)
+        print(f"[POSView] PAY label refresh: mode={getattr(self, '_cart_mode', '?')!r} "
+              f"role={_role!r} is_pharmacist={_is_p} → {self.btn_pay.text()!r}",
+              flush=True)
 
     def _on_quote_mode_toggle(self, checked: bool):
         # Flip cart mode and repaint the PAY button. Behavior switch happens
@@ -5320,11 +5325,19 @@ class POSView(QWidget):
             return
 
         # ── 0a. QUOTE MODE REROUTE ────────────────────────────────────────────
-        # In Quote mode the finalize button saves the cart as a quotation
-        # instead of opening the payment flow. Labelled "Dispense" for
-        # pharmacists, "Finalize Quote" for everyone else. Toggled from the
-        # navbar Quote Mode button; defaults to on for pharmacists.
-        if getattr(self, "_cart_mode", "sales") == "quote":
+        # Pharmacists always dispense (never finalize a sale). Other users
+        # follow the explicit Quote-Mode toggle. Live is_pharmacist check so
+        # this is immune to _cart_mode drift.
+        _reroute = False
+        try:
+            from utils.roles import is_pharmacist
+            if is_pharmacist(getattr(self, "user", None)):
+                _reroute = True
+        except Exception:
+            pass
+        if not _reroute and getattr(self, "_cart_mode", "sales") == "quote":
+            _reroute = True
+        if _reroute:
             self._save_quotation()
             return
 
