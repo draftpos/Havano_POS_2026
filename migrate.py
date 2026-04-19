@@ -643,6 +643,41 @@ def migrate():
     _add_column_if_missing("sale_items", "uom", "NVARCHAR(20) NULL")
     print("[migrate] ✅  sale_items.uom")
 
+    # ── De-duplicate products + add UNIQUE (part_no) ──────────────────────────
+    # Two sync paths (login sync_service.sync_products AND background
+    # SyncWorker → sync_products_smart) run concurrently after login, and
+    # products.part_no had no UNIQUE constraint, so a race between them
+    # inserted the same item twice. Clean up any existing duplicates, then
+    # add the constraint so future races fail fast instead of silently
+    # doubling the catalog.
+    try:
+        # Normalise casing first so UPPER collapses "Amoxlyn" + "AMOXLYN"
+        cur.execute("UPDATE products SET part_no = UPPER(part_no) WHERE part_no <> UPPER(part_no)")
+        # Keep the highest-id row per part_no, drop the rest.
+        cur.execute("""
+            DELETE FROM products
+            WHERE id NOT IN (
+                SELECT MAX(id) FROM products GROUP BY part_no
+            )
+        """)
+        removed = cur.rowcount if cur.rowcount is not None else 0
+        conn.commit()
+        if removed and removed > 0:
+            print(f"[migrate] 🧹  Removed {removed} duplicate product row(s)")
+
+        # Add the UNIQUE constraint if it isn't there yet.
+        cur.execute("""
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'UQ_products_part_no' AND object_id = OBJECT_ID('products')
+            )
+            ALTER TABLE products ADD CONSTRAINT UQ_products_part_no UNIQUE (part_no)
+        """)
+        conn.commit()
+        print("[migrate] ✅  products.part_no UNIQUE constraint")
+    except Exception as _e:
+        print(f"[migrate]   ! product dedupe / UNIQUE failed: {_e}")
+
     # ── Seed default admin if users table is empty ────────────────────────────
     cur.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:

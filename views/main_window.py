@@ -6302,11 +6302,27 @@ class POSView(QWidget):
 
         # ── Cart Mode (Sales vs Quote) — default by role ──────────────────────
         # Pharmacists default to Quote; everyone else to Sales. Toggleable.
+        _cart_mode_user = getattr(self, "user", None)
+        _is_p = False
         try:
             from utils.roles import is_pharmacist as _is_pharm
-            self._cart_mode = "quote" if _is_pharm(getattr(self, "user", None)) else "sales"
-        except Exception:
-            self._cart_mode = "sales"
+            _is_p = bool(_is_pharm(_cart_mode_user))
+        except Exception as _cmerr:
+            print(f"[POSView] cart_mode init — is_pharmacist import failed: {_cmerr}", flush=True)
+        _role_at_init = (
+            _cart_mode_user.get("role")
+            if isinstance(_cart_mode_user, dict) else None
+        )
+        _keys_at_init = (
+            list(_cart_mode_user.keys())
+            if isinstance(_cart_mode_user, dict) else None
+        )
+        print(
+            f"[POSView] cart_mode init: user_type={type(_cart_mode_user).__name__} "
+            f"role={_role_at_init!r} keys={_keys_at_init} is_pharmacist={_is_p}",
+            flush=True,
+        )
+        self._cart_mode = "quote" if _is_p else "sales"
 
         self.quote_mode_btn = QPushButton("Quote Mode")
         self.quote_mode_btn.setCheckable(True)
