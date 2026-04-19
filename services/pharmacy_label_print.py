@@ -65,15 +65,16 @@ def _fmt_date(value) -> str:
 
 _LABEL_TEMPLATE = (
     "<div style=\"font-family:'Segoe UI',Arial,sans-serif; padding:3mm; font-size:8pt;\">"
+    # Pharmacy block goes ABOVE the drug details per UX request
+    "<div style=\"font-weight:bold; font-size:8pt; text-align:center;\">{pharmacy_name}</div>"
+    "<div style=\"font-size:7pt; color:#444; text-align:center;\">{pharmacy_address}</div>"
+    "<hr style=\"margin:1mm 0;\">"
     "<div style=\"font-weight:bold; font-size:9pt;\">{item_name}</div>"
-    "<div>{qty} {uom}</div>"
+    "<div>{qty} by {uom}</div>"
     "<div>Dosage: {dosage}</div>"
     "<div>Batch: {batch_no} &nbsp;&nbsp; Exp: {expiry_date}</div>"
     "{doctor_block}"
     "<div style=\"margin-top:1mm;\">Pharmacist: {pharmacist_name}</div>"
-    "<hr style=\"margin:1mm 0;\">"
-    "<div style=\"font-size:7pt; color:#444;\">{pharmacy_name}</div>"
-    "<div style=\"font-size:7pt; color:#444;\">{pharmacy_address}</div>"
     "</div>"
 )
 

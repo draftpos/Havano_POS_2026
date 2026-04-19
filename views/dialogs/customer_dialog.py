@@ -3126,14 +3126,14 @@ class QuickAddCustomerDialog(QDialog):
         fl.setContentsMargins(24, 20, 24, 8)
         fl.setSpacing(10)
 
-        self._f_first = self._field("First name", required=True)
-        self._f_last  = self._field("Last name")
+        # Single full-name field — matches Frappe's `customer_name` directly
+        # instead of splitting into first/last and reassembling.
+        self._f_name  = self._field("Full name (first + last)", required=True)
         self._f_phone = self._field("Phone number")
         self._f_city  = self._field("City")
 
         for lbl_txt, widget in [
-            ("FIRST NAME",   self._f_first),
-            ("LAST NAME",    self._f_last),
+            ("FULL NAME",    self._f_name),
             ("PHONE NUMBER", self._f_phone),
             ("CITY",         self._f_city),
         ]:
@@ -3249,7 +3249,7 @@ class QuickAddCustomerDialog(QDialog):
         root.addWidget(foot)
 
         # focus the first field
-        self._f_first.setFocus()
+        self._f_name.setFocus()
 
     # -------------------------------------------------------------------------
     def _populate_doctor_combo(self, select_id: int | None = None):
@@ -3331,18 +3331,14 @@ class QuickAddCustomerDialog(QDialog):
 
     # -------------------------------------------------------------------------
     def _save(self):
-        first = self._f_first.text().strip()
-        last  = self._f_last.text().strip()
-        phone = self._f_phone.text().strip()
-        city  = self._f_city.text().strip()
+        full_name = self._f_name.text().strip()
+        phone     = self._f_phone.text().strip()
+        city      = self._f_city.text().strip()
 
-        if not first:
-            self._status.setText("First name is required.")
-            self._f_first.setFocus()
+        if not full_name:
+            self._status.setText("Full name is required.")
+            self._f_name.setFocus()
             return
-
-        # Build full customer_name from first + last
-        full_name = f"{first} {last}".strip()
 
         self._save_btn.setEnabled(False)
         self._status.setText("")
