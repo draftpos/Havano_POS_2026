@@ -19,13 +19,25 @@ if _ROOT not in sys.path:
 _LOG_PATH = os.path.join(_ROOT, "logs", "product_sync_service.log")
 os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
 
+# Build the handler list defensively — when this process is a PyInstaller
+# --windowed --onefile build, sys.stdout is None and sys.stdout.fileno()
+# throws AttributeError at module import time, which bricks the EXE. Only
+# attach a StreamHandler when a real stdout is available.
+_log_handlers: list = [logging.FileHandler(_LOG_PATH, encoding="utf-8")]
+try:
+    if sys.stdout is not None and hasattr(sys.stdout, "fileno"):
+        _fd = sys.stdout.fileno()  # may raise OSError if redirected to NUL
+        _log_handlers.append(
+            logging.StreamHandler(open(_fd, mode="w", encoding="utf-8", closefd=False))
+        )
+except (AttributeError, OSError, ValueError):
+    # Windowed EXE / redirected stream — file handler alone is fine
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  [%(levelname)s]  %(message)s",
-    handlers=[
-        logging.FileHandler(_LOG_PATH, encoding="utf-8"),
-        logging.StreamHandler(open(sys.stdout.fileno(), mode="w", encoding="utf-8", closefd=False)),
-    ],
+    handlers=_log_handlers,
 )
 log = logging.getLogger("ProductSyncService")
 
