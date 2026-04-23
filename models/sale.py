@@ -1027,7 +1027,7 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
     if fiscal_enabled and not fiscal_ready:
         print(f"⏳ Waiting for fiscalization for sale {sale.get('id')}...")
         wait_start   = time.time()
-        wait_seconds = 3
+        wait_seconds = 6
 
         while time.time() - wait_start < wait_seconds:
             try:

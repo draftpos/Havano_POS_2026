@@ -2,10 +2,10 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QHeaderView, QAbstractItemView, QMessageBox, 
-    QApplication, QTabWidget, QWidget
+    QApplication, QTabWidget, QWidget, QToolButton, QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFont
 import qtawesome as qta
 from database.db import get_connection, fetchall_dicts
 
@@ -24,7 +24,97 @@ ROW_ALT = "#edf3fb"
 
 class UnfiscalizedDialog(QDialog):
     """Dialog to show and retry unfiscalized sales and Z-Report summaries"""
-    
+    def _load_history(self):
+        """Load all fiscalized sales grouped by day into the history table."""
+        self._hist_table.setRowCount(0)
+
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    id,
+                    invoice_no,
+                    customer_name,
+                    total,
+                    fiscal_qr_code,
+                    fiscal_verification_code,
+                    fiscal_global_no,
+                    CAST(COALESCE(fiscal_sync_date, created_at) AS DATE) AS fiscal_day
+                FROM sales
+                WHERE fiscal_status = 'fiscalized'
+                ORDER BY fiscal_day DESC, id DESC
+            """)
+            rows = fetchall_dicts(cursor)
+            conn.close()
+        except Exception as e:
+            print(f"[UnfiscalizedDialog] Failed to load history: {e}")
+            return
+
+        if not rows:
+            return
+
+        current_day = None
+
+        for sale in rows:
+            day = str(sale.get("fiscal_day") or "Unknown Date")
+
+            if day != current_day:
+                current_day = day
+                self._insert_day_header(day)
+
+            r = self._hist_table.rowCount()
+            self._hist_table.insertRow(r)
+
+            inv_no      = sale.get("invoice_no") or ""
+            customer    = sale.get("customer_name") or "Walk-in"
+            total_val   = float(sale.get("total") or 0)
+            global_no   = str(sale.get("fiscal_global_no") or "")
+            verif_code  = sale.get("fiscal_verification_code") or ""
+
+            date_item = QTableWidgetItem(day)
+            date_item.setForeground(QColor(MUTED))
+            date_item.setTextAlignment(Qt.AlignCenter)
+            self._hist_table.setItem(r, 0, date_item)
+
+            self._hist_table.setItem(r, 1, QTableWidgetItem(inv_no))
+            self._hist_table.setItem(r, 2, QTableWidgetItem(customer))
+
+            total_item = QTableWidgetItem(f"${total_val:,.2f}")
+            total_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._hist_table.setItem(r, 3, total_item)
+
+            # Global No in place of fiscal_code (which doesn't exist)
+            fc_item = QTableWidgetItem(f"Global #{global_no}" if global_no else "")
+            fc_item.setFont(self._mono_font())
+            fc_item.setForeground(QColor(MUTED))
+            self._hist_table.setItem(r, 4, fc_item)
+
+            vc_item = QTableWidgetItem(verif_code)
+            vc_item.setFont(self._mono_font(bold=True))
+            vc_item.setForeground(QColor(ACCENT))
+            vc_item.setToolTip("Click the copy button → to copy this verification code")
+            self._hist_table.setItem(r, 5, vc_item)
+
+            copy_btn = QToolButton()
+            copy_btn.setIcon(qta.icon("fa5s.copy", color=ACCENT))
+            copy_btn.setToolTip(f"Copy verification code for {inv_no}")
+            copy_btn.setCursor(Qt.PointingHandCursor)
+            copy_btn.setStyleSheet(f"""
+                QToolButton {{
+                    border: none; background: transparent; padding: 2px;
+                }}
+                QToolButton:hover {{
+                    background: {ROW_ALT}; border-radius: 3px;
+                }}
+                QToolButton:pressed {{
+                    background: {BORDER};
+                }}
+            """)
+            copy_btn.clicked.connect(
+                lambda checked, vc=verif_code, inv=inv_no: self._copy_verification_code(vc, inv)
+            )
+            self._hist_table.setCellWidget(r, 6, copy_btn)
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Fiscalization Dashboard")
@@ -76,6 +166,10 @@ class UnfiscalizedDialog(QDialog):
         # Tab 2: Aggregated Summary (The "Z" Details)
         self._summary_tab = self._build_summary_tab()
         self._tabs.addTab(self._summary_tab, qta.icon("fa5s.chart-line"), "Fiscal Day Summary (Z)")
+
+        # Tab 3: Fiscalization History by Day
+        self._history_tab = self._build_history_tab()
+        self._tabs.addTab(self._history_tab, qta.icon("fa5s.history"), "Fiscalization History")
         
         layout.addWidget(self._tabs, 1)
         
@@ -153,6 +247,40 @@ class UnfiscalizedDialog(QDialog):
         self._style_table(self._sum_table)
         l.addWidget(self._sum_table)
         
+        return w
+
+    def _build_history_tab(self) -> QWidget:
+        """Tab 3: Fiscalization History grouped by day, with copyable verification codes."""
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(10, 10, 10, 10)
+        l.setSpacing(8)
+
+        info = QLabel(
+            "Fiscalized invoices grouped by day. Click the copy icon to copy the verification code for any invoice."
+        )
+        info.setStyleSheet(f"color: {MUTED}; font-size: 12px; margin-bottom: 4px;")
+        l.addWidget(info)
+
+        # 7 columns: Date, Invoice No, Customer, Total, Fiscal Code, Verification Code, Copy
+        self._hist_table = QTableWidget(0, 7)
+        self._hist_table.setHorizontalHeaderLabels([
+            "Date", "Invoice No", "Customer", "Total ($)", "Fiscal Code", "Verification Code", ""
+        ])
+        hh = self._hist_table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Fixed);  self._hist_table.setColumnWidth(0, 100)
+        hh.setSectionResizeMode(1, QHeaderView.Fixed);  self._hist_table.setColumnWidth(1, 150)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed);  self._hist_table.setColumnWidth(3, 100)
+        hh.setSectionResizeMode(4, QHeaderView.Fixed);  self._hist_table.setColumnWidth(4, 160)
+        hh.setSectionResizeMode(5, QHeaderView.Fixed);  self._hist_table.setColumnWidth(5, 200)
+        hh.setSectionResizeMode(6, QHeaderView.Fixed);  self._hist_table.setColumnWidth(6, 44)
+
+        self._style_table(self._hist_table)
+        # Allow copy via keyboard too
+        self._hist_table.setSelectionMode(QAbstractItemView.SingleSelection)
+
+        l.addWidget(self._hist_table)
         return w
 
     def _style_table(self, tbl):
@@ -256,6 +384,58 @@ class UnfiscalizedDialog(QDialog):
             self._sum_table.item(r, 0).setForeground(QColor(ACCENT))
             for c in range(4):
                 self._sum_table.item(r, c).setBackground(QColor(ROW_ALT))
+
+        # 3. Load Fiscalization History (Tab 3)
+        self._load_history()
+        
+    
+
+    
+    def _insert_day_header(self, day: str):
+        """Insert a full-width group header row for a given fiscal day."""
+        r = self._hist_table.rowCount()
+        self._hist_table.insertRow(r)
+
+        header_item = QTableWidgetItem(f"  📅  {day}")
+        header_item.setFlags(Qt.ItemIsEnabled)  # not selectable
+        header_font = QFont()
+        header_font.setBold(True)
+        header_font.setPointSize(10)
+        header_item.setFont(header_font)
+        header_item.setForeground(QColor(WHITE))
+        header_item.setBackground(QColor(NAVY))
+
+        self._hist_table.setItem(r, 0, header_item)
+
+        # Span look: fill remaining cols with same style
+        for c in range(1, 7):
+            filler = QTableWidgetItem("")
+            filler.setFlags(Qt.ItemIsEnabled)
+            filler.setBackground(QColor(NAVY))
+            self._hist_table.setItem(r, c, filler)
+
+        self._hist_table.setRowHeight(r, 32)
+
+    def _copy_verification_code(self, code: str, inv_no: str):
+        """Copy the verification code to clipboard and briefly confirm."""
+        if not code:
+            QMessageBox.warning(self, "No Code", f"No verification code available for {inv_no}.")
+            return
+
+        clipboard = QApplication.clipboard()
+        clipboard.setText(code)
+
+        # Brief tooltip-style confirmation via window title flash
+        original_title = self.windowTitle()
+        self.setWindowTitle(f"✔  Copied: {code[:32]}{'…' if len(code) > 32 else ''}")
+        QTimer.singleShot(2000, lambda: self.setWindowTitle(original_title))
+
+    @staticmethod
+    def _mono_font(bold: bool = False) -> QFont:
+        font = QFont("Courier New")
+        font.setPointSize(9)
+        font.setBold(bold)
+        return font
 
     def _v_cell(self, val, bold=False):
         it = QTableWidgetItem(f"${val:,.2f}")

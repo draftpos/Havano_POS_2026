@@ -296,6 +296,9 @@ class PrintingService:
                 except Exception as e:
                     print(f"[PrintService] Error drawing fiscal QR for credit note: {e}")
             elif fiscal_enabled and not fiscal_ready:
+                pixmap = QPixmap("assets/qr.png")
+                if not pixmap.isNull():
+                    painter.drawPixmap(self.margin + (self.paper_width - self.margin * 2 - pixmap.width()) // 2, y, pixmap)
                 # Fiscalization enabled but QR not ready
                 painter.setFont(bold_font)
                 painter.setPen(QColor(ORANGE))
@@ -1186,19 +1189,18 @@ class PrintingService:
                     except Exception as e:
                         print(f"[PrintService] Error drawing fiscal QR: {e}")
                 else:
+                    y += 60
                     # Fiscalization enabled but QR not in DB yet — already waited upstream
-                    painter.setFont(bold_font)
-                    painter.setPen(QColor(ORANGE))
-                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 30,
-                                     Qt.AlignCenter, "FISCALIZATION PENDING")
-                    y += 30
-                    painter.setFont(normal_font)
-                    painter.setPen(QColor(DARK_TEXT))
-                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
-                                     Qt.AlignCenter, "Receipt will be re-issued once fiscalized")
-                    y += 40
-                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
-                    y += 20
+                    pixmap = QPixmap("assets/qr.png")
+                    if not pixmap.isNull():
+                        painter.drawPixmap(self.margin + (self.paper_width - self.margin * 2 - pixmap.width()) // 2, y, pixmap)
+                        y += pixmap.height() + 15
+                        
+                        painter.setFont(normal_font) # or a specific warning font
+                        painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
+                                 Qt.AlignCenter, "NOT FISCALIZED")
+                        y += 20
+                    
 
             # Footer — fully user-configurable via Company Defaults → Footer Text.
             # Multi-line values are rendered as separate centered lines so the
@@ -1206,7 +1208,7 @@ class PrintingService:
             # / anything else in the settings instead of shipping a hardcoded
             # second line.
             painter.setFont(normal_font)
-            _footer_raw = (receipt.footer or "Thank you for your purchase!").strip()
+            _footer_raw = (receipt.footer or ".........").strip()
             for _line in _footer_raw.splitlines():
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
                                  Qt.AlignCenter, _line)
@@ -1401,7 +1403,7 @@ class PrintingService:
             # Footer
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
-                             Qt.AlignCenter, receipt.footer or "Thank you for your payment!")
+                             Qt.AlignCenter, receipt.footer or "......")
             y += 30
 
             painter.end()

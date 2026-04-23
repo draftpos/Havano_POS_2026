@@ -4057,6 +4057,7 @@ class AdminDashboard(QWidget):
             dlg.exec()
         else:
             coming_soon(self, "Settings — add views/dialogs/settings_dialog.py")
+            
 class OptionsDialog(QDialog):
     """
     Clean, minimal options panel for cashiers.
@@ -5186,6 +5187,10 @@ class POSView(QWidget):
         for r in range(current, new_count):
             self.invoice_table.setRowHeight(r, 20)
             self._init_row(r)
+    def _do_nav_sync_products(self):
+    
+        dlg = OptionsDialog(self, pos_view=self)
+        dlg._do_sync_products()
 
     def _on_laybye(self):
         """
@@ -6562,6 +6567,8 @@ class POSView(QWidget):
         self.quote_mode_btn.toggled.connect(self._on_quote_mode_toggle)
         layout.addWidget(self.quote_mode_btn)
         layout.addSpacing(4)
+        
+        
 
         # ── Laybye Switcher ───────────────────────────────────────────────────
         self.laybye_btn = QPushButton("Laybye")
@@ -6611,6 +6618,19 @@ class POSView(QWidget):
         quote_btn.setToolTip("Create a Quotation")
         layout.addWidget(quote_btn)
         layout.addSpacing(4)
+        
+        # ── Options dropdown (replaces right-panel Options button) ───────────────
+        options_menu_btn = HoverMenuButton("Options ▾", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        options_menu_btn.addItem("Create Credit Note  (Return)", self._open_credit_note_dialog)
+        options_menu_btn.addItem("Save / Print Quotation",       self._save_quotation)
+        options_menu_btn.addItem("Manage Quotations",            self._open_quotation_manager)
+        options_menu_btn.addItem("Reprint Invoice",              self._reprint_by_invoice_no)
+        options_menu_btn.addSeparator()
+        options_menu_btn.addItem("Sync Products from Server",    self._do_nav_sync_products)
+        layout.addWidget(options_menu_btn)
+        layout.addSpacing(4)
+        
+        
 
         # ── Return mode indicator ─────────────────────────────────────────────
         self._return_btn = _nb("↩   Return", self._process_return, color=DANGER, hov=DANGER_H)
@@ -7583,6 +7603,7 @@ class POSView(QWidget):
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Reprint Shift Reconciliation", self._open_shift_reprint)
         layout.addWidget(sales_menu_btn)
+        
 
         # ── Admin Check ───────────────────────────────────────────────────────
         is_admin_user = False
@@ -7727,6 +7748,25 @@ class POSView(QWidget):
         quote_btn.setToolTip("Create a Quotation")
         layout.addWidget(quote_btn)
         layout.addSpacing(4)
+        
+        
+        
+        
+# ── Options dropdown ──────────────────────────────────────────────────────
+        options_menu_btn = HoverMenuButton("Options ▾", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        options_menu_btn.addItem("Create Credit Note  (Return)", self._open_credit_note_dialog)
+        # options_menu_btn.addItem("Save / Print Quotation",       self._save_quotation)
+        options_menu_btn.addItem("Save / Print Quotation", self._save_quotation)
+
+        
+        # options_menu_btn.addItem("Manage Quotations",            self._open_quotation_manager)
+        # options_menu_btn.addItem("Reprint Invoice",              self._reprint_by_invoice_no)
+        options_menu_btn.addSeparator(),
+        
+        options_menu_btn.addItem("Sync Products from Server",    self._do_nav_sync_products)
+        layout.addWidget(options_menu_btn)
+        layout.addSpacing(4)
+        
 
         # ── Return mode indicator ─────────────────────────────────────────────
         self._return_btn = _nb("↩   Return", self._process_return, color=DANGER, hov=DANGER_H)
@@ -8601,6 +8641,8 @@ class POSView(QWidget):
             if key == Qt.Key_F2:        self._save_sale();        return True
             if key == Qt.Key_F3:        self._print_receipt();    return True
             if key == Qt.Key_F4:        self._on_discount_clicked(); return True
+            # To this:
+            if key == Qt.Key_F6: self._open_quotation_manager(); return True
             if key == Qt.Key_F5:        self._open_payment();     return True
             if key == Qt.Key_F7:        self._open_sales_list();  return True
             if key == Qt.Key_Q:         UnsyncedPopup("PAY", self).exec(); return True
@@ -9061,19 +9103,9 @@ class POSView(QWidget):
         top_row.addWidget(_top_btn("Hold/\nRecall", NAVY_2, NAVY_3, self._open_hold_recall))
 
         # Options Button
-        opt_btn = QPushButton("Options\n▼")
-        opt_btn.setFixedHeight(52)
-        opt_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        opt_btn.setCursor(Qt.PointingHandCursor)
-        opt_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {NAVY_3}; color: {WHITE}; border: none;
-                border-radius: 6px; font-size: 11px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background-color: {NAVY_2}; }}
-        """)
-        opt_btn.clicked.connect(self._show_options_menu)
-        top_row.addWidget(opt_btn)
+        # REPLACE with this:
+        qtn_btn = _top_btn("Quotation\nF6", NAVY_3, NAVY_2, self._open_quotation_manager)
+        top_row.addWidget(qtn_btn)
 
         layout.addLayout(top_row)
 
@@ -11739,7 +11771,7 @@ class MainWindow(QMainWindow):
             ("Company Defaults",  self._open_company_defaults),
             ("POS Rules",         _sd_action("POSRulesDialog")),
             ("Hardware Settings", _sd_action("HardwareDialog")),
-            ("Advanced Printing", lambda: AdvanceSettingsDialog(self).exec()),
+            # ("Advanced Printing", lambda: AdvanceSettingsDialog(self).exec()),
             (None, None),
             ("Day Shift",         self._pos_view._open_day_shift),
             ("Sync Queue",        self._pos_view._open_sales_list),
