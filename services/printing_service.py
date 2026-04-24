@@ -711,6 +711,46 @@ class PrintingService:
             return False
 
     # =========================================================================
+    # PAYMENT-CURRENCY HELPERS
+    # =========================================================================
+    def _sole_non_usd_payment_rate(
+        self, payment_items: list,
+    ) -> tuple[str, float]:
+        """
+        If the receipt was paid with exactly ONE non-USD payment line,
+        return its (currency_code, rate). Rate is local-per-USD —
+        multiply a USD figure by it to get the native equivalent.
+
+        Returns ("", 0.0) when the heuristic doesn't apply (no payments,
+        >1 payment row, or the sole row is USD). Callers should fall back
+        to USD in that case.
+
+        Rate is derived from the payment item itself: `price` holds the
+        native amount, `amount` holds the USD equivalent, so
+        `rate = native / usd`. This avoids another DB round-trip to the
+        exchange_rates table and uses the *same* rate that was locked in
+        at payment time — the change will be consistent with what the
+        cashier took in.
+        """
+        if not payment_items or len(payment_items) != 1:
+            return ("", 0.0)
+
+        pi       = payment_items[0]
+        cur      = (getattr(pi, "productid", "") or "USD").strip().upper()
+        if not cur or cur == "USD":
+            return ("", 0.0)
+
+        try:
+            native = float(getattr(pi, "price",  0) or 0)
+            usd    = float(getattr(pi, "amount", 0) or 0)
+        except (TypeError, ValueError):
+            return ("", 0.0)
+        if usd <= 0.005 or native <= 0.005:
+            return ("", 0.0)
+
+        return (cur, native / usd)
+
+    # =========================================================================
     # SHIFT INVOICE-COUNT HELPER
     # =========================================================================
     def _resolve_shift_invoice_count(
@@ -1176,16 +1216,32 @@ class PrintingService:
 
             y += 10
 
-            # Amount tendered + change — ALWAYS in base currency (USD).
+            # Amount tendered + change.
             # Tendered is the SUM across all payment methods (see sale.py —
             # create_sale recomputes tendered_usd from splits when present).
             # Change always prints alongside it (even if 0.00) so cashiers
             # always see the pair on the slip.
+            #
+            # Currency rule: when the sale was paid with exactly ONE non-USD
+            # payment method (e.g. a single ZWG / ZAR tender), show both
+            # tendered AND change in that native currency — cashiers hand
+            # back the change in the same denomination the customer paid in.
+            # Multi-currency / mixed-method sales fall back to USD because
+            # the 'real' change is ambiguous in that case.
             _tendered_base = float(getattr(receipt, "amountTendered", 0) or 0)
             _change_base   = float(getattr(receipt, "change",         0) or 0)
             if _tendered_base > 0.005:
-                draw_total("Amount Tendered", _tendered_base, "USD")
-                draw_total("Change",          _change_base,   "USD")
+                pay_cur, pay_rate = self._sole_non_usd_payment_rate(
+                    getattr(receipt, "paymentItems", None) or []
+                )
+                if pay_cur and pay_rate > 0:
+                    draw_total("Amount Tendered",
+                               _tendered_base * pay_rate, pay_cur)
+                    draw_total("Change",
+                               _change_base   * pay_rate, pay_cur)
+                else:
+                    draw_total("Amount Tendered", _tendered_base, "USD")
+                    draw_total("Change",          _change_base,   "USD")
 
             # Payment Details — modes + amounts per currency.
             # paymentItems is populated by _print_receipt; each carries
