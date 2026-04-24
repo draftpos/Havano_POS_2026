@@ -1,6 +1,36 @@
 # models/customer.py
 from database.db import get_connection, fetchall_dicts, fetchone_dict
 
+
+def _ensure_price_list_id(cur, name: str | None) -> int | None:
+    """
+    Resolve a price-list name to its local id, creating the row on miss.
+
+    The customer sync flow depends on the customer's `default_price_list`
+    (e.g. "Standard Selling") being resolvable in the local `price_lists`
+    table. In tenants where no dedicated price_list sync has run yet, the
+    table can be empty — which used to make every customer's
+    `default_price_list_id` land as NULL and the POS refuse to sell.
+
+    Self-healing behaviour: the price list NAME is the identity at the
+    Frappe end, so it's safe to insert a new row on miss. `selling=1` is
+    set because `default_price_list` on Customer is always a selling list.
+    """
+    nm = (name or "").strip()
+    if not nm:
+        return None
+
+    cur.execute("SELECT id FROM price_lists WHERE LTRIM(RTRIM(name)) = ?", (nm,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    cur.execute(
+        "INSERT INTO price_lists (name, selling) OUTPUT INSERTED.id VALUES (?, 1)",
+        (nm,),
+    )
+    return int(cur.fetchone()[0])
+
 _SELECT = """
     SELECT cu.id, cu.customer_name, cu.customer_group_id,
            cg.name AS customer_group_name, cu.customer_type,
@@ -74,7 +104,10 @@ def upsert_from_frappe(c: dict):
 
     warehouse_id   = find_id("warehouses", c.get("custom_warehouse"), "Stores - AT")
     cost_center_id = find_id("cost_centers", c.get("custom_cost_center"), "Main - AT")
-    price_list_id  = find_id("price_lists", c.get("default_price_list"), "Standard Selling ZWG")
+    # Price lists are self-healing: if the name doesn't exist locally we
+    # create it rather than falling back to some other row (the old
+    # find_id TOP-1 fallback silently assigned wrong price lists).
+    price_list_id  = _ensure_price_list_id(cur, c.get("default_price_list"))
     group_id       = find_id("customer_groups", c.get("customer_group"), "All Customer Groups")
 
     # 2. Check existence

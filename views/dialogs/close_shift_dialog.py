@@ -133,6 +133,17 @@ class CloseShiftDialog(QDialog):
         info_layout.addWidget(duration_lbl, 1, 0)
         info_layout.addWidget(self._duration, 1, 1)
 
+        # Invoice count — running total of finalised sales in this shift.
+        # Populated by _load_shift_data; also printed on the shift summary.
+        invoices_lbl = QLabel("Invoices:")
+        invoices_lbl.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
+        self._invoice_count = QLabel("0")
+        self._invoice_count.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; color: {NAVY}; background: transparent;"
+        )
+        info_layout.addWidget(invoices_lbl,        1, 2)
+        info_layout.addWidget(self._invoice_count, 1, 3)
+
         layout.addWidget(info_group)
 
         # Sales Summary
@@ -295,15 +306,22 @@ class CloseShiftDialog(QDialog):
                 # Load sales by method
                 sales_by_method = get_shift_sales_by_method(shift["id"])
                 total_sales = 0.0
+                total_invoices = 0
 
                 for method, data in sales_by_method.items():
                     if method in self._method_rows:
                         self._method_rows[method]["count"].setText(str(data["count"]))
                         self._method_rows[method]["total"].setText(f"${data['total']:.2f}")
-                        total_sales += data["total"]
+                        total_sales    += data["total"]
+                        total_invoices += int(data.get("count") or 0)
 
                 self._total_sales.setText(f"${total_sales:.2f}")
                 self._total_actual.setText(f"${total_sales:.2f}")
+                # Method counts overlap when a single sale is split across
+                # methods, so prefer a direct DB count when we can.
+                self._invoice_count.setText(
+                    str(self._direct_invoice_count(shift["id"]) or total_invoices)
+                )
             else:
                 # No active shift - show message
                 self._start_time.setText("No active shift")
@@ -331,6 +349,23 @@ class CloseShiftDialog(QDialog):
 
             self._total_sales.setText(f"${total:.2f}")
             self._total_actual.setText(f"${total:.2f}")
+
+    def _direct_invoice_count(self, shift_id: int) -> int | None:
+        """Authoritative count — one row per finalised sale for this shift."""
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur  = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM sales WHERE shift_id = ?",
+                (int(shift_id),),
+            )
+            row = cur.fetchone()
+            conn.close()
+            return int(row[0]) if row and row[0] is not None else None
+        except Exception as e:
+            print(f"[close-shift] invoice count lookup failed: {e}")
+            return None
 
     def _update_time(self):
         self._current_time.setText(QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss"))

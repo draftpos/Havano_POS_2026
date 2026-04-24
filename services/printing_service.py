@@ -652,7 +652,7 @@ class PrintingService:
                 painter.drawText(COL_METHOD, y, 130, line_h, Qt.AlignLeft, "TOTAL")
                 painter.drawText(COL_EXP, y, COL_W, line_h, Qt.AlignRight, f"{grand_expected:,.2f}")
                 painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, f"{grand_counted:,.2f}")
-                
+
                 grand_var = grand_counted - grand_expected
                 variance_color = DANGER if grand_var < 0 else SUCCESS if grand_var > 0 else DARK_TEXT
                 old_color = painter.pen().color()
@@ -663,6 +663,28 @@ class PrintingService:
 
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                 y += 20
+
+            # ─────────────────────────────────────────────────────────────
+            # Invoice count — aggregate across all cashiers for this shift.
+            # Sources, in order: reconciliation_data.total_invoices (if the
+            # caller already computed it), sum of per-cashier transaction
+            # counts, or a direct DB count keyed by shift id.
+            # ─────────────────────────────────────────────────────────────
+            invoice_count = self._resolve_shift_invoice_count(
+                reconciliation_data=reconciliation_data,
+                print_data=print_data,
+                shift=shift,
+                cashiers=cashiers,
+            )
+            if invoice_count is not None:
+                painter.setFont(bold_font)
+                painter.drawText(self.margin, y,
+                                 self.paper_width - self.margin * 2, line_h,
+                                 Qt.AlignCenter,
+                                 f"Total Invoices: {invoice_count}")
+                y += line_h + 10
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 10
 
             # Footer
             painter.setFont(normal_font)
@@ -684,6 +706,77 @@ class PrintingService:
                 painter.end()
             QMessageBox.warning(None, "Print Failed", f"Shift report could not be printed:\n\n{e}")
             return False
+
+    # =========================================================================
+    # SHIFT INVOICE-COUNT HELPER
+    # =========================================================================
+    def _resolve_shift_invoice_count(
+        self,
+        reconciliation_data: dict | None,
+        print_data:          dict | None,
+        shift:               dict | None,
+        cashiers:            list,
+    ) -> int | None:
+        """
+        Best-effort invoice-count resolution for the shift summary print-out.
+
+        Preference order:
+          1. Explicit override in reconciliation/print_data (`total_invoices`).
+          2. Sum of per-cashier `transaction_count` / `transactions` keys.
+          3. Direct `COUNT(*)` on `sales` table keyed by shift id.
+        Returns None only when every strategy fails — caller skips the line
+        silently in that case.
+        """
+        # 1. Caller-supplied number (set by the reconciliation builder).
+        for src in (reconciliation_data, print_data):
+            if not src:
+                continue
+            n = src.get("total_invoices")
+            if n is not None:
+                try:
+                    return int(n)
+                except (TypeError, ValueError):
+                    pass
+
+        # 2. Sum from cashier breakdown.
+        try:
+            total = 0
+            got_any = False
+            for c in (cashiers or []):
+                n = c.get("transaction_count", c.get("transactions"))
+                if n is None:
+                    continue
+                got_any = True
+                try:
+                    total += int(n)
+                except (TypeError, ValueError):
+                    pass
+            if got_any:
+                return total
+        except Exception:
+            pass
+
+        # 3. DB fallback — only if we have a shift id to key on.
+        shift_id = None
+        if shift and isinstance(shift, dict):
+            shift_id = shift.get("id") or shift.get("shift_id")
+        if shift_id:
+            try:
+                from database.db import get_connection
+                conn = get_connection()
+                cur  = conn.cursor()
+                cur.execute(
+                    "SELECT COUNT(*) FROM sales WHERE shift_id = ?",
+                    (int(shift_id),),
+                )
+                row = cur.fetchone()
+                conn.close()
+                if row and row[0] is not None:
+                    return int(row[0])
+            except Exception as e:
+                print(f"[print] invoice-count DB fallback failed: {e}")
+
+        return None
 
     # =========================================================================
     # FONT HELPERS
@@ -772,17 +865,30 @@ class PrintingService:
             painter.translate(0, -rect.top())
             y = 20
 
-            normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
+            # Kitchen font sizes live on their own fields so a change to
+            # the receipt's contentFontSize never re-scales the KOT. Fall
+            # back to the old derived sizes on pre-migration AdvanceSettings
+            # files so the first launch after an upgrade still prints sanely.
+            kitchen_body_size   = int(getattr(settings, "kitchenBodySize", 0)
+                                      or settings.contentFontSize or 10)
+            kitchen_header_size = int(getattr(settings, "kitchenHeaderSize", 0)
+                                      or (kitchen_body_size + 4))
+
+            normal_font = self._create_font(settings.contentFontName,
+                                            kitchen_body_size,
+                                            settings.contentFontStyle)
             bold_font   = self._make_bold(normal_font)
-            # Order-number header — slightly larger + bold so kitchen staff
-            # can read it from across the bench.
-            header_font = self._make_bold(self._create_font(settings.contentFontName,
-                                                            settings.contentFontSize + 2,
-                                                            settings.contentFontStyle))
-            # Terminal line at the footer uses a small font — roughly footer size
-            # so it doesn't compete with the main order-number header.
+            # Order-number header — large + bold so kitchen staff can read
+            # it from across the bench. Independent of receipt header size.
+            header_font = self._make_bold(self._create_font(
+                settings.contentFontName,
+                kitchen_header_size,
+                settings.contentFontStyle,
+            ))
+            # Terminal tag at the footer — clamped to a small readable size
+            # (~2pt below the body) so it doesn't compete with the header.
             small_font = self._create_font(settings.contentFontName,
-                                           max(settings.contentFontSize - 2, 6),
+                                           max(kitchen_body_size - 2, 6),
                                            settings.contentFontStyle)
 
             station = (getattr(receipt, "KOT", "") or "KITCHEN").strip() or "KITCHEN"

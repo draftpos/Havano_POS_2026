@@ -839,9 +839,13 @@ class CustomerSearchPopup(QDialog):
         lay.addLayout(sr)
 
         # --- Customer Table ---
-        self._tbl = QTableWidget(0, 6)
-        self._tbl.setHorizontalHeaderLabels(["Name", "Type", "Phone", "City", "Laybye Bal", "Total Due"])
-        
+        # Price List column shows the customer's `default_price_list` —
+        # this is what governs pricing on the POS after selection.
+        self._tbl = QTableWidget(0, 7)
+        self._tbl.setHorizontalHeaderLabels([
+            "Name", "Type", "Phone", "City", "Price List", "Laybye Bal", "Total Due",
+        ])
+
         # TABLE STYLING: Fixes the 'White on White' selection issue
         self._tbl.setStyleSheet(f"""
             QTableWidget {{
@@ -864,9 +868,11 @@ class CustomerSearchPopup(QDialog):
         """)
 
         hh = self._tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Stretch) 
-        
-        widths = {1: 80, 2: 110, 3: 100, 4: 110, 5: 110}
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+
+        # Column order:  0 Name  1 Type  2 Phone  3 City
+        #                4 Price List  5 Laybye  6 Total Due
+        widths = {1: 80, 2: 110, 3: 100, 4: 140, 5: 110, 6: 110}
         for col, width in widths.items():
             hh.setSectionResizeMode(col, QHeaderView.Fixed)
             self._tbl.setColumnWidth(col, width)
@@ -986,21 +992,30 @@ class CustomerSearchPopup(QDialog):
             self._tbl.setItem(r, 2, create_item(c.get("custom_telephone_number", "")))
             self._tbl.setItem(r, 3, create_item(c.get("custom_city", "")))
 
-            # Laybye Balance (Column 4)
+            # Price List (Column 4) — customer's default_price_list. Greyed
+            # out when unset so cashiers notice the gap (sales will be
+            # blocked for these customers).
+            pl_name = (c.get("price_list_name") or "").strip()
+            it_pl = create_item(pl_name or "—")
+            if not pl_name:
+                it_pl.setForeground(QColor(MUTED))
+            self._tbl.setItem(r, 4, it_pl)
+
+            # Laybye Balance (Column 5)
             l_bal = float(c.get("laybye_balance") or 0.0)
             it_l = QTableWidgetItem(f"{l_bal:,.2f}")
             it_l.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             # Readable Blue
             it_l.setForeground(QColor("#0044cc")) if l_bal > 0 else it_l.setForeground(QColor(DARK_TEXT))
-            self._tbl.setItem(r, 4, it_l)
+            self._tbl.setItem(r, 5, it_l)
 
-            # Outstanding / Total Due (Column 5)
+            # Outstanding / Total Due (Column 6)
             o_bal = float(c.get("outstanding_amount") or 0.0)
             it_o = QTableWidgetItem(f"{o_bal:,.2f}")
             it_o.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             # High Contrast Red
             it_o.setForeground(QColor("#cc0000")) if o_bal > 0 else it_o.setForeground(QColor(DARK_TEXT))
-            self._tbl.setItem(r, 5, it_o)
+            self._tbl.setItem(r, 6, it_o)
 
             # Store the dictionary in the first item
             self._tbl.item(r, 0).setData(Qt.UserRole, c)
@@ -5237,19 +5252,9 @@ class POSView(QWidget):
                 # Open customer picker directly - no warning message
                 dlg = CustomerSearchPopup(self)
                 if dlg.exec() == QDialog.Accepted and dlg.selected_customer:
-                    self._selected_customer = dlg.selected_customer
-                    cname = self._selected_customer.get("customer_name", "")
-                    self._cust_btn.setText(f"{cname[:22]}")
-                    self._cust_btn.setStyleSheet(f"""
-                        QPushButton {{
-                            background-color: {ACCENT}; color: {WHITE};
-                            border: none; border-radius: 3px;
-                            font-size: 11px; font-weight: bold; padding: 0 8px;
-                        }}
-                        QPushButton:hover {{ background-color: {ACCENT_H}; }}
-                    """)
-                    if self.parent_window:
-                        self.parent_window._set_status(f"Customer: {cname}")
+                    # Single entry point keeps nav-bar btn + inline label +
+                    # price list + grid re-price all in sync.
+                    self._apply_selected_customer(dlg.selected_customer)
                 else:
                     # User cancelled - turn off laybye mode
                     self.laybye_btn.setChecked(False)
@@ -5311,19 +5316,7 @@ class POSView(QWidget):
             dlg = CustomerSearchPopup(self)
             if dlg.exec() != QDialog.Accepted or not dlg.selected_customer:
                 return
-            self._selected_customer = dlg.selected_customer
-            cname = self._selected_customer.get("customer_name", "")
-            self._cust_btn.setText(f"{cname[:22]}")
-            self._cust_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {ACCENT}; color: {WHITE};
-                    border: none; border-radius: 3px;
-                    font-size: 11px; font-weight: bold; padding: 0 8px;
-                }}
-                QPushButton:hover {{ background-color: {ACCENT_H}; }}
-            """)
-            if self.parent_window:
-                self.parent_window._set_status(f"Customer: {cname}")
+            self._apply_selected_customer(dlg.selected_customer)
 
         confirmed_customer = self._selected_customer
 
@@ -5525,20 +5518,9 @@ class POSView(QWidget):
             _picker = CustomerSearchPopup(self)
             if _picker.exec() != QDialog.Accepted or not _picker.selected_customer:
                 return  # cashier cancelled
-            
-            self._selected_customer = _picker.selected_customer
-            _name = self._selected_customer.get("customer_name", "")
-            self._cust_btn.setText(f"{_name[:22]}")
-            self._cust_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {ACCENT}; color: {WHITE};
-                    border: none; border-radius: 3px;
-                    font-size: 11px; font-weight: bold; padding: 0 8px;
-                }}
-                QPushButton:hover {{ background-color: {ACCENT_H}; }}
-            """)
-            if self.parent_window:
-                self.parent_window._set_status(f"Customer: {_name}")
+            # Central setter — keeps nav btn + inline label + price list +
+            # grid re-price + cart-clear prompt all consistent.
+            self._apply_selected_customer(_picker.selected_customer)
 
         # ── 3. COLLECT INVOICE ITEMS ─────────────────────────────────────────
         items = self._collect_invoice_items()
@@ -5760,6 +5742,14 @@ class POSView(QWidget):
         self._return_cn   = None
         self.current_discount_percent = 0.0   # ← Discount state
         self._quotation_mode = False           # ← Quotation mode flag
+
+        # Active price list for the current customer — resolved from the
+        # customer's default_price_list_id at selection time. Used by the
+        # price-lookup helper when adding items to the cart. None means
+        # "no price list configured" → any item lookup returns 0 and the
+        # cashier can't add to cart. (Matches Android behaviour.)
+        self._active_price_list: str | None = None
+
         self._build_ui()
         QTimer.singleShot(0, self._ensure_default_customer)
 
@@ -5899,16 +5889,14 @@ class POSView(QWidget):
 
         self._recalc_totals()
 
-        # Set customer if provided
+        # Set customer if provided — route through the central setter so
+        # the grid reprices and the inline label stays in sync.
         if customer:
             try:
                 from models.customer import search_customers
                 customers = search_customers(customer)
                 if customers:
-                    self._selected_customer = customers[0]
-                    self._refresh_customer_btn()
-                    if self.parent_window:
-                        self.parent_window._set_status(f"Customer: {customer}")
+                    self._apply_selected_customer(customers[0])
             except Exception as e:
                 print(f"Error setting customer: {e}")
         
@@ -5927,7 +5915,8 @@ class POSView(QWidget):
     #  _inline_on_item_clicked, _inline_commit_query, _inline_commit_product,
     #  _fill_row_from_product, _close_inline_search, eventFilter,
     #  _on_cell_clicked, _on_cell_double_clicked, _on_product_btn_clicked,
-    #  _get_uom_prices, _maybe_pick_uom, _check_permission, _warn_popup,
+    #  _pick_product_uom_and_price, _resolve_price_for_product, _get_price_rows_for_list,
+    #  _is_template_product, _pick_variant, _check_permission, _warn_popup,
     #  _require_active_shift, _get_pos_rule, _apply_pricing_rules,
     #  _add_product_to_invoice, _build_invoice_footer, _update_prev_txn_display,
     #  _build_right_panel, _build_numpad, _numpad_press, _numpad_clear,
@@ -7182,8 +7171,10 @@ class POSView(QWidget):
         # ── New row with tax info ─────────────────────────────────────────────
         r = self._find_next_empty_row()
         self._block_signals = True
-        # Fall back to the product's stock UOM when the caller didn't pass one
-        # (callers that went through _maybe_pick_uom always set `uom`).
+        # Fall back to the product's stock UOM when the caller didn't pass one.
+        # Callers going through `_pick_product_uom_and_price` always set `uom`;
+        # only legacy direct invocations (e.g. from pharmacy auto-dispense)
+        # may leave it blank.
         _row_uom = uom
         if not _row_uom and product_id:
             try:
@@ -7973,34 +7964,15 @@ class POSView(QWidget):
             self._attach_inline_customer(first)
 
     def _attach_inline_customer(self, cust: dict):
-        """Set the given customer dict as active on the cart (same slot as old flow)."""
-        if not cust:
-            return
-        self._selected_customer = cust
-        name = cust.get("customer_name", "") or ""
-        # Update the inline label
-        self._cust_inline_label.setText(f"Customer: {name}")
-        self._cust_inline_label.setStyleSheet(
-            f"color: {NAVY}; font-size: 11px; font-weight: bold; "
-            f"background: transparent; padding: 0 6px;"
-        )
-        # Update the nav-bar customer button so both UIs stay in sync
-        try:
-            self._refresh_customer_btn()
-        except Exception:
-            pass
-        # Clear the edit so the next search starts fresh
-        try:
-            self._cust_search_edit.blockSignals(True)
-            self._cust_search_edit.clear()
-            self._cust_search_edit.blockSignals(False)
-        except Exception:
-            pass
-        if self.parent_window:
-            try:
-                self.parent_window._set_status(f"Customer: {name}")
-            except Exception:
-                pass
+        """
+        Called when the cashier picks a customer via the inline search
+        completer. Delegates to `_apply_selected_customer` so the
+        nav-bar button, inline label, cart-clear prompt, status bar, AND
+        the product-grid re-price all happen in one place. Keeping this
+        alias so legacy callers (QuickAddCustomerDialog signal etc.)
+        don't have to change.
+        """
+        self._apply_selected_customer(cust)
 
     def _inline_add_new_customer(self):
         """Open the existing QuickAddCustomerDialog and auto-attach on success."""
@@ -8372,10 +8344,10 @@ class POSView(QWidget):
             if matches: product = matches[0]
 
         if product:
-            result = self._maybe_pick_uom(product)
-            if result is None:
-                return   # user cancelled UOM picker
-            uom, price = result
+            picked = self._pick_product_uom_and_price(product)
+            if picked is None:
+                return   # cancelled / blocked
+            product, uom, price = picked
             self._add_product_to_invoice(
                 name=product["name"],
                 price=price,
@@ -8417,10 +8389,10 @@ class POSView(QWidget):
         self._close_inline_search()
         if not product:
             return
-        result = self._maybe_pick_uom(product)
-        if result is None:
-            return   # user cancelled UOM picker
-        uom, price = result
+        picked = self._pick_product_uom_and_price(product)
+        if picked is None:
+            return   # cancelled / blocked
+        product, uom, price = picked
         self._add_product_to_invoice(
             name=product["name"],
             price=price,
@@ -8660,11 +8632,10 @@ class POSView(QWidget):
         query = part_item.text().strip() if part_item else ""
         dlg = ProductSearchDialog(self, initial_query=query)
         if dlg.exec() == QDialog.Accepted and dlg.selected_product:
-            p = dlg.selected_product
-            result = self._maybe_pick_uom(p)
-            if result is None:
-                return   # user cancelled UOM picker
-            uom, price = result
+            picked = self._pick_product_uom_and_price(dlg.selected_product)
+            if picked is None:
+                return   # cancelled / blocked
+            p, uom, price = picked
             self._block_signals = True
             self._init_row(row, part_no=p["part_no"], details=p["name"],
                            qty="1", amount=f"{price:.2f}",
@@ -8678,77 +8649,186 @@ class POSView(QWidget):
             self._active_row = row; self._active_col = self.COL_QTY; self._numpad_buffer = ""
 
     def _on_product_btn_clicked(self, product: dict):
-        """Called when a product tile button is clicked — shows UOM picker if needed."""
-        # Immediately close any open inline editor so the overlay doesn't
-        # intercept the touch event or eat the next tap.
+        """Product tile tapped — debounce, then route through the shared
+        template/variant/uom/price pipeline."""
         self._close_inline_search()
-        # Small guard: ignore double-fire within 200 ms (touch long-press)
+
         import time as _time
-        now = _time.monotonic()
-        last = getattr(self, '_last_grid_tap', 0)
+        now  = _time.monotonic()
+        last = getattr(self, "_last_grid_tap", 0)
         if now - last < 0.20:
             return
         self._last_grid_tap = now
 
-        result = self._maybe_pick_uom(product)
-        if result is None:
+        picked = self._pick_product_uom_and_price(product)
+        if picked is None:
             return
-        uom, price = result
-        self._add_product_to_invoice(
-                name=product.get("name", ""),
-                price=price,
-                part_no=product.get("part_no", ""),
-                product_id=product.get("id"),
-                stock=product.get("stock"),
-                uom=uom,
-            )
+        product, uom, price = picked
 
-    def _get_uom_prices(self, part_no: str) -> list[dict]:
-        """Returns list of {uom, price} for a product from product_uom_prices table."""
+        self._add_product_to_invoice(
+            name       = product.get("name", ""),
+            price      = price,
+            part_no    = product.get("part_no", ""),
+            product_id = product.get("id"),
+            stock      = product.get("stock"),
+            uom        = uom,
+        )
+
+    def _pick_product_uom_and_price(
+        self, product: dict,
+    ) -> tuple[dict, str, float] | None:
+        """
+        Shared pre-add pipeline used by every "add this product to cart"
+        path (grid tile tap, inline search commit, double-click cell
+        picker, barcode lookup, etc.).
+
+        Steps:
+          1. If the tapped product is a *template*, open the variant
+             picker and swap in the selected variant.
+          2. Resolve a (uom, price) pair against the active customer's
+             price list. `_resolve_price_for_product` opens
+             `UomPickerDialog` when the item has more than one UOM row
+             in that price list — so multi-UOM items still get the
+             picker, just read from `item_prices` instead of the legacy
+             `product_uom_prices` table.
+          3. Returns (product_actually_used, uom, price), or None if the
+             cashier cancelled or anything was rejected (no customer /
+             no price list / zero-priced item — each case shows its own
+             explainer before returning None).
+        """
+        if not product:
+            return None
+
+        if self._is_template_product(product):
+            product = self._pick_variant(product) or {}
+            if not product:
+                return None  # user cancelled the variant picker
+
+        picked = self._resolve_price_for_product(product)
+        if picked is None:
+            return None
+        uom, price = picked
+        return (product, uom, price)
+
+    # -----------------------------------------------------------------------
+    # Price-list resolution (task 1e)
+    # -----------------------------------------------------------------------
+
+    def _get_active_price_list(self) -> str | None:
+        """Active customer's price list name (e.g. 'Standard Selling')."""
+        cust = self._selected_customer or {}
+        name = (cust.get("price_list_name") or "").strip()
+        return name or None
+
+    def _get_price_rows_for_list(self, part_no: str, price_list: str) -> list[dict]:
+        """
+        All (uom, price) rows for an item under the given price list, from the
+        `item_prices` cache populated by product sync.
+        """
         try:
             from database.db import get_connection
-            conn = get_connection(); cur = conn.cursor()
-            cur.execute(
-                "SELECT uom, price FROM product_uom_prices WHERE part_no=? ORDER BY price",
-                (part_no,)
-            )
+            conn = get_connection()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT uom, price FROM item_prices
+                WHERE  part_no = ? AND price_list = ? AND price_type = 'selling'
+                ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
+            """, (part_no, price_list))
             rows = cur.fetchall(); conn.close()
-            return [{"uom": r[0], "price": float(r[1])} for r in rows]
-        except Exception:
+            return [{"uom": r[0], "price": float(r[1] or 0)} for r in rows]
+        except Exception as e:
+            print(f"[pos] _get_price_rows_for_list failed ({part_no}/{price_list}): {e}")
             return []
 
-    def _maybe_pick_uom(self, product: dict) -> tuple[str, float] | None:
+    def _resolve_price_for_product(self, product: dict) -> tuple[str, float] | None:
         """
-        If product has multiple UOM prices, show picker dialog.
-        Returns (uom, price) tuple — never returns None for no-data case.
-        Returns None only if user explicitly cancels the picker.
+        Returns (uom, price) or None.
+
+        None means "don't add to cart" — we've already shown an explanation to
+        the cashier (no customer / no price list / item not priced / zero).
         """
-        part_no    = product.get("part_no", "")
-        base_price = float(product.get("price", 0))
-        base_uom   = str(product.get("uom", "Nos") or "Nos")
+        part_no  = product.get("part_no", "")
+        base_uom = str(product.get("uom", "Nos") or "Nos")
+        name     = product.get("name", part_no)
 
-        uom_prices = self._get_uom_prices(part_no)
+        if not self._selected_customer:
+            self._warn_popup(
+                "No customer selected",
+                f"Pick a customer before adding <b>{name}</b> — the price "
+                f"depends on the customer's price list.",
+            )
+            return None
 
-        # No UOM table data or table doesn't exist yet —
-        # fall through silently with base price, no popup
-        if not uom_prices:
-            return (base_uom, base_price)
+        price_list = self._get_active_price_list()
+        if not price_list:
+            self._warn_popup(
+                "No price list",
+                f"The current customer has no default price list. "
+                f"<b>{name}</b> can't be sold until one is assigned.",
+            )
+            return None
 
-        # Single UOM — no dialog needed, use it directly
-        if len(uom_prices) == 1:
-            return (uom_prices[0]["uom"], uom_prices[0]["price"])
+        rows = self._get_price_rows_for_list(part_no, price_list)
+        if not rows:
+            self._warn_popup(
+                "Item not priced",
+                f"<b>{name}</b> has no price in the <b>{price_list}</b> "
+                f"price list. Add a rate on the server and re-sync.",
+            )
+            return None
 
-        # Multiple UOMs — show picker so cashier chooses pack size
-        dlg = UomPickerDialog(
-            product_name=product.get("name", ""),
-            uom_prices=uom_prices,
-            parent=self,
-        )
-        if dlg.exec() == QDialog.Accepted and dlg.selected_uom:
-            return (dlg.selected_uom, dlg.selected_price)
+        # Single UOM → use it directly.
+        if len(rows) == 1:
+            picked = rows[0]
+        else:
+            dlg = UomPickerDialog(
+                product_name=name,
+                uom_prices=rows,
+                parent=self,
+            )
+            if dlg.exec() != QDialog.Accepted or not dlg.selected_uom:
+                return None
+            picked = {"uom": dlg.selected_uom, "price": dlg.selected_price}
 
-        # Cancelled — still add with base price rather than blocking
-        return (base_uom, base_price)
+        if float(picked["price"] or 0) <= 0:
+            self._warn_popup(
+                "Zero-priced item",
+                f"<b>{name}</b> is priced at 0 in <b>{price_list}</b>. "
+                f"The POS won't sell zero-priced items — update the price "
+                f"on the server and re-sync.",
+            )
+            return None
+
+        return (picked.get("uom") or base_uom, float(picked["price"]))
+
+    # -----------------------------------------------------------------------
+    # Variants (task 3c) — picker placeholder wired in the dialog step
+    # -----------------------------------------------------------------------
+
+    def _is_template_product(self, product: dict) -> bool:
+        """True for items flagged as variant templates by the sync."""
+        return bool(product.get("is_template") or product.get("has_variants"))
+
+    def _pick_variant(self, template: dict) -> dict | None:
+        """
+        Open the variant picker (built in task 3c). Import kept local so a
+        missing module doesn't break POS startup.
+        """
+        try:
+            from views.dialogs.variant_picker_dialog import VariantPickerDialog
+        except Exception as e:
+            print(f"[pos] variant picker unavailable: {e}")
+            self._warn_popup(
+                "Variants not available",
+                "This item has variants but the picker dialog is not "
+                "installed yet. Please update the POS.",
+            )
+            return None
+
+        dlg = VariantPickerDialog(template=template, parent=self)
+        if dlg.exec() != QDialog.Accepted or not dlg.selected_variant:
+            return None
+        return dlg.selected_variant
 
     # =========================================================================
     # PERMISSION CHECK HELPER  (#23)
@@ -9528,7 +9608,10 @@ class POSView(QWidget):
         self._load_category_products(idx, name)
 
     def _load_category_products(self, idx, name):
-        # Load ALL products for this category into memory
+        """
+        Load products for a category, overlay the active customer's
+        price-list prices, and stash variant metadata for tap-time lookup.
+        """
         try:
             from models.product import get_products_by_category, get_all_products
             if name == "All":
@@ -9539,13 +9622,60 @@ class POSView(QWidget):
                 if not db_products:
                     db_products = get_all_products()
 
-            self._current_products = [
-                (p["name"], p["part_no"], p["price"], p["id"], p.get("image_path", ""))
-                for p in db_products
-            ]
+            # ── Overlay price-list prices ────────────────────────────────
+            # Price comes *only* from the active customer's price list.
+            # No fallback to products.price — the rule is: no price list
+            # (or no rate in that list for this item) → show 0. Cart add
+            # will also refuse zero-priced items. Matches the Android
+            # client minus its "try Standard Selling" fallback (which the
+            # user explicitly rejected — no silent price substitutions).
+            active_list = self._get_active_price_list()
+            price_map: dict[str, float] = {}
+            if active_list:
+                try:
+                    from models.item_price import get_prices_map
+                    price_map = get_prices_map(active_list)
+                except Exception as e:
+                    print(f"[grid] price map load failed ({active_list}): {e}")
+                    price_map = {}
+            else:
+                print("[grid] ⚠ no active price list — grid will show 0.00 "
+                      "everywhere (cart add will block)")
+
+            # ── Build tuple list + per-part meta map for tap handler ─────
+            tuples:  list[tuple] = []
+            meta:    dict[str, dict] = {}
+            hidden_no_price = 0
+            for p in db_products:
+                part_no = (p.get("part_no") or "").upper()
+                # Single source of truth: price_map[part_no] or 0. No
+                # fallback to products.price under any condition.
+                price = float(price_map.get(part_no, 0) or 0)
+
+                tuples.append((
+                    p["name"], p["part_no"], price, p["id"],
+                    p.get("image_path", ""),
+                ))
+                meta[part_no] = {
+                    "is_template":  bool(p.get("is_template")),
+                    "has_variants": bool(p.get("has_variants")),
+                    "variant_of":   p.get("variant_of"),
+                    "attributes":   p.get("attributes") or "",
+                    "uom":          p.get("uom") or "Nos",
+                    "stock":        p.get("stock"),
+                }
+                if active_list and price <= 0 and not p.get("is_template"):
+                    hidden_no_price += 1
+
+            self._current_products    = tuples
+            self._product_meta_by_pn  = meta
+            if hidden_no_price:
+                print(f"[grid] {hidden_no_price} item(s) show 0 — no rate in "
+                      f"price list '{active_list}'")
         except Exception as e:
             print(f"[grid] Error loading products: {e}")
-            self._current_products = []
+            self._current_products   = []
+            self._product_meta_by_pn = {}
 
         # Always reset to first page when switching categories
         self._product_page = 0
@@ -9634,8 +9764,23 @@ class POSView(QWidget):
                                          icon_size=cell_h if any_image else 0,
                                          has_any_image=any_image)
                     btn.setStyleSheet(BTN_STYLE)
+                    # Pull variant metadata stashed by _load_category_products
+                    # so the tap handler knows if this is a template tile.
+                    _pn_key = (part_no or "").upper()
+                    _meta   = (getattr(self, "_product_meta_by_pn", {}) or {}).get(_pn_key, {})
                     btn.clicked.connect(
-                        lambda _, prod=dict(name=pname,price=price,part_no=part_no,id=product_id): self._on_product_btn_clicked(prod)
+                        lambda _, prod=dict(
+                            name         = pname,
+                            price        = price,
+                            part_no      = part_no,
+                            id           = product_id,
+                            uom          = _meta.get("uom") or "Nos",
+                            stock        = _meta.get("stock"),
+                            is_template  = _meta.get("is_template", False),
+                            has_variants = _meta.get("has_variants", False),
+                            variant_of   = _meta.get("variant_of"),
+                            attributes   = _meta.get("attributes") or "",
+                        ): self._on_product_btn_clicked(prod)
                     )
                     btn.setContextMenuPolicy(Qt.CustomContextMenu)
                     btn.customContextMenuRequested.connect(
@@ -9819,24 +9964,17 @@ class POSView(QWidget):
         dlg.exec()
 
     def _select_customer(self):
+        """Nav-bar Customer button → full picker dialog."""
         dlg = CustomerSearchPopup(self)
-        if dlg.exec() == QDialog.Accepted:
-            self._selected_customer = dlg.selected_customer
-            if self._selected_customer:
-                name = self._selected_customer.get("customer_name", "")
-                self._cust_btn.setText(f"{name[:22]}")
-                self._cust_btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {ACCENT}; color: {WHITE};
-                        border: none; border-radius: 3px;
-                        font-size: 11px; font-weight: bold; padding: 0 8px;
-                    }}
-                    QPushButton:hover {{ background-color: {ACCENT_H}; }}
-                """)
-                if self.parent_window:
-                    self.parent_window._set_status(f"Customer: {name}")
-            else:
-                self._reset_customer_btn()
+        if dlg.exec() != QDialog.Accepted:
+            return
+        picked = dlg.selected_customer
+        if picked:
+            # Central setter keeps nav btn + inline label + price list +
+            # grid re-price + cart-clear prompt all consistent.
+            self._apply_selected_customer(picked)
+        else:
+            self._reset_customer_btn()
 
     def _open_sales_list(self):
         if _HAS_SALES_LIST:
@@ -10068,22 +10206,9 @@ class POSView(QWidget):
                                     "Please select a customer before recording a payment.")
             return
         
-        # Set selected customer from the picker
-        self._selected_customer = dlg_search.selected_customer
-        cname = self._selected_customer.get("customer_name", "")
-        
-        # Update customer button appearance to green
-        self._cust_btn.setText(f"{cname[:22]}")
-        self._cust_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {SUCCESS}; color: {WHITE}; border: none;
-                border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 8px;
-            }}
-            QPushButton:hover {{ background-color: {SUCCESS_H}; }}
-        """)
-        
-        if self.parent_window:
-            self.parent_window._set_status(f"Customer: {cname}")
+        # Central setter — keeps nav btn / inline label / price list /
+        # grid re-price / cart-clear prompt all consistent.
+        self._apply_selected_customer(dlg_search.selected_customer)
 
         # 2. Proceed to Payment Entry
         customer = self._selected_customer
@@ -10156,45 +10281,202 @@ class POSView(QWidget):
     # =========================================================================
     def _ensure_default_customer(self):
         """
-        Guarantees that 'Default' is set as the active customer 
-        whenever no customer is currently selected.
+        Pick the active customer at POS startup.
 
-        Rules
-        ─────
-        • Called on startup (via QTimer.singleShot) and before every payment.
-        • 'Default' customer is assumed to be created securely around login.
-        • Once resolved, it is set as _selected_customer and the nav-bar button
-          is updated via _refresh_customer_btn().
-        • If the user has already chosen a different customer this method does
-          nothing (it never overwrites an existing selection).
+        Priority (matches Android):
+          1. Customer whose name == login response's `default_customer`
+             (saved to company_defaults.server_default_customer by
+             services/auth_service.py — sourced from ERPNext's
+             User Permission with is_default=1).
+          2. The generic "Default" customer (created post-login by
+             models/default_customer.create_default_customer).
+
+        Once resolved, we also seed the active price list from the
+        customer's default_price_list_id, so pricing applies on the very
+        first cart add.
+
+        Never overwrites a selection the cashier has already made.
         """
-        # Do nothing if the cashier has already chosen someone
+        # Cashier already picked someone — don't clobber it.
         if self._selected_customer:
             return
 
         try:
-            from models.customer import get_all_customers
+            from models.customer import get_customer_by_name, get_all_customers
+        except Exception as e:
+            print(f"[pos] _ensure_default_customer import failed: {e}")
+            return
 
-            # ── Step 1: look for existing Default Customer ─────────────────
-            all_customers = get_all_customers()
-            default = next(
-                (c for c in all_customers
-                 if c.get("customer_name", "").strip().lower() == "default"),
-                None
-            )
+        picked = self._pick_login_default_customer(get_customer_by_name)
+        if picked is None:
+            picked = self._pick_generic_default_customer(get_all_customers)
+        if picked is None:
+            return   # nothing usable — bail silently
 
-            # ── Step 2: apply as the selected customer ─────────────────────
-            if default:
-                self._selected_customer = default
-                self._refresh_customer_btn()
-                if self.parent_window:
-                    self.parent_window._set_status(
-                        f"Customer: {default.get('customer_name', 'Default')}"
-                    )
+        self._apply_selected_customer(picked)
 
+    # ---- helpers used by _ensure_default_customer -------------------------
+
+    def _pick_login_default_customer(self, getter):
+        """Resolve the login-bound default customer by name. None if missing."""
+        try:
+            from models.company_defaults import get_defaults
+            name = (get_defaults() or {}).get("server_default_customer") or ""
+            name = str(name).strip()
         except Exception:
-            # Silent fail — never crash the POS over a customer lookup
+            name = ""
+        if not name:
+            return None
+        try:
+            cust = getter(name)
+            if cust:
+                print(f"[pos] 🎯 Login default customer resolved: {name}")
+                return cust
+            print(f"[pos] ⚠ Login default customer '{name}' not in local DB")
+        except Exception as e:
+            print(f"[pos] login-default lookup failed ({name}): {e}")
+        return None
+
+    def _pick_generic_default_customer(self, getter_all):
+        """Fallback: the generic 'Default' customer (created post-login)."""
+        try:
+            for c in (getter_all() or []):
+                if (c.get("customer_name") or "").strip().lower() == "default":
+                    return c
+        except Exception as e:
+            print(f"[pos] generic-default lookup failed: {e}")
+        return None
+
+    def _apply_selected_customer(self, cust: dict) -> bool:
+        """Single entry point for 'a customer was chosen'.
+
+        Keeps *everything* consistent after a customer change:
+          • `_selected_customer` + active price list
+          • the nav-bar Customer button (`_cust_btn`)
+          • the inline search-strip label next to the search box
+            (`_cust_inline_label`)
+          • the search input itself (cleared so the next search is fresh)
+          • the status bar
+          • re-prices the product grid against the new customer's list
+          • **clears the cart** if the customer's price list differs from
+            the currently active one and the cart has items — stale per-row
+            prices against the old list would be misleading.
+
+        Returns True when applied, False when the user cancelled a
+        cart-clear confirmation. Callers that care can branch on this to
+        undo UI state (e.g. re-tick the previous customer selection).
+        """
+        if not cust:
+            return False
+
+        new_price_list = cust.get("price_list_name") or None
+
+        # Ask before wiping a populated cart for a price-list change.
+        if not self._confirm_cart_clear_on_price_list_change(new_price_list):
+            return False
+
+        self._selected_customer = cust
+        self._active_price_list = new_price_list
+        name = cust.get("customer_name", "") or ""
+
+        print(f"[pos] 👤 customer='{name}' "
+              f"price_list='{self._active_price_list or '(none)'}'")
+
+        # Nav-bar button (also updates _cust_inline_label via _refresh_customer_btn)
+        try:
+            self._refresh_customer_btn()
+        except Exception:
             pass
+
+        # Inline label — _refresh_customer_btn already touches it, but we
+        # set it here too so callers that fire before the strip is built
+        # still render correctly on the next show.
+        if hasattr(self, "_cust_inline_label") and self._cust_inline_label is not None:
+            try:
+                self._cust_inline_label.setText(f"Customer: {name}")
+                self._cust_inline_label.setStyleSheet(
+                    f"color: {NAVY}; font-size: 11px; font-weight: bold; "
+                    f"background: transparent; padding: 0 6px;"
+                )
+            except Exception:
+                pass
+
+        # Clear the inline search box so the cashier can type a new query
+        # without backspacing the previous one. Block signals so textEdited
+        # doesn't fire the completer with an empty string.
+        if hasattr(self, "_cust_search_edit") and self._cust_search_edit is not None:
+            try:
+                self._cust_search_edit.blockSignals(True)
+                self._cust_search_edit.clear()
+                self._cust_search_edit.blockSignals(False)
+            except Exception:
+                pass
+
+        if self.parent_window:
+            try:
+                self.parent_window._set_status(f"Customer: {name or 'Default'}")
+            except Exception:
+                pass
+
+        # Re-render the current category so prices reflect the new price list.
+        try:
+            self._reload_current_category()
+        except Exception as e:
+            print(f"[pos] grid re-price failed: {e}")
+        return True
+
+    def _confirm_cart_clear_on_price_list_change(self, new_price_list: str | None) -> bool:
+        """
+        Ask the cashier before wiping a populated cart because the incoming
+        customer's price list differs from the active one.
+
+        Returns True when it's safe to continue with the customer change:
+          • cart is empty, or
+          • price list is unchanged, or
+          • user confirmed the wipe (cart gets cleared here).
+        Returns False when the user cancels — caller should NOT change
+        customer.
+
+        Startup / first-time selection (no existing selected customer)
+        never prompts because there's nothing to lose.
+        """
+        # Startup / first pick — nothing to protect.
+        if self._selected_customer is None:
+            return True
+
+        # Same price list → no price recomputation needed, keep the cart.
+        current_pl = self._active_price_list or None
+        if (current_pl or "") == (new_price_list or ""):
+            return True
+
+        # Empty cart → safe to switch silently.
+        try:
+            if not self._collect_invoice_items():
+                return True
+        except Exception:
+            pass
+
+        answer = QMessageBox.question(
+            self,
+            "Clear cart?",
+            (
+                f"The new customer uses price list "
+                f"<b>{new_price_list or '(none)'}</b> (current: "
+                f"<b>{current_pl or '(none)'}</b>).\n\n"
+                "Cart items were priced at the previous list. They will be "
+                "cleared so new rates apply.\n\nContinue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+
+        try:
+            self._clear_cart()
+        except Exception as e:
+            print(f"[pos] cart clear on customer change failed: {e}")
+        return True
     
     # def _refresh_unsynced_badge(self):
     #     """Refresh sync badges.
@@ -10955,16 +11237,11 @@ class POSView(QWidget):
             QMessageBox.information(self, "Customer Required",
                                     "Please select a customer before creating a Quotation.")
             return
-        self._selected_customer = dlg.selected_customer
-        cname = self._selected_customer.get("customer_name", "")
-        self._cust_btn.setText(f"{cname[:22]}")
-        self._cust_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {SUCCESS}; color: {WHITE}; border: none;
-                border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 8px;
-            }}
-            QPushButton:hover {{ background-color: {SUCCESS_H}; }}
-        """)
+        # Route through the central setter so the grid re-prices, the
+        # inline label updates, and a cart-clear is offered if the price
+        # list differs from what was previously active.
+        self._apply_selected_customer(dlg.selected_customer)
+        cname = (dlg.selected_customer or {}).get("customer_name", "")
         if self.parent_window:
             self.parent_window._set_status(
                 f"Quotation mode — Customer: {cname}  — Add items then use Options › Save Quotation")

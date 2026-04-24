@@ -9,7 +9,7 @@ import time
 # table / index. Mismatches between this constant and schema_info.version
 # trigger a full migration pass on next launch; matches short-circuit so
 # startup doesn't burn 5–15s on INFORMATION_SCHEMA round-trips every time.
-SCHEMA_VERSION = "2026.04.19.2"
+SCHEMA_VERSION = "2026.04.24.1"
 
 
 def _hash(pw: str) -> str:
@@ -498,8 +498,50 @@ def run():
             ("conversion_factor", "DECIMAL(12,4) NULL"),
             ("tax_rate",          "DECIMAL(8,4)  NULL"),
             ("tax_type",          "NVARCHAR(50)  NULL"),
+            # Variant support — templates have is_template=1 and no price rows of their
+            # own; variants carry variant_of=<template part_no> and their own attrs.
+            ("is_template",       "BIT           NOT NULL DEFAULT 0"),
+            ("variant_of",        "NVARCHAR(50)  NULL"),
+            ("attributes",        "NVARCHAR(MAX) NULL"),   # JSON: [{attribute, attribute_value}, ...]
+            ("has_variants",      "BIT           NOT NULL DEFAULT 0"),
         ]:
             add_col("products", col, defn)
+
+    # ==================================================================
+    # 9b. item_prices — per (item, price_list, uom) rate cache.
+    # --------------------------------------------------------------
+    # The backend `get_products` endpoint returns a `prices` array per item
+    # (one entry per price list / uom). We persist every entry here so the
+    # POS can resolve the correct rate for the *active customer's* price
+    # list at cart time — matching the Android client's bulk-cache pattern.
+    # ==================================================================
+    if not table_exists("item_prices"):
+        cur.execute("""
+            CREATE TABLE [dbo].[item_prices] (
+                [id]              INT           IDENTITY(1,1) NOT NULL,
+                [part_no]         NVARCHAR(50)  NOT NULL,
+                [price_list]      NVARCHAR(120) NOT NULL,
+                [uom]             NVARCHAR(20)  NOT NULL DEFAULT 'nos',
+                [price]           DECIMAL(18,4) NOT NULL DEFAULT 0,
+                [currency]        NVARCHAR(10)  NULL,
+                [price_type]      NVARCHAR(20)  NOT NULL DEFAULT 'selling', -- selling|buying
+                [updated_at]      DATETIME      NOT NULL DEFAULT GETDATE(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        # Unique per (item, price_list, uom, price_type) — upserts key on this.
+        cur.execute("""
+            CREATE UNIQUE INDEX ux_item_prices_key
+                ON [dbo].[item_prices]([part_no], [price_list], [uom], [price_type])
+        """)
+        # Fast path for grid refresh: "give me every selling price in list X".
+        cur.execute("""
+            CREATE INDEX ix_item_prices_list
+                ON [dbo].[item_prices]([price_list], [price_type])
+        """)
+        ok("item_prices")
+    else:
+        skip("item_prices")
 
     # ==================================================================
     # 10. sales

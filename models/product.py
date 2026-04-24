@@ -9,9 +9,16 @@ _ORDER_SEL  = ", ".join(_ORDER_COLS)   # order_1, order_2, … order_6
 
 # Added uom and conversion_factor to the standard selection
 # is_pharmacy_product is wrapped in COALESCE so pre-migration rows still work
+# is_template / has_variants / variant_of / attributes come from task 3 (variants).
+# All four are COALESCE'd so the SELECT never blows up on a DB that hasn't
+# migrated yet (fresh installs pick them up via setup_database.py).
 _BASE_SELECT = (
     "id, part_no, name, price, stock, category, image_path, uom, conversion_factor, "
     "COALESCE(is_pharmacy_product, 0) AS is_pharmacy_product, "
+    "COALESCE(is_template, 0)         AS is_template, "
+    "COALESCE(has_variants, 0)        AS has_variants, "
+    "variant_of, "
+    "attributes, "
     f"{_ORDER_SEL}"
 )
 
@@ -19,22 +26,30 @@ _BASE_SELECT = (
 # READ
 # =============================================================================
 
-def get_all_products() -> list[dict]:
+# When include_variants=False (default), variant rows are hidden from the
+# grid — only templates and standalone items appear. Cashiers reach variants
+# via the variant-picker dialog launched on tapping a template.
+_HIDE_VARIANTS = " AND (variant_of IS NULL OR variant_of = '')"
+
+
+def get_all_products(include_variants: bool = False) -> list[dict]:
     conn = get_connection()
     cur  = conn.cursor()
-    cur.execute(f"SELECT {_BASE_SELECT} FROM products ORDER BY part_no")
+    where = "" if include_variants else f"WHERE 1=1 {_HIDE_VARIANTS}"
+    cur.execute(f"SELECT {_BASE_SELECT} FROM products {where} ORDER BY part_no")
     rows = fetchall_dicts(cur)
     conn.close()
     return [_to_dict(r) for r in rows]
 
 
-def get_products_by_category(category: str) -> list[dict]:
+def get_products_by_category(category: str, include_variants: bool = False) -> list[dict]:
     conn = get_connection()
     cur  = conn.cursor()
+    tail = "" if include_variants else _HIDE_VARIANTS
     cur.execute(f"""
         SELECT {_BASE_SELECT}
         FROM products
-        WHERE category = ?
+        WHERE category = ? {tail}
         ORDER BY name
     """, (category,))
     rows = fetchall_dicts(cur)
@@ -86,6 +101,24 @@ def get_product_by_part_no(part_no: str) -> dict | None:
     row = fetchone_dict(cur)
     conn.close()
     return _to_dict(row) if row else None
+
+
+def get_variants_of(template_part_no: str) -> list[dict]:
+    """
+    All variant rows whose `variant_of` points at this template. Used by the
+    variant-picker dialog to build its attribute matrix.
+    """
+    if not template_part_no:
+        return []
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute(
+        f"SELECT {_BASE_SELECT} FROM products WHERE variant_of = ? ORDER BY name",
+        (template_part_no.upper().strip(),),
+    )
+    rows = fetchall_dicts(cur)
+    conn.close()
+    return [_to_dict(r) for r in rows]
 
 
 # =============================================================================
@@ -223,6 +256,11 @@ def _to_dict(row: dict) -> dict | None:
         "uom":               row.get("uom") or "Unit",
         "conversion_factor": float(row.get("conversion_factor") or 1.0),
         "is_pharmacy_product": bool(row.get("is_pharmacy_product", False)),
+        # Variant flags — present even on pre-migration rows via COALESCE.
+        "is_template":   bool(row.get("is_template",  False)),
+        "has_variants":  bool(row.get("has_variants", False)),
+        "variant_of":    (row.get("variant_of") or "") or None,
+        "attributes":    row.get("attributes") or "",
         **{f"order_{i}": bool(row.get(f"order_{i}", False)) for i in range(1, 7)},
     }
 

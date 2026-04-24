@@ -256,6 +256,87 @@ class SqlSettingsDialog(QDialog):
         }
         self.settings_file.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
+    # ── Tenant switch detection / wipe ───────────────────────────────────
+    def _new_api_url(self) -> str:
+        """Whatever the user has typed into the URL field right now."""
+        return self.frappe_url_input.text().strip()
+
+    def _maybe_wipe_on_tenant_switch(self) -> bool:
+        """
+        If the user has changed `api_url` to a different tenant, prompt to
+        wipe every synced row in the local DB (products, customers, sales,
+        shifts, users — everything except the schema version marker).
+
+        Returns True when a wipe was performed, so callers can force the
+        app to exit / restart and avoid stale in-memory state.
+
+        We only fire when the URL *actually* changed — pure DB-connection
+        tweaks (server/database/credentials) do not trigger a wipe.
+        """
+        old = getattr(self, "api_url", "") or ""
+        new = self._new_api_url()
+        try:
+            from database.tenant_reset import urls_differ
+        except Exception as e:
+            print(f"[sql_settings] tenant_reset import failed: {e}")
+            return False
+
+        if not urls_differ(old, new):
+            return False   # same tenant (or first-time setup with blank old)
+        if not old:
+            return False   # first-time setup — there's nothing to wipe yet
+
+        confirm = QMessageBox.warning(
+            self,
+            "Switching tenant",
+            (
+                "The Frappe site URL has changed:\n\n"
+                f"   FROM:  {old or '(unset)'}\n"
+                f"   TO:    {new}\n\n"
+                "All local data belongs to the old tenant — products, "
+                "customers, sales, shifts, users, and prices. Keeping it "
+                "would cause records to bleed between instances.\n\n"
+                "Wipe every synced row now and start clean on the new "
+                "tenant?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return False
+
+        try:
+            from database.tenant_reset import (
+                wipe_all_tenant_data, invalidate_runtime_caches,
+            )
+            summary = wipe_all_tenant_data()
+            invalidate_runtime_caches()
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Wipe failed",
+                f"Could not clear tenant data:\n\n{e}\n\n"
+                "Settings were NOT saved. Investigate before retrying.",
+            )
+            return False
+
+        if summary.get("errors"):
+            QMessageBox.warning(
+                self, "Wipe completed with warnings",
+                "Some tables could not be cleared:\n\n" +
+                "\n".join(summary["errors"][:6]) +
+                (f"\n... (+{len(summary['errors'])-6} more)"
+                 if len(summary["errors"]) > 6 else ""),
+            )
+        else:
+            QMessageBox.information(
+                self, "Data wiped",
+                f"Cleared {summary['rows_deleted']:,} rows across "
+                f"{summary['tables_wiped']} table(s).\n\n"
+                "The POS will close so the new tenant data can load "
+                "cleanly on next launch.",
+            )
+        return True
+
     # ── NEW: Reconnect button logic
     def _reconnect(self):
         """Check connection to the EXISTING database, then save settings ONLY (no migration)"""
@@ -274,7 +355,11 @@ class SqlSettingsDialog(QDialog):
             )
             return
 
-        # Connection is valid → save settings only
+        # Tenant switch? Offer to wipe the old DB before we point at a new
+        # URL. Must happen *before* _save_settings so on-disk old_url matches
+        # the current live data.
+        wiped = self._maybe_wipe_on_tenant_switch()
+
         self._save_settings()
 
         try:
@@ -282,6 +367,11 @@ class SqlSettingsDialog(QDialog):
             invalidate_cache()
         except Exception:
             pass
+
+        if wiped:
+            # Force a restart so no singleton still carries old-tenant state.
+            self._exit_for_clean_restart()
+            return
 
         QMessageBox.information(
             self, "Reconnect Successful",
@@ -291,13 +381,53 @@ class SqlSettingsDialog(QDialog):
         self.accept()  # Close dialog (no sys.exit, no migration)
 
     def _save_and_close(self):
+        # Tenant switch? Wipe happens *before* saving so the wipe targets
+        # the old tenant's DB while the in-file api_url still reflects it.
+        wiped = self._maybe_wipe_on_tenant_switch()
+
         self._save_settings()   # Reuse the shared save logic
         try:
             from services.site_config import invalidate_cache
             invalidate_cache()
         except Exception:
             pass
+
+        if wiped:
+            # Fresh DB — still run migrations so schema_info lines up, then
+            # force a restart so no cache holds old-tenant state.
+            try:
+                self._run_migration_script()
+            except Exception:
+                pass
+            self._exit_for_clean_restart()
+            return
+
         self._run_migration_script()
+
+    # ── Force a clean restart after a wipe ───────────────────────────────
+    def _exit_for_clean_restart(self) -> None:
+        """
+        After a tenant wipe there's no safe way to keep running in-process —
+        every singleton (auth session, sync threads, cached customer list)
+        is holding data that no longer exists. Close the POS so the next
+        launch bootstraps against the new tenant from a clean slate.
+        """
+        try:
+            self.accept()
+        except Exception:
+            pass
+        try:
+            # Graceful quit via Qt event loop. If Qt is no longer alive for
+            # some reason (rare), fall through to os._exit as a backstop.
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+                return
+        except Exception:
+            pass
+        import os as _os
+        _os._exit(0)
 
     def _run_migration_script(self):
         db_name = self.db_input.text().strip() or "pos_db"

@@ -81,6 +81,10 @@ def login(username: str, password: str) -> dict:
             existing["server_vat_enabled"]      = _str(user_rights.get("is_additional_tax_enabled"))
             existing["server_taxes_and_charges"]= _str(user_block.get("taxes_and_charges") or user_rights.get("taxes_and_charges"))
             existing["server_api_host"]         = _str(raw.get("api_host") or API_BASE_URL)
+            # Default customer bound to this user in ERPNext (User Permission,
+            # is_default=1). Saved as the customer's *name* — the POS resolves
+            # it to a full local Customer row at MainWindow init.
+            existing["server_default_customer"] = _str(user_block.get("default_customer"))
             save_defaults(existing)
             print("[auth] ✅ Server defaults saved.")
         except Exception as e:

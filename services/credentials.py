@@ -82,12 +82,26 @@ def get_credentials() -> tuple[str, str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _read_from_db() -> tuple[str, str]:
-    """Read api_key / api_secret from company_defaults. Never raises."""
+    """
+    Read api_key / api_secret from company_defaults. Never raises.
+
+    Keyed on `MIN(id)` — not a hardcoded id=1 — because schema
+    migrations / tenant wipes / schema re-builds can leave the single
+    row at an id other than 1 (we've seen id=2 in the wild). The write
+    path already uses `MIN(id)`; this read now matches so they address
+    the same row. Mismatch was the cause of the 'No credentials' bug on
+    PIN login (PIN login never hits the online endpoint, so it's
+    entirely dependent on this read path).
+    """
     try:
         from database.db import get_connection
         conn = get_connection()
         cur  = conn.cursor()
-        cur.execute("SELECT api_key, api_secret FROM company_defaults WHERE id = 1")
+        cur.execute("""
+            SELECT api_key, api_secret
+            FROM   company_defaults
+            WHERE  id = (SELECT MIN(id) FROM company_defaults)
+        """)
         row = cur.fetchone()
         conn.close()
         if row:

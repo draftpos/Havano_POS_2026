@@ -28,6 +28,14 @@ class AdvanceSettings:
     orderContentFontSize: int = 10
     orderContentStyle: str = "Bold"
 
+    # Kitchen (KOT) font sizes — independent of the receipt fonts so a
+    # change to the receipt never accidentally shrinks/enlarges the
+    # kitchen slip. Header is used for the big "Order #N" line; body is
+    # used for the item lines. Consumed by
+    # services/printing_service.print_kitchen_order.
+    kitchenHeaderSize: int = 14
+    kitchenBodySize:   int = 10
+
     # Logo
     logoDirectory: str = ""
 

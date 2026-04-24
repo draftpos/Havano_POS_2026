@@ -285,6 +285,71 @@ def _extract_tax_info(taxes: list, part_no: str = "") -> dict | None:
     }
 
 
+def _extract_price_list_rows(prices: list) -> list[dict]:
+    """
+    Normalise the `prices` array from get_products into rows suitable for the
+    local `item_prices` table. One row per (price_list, uom, price_type).
+
+    Mirrors the Android client's bulk-cache approach (see
+    lib/core/services/products_service.dart) — the server ships every price
+    list a product belongs to, and the POS filters by the *active* price
+    list at cart time.
+    """
+    rows: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for p in prices or []:
+        price_list = str(p.get("priceName") or "").strip()
+        if not price_list:
+            continue
+        uom        = str(p.get("uom")  or "nos").strip() or "nos"
+        price_type = str(p.get("type") or "selling").strip().lower() or "selling"
+        try:
+            price = float(p.get("price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+
+        key = (price_list, uom, price_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "price_list": price_list,
+            "uom":        uom,
+            "price":      price,
+            "price_type": price_type,
+        })
+    return rows
+
+
+def _extract_variant_info(p: dict) -> dict:
+    """
+    Pull variant fields from the get_products payload. The backend returns
+    (see pos_intergration_latest api.py):
+        has_variants  : BIT  — this is a template item
+        variant_of    : str  — parent template part_no (variants only)
+        attributes    : list[{attribute, attribute_value}]
+    Missing keys → safe defaults (all zero / empty).
+    """
+    has_variants = bool(p.get("has_variants") or 0)
+    variant_of   = str(p.get("variant_of") or "").strip().upper()
+    attrs_raw    = p.get("attributes") or []
+
+    # Always json.dumps — even empty list — so downstream callers can parse
+    # without guarding for None.
+    try:
+        attrs_json = json.dumps(attrs_raw, default=str)
+    except Exception:
+        attrs_json = "[]"
+
+    return {
+        "has_variants": 1 if has_variants else 0,
+        "is_template":  1 if has_variants else 0,
+        "variant_of":   variant_of or None,
+        "attributes":   attrs_json,
+    }
+
+
 def _parse_product(p: dict) -> dict | None:
     """
     Maps the real API product object to a clean local dict including tax info.
@@ -308,11 +373,26 @@ def _parse_product(p: dict) -> dict | None:
     taxes    = p.get("taxes", [])
     tax_info = _extract_tax_info(taxes, part_no=part_no)
 
-    # is_sales_item filter
-    is_sales = p.get("is_sales_item")
-    if not is_sales or str(is_sales).strip() in ("0", "false", "False", "no"):
+    # is_sales_item filter.
+    # Templates (has_variants=1) are often flagged is_sales_item=0 in Frappe
+    # — you sell the variants, not the template itself. We still need the
+    # template row locally so it can appear as a tile on the POS grid and
+    # open the variant picker; without it, the variants would look like
+    # unrelated products. Skip only when both conditions hold:
+    #   (a) is_sales_item is falsy, AND
+    #   (b) has_variants is also falsy (not a template).
+    is_sales    = p.get("is_sales_item")
+    is_template = bool(p.get("has_variants"))
+    not_sellable = (
+        not is_sales
+        or str(is_sales).strip() in ("0", "false", "False", "no")
+    )
+    if not_sellable and not is_template:
         log.debug("[sync] Skipped (not sales item): %s - %s", part_no, name)
         return None
+    if not_sellable and is_template:
+        log.info("[sync] Kept non-sales template: %s - %s (for variant picker)",
+                 part_no, name)
 
     if not part_no:
         return None
@@ -334,6 +414,14 @@ def _parse_product(p: dict) -> dict | None:
     # Safe default to empty list; the sync writer wipes + rewrites per product.
     raw_batches = p.get("batches") or []
 
+    # Every price-list row for this item (multi-currency / multi-list aware).
+    # Used below to populate the `item_prices` cache so the POS can look up
+    # the right price for the active customer's price list.
+    price_list_rows = _extract_price_list_rows(raw_prices)
+
+    # Variant metadata — template flag, parent pointer, attribute blob.
+    variant_info = _extract_variant_info(p)
+
     result = {
         "part_no":             part_no,
         "name":                name,
@@ -342,8 +430,14 @@ def _parse_product(p: dict) -> dict | None:
         "stock":               stock,
         "uom":                 stock_uom,
         "uom_prices":          uom_prices,
+        "price_list_rows":     price_list_rows,
         "is_pharmacy_product": bool(p.get("is_pharmacy_product") or 0),
         "batches":             raw_batches,
+        # Variant fields flattened for the UPDATE/INSERT below
+        "has_variants":        variant_info["has_variants"],
+        "is_template":         variant_info["is_template"],
+        "variant_of":          variant_info["variant_of"],
+        "attributes":          variant_info["attributes"],
     }
 
     # Kitchen-printer routing flags from Frappe (custom_is_order_item_1..6)
@@ -369,6 +463,41 @@ def _parse_product(p: dict) -> dict | None:
 # =============================================================================
 # CORE SYNC
 # =============================================================================
+
+def _upsert_item_prices(cur, part_no: str, rows: list[dict]) -> int:
+    """
+    MERGE the full price-list cache for a single item. One MERGE per row —
+    the row count is small (usually 1–3 per item) so batching via a table
+    variable isn't worth the complexity. Returns the number of rows upserted.
+    """
+    count = 0
+    for r in rows:
+        try:
+            cur.execute("""
+                MERGE item_prices AS target
+                USING (SELECT ? AS part_no, ? AS price_list,
+                              ? AS uom,     ? AS price_type) AS src
+                    ON target.part_no    = src.part_no
+                   AND target.price_list = src.price_list
+                   AND target.uom        = src.uom
+                   AND target.price_type = src.price_type
+                WHEN MATCHED THEN
+                    UPDATE SET price      = ?,
+                               updated_at = GETDATE()
+                WHEN NOT MATCHED THEN
+                    INSERT (part_no, price_list, uom, price, price_type)
+                    VALUES (?, ?, ?, ?, ?);
+            """, (
+                part_no, r["price_list"], r["uom"], r["price_type"],
+                r["price"],
+                part_no, r["price_list"], r["uom"], r["price"], r["price_type"],
+            ))
+            count += 1
+        except Exception as e:
+            log.warning("[sync] item_prices upsert failed %s/%s/%s: %s",
+                        part_no, r.get("price_list"), r.get("uom"), e)
+    return count
+
 
 def _get_local_part_nos() -> set[str]:
     try:
@@ -450,6 +579,48 @@ def _ensure_schema(cur) -> None:
             WHERE TABLE_NAME = 'products' AND COLUMN_NAME = 'item_tax_template'
         )
         ALTER TABLE products ADD item_tax_template NVARCHAR(100) DEFAULT ''
+    """)
+
+    # -----------------------------------------------------------------
+    # Variant columns — mirrors the DDL in setup_database.py. Defensive
+    # because this service can run standalone (Windows Service mode)
+    # where setup_database.py may not have executed recently.
+    # -----------------------------------------------------------------
+    for col, defn in [
+        ("is_template",  "BIT           NOT NULL DEFAULT 0"),
+        ("variant_of",   "NVARCHAR(50)  NULL"),
+        ("attributes",   "NVARCHAR(MAX) NULL"),
+        ("has_variants", "BIT           NOT NULL DEFAULT 0"),
+    ]:
+        cur.execute(f"""
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = 'products' AND COLUMN_NAME = '{col}'
+            )
+            ALTER TABLE products ADD {col} {defn}
+        """)
+
+    # -----------------------------------------------------------------
+    # item_prices table — same structure as setup_database.py. Created
+    # here too so a fresh Windows-Service install can sync prices even
+    # before the desktop app first launches.
+    # -----------------------------------------------------------------
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = 'item_prices'
+        )
+        CREATE TABLE item_prices (
+            id          INT           IDENTITY(1,1) PRIMARY KEY,
+            part_no     NVARCHAR(50)  NOT NULL,
+            price_list  NVARCHAR(120) NOT NULL,
+            uom         NVARCHAR(20)  NOT NULL DEFAULT 'nos',
+            price       DECIMAL(18,4) NOT NULL DEFAULT 0,
+            currency    NVARCHAR(10)  NULL,
+            price_type  NVARCHAR(20)  NOT NULL DEFAULT 'selling',
+            updated_at  DATETIME      NOT NULL DEFAULT GETDATE(),
+            CONSTRAINT UQ_item_prices UNIQUE (part_no, price_list, uom, price_type)
+        )
     """)
 
 
@@ -537,6 +708,12 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
 
             order_flags = tuple(int(p.get(f"order_{i}", 0) or 0) for i in range(1, 7))
 
+            # Variant fields (default-safe so existing products get flags=0)
+            is_template  = int(p.get("is_template")  or 0)
+            has_variants = int(p.get("has_variants") or 0)
+            variant_of   = p.get("variant_of")  # may be None
+            attributes   = p.get("attributes") or "[]"
+
             if p["part_no"] in local_part_nos:
                 cur.execute("""
                     UPDATE products
@@ -554,36 +731,53 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                            order_3             = ?,
                            order_4             = ?,
                            order_5             = ?,
-                           order_6             = ?
+                           order_6             = ?,
+                           is_template         = ?,
+                           has_variants        = ?,
+                           variant_of          = ?,
+                           attributes          = ?
                     WHERE  part_no = ?
                 """, (
                     p["name"], p["price"], p["stock"], p["category"],
                     tax_rate, tax_type, item_tax_template, is_pharm,
                     p.get("uom") or None,
                     *order_flags,
+                    is_template, has_variants, variant_of, attributes,
                     p["part_no"],
                 ))
                 result["updated"] += 1
-                log.debug("[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  pharmacy=%d  orders=%s",
-                          p["part_no"], tax_rate, tax_type, is_pharm, order_flags)
+                log.debug("[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  pharmacy=%d  orders=%s  tmpl=%d var_of=%s",
+                          p["part_no"], tax_rate, tax_type, is_pharm, order_flags,
+                          is_template, variant_of)
             else:
                 cur.execute("""
                     INSERT INTO products
                         (part_no, name, price, stock, category,
                          tax_rate, tax_type, item_tax_template, is_pharmacy_product,
                          uom,
-                         order_1, order_2, order_3, order_4, order_5, order_6)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         order_1, order_2, order_3, order_4, order_5, order_6,
+                         is_template, has_variants, variant_of, attributes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     p["part_no"], p["name"], p["price"], p["stock"], p["category"],
                     tax_rate, tax_type, item_tax_template, is_pharm,
                     p.get("uom") or None,
                     *order_flags,
+                    is_template, has_variants, variant_of, attributes,
                 ))
                 local_part_nos.add(p["part_no"])
                 result["inserted"] += 1
-                log.debug("[sync] Inserted: %s  tax_rate=%.4f  tax_type=%s  orders=%s",
-                          p["part_no"], tax_rate, tax_type, order_flags)
+                log.debug("[sync] Inserted: %s  tax_rate=%.4f  tax_type=%s  orders=%s  tmpl=%d var_of=%s",
+                          p["part_no"], tax_rate, tax_type, order_flags,
+                          is_template, variant_of)
+
+            # ── Upsert full price-list cache for this item ───────────────────
+            # Templates have no prices of their own — variants carry them.
+            pl_rows = p.get("price_list_rows") or []
+            if pl_rows:
+                n = _upsert_item_prices(cur, p["part_no"], pl_rows)
+                if n:
+                    log.debug("[sync] %s — %d price-list row(s) cached", p["part_no"], n)
 
             # ── Upsert batches (pharmacy expiry tracking) ────────────────────
             # Wipe + insert fresh per product using the outer transaction's
