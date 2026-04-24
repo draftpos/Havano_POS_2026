@@ -41,12 +41,61 @@ GL_MOP_SYNC_INTERVAL_SECONDS  = 600  # GL / MOP / exchange rates every 10 min
 # PUBLIC — called on login and by SyncWorker
 # =============================================================================
 
+def _has_local_products() -> bool:
+    """Returning-user detection: do we already have a catalogue on disk?
+
+    When True, the login flow should NOT block on a full inline sync —
+    the BackgroundSyncWorker (started from login_dialog._accept_user)
+    will refresh products, taxes, GL, MOP, and exchange rates without
+    making the cashier wait at the login screen. False means first-time
+    setup: the POS grid would be empty until sync completes, so we fall
+    back to the blocking inline path.
+    """
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM products")
+        n = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return n > 0
+    except Exception as e:
+        log.debug("_has_local_products check failed: %s", e)
+        return False
+
+
 def sync_from_login_response(login_data: dict) -> dict:
     token_string = login_data.get("token_string", "")
     api_key = api_secret = ""
     if token_string and ":" in token_string:
         api_key, api_secret = token_string.split(":", 1)
 
+    # ------------------------------------------------------------------
+    # Fast path: returning user, products already cached locally.
+    # Defer every heavy sync to the BackgroundSyncWorker so login opens
+    # the POS immediately. The background worker runs users + products +
+    # taxes (+ GL/MOP/rates via its SyncWorker) in the same order.
+    # ------------------------------------------------------------------
+    if _has_local_products():
+        log.info("[sync_login] products exist locally — skipping inline "
+                 "sync, background worker will handle refresh")
+        return {
+            "inserted":                0,
+            "updated":                  0,
+            "products_synced":          0,
+            "gl_accounts_synced":       0,
+            "modes_of_payment_synced":  0,
+            "exchange_rates_synced":    0,
+            "doctors_synced":           0,
+            "dosages_synced":           0,
+            "skipped_inline":           True,
+        }
+
+    # ------------------------------------------------------------------
+    # First-time install path (no local products yet) — the POS grid is
+    # unusable until a catalogue is populated, so we block login on the
+    # full sync. Login dialog paints a "First-time setup" notice before
+    # spawning the LoginWorker when this branch is about to fire.
     # ------------------------------------------------------------------
     # 1. Products (always first)
     # ------------------------------------------------------------------

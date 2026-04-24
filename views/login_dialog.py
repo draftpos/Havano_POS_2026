@@ -705,12 +705,40 @@ class LoginDialog(QDialog):
             self._show_error("Please enter your username and password.")
             return
 
+        # First-time detection — if the local products table is empty we
+        # know LoginWorker → auth_service.login → sync_from_login_response
+        # will do a full inline catalogue sync (can take ~30–60s on first
+        # install). Tell the cashier that's about to happen so the login
+        # doesn't look frozen. Returning logins (products cached) skip
+        # this — login is instant, sync runs in the background.
         self._set_btn_loading(self._email_btn)
         self.error_label.hide()
+        if self._local_catalogue_is_empty():
+            self._set_status(
+                "First-time setup — signing in and syncing catalogue… "
+                "(this may take a minute)",
+                "#c05a00",
+            )
 
         self._worker = LoginWorker(u, p)
         self._worker.finished.connect(self._on_email_login_done)
         self._worker.start()
+
+    def _local_catalogue_is_empty(self) -> bool:
+        """True when no products are synced locally yet."""
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur  = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM products")
+            n = int(cur.fetchone()[0] or 0)
+            conn.close()
+            return n == 0
+        except Exception:
+            # If we can't tell, err on the side of not showing the prompt —
+            # returning users shouldn't see a "first-time setup" banner
+            # just because of a momentary DB hiccup.
+            return False
 
     def _on_email_login_done(self, result: dict):
         self._worker = None

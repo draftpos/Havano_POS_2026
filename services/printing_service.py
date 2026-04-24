@@ -296,10 +296,17 @@ class PrintingService:
                 except Exception as e:
                     print(f"[PrintService] Error drawing fiscal QR for credit note: {e}")
             elif fiscal_enabled and not fiscal_ready:
+                # Placeholder QR + label + explanation. The image must
+                # advance `y` before the label renders or the two overlap
+                # on the slip (the original merged code missed that and
+                # drew the text right on top of the pixmap).
                 pixmap = QPixmap("assets/qr.png")
                 if not pixmap.isNull():
-                    painter.drawPixmap(self.margin + (self.paper_width - self.margin * 2 - pixmap.width()) // 2, y, pixmap)
-                # Fiscalization enabled but QR not ready
+                    painter.drawPixmap(
+                        self.margin + (self.paper_width - self.margin * 2 - pixmap.width()) // 2,
+                        y, pixmap,
+                    )
+                    y += pixmap.height() + 10
                 painter.setFont(bold_font)
                 painter.setPen(QColor(ORANGE))
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 30,
@@ -308,7 +315,8 @@ class PrintingService:
                 painter.setFont(normal_font)
                 painter.setPen(QColor(DARK_TEXT))
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
-                                 Qt.AlignCenter, "Credit note will be re-issued once fiscalized")
+                                 Qt.AlignCenter,
+                                 "Credit note will be re-issued once fiscalized")
                 y += 40
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                 y += 20
@@ -1351,18 +1359,38 @@ class PrintingService:
                     except Exception as e:
                         print(f"[PrintService] Error drawing fiscal QR: {e}")
                 else:
-                    y += 60
-                    # Fiscalization enabled but QR not in DB yet — already waited upstream
+                    # Fiscalization enabled but QR not in DB yet — already
+                    # waited upstream. We show three things in this case:
+                    #   1. A placeholder QR image (assets/qr.png) so the
+                    #      receipt visually resembles a fiscalised slip
+                    #      even without the real code yet.
+                    #   2. A clear "NOT FISCALIZED" label so staff don't
+                    #      mistake the placeholder for a live QR.
+                    #   3. A small note explaining that the receipt will
+                    #      be re-issued once fiscalisation succeeds.
+                    y += 20
                     pixmap = QPixmap("assets/qr.png")
                     if not pixmap.isNull():
-                        painter.drawPixmap(self.margin + (self.paper_width - self.margin * 2 - pixmap.width()) // 2, y, pixmap)
-                        y += pixmap.height() + 15
-                        
-                        painter.setFont(normal_font) # or a specific warning font
-                        painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 24,
-                                 Qt.AlignCenter, "NOT FISCALIZED")
-                        y += 20
-                    
+                        painter.drawPixmap(
+                            self.margin + (self.paper_width - self.margin * 2 - pixmap.width()) // 2,
+                            y, pixmap,
+                        )
+                        y += pixmap.height() + 10
+                    painter.setFont(bold_font)
+                    painter.setPen(QColor(ORANGE))
+                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 28,
+                                     Qt.AlignCenter, "FISCALIZATION PENDING")
+                    y += 28
+                    painter.setFont(normal_font)
+                    painter.setPen(QColor(DARK_TEXT))
+                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 22,
+                                     Qt.AlignCenter,
+                                     "Receipt will be re-issued once fiscalized")
+                    y += 30
+                    painter.drawLine(self.margin, y,
+                                     self.paper_width - self.margin, y)
+                    y += 14
+
 
             # Footer — fully user-configurable via Company Defaults → Footer Text.
             # Multi-line values are rendered as separate centered lines so the
@@ -1370,7 +1398,7 @@ class PrintingService:
             # / anything else in the settings instead of shipping a hardcoded
             # second line.
             painter.setFont(normal_font)
-            _footer_raw = (receipt.footer or ".........").strip()
+            _footer_raw = (receipt.footer or "Thank you for your purchase!").strip()
             for _line in _footer_raw.splitlines():
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, 22,
                                  Qt.AlignCenter, _line)
@@ -1565,7 +1593,7 @@ class PrintingService:
             # Footer
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
-                             Qt.AlignCenter, receipt.footer or "......")
+                             Qt.AlignCenter, receipt.footer or "Thank you for your payment!")
             y += 30
 
             painter.end()
