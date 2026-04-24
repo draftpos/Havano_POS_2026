@@ -11,6 +11,8 @@
     "orderContentFontName": "Arial",
     "orderContentFontSize": 8,
     "orderContentStyle": "Italic",
+    "kitchenHeaderSize": 14,
+    "kitchenBodySize": 10,
     "logoDirectory": "logo.png",
     "charactersPerLine": 48,
     "showSubtotalExclusive": false,
