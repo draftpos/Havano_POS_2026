@@ -1313,7 +1313,70 @@ def run():
             ("updated_at",        "DATETIME2(7)  NULL DEFAULT SYSDATETIME()"),
         ]:
             add_col("product_taxes", col, defn)
+    
+        # ==================================================================
+    # 31. product_taxes
+    # ==================================================================
+    if not table_exists("product_taxes"):
+        cur.execute("""
+            CREATE TABLE [dbo].[product_taxes] (
+                [id]                INT           IDENTITY(1,1) NOT NULL,
+                [part_no]           NVARCHAR(50)  NOT NULL,
+                [item_tax_template] NVARCHAR(100) NULL,
+                [tax_category]      NVARCHAR(50)  NULL,
+                [valid_from]        DATE          NULL,
+                [minimum_net_rate]  DECIMAL(8,4)  NULL,
+                [maximum_net_rate]  DECIMAL(8,4)  NULL,
+                [created_at]        DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
+                [updated_at]        DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("product_taxes")
+    else:
+        skip("product_taxes")
+        # ... existing code ...
 
+    # ==================================================================
+    # 32. price_types ← ADD THIS NEW SECTION
+    # ==================================================================
+    if not table_exists("price_types"):
+        cur.execute("""
+            CREATE TABLE [dbo].[price_types] (
+                [id]          INT           IDENTITY(1,1) NOT NULL,
+                [price_name]  NVARCHAR(100) NOT NULL,
+                [description] NVARCHAR(255) NULL,
+                [is_active]   BIT           NOT NULL DEFAULT 1,
+                [created_at]  DATETIME      NOT NULL DEFAULT GETDATE(),
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                CONSTRAINT [UQ_price_types_name] UNIQUE NONCLUSTERED ([price_name] ASC)
+            )
+        """)
+        ok("price_types")
+    else:
+        skip("price_types")
+
+    # ==================================================================
+    # 33. product_prices ← ADD THIS NEW SECTION
+    # ==================================================================
+    if not table_exists("product_prices"):
+        cur.execute("""
+            CREATE TABLE [dbo].[product_prices] (
+                [id]            INT           IDENTITY(1,1) NOT NULL,
+                [part_no]       NVARCHAR(50)  NOT NULL,
+                [price_type_id] INT           NOT NULL,
+                [price]         DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [uom]           NVARCHAR(40)  NOT NULL DEFAULT 'Nos',
+                [is_active]     BIT           NOT NULL DEFAULT 1,
+                [created_at]    DATETIME      NOT NULL DEFAULT GETDATE(),
+                [updated_at]    DATETIME      NOT NULL DEFAULT GETDATE(),
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                CONSTRAINT [UQ_product_prices] UNIQUE NONCLUSTERED ([part_no], [price_type_id])
+            )
+        """)
+        ok("product_prices")
+    else:
+        skip("product_prices")
     # ==================================================================
     # 32. quotations
     # ==================================================================
@@ -1594,6 +1657,16 @@ def run():
          "ADD CONSTRAINT [FK_customers_warehouses] "
          "FOREIGN KEY ([custom_warehouse_id]) "
          "REFERENCES [dbo].[warehouses]([id])"),
+                ("FK_product_prices_products",
+         "ALTER TABLE [dbo].[product_prices] WITH CHECK "
+         "ADD CONSTRAINT [FK_product_prices_products] "
+         "FOREIGN KEY ([part_no]) REFERENCES [dbo].[products]([part_no]) "
+         "ON DELETE CASCADE"),
+        
+        ("FK_product_prices_price_types",
+         "ALTER TABLE [dbo].[product_prices] WITH CHECK "
+         "ADD CONSTRAINT [FK_product_prices_price_types] "
+         "FOREIGN KEY ([price_type_id]) REFERENCES [dbo].[price_types]([id])"),
 
         ("FK_customers_cost_centers",
          "ALTER TABLE [dbo].[customers] WITH CHECK "

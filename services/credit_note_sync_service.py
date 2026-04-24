@@ -79,21 +79,28 @@ def _get_defaults() -> dict:
         return {}
 
 
-def _get_host() -> str:
+def _get_host():
+    """Get Frappe host URL using the same method as sync_customers"""
     try:
-        from services.site_config import get_host
-        return get_host()
+        from services.site_config import get_host as _gh
+        return _gh()
     except Exception:
-        pass
-    try:
-        host = _get_defaults().get("server_api_host", "").strip().rstrip("/")
-        if host:
-            return host
-    except Exception:
-        pass
-    return "https://erp1193.havano.cloud"
-
-
+        # Fallback to database
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT TOP 1 server_api_host FROM company_defaults")
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0]:
+                host = row[0].strip()
+                if host and not host.startswith('http'):
+                    host = 'https://' + host
+                return host.rstrip('/')
+        except Exception:
+            pass
+        return None
 # =============================================================================
 # EXCHANGE RATE HELPERS  (identical logic to pos_upload_service)
 # =============================================================================

@@ -1,7 +1,7 @@
 # =============================================================================
 # services/sync_service.py  —  Product + GL Account + Mode of Payment Sync
 # =============================================================================
-
+from models.product_price import sync_all_product_prices_from_api, ensure_price_tables_and_columns, get_price_summary_by_product
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -293,13 +293,13 @@ def sync_modes_of_payment(api_key: str, api_secret: str,
 # =============================================================================
 # PRODUCT SYNC
 # =============================================================================
-
 def sync_products(api_key: str = "", api_secret: str = "",
                   page: int = None) -> dict:
     result = {
         "products_synced":   0,
         "products_inserted": 0,
         "products_updated":  0,
+        "prices_synced":     0,  # Add this line to track prices
         "skipped":           0,
         "total_api":         0,
         "pages_fetched":     0,
@@ -311,6 +311,8 @@ def sync_products(api_key: str = "", api_secret: str = "",
         headers["Authorization"] = f"token {api_key}:{api_secret}"
 
     current_page = 1
+    total_prices_synced = 0
+    
     while True:
         url = f"{PRODUCTS_ENDPOINT}?page={current_page}&limit={PAGE_SIZE}"
         print(f"[sync] Fetching page {current_page}: {url}")
@@ -351,6 +353,7 @@ def sync_products(api_key: str = "", api_secret: str = "",
 
         print(f"[sync]   {len(products)} products on page {current_page}/{total_pages}")
 
+        page_prices_synced = 0
         for raw in products:
             item_code = str(raw.get("itemcode") or "").strip()
             if not item_code:
@@ -363,12 +366,20 @@ def sync_products(api_key: str = "", api_secret: str = "",
                     result["products_inserted"] += 1
                 else:
                     result["products_updated"] += 1
+                
+                # Count prices synced for this product
+                prices_count = len(raw.get("prices", []))
+                page_prices_synced += prices_count
+                
             except Exception as e:
                 result["skipped"] += 1
                 err_msg = f"{item_code}: {e}"
                 result["errors"].append(err_msg)
                 if result["skipped"] <= 5:
                     print(f"[sync] ❌ {err_msg}")
+        
+        total_prices_synced += page_prices_synced
+        result["prices_synced"] = total_prices_synced
 
         if page is not None:
             break
@@ -380,17 +391,47 @@ def sync_products(api_key: str = "", api_secret: str = "",
         f"[sync] ✅ Done — "
         f"{result['products_inserted']} inserted, "
         f"{result['products_updated']} updated, "
+        f"{result['prices_synced']} prices synced, "
         f"{result['skipped']} skipped "
         f"({result['pages_fetched']} page(s) fetched of {result['total_api']} total API records)"
     )
     return result
-
-
 # =============================================================================
 # PRIVATE — product upsert helpers
 # =============================================================================
-
+def format_sync_result_with_prices(result: dict) -> str:
+    """Format sync result including price information."""
+    if not result:
+        return "No sync performed."
+    if "error" in result and not result.get("products_synced"):
+        return f"❌ Sync failed: {result['error']}"
+    
+    lines = [
+        f"✅ Sync complete  ({result.get('total_api', 0)} products on server)",
+        f"   • {result.get('products_inserted', 0)} new products added",
+        f"   • {result.get('products_updated', 0)} products updated",
+    ]
+    
+    # Add price sync info
+    if result.get('prices_synced') is not None:
+        lines.append(f"   • {result['prices_synced']} product prices synced")
+    
+    if result.get("skipped"):
+        lines.append(f"   • {result['skipped']} skipped")
+    if result.get("gl_accounts_synced") is not None:
+        lines.append(f"   • {result['gl_accounts_synced']} GL accounts synced")
+    if result.get("modes_of_payment_synced") is not None:
+        lines.append(f"   • {result['modes_of_payment_synced']} modes of payment synced")
+    if result.get("exchange_rates_synced") is not None:
+        lines.append(f"   • {result['exchange_rates_synced']} exchange rate(s) synced")
+    if result.get("errors"):
+        lines.append(f"   ⚠  {result['errors'][0]}")
+    return "\n".join(lines)
 def _upsert_product(raw: dict) -> bool:
+    """
+    Insert or update product and sync all prices.
+    Returns True if inserted, False if updated.
+    """
     part_no = str(raw.get("itemcode") or "").strip().upper()
     name    = _clean_text(str(raw.get("itemname") or part_no))[:255]
     group   = str(raw.get("groupname") or "")[:100]
@@ -403,6 +444,7 @@ def _upsert_product(raw: dict) -> bool:
         except (TypeError, ValueError):
             pass
 
+    # Get primary price for backward compatibility
     server_price = 0.0
     for p in (raw.get("prices") or []):
         if str(p.get("type") or "").lower() == "selling":
@@ -418,12 +460,17 @@ def _upsert_product(raw: dict) -> bool:
     conn = get_connection()
     cur  = conn.cursor()
     try:
+        # Ensure price tables exist on first run
+        try:
+            ensure_price_tables_and_columns()
+        except Exception as e:
+            log.warning(f"Could not ensure price tables: {e}")
+        
         cur.execute("SELECT id, price FROM products WHERE part_no = ?", (part_no,))
         existing = fetchone_dict(cur)
 
         if existing:
-            local_price = float(existing.get("price") or 0)
-            new_price   = server_price if server_price > 0 else local_price
+            # Update product
             cur.execute("""
                 UPDATE products
                 SET name     = ?,
@@ -432,12 +479,19 @@ def _upsert_product(raw: dict) -> bool:
                     price    = ?,
                     category = CASE WHEN ? <> '' THEN ? ELSE category END
                 WHERE part_no = ?
-            """, (name, stock, uom, new_price, category, category, part_no))
+            """, (name, stock, uom, server_price, category, category, part_no))
+            
+            # Sync all prices (Standard, Airport, etc.)
+            price_result = sync_all_product_prices_from_api(part_no, raw.get("prices", []))
+            
             conn.commit()
-            _upsert_uom_prices(cur, part_no, raw.get("prices") or [])
-            conn.commit()
+            
+            if price_result['synced'] > 0:
+                log.debug(f"Updated {price_result['synced']} prices for {part_no}: {price_result['price_types']}")
+            
             return False
         else:
+            # Insert new product
             cur.execute("""
                 INSERT INTO products
                     (part_no, name, price, stock, category,
@@ -445,14 +499,18 @@ def _upsert_product(raw: dict) -> bool:
                      order_1, order_2, order_3, order_4, order_5, order_6)
                 VALUES (?, ?, ?, ?, ?, ?, 1.0, 0, 0, 0, 0, 0, 0)
             """, (part_no, name, server_price, stock, category, uom))
+            
+            # Sync all prices (Standard, Airport, etc.)
+            price_result = sync_all_product_prices_from_api(part_no, raw.get("prices", []))
+            
             conn.commit()
-            _upsert_uom_prices(cur, part_no, raw.get("prices") or [])
-            conn.commit()
+            
+            if price_result['synced'] > 0:
+                log.debug(f"Added {price_result['synced']} prices for new product {part_no}: {price_result['price_types']}")
+            
             return True
     finally:
         conn.close()
-
-
 def _upsert_uom_prices(cur, part_no: str, prices: list) -> None:
     try:
         cur.execute("""

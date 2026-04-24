@@ -2213,7 +2213,53 @@ class HoldRecallDialog(QDialog):
         btn_row.addStretch(); btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
+class PrintingManager(QDialog):
+    def __init__(self, sale_id, parent=None):
+        super().__init__(parent)
+        self.sale_id = sale_id
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setModal(True)
+        self.setFixedSize(300, 150)
+        
+        # Style to match your UI
+        self.setStyleSheet(f"background-color: white; border: 2px solid #2c3e50; border-radius: 10px;")
+        
+        layout = QVBoxLayout(self)
+        self.icon_label = QLabel()
+        self.icon_label.setPixmap(qta.icon("fa5s.spinner", color="#3498db").pixmap(40, 40))
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        
+        self.text_label = QLabel("Initializing...")
+        self.text_label.setAlignment(Qt.AlignCenter)
+        self.text_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        
+        layout.addWidget(self.icon_label)
+        layout.addWidget(self.text_label)
 
+    def process(self, fiscal_enabled):
+        """Returns the updated sale data after waiting."""
+        self.show()
+        updated_sale = None
+        
+        if fiscal_enabled:
+            self.text_label.setText("Waiting for Fiscalization...")
+            start_time = time.time()
+            while time.time() - start_time < 6: # 6 second timeout
+                QApplication.processEvents()
+                try:
+                    from models.sale import get_sale_by_id
+                    refreshed = get_sale_by_id(self.sale_id)
+                    if refreshed and refreshed.get("fiscal_qr_code"):
+                        updated_sale = refreshed
+                        break
+                except: pass
+                time.sleep(0.3)
+        
+        self.text_label.setText("Sending to Printer...")
+        QApplication.processEvents()
+        time.sleep(0.5) # Short pause for visual feedback
+        self.close()
+        return updated_sale
 # =============================================================================
 # MANAGE USERS DIALOG
 # =============================================================================
@@ -11566,7 +11612,7 @@ class ReprintDialog(QDialog):
                 discAmt             = float(sale.get("discount_amount", 0)),
                 paymentMode         = sale.get("method", "CASH"),
                 currency            = sale.get("currency", "USD"),
-                footer              = co.get("footer_text", "Thank you for your purchase!"),
+                footer              = co.get("footer_text", "......."),
             )
 
             for it in sale["items"]:

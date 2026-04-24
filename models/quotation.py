@@ -6,8 +6,8 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 from database.db import get_connection, fetchall_dicts, fetchone_dict
-
-
+from services.pharmacy_label_zpl_printer import auto_print_pharmacy_labels_for_quotation
+print("[DEBUG] ZPL printer module loaded successfully")  # ADD THIS LINE
 @dataclass
 class QuotationItem:
     """Individual item within a quotation - linked to product"""
@@ -379,6 +379,18 @@ def save_quotation(quotation: Quotation) -> int:
     
     conn.commit()
     conn.close()
+    
+    pharmacy_count = sum(1 for item in quotation.items if item.is_pharmacy)
+    print(f"[DEBUG] save_quotation() completed for ID={quotation_id}")
+    print(f"[DEBUG] Total items: {len(quotation.items)}, Pharmacy items: {pharmacy_count}")
+    
+    if pharmacy_count > 0:
+        print(f"[DEBUG] *** CALLING ZPL PRINTER for {pharmacy_count} pharmacy items ***")
+        result = auto_print_pharmacy_labels_for_quotation(quotation_id, silent=True)
+        print(f"[DEBUG] ZPL printer returned: {result} labels printed")
+    else:
+        print(f"[DEBUG] No pharmacy items, skipping ZPL print")
+    
     return quotation_id
 
 
