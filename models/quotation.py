@@ -29,6 +29,20 @@ class QuotationItem:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'QuotationItem':
+        # Pharmacy fields: the server (saas_api) stores them as custom
+        # fields on Quotation Item with `custom_` prefixes. Accept both
+        # forms — the `custom_*` keys from the server response and the
+        # plain keys from locally-saved rows / older clients — so we stay
+        # forward- and backward-compatible.
+        is_pharmacy = bool(
+            data.get("custom_is_pharmacy")
+            or data.get("is_pharmacy")
+            or False
+        )
+        dosage      = data.get("custom_dosage")      or data.get("dosage")
+        batch_no    = data.get("custom_batch_no")    or data.get("batch_no")
+        expiry_date = data.get("custom_expiry_date") or data.get("expiry_date")
+
         return cls(
             item_code=str(data.get("item_code", "")),
             item_name=str(data.get("item_name", "")),
@@ -38,10 +52,10 @@ class QuotationItem:
             amount=float(data.get("amount", 0)),
             uom=str(data.get("uom", "Nos")),
             part_no=str(data.get("item_code", "")),
-            is_pharmacy=bool(data.get("is_pharmacy", False)),
-            dosage=data.get("dosage"),
-            batch_no=data.get("batch_no"),
-            expiry_date=data.get("expiry_date"),
+            is_pharmacy=is_pharmacy,
+            dosage=dosage,
+            batch_no=batch_no,
+            expiry_date=expiry_date,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -275,17 +289,48 @@ def save_quotation(quotation: Quotation) -> int:
     """Save a quotation to local database with product linking"""
     conn = get_connection()
     cur = conn.cursor()
-    
+
     # First, try to link items to local products
     quotation.link_items_to_products()
-    
+
     # Check if already exists
     cur.execute("SELECT id FROM quotations WHERE name = ?", (quotation.name,))
     existing = cur.fetchone()
-    
+
+    # Pharmacy-field snapshot for existing rows: used below to preserve
+    # dosage / batch_no / expiry_date when the incoming `quotation.items`
+    # don't carry them. This matters for the sync-from-server path — the
+    # server-side Quotation doctype has no pharmacy fields, so its
+    # response would otherwise wipe the locally-entered pharmacy data.
+    # Keyed by item_code → FIFO list (handles duplicate item_codes by
+    # matching in insertion order).
+    pharmacy_snapshot: dict[str, list[dict]] = {}
+
     if existing:
         # Update existing
         quotation_id = existing[0]
+
+        # Snapshot pharmacy fields BEFORE the DELETE below.
+        try:
+            cur.execute("""
+                SELECT item_code, is_pharmacy, dosage, batch_no, expiry_date
+                FROM   quotation_items
+                WHERE  quotation_id = ?
+                ORDER  BY id
+            """, (quotation_id,))
+            for r in cur.fetchall():
+                code = (r[0] or "").strip()
+                if not code:
+                    continue
+                pharmacy_snapshot.setdefault(code, []).append({
+                    "is_pharmacy": bool(r[1]),
+                    "dosage":      r[2],
+                    "batch_no":    r[3],
+                    "expiry_date": r[4],
+                })
+        except Exception as _snap_err:
+            print(f"[save_quotation] pharmacy snapshot skipped: {_snap_err}")
+
         cur.execute("""
             UPDATE quotations
             SET transaction_date = ?,
@@ -315,7 +360,7 @@ def save_quotation(quotation: Quotation) -> int:
             quotation.cashier_name,
             quotation_id
         ))
-        
+
         # Delete old items
         cur.execute("DELETE FROM quotation_items WHERE quotation_id = ?", (quotation_id,))
     else:
@@ -351,8 +396,32 @@ def save_quotation(quotation: Quotation) -> int:
             conn.close()
             raise Exception("Failed to get inserted quotation ID")
     
-    # Insert items with product links (plus pharmacy fields)
+    # Insert items with product links (plus pharmacy fields).
+    # Pharmacy preservation: if the incoming item has no pharmacy data
+    # (common when the item came back from Frappe's sync_quotations_from_frappe
+    # response), fall back to the snapshot captured before the DELETE so
+    # the dosage / batch_no / expiry_date the pharmacist typed survives
+    # a round-trip through the server.
     for item in quotation.items:
+        is_pharmacy = bool(item.is_pharmacy)
+        dosage      = item.dosage
+        batch_no    = item.batch_no
+        expiry_date = item.expiry_date
+
+        # "Empty" means the caller didn't supply any pharmacy data on
+        # this row — not is_pharmacy and all three detail fields blank.
+        item_has_pharmacy_data = (
+            is_pharmacy or dosage or batch_no or expiry_date
+        )
+        if not item_has_pharmacy_data:
+            saved_rows = pharmacy_snapshot.get((item.item_code or "").strip())
+            if saved_rows:
+                snap = saved_rows.pop(0)   # FIFO — handles duplicates
+                is_pharmacy = snap["is_pharmacy"]
+                dosage      = snap["dosage"]
+                batch_no    = snap["batch_no"]
+                expiry_date = snap["expiry_date"]
+
         cur.execute("""
             INSERT INTO quotation_items (
                 quotation_id, item_code, item_name, description,
@@ -371,11 +440,19 @@ def save_quotation(quotation: Quotation) -> int:
             item.uom,
             item.product_id,
             item.part_no,
-            1 if item.is_pharmacy else 0,
-            item.dosage,
-            item.batch_no,
-            item.expiry_date,
+            1 if is_pharmacy else 0,
+            dosage,
+            batch_no,
+            expiry_date,
         ))
+
+        # Mirror the preserved data back onto the item dataclass so the
+        # caller's in-memory object matches what we just stored. This is
+        # what auto_print_pharmacy_labels_for_quotation reads below.
+        item.is_pharmacy = is_pharmacy
+        item.dosage      = dosage
+        item.batch_no    = batch_no
+        item.expiry_date = expiry_date
     
     conn.commit()
     conn.close()

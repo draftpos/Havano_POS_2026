@@ -88,17 +88,27 @@ def _build_quotation_payload(quotation: dict, defaults: dict) -> dict:
     if not customer:
         customer = defaults.get("server_walk_in_customer", "Walk-in Customer")
     
-    # Format items for Frappe
+    # Format items for Frappe.
+    # Pharmacy custom fields (custom_is_pharmacy, custom_dosage,
+    # custom_batch_no, custom_expiry_date) live on Quotation Item in the
+    # saas_api app (installed via fixtures). Sending them here means the
+    # pharmacist's data survives a round-trip through the server — the
+    # local snapshot fallback in save_quotation is a belt-and-braces layer
+    # on top of this, not a replacement.
     items = []
     for item in quotation.get("items", []):
         items.append({
-            "item_code": item.get("item_code", ""),
-            "item_name": item.get("item_name", ""),
-            "description": item.get("description", ""),
-            "qty": float(item.get("qty", 1)),
-            "rate": float(item.get("rate", 0)),
-            "amount": float(item.get("amount", 0)),
-            "uom": item.get("uom", "Nos")
+            "item_code":          item.get("item_code", ""),
+            "item_name":          item.get("item_name", ""),
+            "description":        item.get("description", ""),
+            "qty":                float(item.get("qty", 1)),
+            "rate":               float(item.get("rate", 0)),
+            "amount":             float(item.get("amount", 0)),
+            "uom":                item.get("uom", "Nos"),
+            "custom_is_pharmacy": 1 if item.get("is_pharmacy") else 0,
+            "custom_dosage":      item.get("dosage")      or "",
+            "custom_batch_no":    item.get("batch_no")    or "",
+            "custom_expiry_date": item.get("expiry_date") or None,
         })
     
     # Build payload with required arguments
