@@ -9,7 +9,7 @@ import time
 # table / index. Mismatches between this constant and schema_info.version
 # trigger a full migration pass on next launch; matches short-circuit so
 # startup doesn't burn 5–15s on INFORMATION_SCHEMA round-trips every time.
-SCHEMA_VERSION = "2026.04.24.1"
+SCHEMA_VERSION = "2026.04.25.1"
 
 
 def _hash(pw: str) -> str:
@@ -479,12 +479,31 @@ def run():
                 [conversion_factor] DECIMAL(12,4) NULL,
                 [tax_rate]          DECIMAL(8,4)  NULL,
                 [tax_type]          NVARCHAR(50)  NULL,
-                PRIMARY KEY CLUSTERED ([id] ASC)
+                [is_template]       BIT           NOT NULL DEFAULT 0,
+                [variant_of]        NVARCHAR(50)  NULL,
+                [attributes]        NVARCHAR(MAX) NULL,
+                [has_variants]      BIT           NOT NULL DEFAULT 0,
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                UNIQUE NONCLUSTERED ([part_no] ASC)
             )
         """)
         ok("products")
     else:
         skip("products")
+        # Ensure part_no has a UNIQUE constraint (needed for FK_product_prices_products)
+        try:
+            cur.execute("""
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.indexes
+                    WHERE name = 'UQ_products_part_no'
+                    AND object_id = OBJECT_ID('dbo.products')
+                )
+                    CREATE UNIQUE NONCLUSTERED INDEX [UQ_products_part_no]
+                        ON [dbo].[products]([part_no] ASC)
+            """)
+            conn.commit()
+        except Exception as _e:
+            print(f"    ! Could not add UQ_products_part_no: {_e}")
         for col, defn in [
             ("active",            "BIT           NULL"),
             ("image_path",        "NVARCHAR(500) NULL"),
@@ -786,6 +805,7 @@ def run():
             ("frappe_payment_ref",       "NVARCHAR(80)  NULL"),
             ("frappe_so_ref",            "NVARCHAR(255) NULL"),
             ("sync_attempts",            "INT           NOT NULL DEFAULT 0"),
+            ("sync_error",               "NVARCHAR(MAX) NULL"),
             ("syncing",                  "BIT           NOT NULL DEFAULT 0"),
             ("last_error",               "NVARCHAR(MAX) NULL"),
             ("amount_usd",    "DECIMAL(14,4) NULL DEFAULT 0"),
@@ -1314,28 +1334,7 @@ def run():
         ]:
             add_col("product_taxes", col, defn)
     
-        # ==================================================================
-    # 31. product_taxes
-    # ==================================================================
-    if not table_exists("product_taxes"):
-        cur.execute("""
-            CREATE TABLE [dbo].[product_taxes] (
-                [id]                INT           IDENTITY(1,1) NOT NULL,
-                [part_no]           NVARCHAR(50)  NOT NULL,
-                [item_tax_template] NVARCHAR(100) NULL,
-                [tax_category]      NVARCHAR(50)  NULL,
-                [valid_from]        DATE          NULL,
-                [minimum_net_rate]  DECIMAL(8,4)  NULL,
-                [maximum_net_rate]  DECIMAL(8,4)  NULL,
-                [created_at]        DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
-                [updated_at]        DATETIME2(7)  NULL DEFAULT SYSDATETIME(),
-                PRIMARY KEY CLUSTERED ([id] ASC)
-            )
-        """)
-        ok("product_taxes")
-    else:
-        skip("product_taxes")
-        # ... existing code ...
+    
 
     # ==================================================================
     # 32. price_types ← ADD THIS NEW SECTION
@@ -1594,40 +1593,59 @@ def run():
         ]:
             add_col("modes_of_payment", col, defn)
 
+
     # ==================================================================
-    # 38. payment_entries
+    # 38. product_bundles  — named bundles that expand to multiple items
     # ==================================================================
-    if not table_exists("payment_entries"):
+    if not table_exists("product_bundles"):
         cur.execute("""
-            CREATE TABLE [dbo].[payment_entries] (
-                [id]                      INT           IDENTITY(1,1) PRIMARY KEY,
-                [sale_id]                 INT           NULL,
-                [sale_invoice_no]         NVARCHAR(80)  NULL,
-                [frappe_invoice_ref]      NVARCHAR(80)  NULL,
-                [party]                   NVARCHAR(120) NULL,
-                [paid_amount]             DECIMAL(12,2) NOT NULL DEFAULT 0,
-                [received_amount]         DECIMAL(12,2) NOT NULL DEFAULT 0,
-                [source_exchange_rate]    DECIMAL(12,6) NOT NULL DEFAULT 1,
-                [currency]                NVARCHAR(10)  NULL,
-                [mode_of_payment]         NVARCHAR(80)  NULL,
-                [reference_no]            NVARCHAR(80)  NULL,
-                [payment_type]            NVARCHAR(20)  NOT NULL DEFAULT 'Receive',
-                [synced]                  BIT           NOT NULL DEFAULT 0,
-                [frappe_payment_ref]      NVARCHAR(80)  NULL,
-                [sync_attempts]           INT           NOT NULL DEFAULT 0,
-                [sync_error]              NVARCHAR(MAX) NULL,
-                [created_at]              DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()
+            CREATE TABLE [dbo].[product_bundles] (
+                [id]          INT           IDENTITY(1,1) NOT NULL,
+                [name]        NVARCHAR(200) NOT NULL,
+                [description] NVARCHAR(MAX) NULL DEFAULT '',
+                [sync_status] NVARCHAR(20)  NOT NULL DEFAULT 'pending',
+                [created_at]  DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                [updated_at]  DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC),
+                UNIQUE NONCLUSTERED ([name] ASC)
             )
         """)
-        ok("payment_entries")
+        ok("product_bundles")
     else:
-        skip("payment_entries")
+        skip("product_bundles")
         for col, defn in [
-            ("sync_attempts", "INT           NOT NULL DEFAULT 0"),
-            ("sync_error",    "NVARCHAR(MAX) NULL"),
-            ("last_error",    "NVARCHAR(MAX) NULL"),
+            ("description", "NVARCHAR(MAX) NULL DEFAULT ''"),
+            ("sync_status", "NVARCHAR(20)  NOT NULL DEFAULT 'pending'"),
+            ("created_at",  "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
+            ("updated_at",  "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
         ]:
-            add_col("payment_entries", col, defn)
+            add_col("product_bundles", col, defn)
+
+    # ==================================================================
+    # 39. bundle_items  — line items belonging to a product_bundle
+    # ==================================================================
+    if not table_exists("bundle_items"):
+        cur.execute("""
+            CREATE TABLE [dbo].[bundle_items] (
+                [id]        INT           IDENTITY(1,1) NOT NULL,
+                [bundle_id] INT           NOT NULL,
+                [item_code] NVARCHAR(50)  NOT NULL,
+                [quantity]  DECIMAL(12,4) NOT NULL DEFAULT 1,
+                [rate]      DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [uom]       NVARCHAR(20)  NOT NULL DEFAULT 'Nos',
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("bundle_items")
+    else:
+        skip("bundle_items")
+        for col, defn in [
+            ("quantity", "DECIMAL(12,4) NOT NULL DEFAULT 1"),
+            ("rate",     "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+            ("uom",      "NVARCHAR(20)  NOT NULL DEFAULT 'Nos'"),
+        ]:
+            add_col("bundle_items", col, defn)
+
 
     # ------------------------------------------------------------------
     # Commit all table DDL before foreign keys
@@ -1709,6 +1727,12 @@ def run():
          "ADD CONSTRAINT [FK_quotation_items_quotations] "
          "FOREIGN KEY ([quotation_id]) "
          "REFERENCES [dbo].[quotations]([id]) ON DELETE CASCADE"),
+
+        ("FK_bundle_items_product_bundles",
+         "ALTER TABLE [dbo].[bundle_items] WITH CHECK "
+         "ADD CONSTRAINT [FK_bundle_items_product_bundles] "
+         "FOREIGN KEY ([bundle_id]) "
+         "REFERENCES [dbo].[product_bundles]([id]) ON DELETE CASCADE"),
     ]
 
     for fk_name, fk_sql in fk_defs:

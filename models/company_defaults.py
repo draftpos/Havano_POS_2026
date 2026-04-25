@@ -22,6 +22,8 @@ _BLANK = {
     # Editable — invoice numbering
     "invoice_prefix":       "",   # up to 6 chars e.g. "ABC"
     "invoice_start_number": "0",  # integer as string
+    # Readable from logo_config.json (not in company_defaults DB record)
+    "logo_path":            "",   # local filename
     # Read-only — from login
     "server_company": "", "server_warehouse": "", "server_cost_center": "",
     "server_username": "", "server_email": "", "server_role": "",
@@ -47,7 +49,21 @@ def get_defaults() -> dict:
 
     result = dict(_BLANK)
     for key in _BLANK:
-        result[key] = str(row.get(key) or "")
+        if key != "logo_path":
+            result[key] = str(row.get(key) or "")
+    
+    # Load logo_path from JSON helper
+    try:
+        import os, json
+        from database.db import get_app_data_dir
+        json_path = os.path.join(get_app_data_dir(), "logo_config.json")
+        if os.path.exists(json_path):
+            with open(json_path, "r") as f:
+                cfg = json.load(f)
+                result["logo_path"] = cfg.get("logo_path", "")
+    except Exception as e:
+        print(f"[CompanyDefaults] Error loading logo_path from JSON: {e}")
+
     return result
 
 
@@ -124,5 +140,15 @@ def save_defaults(data: dict) -> None:
             str(data.get("server_vat_enabled",    "")),
         ))
         conn.commit()
+
+        # Save logo_path to JSON helper
+        try:
+            import os, json
+            from database.db import get_app_data_dir
+            json_path = os.path.join(get_app_data_dir(), "logo_config.json")
+            with open(json_path, "w") as f:
+                json.dump({"logo_path": data.get("logo_path", "")}, f)
+        except Exception as e:
+            print(f"[CompanyDefaults] Error saving logo_path to JSON: {e}")
     finally:
         conn.close()

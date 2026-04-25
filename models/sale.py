@@ -1,7 +1,7 @@
 from database.db import get_connection, fetchall_dicts, fetchone_dict
 from models.product import adjust_stock, get_product_by_id
-from models.receipt import ReceiptData, Item
-from services.printing_service import printing_service
+from models.receipt import ReceiptData, Item, MultiCurrencyDetail
+from services.printing_service import PrintingService
 
 from datetime import date
 import json
@@ -354,7 +354,7 @@ def create_sale(
     change_amount:     float = None,
     is_on_account:     bool  = False,
     skip_stock:        bool  = False,
-    skip_print:        bool  = False,
+    skip_print:        bool  = True,   # always skip auto-print; main_window prints after fiscal wait
     shift_id:          int   = None,
     transaction_id:    str   = None,
     idempotency_key:   str   = None,
@@ -475,14 +475,14 @@ def create_sale(
     else:
         _total_usd = round(total_amount * _exch, 4)
 
-    # total_zwd: only set when currency is ZWD (or ZWG — treated same)
-    _total_zwd = total_amount if currency_upper in ("ZWD", "ZWG") else 0.0
+    # total_zwd: only set when currency is ZWD, ZWG, or ZIG
+    _total_zwd = total_amount if currency_upper in ("ZWD", "ZWG", "ZIG") else 0.0
 
     # tendered split by currency
     if currency_upper == "USD":
         _tendered_usd = tendered_amount
         _tendered_zwd = 0.0
-    elif currency_upper in ("ZWD", "ZWG"):
+    elif currency_upper in ("ZWD", "ZWG", "ZIG"):
         _tendered_zwd = tendered_amount
         _tendered_usd = round(tendered_amount * _exch, 4)
     else:
@@ -518,7 +518,7 @@ def create_sale(
                 _z = sum(
                     float(s.get("native_amount") or 0)
                     for s in splits
-                    if (s.get("native_currency") or "").upper() in ("ZWD", "ZWG")
+                    if (s.get("native_currency") or "").upper() in ("ZWD", "ZWG", "ZIG")
                 )
                 if _z > 0:
                     _tendered_zwd = round(_z, 4)
@@ -1023,48 +1023,34 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
     fiscal_v_code  = sale.get("fiscal_verification_code", "")
     fiscal_ready   = bool(fiscal_qr_code and fiscal_qr_code.strip())
 
-    # If fiscalization is enabled but QR not ready yet, wait up to 3 seconds
-    if fiscal_enabled and not fiscal_ready:
-        print(f"⏳ Waiting for fiscalization for sale {sale.get('id')}...")
-        wait_start   = time.time()
-        wait_seconds = 6
+    # Fiscal polling removed here because it's now handled by the UI loader (FiscalWaitDialog)
+    # for a better non-blocking experience.
+    fiscal_ready = bool(fiscal_qr_code and fiscal_qr_code.strip())
 
-        while time.time() - wait_start < wait_seconds:
-            try:
-                from models.sale import get_sale_by_id
-                refreshed_sale = get_sale_by_id(sale.get("id"))
-                if refreshed_sale:
-                    fiscal_qr_code = refreshed_sale.get("fiscal_qr_code", "")
-                    fiscal_v_code  = refreshed_sale.get("fiscal_verification_code", "")
-                    if fiscal_qr_code and fiscal_qr_code.strip():
-                        fiscal_ready = True
-                        print(f"✅ Fiscalization ready after {time.time() - wait_start:.1f} seconds")
-                        sale.update(refreshed_sale)
-                        break
-            except Exception as e:
-                print(f"⚠️ Error checking fiscal status: {e}")
 
-            time.sleep(0.3)
+    # Resolved Tendered and Change based on transaction currency
+    # If transaction is in a specific currency (like ZIG), we show tendered/change in that currency.
+    _is_zig = (currency or "").upper() in ["ZIG", "ZWG"]
+    
+    _total_native    = float(total or 0)
+    _tendered_native = float(tendered or 0)
+    
+    # Priority for tendered:
+    #   1. Sum of sale["splits"][i].native_amount (if all same currency)
+    #   2. tendered arg
+    _splits = sale.get("splits") or []
+    if _splits:
+        _master_currency = (_splits[0].get("native_currency") or "USD").upper()
+        _all_same = all((s.get("native_currency") or "USD").upper() == _master_currency for s in _splits)
+        if _all_same:
+            _tendered_native = sum(float(s.get("native_amount") or 0) for s in _splits)
+    
+    _total_usd = float(sale.get("total_usd") or 0) or float(total or 0)
+    _change_native = round(max(_tendered_native - _total_native, 0.0), 4)
+    # Ensure change is 0 if it's on account
+    if sale.get("is_on_account", False):
+        _change_native = 0.0
 
-        if not fiscal_ready:
-            print(f"⚠️ Fiscalization not ready after {wait_seconds}s, printing with pending message")
-    else:
-        fiscal_ready = bool(fiscal_qr_code and fiscal_qr_code.strip())
-
-    # Tendered + change are ALWAYS shown in the business's base currency (USD
-    # per company_defaults default) so the cashier doesn't have to mental-math
-    # multi-currency splits. Priority for tendered:
-    #   1. Sum of sale["splits"][i].base_value  — definitive multi-method total
-    #   2. sale.tendered_usd                    — stored on the sales row
-    #   3. tendered arg (single-method fallback)
-    _total_usd    = float(sale.get("total_usd") or 0) or float(total or 0)
-    _splits       = sale.get("splits") or []
-    _splits_usd   = sum(float(s.get("base_value") or 0) for s in _splits)
-    if _splits_usd > 0:
-        _tendered_usd = round(_splits_usd, 4)
-    else:
-        _tendered_usd = float(sale.get("tendered_usd") or 0) or float(tendered or 0)
-    _change_usd = round(max(_tendered_usd - _total_usd, 0.0), 4)
 
     try:
         receipt = ReceiptData(
@@ -1088,8 +1074,8 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
             customerContact=sale.get("customer_contact", customer_contact),
             customerTin="",
             customerVat="",
-            amountTendered=_tendered_usd,
-            change=_change_usd,
+            amountTendered=_tendered_native,
+            change=_change_native,
             grandTotal=total,
             subtotal=float(sale.get("subtotal", total)),
             totalVat=float(sale.get("total_vat", 0)),
@@ -1105,10 +1091,14 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
         # Non-split sales get a single synthetic split so the block still renders.
         _splits = sale.get("splits") or []
         if not _splits:
+            # For single entry, we show what was actually applied to the total,
+            # which is precisely the grand total itself (excluding change).
+            _applied_total = _total_native 
+            
             _splits = [{
                 "method":          method or sale.get("method", "CASH"),
                 "base_value":      _total_usd,
-                "native_amount":   float(tendered or _total_usd),
+                "native_amount":   float(_applied_total),
                 "native_currency": (currency or "USD").upper(),
                 "is_credit":       bool(sale.get("is_on_account", False)),
             }]
@@ -1149,7 +1139,7 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
 
         for printer_name in active_printers:
             try:
-                success = printing_service.print_receipt(receipt, printer_name=printer_name)
+                success = PrintingService().print_receipt(receipt, printer_name=printer_name)
                 if success:
                     print(f"✅ Receipt printed successfully → {printer_name}")
                     if fiscal_enabled and not fiscal_ready:
@@ -1627,7 +1617,7 @@ def print_kitchen_orders(sale: dict):
                 ) for it in order_items]
             )
 
-            success = printing_service.print_kitchen_order(kot_receipt, printer_name=printer_name)
+            success = PrintingService().print_kitchen_order(kot_receipt, printer_name=printer_name)
             if success:
                 print(f"✅ KOT printed for {order_key} → {printer_name}")
             else:
@@ -1772,3 +1762,116 @@ def debug_duplicate_invoices():
     print("   1. Check if your frontend is submitting the form twice")
     print("   2. Check if button click handlers are firing twice")
     print("   3. Pass idempotency_key= to create_sale() to prevent duplicates automatically")
+def prepare_receipt_data(sale: dict) -> ReceiptData:
+    """Centralized converter to transform a raw sale dictionary into a ReceiptData object."""
+    # Build items list
+    items_list = []
+    for it in sale.get("items", []):
+        items_list.append(Item(
+            productName=it.get("product_name", ""),
+            productid=it.get("part_no", ""),
+            qty=float(it.get("qty", 1)),
+            price=float(it.get("price", 0)),
+            amount=float(it.get("total", 0)),
+            tax_amount=float(it.get("tax_amount", 0))
+        ))
+
+    currency    = (sale.get("currency") or "USD").strip().upper()
+    splits      = sale.get("splits") or []
+    is_split    = len(splits) > 1 or (
+        len(splits) == 1 and splits[0].get("native_currency", "USD").upper() not in ("USD", "US", "")
+        and splits[0].get("native_currency", "USD").upper() != currency
+    )
+
+    # ── Amount Tendered ───────────────────────────────────────────────────────
+    # For split / multi-currency: show USD total (each method is in PAYMENT DETAILS)
+    # For single ZIG/ZWG/ZWD: show native tendered amount (already stored natively)
+    # For USD only: show tendered as-is
+    tendered_native = float(sale.get("tendered") or 0)
+    tendered_usd    = float(sale.get("tendered_usd") or 0)
+
+    if len(splits) > 1:
+        # Multi-method: show USD total in PAYMENT DETAILS; use USD total here
+        display_tendered = tendered_usd if tendered_usd > 0 else tendered_native
+        display_currency = "USD"
+    else:
+        # Single method: show native amount with native currency
+        display_tendered = tendered_native
+        display_currency = currency
+
+    # ── Change ────────────────────────────────────────────────────────────────
+    # change_amount is already stored as native currency by PaymentDialog
+    change_value = float(sale.get("change_amount") or 0)
+
+    # ── Build ReceiptData ─────────────────────────────────────────────────────
+    receipt = ReceiptData(
+        invoiceNo=sale.get("invoice_no", ""),
+        invoiceDate=sale.get("invoice_date", sale.get("date", "")),
+        cashierName=sale.get("cashier_name", sale.get("user", "")),
+        customerName=sale.get("customer_name", "Walk-in"),
+        customerContact=sale.get("customer_contact", ""),
+        companyName=sale.get("company_name", "HAVANO POS"),
+        grandTotal=float(sale.get("total") or 0),
+        subtotal=float(sale.get("subtotal") or 0),
+        totalVat=float(sale.get("total_vat") or 0),
+        amountTendered=display_tendered,
+        change=change_value,
+        currency=display_currency,
+        items=items_list,
+        footer=sale.get("footer", "Thank you for your purchase!"),
+        receiptHeader=sale.get("receipt_type", "SALES RECEIPT"),
+        orderNumber=int(sale.get("order_number", 0) or 0)
+    )
+
+    # ── Company info ──────────────────────────────────────────────────────────
+    if "address_1"  in sale: receipt.companyAddress      = sale["address_1"]
+    if "address_2"  in sale: receipt.companyAddressLine1 = sale["address_2"]
+    if "phone"      in sale: receipt.tel                 = sale["phone"]
+    if "email"      in sale: receipt.companyEmail        = sale["email"]
+    if "tin_number" in sale: receipt.tin                 = sale["tin_number"]
+    if "vat_number" in sale: receipt.vatNo               = sale["vat_number"]
+
+    # ── Fiscal fields ─────────────────────────────────────────────────────────
+    receipt.qrCode       = sale.get("fiscal_qr_code", "")
+    receipt.vCode        = sale.get("fiscal_verification_code", "")
+    receipt.deviceSerial = sale.get("zimra_serial_no", "")
+    receipt.deviceId     = sale.get("zimra_device_id", "")
+
+    # ── Payment Details (paymentItems) from splits ────────────────────────────
+    # Each split → one Item where:
+    #   productName = method label  (e.g. "CASH", "ECOCASH")
+    #   productid   = native currency code (e.g. "ZIG", "USD")
+    #   price       = native amount  (e.g. 9000 ZIG)
+    #   amount      = USD base value (e.g. 297 USD)
+    if splits:
+        for sp in splits:
+            native_cur = (sp.get("native_currency") or sp.get("currency") or "USD").strip().upper()
+            # Normalise "US" stored by PaymentDialog → "USD"
+            if native_cur in ("US", ""):
+                native_cur = "USD"
+            receipt.paymentItems.append(Item(
+                productName=sp.get("method", "PAYMENT"),
+                productid=native_cur,
+                qty=1,
+                price=float(sp.get("native_amount") or sp.get("base_value") or 0),
+                amount=float(sp.get("base_value") or 0),
+            ))
+    elif currency not in ("USD", "US"):
+        # Single non-USD payment — create one paymentItem for PAYMENT DETAILS
+        receipt.paymentItems.append(Item(
+            productName=sale.get("method", "PAYMENT"),
+            productid=currency,
+            qty=1,
+            price=display_tendered,
+            amount=tendered_usd if tendered_usd > 0 else 0,
+        ))
+
+    # ── Multi-currency detail block ───────────────────────────────────────────
+    if sale.get("total_zwd", 0) > 0:
+        receipt.multiCurrencyDetails.append(MultiCurrencyDetail(
+            key="ZWG",
+            value=float(sale["total_zwd"])
+        ))
+
+    return receipt
+

@@ -233,6 +233,12 @@ class ReceiptData:
 
     items: List[Item] = field(default_factory=list)
     itemlist: List[Item] = field(default_factory=list)   # backward-compat with .NET app
+    # Payment method breakdown — one Item per method paid:
+    #   productName = method label (e.g. "CASH", "ECOCASH")
+    #   productid   = native currency code (e.g. "ZIG", "USD")
+    #   price       = native amount  (e.g. 9000.00)
+    #   amount      = USD base value (e.g. 297.00)
+    paymentItems: List[Item] = field(default_factory=list)
 
 
     def to_json(self) -> str:

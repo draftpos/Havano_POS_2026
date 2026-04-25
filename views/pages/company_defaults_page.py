@@ -4,11 +4,13 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QTextEdit, QPushButton, QFrame, QSizePolicy, QScrollArea,
-    QSpinBox, QMessageBox, QProgressBar, QDialog, QGroupBox
+    QSpinBox, QMessageBox, QProgressBar, QDialog, QGroupBox, QFileDialog
 )
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Property as _Prop, QThread, Signal
-from PySide6.QtGui  import QPainter, QColor, QLinearGradient, QRadialGradient
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Property as _Prop, QThread, Signal, QDir, QFileInfo
+from PySide6.QtGui  import QPainter, QColor, QLinearGradient, QRadialGradient, QPixmap
 import qtawesome as qta
+import os
+import shutil
 
 NAVY      = "#0d1f3c"
 NAVY_2    = "#162d52"
@@ -461,6 +463,61 @@ class CompanyDefaultsPage(QWidget):
             inp = _inp()
             self._inputs[key] = inp
             rcl.addLayout(_field_row(label, inp))
+        
+        # --- Company Logo Selection ---
+        _section_header(rcl, "Company Logo")
+        logo_row = QHBoxLayout()
+        logo_row.setSpacing(16)
+        
+        # Logo Preview
+        self._logo_preview = QLabel("No Logo")
+        self._logo_preview.setFixedSize(100, 100)
+        self._logo_preview.setAlignment(Qt.AlignCenter)
+        self._logo_preview.setStyleSheet(f"""
+            QLabel {{
+                background:{LIGHT}; border:1px solid {BORDER};
+                border-radius:6px; color:{MUTED}; font-size:11px;
+                font-weight:bold;
+            }}
+        """)
+        
+        logo_btn_lay = QVBoxLayout()
+        logo_btn_lay.setSpacing(8)
+        
+        self._select_logo_btn = QPushButton(" Select Logo ")
+        self._select_logo_btn.setFixedHeight(34)
+        self._select_logo_btn.setCursor(Qt.PointingHandCursor)
+        self._select_logo_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY_2}; color:{WHITE}; border:none;
+                border-radius:4px; font-size:11px; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{NAVY_3}; }}
+        """)
+        self._select_logo_btn.clicked.connect(self._select_logo)
+        
+        self._clear_logo_btn = QPushButton(" Clear ")
+        self._clear_logo_btn.setFixedHeight(34)
+        self._clear_logo_btn.setCursor(Qt.PointingHandCursor)
+        self._clear_logo_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:transparent; color:{DANGER}; border:1px solid {DANGER};
+                border-radius:4px; font-size:11px; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{DANGER}; color:{WHITE}; }}
+        """)
+        self._clear_logo_btn.clicked.connect(self._clear_logo)
+        
+        logo_btn_lay.addWidget(self._select_logo_btn)
+        logo_btn_lay.addWidget(self._clear_logo_btn)
+        logo_btn_lay.addStretch()
+        
+        logo_row.addWidget(_lbl("Receipt Logo", LBL_W))
+        logo_row.addWidget(self._logo_preview)
+        logo_row.addLayout(logo_btn_lay)
+        logo_row.addStretch()
+        
+        rcl.addLayout(logo_row)
         rcl.addStretch()
 
         # Invoice Numbering
@@ -994,7 +1051,65 @@ class CompanyDefaultsPage(QWidget):
         except Exception as e:
             print(f"[CompanyDefaultsPage] pharmacy_mode load skipped: {e}")
 
+        # Current logo path
+        self._current_logo_name = data.get("logo_path", "")
+        self._update_logo_preview(self._current_logo_name)
+
         self._update_preview()
+
+    # --- Logo Selection Helpers ---
+
+    def _select_logo(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Company Logo", "", "Images (*.png *.jpg *.jpeg *.bmp *.ico)"
+        )
+        if not file_path:
+            return
+
+        try:
+            # Ensure logos directory exists
+            from database.db import get_app_data_dir
+            logos_dir = os.path.join(get_app_data_dir(), "logos")
+            if not os.path.exists(logos_dir):
+                os.makedirs(logos_dir)
+
+            # Generate filename
+            ext = os.path.splitext(file_path)[1]
+            filename = f"company_logo{ext}"
+            dest_path = os.path.join(logos_dir, filename)
+
+            # Copy file
+            shutil.copy2(file_path, dest_path)
+            
+            self._current_logo_name = filename
+            self._update_logo_preview(filename)
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to select logo: {e}")
+
+    def _clear_logo(self):
+        self._current_logo_name = ""
+        self._logo_preview.setText("No Logo")
+        self._logo_preview.setPixmap(QPixmap())
+
+    def _update_logo_preview(self, filename):
+        if not filename:
+            self._logo_preview.setText("No Logo")
+            self._logo_preview.setPixmap(QPixmap())
+            return
+            
+        try:
+            from database.db import get_app_data_dir
+            path = os.path.join(get_app_data_dir(), "logos", filename)
+            if os.path.exists(path):
+                pix = QPixmap(path)
+                if not pix.isNull():
+                    scaled = pix.scaled(90, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self._logo_preview.setPixmap(scaled)
+                    return
+            self._logo_preview.setText("Logo Not Found")
+        except Exception:
+            self._logo_preview.setText("Preview Error")
 
     # ── Save ─────────────────────────────────────────────────────────────────
 
@@ -1006,6 +1121,7 @@ class CompanyDefaultsPage(QWidget):
         data["invoice_prefix"]       = self._prefix_inp.text().strip().upper()
         data["invoice_start_number"] = str(self._start_num.value())
         data["allow_credit_sales"]   = "1" if self._allow_credit_chk.isChecked() else "0"
+        data["logo_path"]            = self._current_logo_name
 
         # Pharmacy mode — terminal-local, saved to app_data/pharmacy_settings.json
         try:

@@ -88,7 +88,7 @@ def _build_zpl_label(
         product_name    = (product_name or "UNKNOWN PRODUCT")[:32].upper()
         qty_val         = int(qty) if qty == int(qty) else round(qty, 2)
         qty_str         = f"{qty_val} {uom}".strip() if uom else str(qty_val)
-        price_str       = f"${price:,.2f}" if price else "$0.00"
+        # price_str       = f"${price:,.2f}" if price else "$0.00"
         batch_no        = (batch_no or "N/A")[:20]
         dosage          = (dosage or "")[:40]
         pharmacist_name = (pharmacist_name or "")[:28]
@@ -122,10 +122,10 @@ def _build_zpl_label(
 
         # Qty / Price row
         zpl.append(f"^FO{X},{y}^A0N,20,15^FDQTY^FS")
-        zpl.append(f"^FO{MID},{y}^A0N,20,15^FDPRICE^FS")
+        # zpl.append(f"^FO{MID},{y}^A0N,20,15^FDPRICE^FS")
         y += 20
         zpl.append(f"^FO{X},{y}^A0N,26,20^FD{qty_str}^FS")
-        zpl.append(f"^FO{MID},{y}^A0N,26,20^FD{price_str}^FS")
+        # zpl.append(f"^FO{MID},{y}^A0N,26,20^FD{price_str}^FS")
         y += 30
 
         # Batch / Expiry row

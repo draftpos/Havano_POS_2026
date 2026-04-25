@@ -742,12 +742,6 @@ class HardwareDialog(_Base):
     def _build(self, lay):
         hw = _load_hw()
         self._system_printers = _get_system_printers()
-        
-        # Status label at top
-        self._status_lbl = QLabel("Loaded printers: " + ", ".join(self._system_printers[:3]) + (" ..." if len(self._system_printers) > 3 else ""))
-        self._status_lbl.setStyleSheet(f"font-size:12px; color:{MUTED}; background:transparent;")
-        lay.addWidget(self._status_lbl)
-        lay.addSpacing(8)
 
         # Refresh printers button
         refresh_btn = _btn("Refresh Printer List", color=ACCENT, hover=ACCENT_H, height=28)
@@ -823,14 +817,29 @@ class HardwareDialog(_Base):
             row.addWidget(lbl); row.addStretch(); row.addWidget(st_printer); row.addWidget(test_btn)
             lay.addLayout(row)
             self._station_widgets.append((st_printer, name))
-        
+
+        lay.addSpacing(10); lay.addWidget(_hr()); lay.addSpacing(10)
+
+        # --- ZPL Pharmacy Label Printer ---
+        zpl_row = QHBoxLayout(); zpl_row.setSpacing(12)
+        zpl_lbl = QLabel("Pharmacy Label Printer")
+        zpl_lbl.setStyleSheet(f"font-size:13px; color:{DARK_TEXT}; font-weight:bold; background:transparent; min-width:90px;")
+        self._zpl_printer = _combo(); self._zpl_printer.setFixedWidth(260)
+        self._zpl_printer.addItem("(None)")
+        for p in self._system_printers: self._zpl_printer.addItem(p)
+        saved_zpl = hw.get("pharmacy_label_printer", "(None)")
+        zpl_idx = self._zpl_printer.findText(saved_zpl)
+        self._zpl_printer.setCurrentIndex(zpl_idx if zpl_idx >= 0 else 0)
+        test_zpl_btn = _btn("Test", color=ACCENT, hover=ACCENT_H, height=28, width=60)
+        test_zpl_btn.clicked.connect(lambda: self._test_printer(self._zpl_printer.currentText()))
+        zpl_row.addWidget(zpl_lbl); zpl_row.addStretch(); zpl_row.addWidget(self._zpl_printer); zpl_row.addWidget(test_zpl_btn)
+        lay.addLayout(zpl_row)
+
         lay.addStretch(); self._status(lay)
 
     def _refresh_printers(self):
         self._system_printers = _get_system_printers()
-        self._status_lbl.setText("Refreshed: " + ", ".join(self._system_printers[:3]) + (" ..." if len(self._system_printers) > 3 else ""))
-        
-        for combo_widget, _ in [(self._main_printer, None)] + self._station_widgets:
+        for combo_widget, _ in [(self._main_printer, None)] + self._station_widgets + [(self._zpl_printer, None)]:
             current = combo_widget.currentText()
             combo_widget.clear()
             combo_widget.addItem("(None)")
@@ -888,6 +897,7 @@ class HardwareDialog(_Base):
             data = {
                 "main_printer": self._main_printer.currentText(),
                 "kitchen_printing_enabled": bool(self._kitchen_enabled_chk.isChecked()),
+                "pharmacy_label_printer": self._zpl_printer.currentText(),
                 "orders": {}
             }
 

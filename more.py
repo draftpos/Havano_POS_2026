@@ -6231,6 +6231,7 @@ class POSView(QWidget):
             receipt = ReceiptData(
                 doc_type        = "receipt",
                 receiptType     = sale.get("receipt_type", "Invoice"),
+                companyLogoPath = co.get("logo_path", ""),
                 companyName     = co.get("company_name", ""),
                 companyAddress  = co.get("address_1", ""),
                 companyAddressLine1 = co.get("address_2", ""),
