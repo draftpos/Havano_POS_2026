@@ -1131,7 +1131,7 @@ class PaymentDialog(QDialog):
                 change_amount=self.accepted_change,
                 is_on_account=self.accepted_is_credit,
                 skip_stock=False,
-                skip_print=False,
+                skip_print=True,  # main_window prints after fiscal wait — never auto-print here
                 shift_id=self.shift_id,
                 idempotency_key=transaction_hash,  # ✅ Pass transaction hash
                 splits=splits,                     # ✅ Per-method breakdown for receipt Payment Details

@@ -1,5 +1,3 @@
-
-
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QPushButton, QLabel, QFrame, QTableWidget, QTableWidgetItem,
@@ -13,9 +11,9 @@ import shutil
 import os
 import qtawesome as qta
 from models.advance_settings import AdvanceSettings
-from PySide6.QtCore import Qt, QTimer, QDate, Slot
+from PySide6.QtCore import Qt, QTimer, QDate, Slot, QPropertyAnimation, QEasingCurve, Property as _Prop
 # from PySide6.QtGui import QAction, QColor, QFont
-from PySide6.QtGui import QAction, QColor, QFont, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QPixmap, QPainter, QLinearGradient, QRadialGradient
 from pathlib import Path
 try:
     from views.dialogs.day_shift_dialog import DayShiftDialog
@@ -171,6 +169,124 @@ QComboBox QAbstractItemView {{
 }}
 """
 from services.quotation_sync_service import start_quotation_sync_thread
+
+# =============================================================================
+# CATEGORY VISIBILITY SETTINGS  (app_data/category_settings.json)
+# Stores a list of category names that are hidden on this branch's POS.
+# =============================================================================
+import json as _json_mod
+
+_CAT_SETTINGS_FILE = Path("app_data/category_settings.json")
+
+
+# =============================================================================
+# ToggleSwitch — pill toggle (same as company defaults)
+# =============================================================================
+
+class _TogglePill(QWidget):
+    def __init__(self, size=20, parent=None):
+        super().__init__(parent)
+        self._size     = size
+        self._checked  = False
+        self._knob_pos = 0.0
+        self.setFixedSize(int(2.2 * size), size)
+        self.setCursor(Qt.PointingHandCursor)
+        self._anim = QPropertyAnimation(self, b"knob_pos", self)
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.InOutCubic)
+
+    def _get_knob_pos(self): return self._knob_pos
+    def _set_knob_pos(self, v):
+        self._knob_pos = v; self.update()
+    knob_pos = _Prop(float, _get_knob_pos, _set_knob_pos)
+
+    def isChecked(self): return self._checked
+    def setChecked(self, value: bool, animated=False):
+        self._checked = bool(value)
+        target = 1.0 if self._checked else 0.0
+        if animated:
+            self._anim.stop()
+            self._anim.setStartValue(self._knob_pos)
+            self._anim.setEndValue(target)
+            self._anim.start()
+        else:
+            self._knob_pos = target; self.update()
+    def mousePressEvent(self, _ev):
+        self.setChecked(not self._checked, animated=True)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        s = self._size; w = self.width(); h = self.height(); r = h / 2
+        t = self._knob_pos
+        if t < 0.01:
+            p.setBrush(QColor("#d7d7d7")); p.setPen(Qt.NoPen)
+            p.drawRoundedRect(0, 0, w, h, r, r)
+        else:
+            grad = QLinearGradient(0, 0, w, 0)
+            grad.setColorAt(0, QColor("#f19af3")); grad.setColorAt(1, QColor("#f099b5"))
+            p.setBrush(QColor("#d7d7d7")); p.setPen(Qt.NoPen)
+            p.drawRoundedRect(0, 0, w, h, r, r)
+            if t > 0.99:
+                p.setBrush(grad); p.drawRoundedRect(0, 0, w, h, r, r)
+            else:
+                p.setOpacity(t); p.setBrush(grad)
+                p.drawRoundedRect(0, 0, w, h, r, r); p.setOpacity(1.0)
+        knob_d = 0.8*s; knob_r = knob_d/2
+        off_x = 0.1*s; on_x = 1.3*s
+        knob_x = off_x + self._knob_pos*(on_x - off_x); knob_y = 0.1*s
+        cx = knob_x+knob_r; cy = knob_y+knob_r
+        shadow = QRadialGradient(cx, cy+4, knob_r*1.1)
+        shadow.setColorAt(0, QColor(0,0,0,55)); shadow.setColorAt(0.6, QColor(0,0,0,30))
+        shadow.setColorAt(1, QColor(0,0,0,0))
+        p.setBrush(shadow); p.setPen(Qt.NoPen)
+        p.drawEllipse(int(knob_x-knob_r*0.15), int(knob_y+knob_r*0.5),
+                      int(knob_d*1.3), int(knob_d*0.9))
+        kg = QLinearGradient(cx, knob_y, cx, knob_y+knob_d)
+        kg.setColorAt(0, QColor("#dedede")); kg.setColorAt(1, QColor("#ffffff"))
+        p.setBrush(kg); p.setPen(Qt.NoPen)
+        p.drawEllipse(int(knob_x), int(knob_y), int(knob_d), int(knob_d))
+        p.end()
+
+class _ToggleSwitch(QWidget):
+    """Pill toggle + label. API: isChecked() / setChecked(bool)."""
+    def __init__(self, label: str, size: int = 18, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(12)
+        self._pill = _TogglePill(size=size, parent=self)
+        layout.addWidget(self._pill)
+        self._lbl = QLabel(label)
+        self._lbl.setStyleSheet(f"font-size:13px; font-weight:600; color:{DARK_TEXT}; background:transparent;")
+        layout.addWidget(self._lbl)
+        layout.addStretch()
+
+    def isChecked(self) -> bool: return self._pill.isChecked()
+    def setChecked(self, value: bool): self._pill.setChecked(value, animated=False)
+
+def load_disabled_categories() -> list:
+    """Return list of category names that are switched OFF for this branch."""
+    try:
+        if _CAT_SETTINGS_FILE.exists():
+            data = _json_mod.loads(_CAT_SETTINGS_FILE.read_text(encoding="utf-8"))
+            return data.get("disabled_categories", [])
+    except Exception:
+        pass
+    return []
+
+
+def save_disabled_categories(disabled: list) -> None:
+    """Persist the list of disabled category names to disk."""
+    try:
+        _CAT_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CAT_SETTINGS_FILE.write_text(
+            _json_mod.dumps({"disabled_categories": disabled}, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as _e:
+        import logging as _log
+        _log.getLogger("main_window").warning("Could not save category settings: %s", _e)
+
 
 # =============================================================================
 # WIDGET HELPERS
@@ -1042,6 +1158,169 @@ class CustomerSearchPopup(QDialog):
     def showEvent(self, e):
         super().showEvent(e)
         self._search.setFocus()
+        
+        
+# =============================================================================
+# CATEGORY VISIBILITY — Reusable widget + Standalone dialog
+# =============================================================================
+
+class _CategoryVisibilityWidget(QWidget):
+    """
+    Self-contained widget that shows all DB categories as checkboxes.
+    Ticked = visible on the POS grid. Unticked = hidden on this branch.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"background:{WHITE};")
+        self._checks: dict = {}   # cat_name → QCheckBox
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setSpacing(16)
+        lay.setContentsMargins(30, 15, 30, 25)
+
+        # ── Header ────────────────────────────────────────────────────
+        header_lay = QHBoxLayout()
+        title = QLabel("Category Visibility")
+        title.setStyleSheet(f"font-size:20px; font-weight:bold; color:{NAVY};")
+        
+        save_btn = navy_btn("Save Settings", height=34, color=SUCCESS, hover=SUCCESS_H)
+        save_btn.clicked.connect(self._save)
+        
+        header_lay.addWidget(title)
+        header_lay.addStretch()
+        header_lay.addWidget(save_btn)
+        lay.addLayout(header_lay)
+        
+        lay.addWidget(hr())
+
+        info = QLabel(
+            "Manage category visibility for this branch. "
+            "Unticked categories will be hidden from the POS screen."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(
+            f"color:{MUTED}; font-size:12px; background:{LIGHT};"
+            f" border:1px solid {BORDER}; border-radius:6px; padding:10px 14px;"
+        )
+        lay.addWidget(info)
+
+        # ── Bulk Actions ──────────────────────────────────────────────
+        sel_row = QHBoxLayout()
+        sel_all = QPushButton("Select All")
+        hide_all = QPushButton("Clear All")
+        
+        for btn in [sel_all, hide_all]:
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{ 
+                    border:none; color:{NAVY}; font-size:12px; font-weight:bold; background:transparent; 
+                }}
+                QPushButton:hover {{ color:{ACCENT}; }}
+            """)
+            
+        sel_all.clicked.connect(lambda: [c.setChecked(True) for c in self._checks.values()])
+        hide_all.clicked.connect(lambda: [c.setChecked(False) for c in self._checks.values()])
+        
+        sel_row.addWidget(sel_all)
+        sel_row.addSpacing(15)
+        sel_row.addWidget(hide_all)
+        sel_row.addStretch()
+        lay.addLayout(sel_row)
+
+        # ── Scrollable checkbox list ──────────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{ 
+                border:1px solid {BORDER}; border-radius:8px; background:{WHITE}; 
+            }}
+        """)
+
+        chk_container = QWidget()
+        chk_container.setStyleSheet(f"background:{WHITE};")
+        chk_lay = QVBoxLayout(chk_container)
+        chk_lay.setSpacing(4)
+        chk_lay.setContentsMargins(15, 15, 15, 15)
+
+        all_cats = []
+        try:
+            from models.product import get_categories
+            all_cats = get_categories()
+        except: pass
+
+        disabled_now = set(load_disabled_categories())
+
+        if not all_cats:
+            no_lbl = QLabel("No categories found.")
+            no_lbl.setStyleSheet(f"color:{MUTED}; font-size:13px;")
+            chk_lay.addWidget(no_lbl)
+        else:
+            for cat in sorted(all_cats, key=str.lower):
+                chk = _ToggleSwitch(cat)
+                chk.setChecked(cat not in disabled_now)
+                chk_lay.addWidget(chk)
+                self._checks[cat] = chk
+
+        chk_lay.addStretch()
+        scroll.setWidget(chk_container)
+        lay.addWidget(scroll, 1)
+
+    def _save(self):
+        disabled = [name for name, chk in self._checks.items() if not chk.isChecked()]
+        save_disabled_categories(disabled)
+        QMessageBox.information(
+            self, "Saved",
+            "Visibility updated.\n\nRestart the POS screen to apply changes."
+        )
+
+
+class CategoryVisibilityDialog(QDialog):
+    """Standalone dialog — with Close on top."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Category Visibility")
+        self.setMinimumSize(540, 600)
+        self.setModal(True)
+        # Use Frameless or specific flags if you want a fully custom top bar
+        self.setStyleSheet(f"QDialog {{ background-color:{WHITE}; border:1px solid {BORDER}; }}")
+        
+        main_lay = QVBoxLayout(self)
+        main_lay.setContentsMargins(0, 0, 0, 0)
+        main_lay.setSpacing(0)
+
+        # ── Custom Top Bar ───────────────────────────────────────────
+        top_bar = QWidget()
+        top_bar.setFixedHeight(50)
+        top_bar.setStyleSheet(f"background:{LIGHT}; border-bottom:1px solid {BORDER};")
+        top_lay = QHBoxLayout(top_bar)
+        top_lay.setContentsMargins(20, 0, 15, 0)
+
+        sys_label = QLabel("POS Maintenance")
+        sys_label.setStyleSheet(f"color:{MUTED}; font-weight:bold; font-size:11px; text-transform:uppercase;")
+        
+        close_btn = QPushButton("✕") # Large X icon
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton { 
+                border:none; border-radius:16px; font-size:18px; color:#888; font-weight:bold;
+            }
+            QPushButton:hover { background:#ff4d4d; color:white; }
+        """)
+        close_btn.clicked.connect(self.accept)
+
+        top_lay.addWidget(sys_label)
+        top_lay.addStretch()
+        top_lay.addWidget(close_btn)
+        
+        main_lay.addWidget(top_bar)
+
+        # ── The Widget Content ──────────────────────────────────────
+        self.content = _CategoryVisibilityWidget(self)
+        main_lay.addWidget(self.content)
 # =============================================================================
 # _InlineSettingsDialog  —  fallback
 # =============================================================================
@@ -1078,14 +1357,15 @@ class _InlineSettingsDialog(QDialog):
         self._stack.setStyleSheet(f"background:{OFF_WHITE};")
 
         pages = [
-            ("General",        self._page_general()),
-            ("Companies",      CompanyDialog(self)),
-            ("Customer Groups",CustomerGroupDialog(self)),
-            ("Warehouses",     WarehouseDialog(self)),
-            ("Cost Centers",   CostCenterDialog(self)),
-            ("Price Lists",    PriceListDialog(self)),
-            ("Customers",      CustomerDialog(self)),
-            ("Users",          ManageUsersDialog(self, current_user=self.user)),
+            ("General",              self._page_general()),
+            ("Companies",            CompanyDialog(self)),
+            ("Customer Groups",      CustomerGroupDialog(self)),
+            ("Warehouses",           WarehouseDialog(self)),
+            ("Cost Centers",         CostCenterDialog(self)),
+            ("Price Lists",          PriceListDialog(self)),
+            ("Customers",            CustomerDialog(self)),
+            ("Users",                ManageUsersDialog(self, current_user=self.user)),
+            ("Category Visibility",  self._page_category_visibility()),
         ]
 
         self._nav_btns = []
@@ -1195,6 +1475,19 @@ class _InlineSettingsDialog(QDialog):
         )
         lay.addWidget(tip)
         lay.addStretch()
+        return w
+
+    # =================================================================
+    # CATEGORY VISIBILITY PAGE  (embedded in _InlineSettingsDialog)
+    # =================================================================
+    def _page_category_visibility(self) -> QWidget:
+        """Embed the standalone CategoryVisibilityWidget inside the settings sidebar."""
+        w = QWidget()
+        w.setStyleSheet(f"background:{WHITE};")
+        lay = QVBoxLayout(w)
+        lay.setSpacing(0)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(_CategoryVisibilityWidget(w))
         return w
 
     # =================================================================
@@ -4487,6 +4780,7 @@ class UnsyncedPopup(QDialog):
     kind = "SI"  → opens on the Sales Invoices tab
     kind = "CN"  → opens on the Credit Notes tab
     kind = "SO"  → opens on the Sales Orders tab
+    kind = "BUNDLE" → opens on the Bundles tab
     kind = ""    → opens on whichever tab has errors (smart)
     """
 
@@ -4496,6 +4790,7 @@ class UnsyncedPopup(QDialog):
         "CN":   ("  Credit Notes",     AMBER,   ORANGE),
         "SO":   ("  Sales Orders",     AMBER,   ORANGE),
         "PAY":  ("  Payment Entries",  ACCENT,  ACCENT_H),
+        "BUNDLE": ("  Bundles",          ACCENT,  ACCENT_H),
         "CUST": ("  Customers",        NAVY_3,  NAVY_2),
     }
 
@@ -4708,7 +5003,7 @@ class UnsyncedPopup(QDialog):
             # Raw error — red, full text in tooltip too
             err_item = _cell(raw_error or "—", DANGER if raw_error else MUTED)
             if raw_error:
-                err_item.setToolTip(raw_error)   # full text on hover
+                err_item.setToolTip(str(raw_error))   # full text on hover
             tbl.setItem(r, 3, err_item)
 
         return n
@@ -4754,11 +5049,13 @@ class UnsyncedPopup(QDialog):
                 if not key:
                     return ""
                 if key in error_map:
-                    return error_map[key]
-                key_l = key.lower()
+                    return str(error_map[key])
+                key_str = str(key).lower()
                 for k, v in error_map.items():
-                    if k and (k.lower() in key_l or key_l in k.lower()):
-                        return v
+                    if k is not None:
+                        k_str = str(k).lower()
+                        if k_str in key_str or key_str in k_str:
+                            return str(v)
                 return ""
 
             if kind == "SI":
@@ -4821,7 +5118,7 @@ class UnsyncedPopup(QDialog):
                     conn.close()
                 except Exception as e:
                     rows.append(("—", "—", "—", f"DB error: {e}"))
-
+            
             elif kind == "SO":
                 try:
                     conn = get_connection()
@@ -4947,6 +5244,36 @@ class UnsyncedPopup(QDialog):
                 except Exception as e:
                     rows.append(("—", "—", "—", f"DB error: {e}"))
 
+            elif kind == "BUNDLE":
+                try:
+                    conn = get_connection()
+                    error_map = _get_raw_errors(conn, "BUNDLE")
+                    for k, v in _get_raw_errors(conn, "bundle").items():
+                        error_map.setdefault(k, v)
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT id, name, description
+                        FROM   product_bundles
+                        WHERE  sync_status = 'pending' OR sync_status = 'failed'
+                        ORDER  BY id DESC
+                    """)
+                    for bid, bname, bdesc in cur.fetchall():
+                        bundle_key = bname or str(bid)
+                        raw_err = _match_error(error_map, bundle_key)
+                        display_err = (
+                            raw_err if raw_err
+                            else "Pending push to server"
+                        )
+                        rows.append((
+                            f"BNDL-{bid}",
+                            bname or "—",
+                            "Bundle",
+                            display_err,
+                        ))
+                    conn.close()
+                except Exception as e:
+                    rows.append(("—", "—", "—", f"DB error: {e}"))
+
         except Exception:
             pass
 
@@ -5058,6 +5385,13 @@ class UnsyncedPopup(QDialog):
                             WHERE synced = 2
                         """)
                         conn.commit()
+                    elif kind == "BUNDLE":
+                        conn.execute("""
+                            UPDATE product_bundles
+                            SET sync_status = 'pending'
+                            WHERE sync_status = 'failed'
+                        """)
+                        conn.commit()
                 except Exception as lock_e:
                     print(f"[retry] Lock reset error for {kind}: {lock_e}")
                 finally:
@@ -5092,6 +5426,9 @@ class UnsyncedPopup(QDialog):
                 elif kind == "CUST":
                     from services.customer_sync_service import push_unsynced_customers
                     push_unsynced_customers()
+                elif kind == "BUNDLE":
+                    from services.bundle_sync_service import sync_pending_bundles
+                    sync_pending_bundles()
             except Exception as e:
                 print(f"[retry] _on_retry error for kind={kind}: {e}")
 
@@ -5116,10 +5453,10 @@ class UnsyncedPopup(QDialog):
 from PySide6.QtCore import QThread, Signal as _Signal
 
 class _BadgeWorker(QThread):
-    done = _Signal(int, int, int, int, int, int)   # si, cn, so, pay, cust, fiscal
+    done = _Signal(int, int, int, int, int, int, int)   # si, cn, so, pay, cust, bundle, fiscal
 
     def run(self):
-        si = cn = so = pay = cust = fiscal = 0
+        si = cn = so = pay = cust = bundle = fiscal = 0
         try:
             from database.db import get_connection
             conn = get_connection()
@@ -5184,11 +5521,20 @@ class _BadgeWorker(QThread):
                 cust = int(cur.fetchone()[0] or 0)
             except Exception: pass
 
+            # BUNDLE - pending/failed bundles
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM product_bundles "
+                    "WHERE sync_status IN ('pending', 'failed')"
+                )
+                bundle = int(cur.fetchone()[0] or 0)
+            except Exception: pass
+
             conn.close()
         except Exception:
             pass
 
-        self.done.emit(si, cn, so, pay, cust, fiscal)
+        self.done.emit(si, cn, so, pay, cust, bundle, fiscal)
 class POSView(QWidget):
     MAX_ROWS = 999   # safety ceiling — table grows elastically
 
@@ -5638,6 +5984,43 @@ class POSView(QWidget):
                         paid=tendered, change=change_out,
                         invoice_no=sale.get("invoice_no", "")
                     )
+                    
+                    # ── FISCALIZATION WAIT (SMART LOADER) ──
+                    try:
+                        from services.fiscalization_service import get_fiscalization_service
+                        fs = get_fiscalization_service()
+                        if fs and fs.is_fiscalization_enabled() and not sale.get("fiscal_qr_code"):
+                            wait_dlg = FiscalWaitDialog(self, sale_id=sale.get("id"))
+                            wait_dlg.exec()
+                            if wait_dlg.success and wait_dlg.refreshed_sale:
+                                sale.update(wait_dlg.refreshed_sale)
+                            
+                            # ── PRINT AFTER WAIT (Ensures 6s wait is respected) ──
+                            try:
+                                from services.printing_service import PrintingService
+                                from models.sale import _get_active_printers
+                                _ps = PrintingService()
+                                _printers = _get_active_printers() or [None]
+                                for _pname in _printers:
+                                    _ps.print_invoice_receipt(sale, printer_name=_pname)
+                            except Exception as e:
+                                print(f"[Print] Error after wait: {e}")
+                        else:
+                            # ── PRINT IMMEDIATELY (if fiscalization is off or already has QR) ──
+                            try:
+                                from services.printing_service import PrintingService
+                                from models.sale import _get_active_printers
+                                _ps = PrintingService()
+                                _printers = _get_active_printers() or [None]
+                                for _pname in _printers:
+                                    _ps.print_invoice_receipt(sale, printer_name=_pname)
+                            except Exception as e:
+                                print(f"[Print] Direct Error: {e}")
+                    except Exception as e:
+                        print(f"[FiscalWait] Error showing dialog: {e}")
+
+
+
                     if self.parent_window:
                         status = f"Sale #{sale.get('number', '')} saved — ${total:.2f} ({method})"
                         if cust_name and cust_name != "Walk-in":
@@ -5691,11 +6074,34 @@ class POSView(QWidget):
                     discount_amount=discount_amt,
                     is_on_account=False,
                     skip_stock=False,
-                    skip_print=False,
+                    skip_print=True,  # SKIP AUTO-PRINT TO SHOW LOADER
                     shift_id=shift_id,
                 )
                 
                 create_payment_entry(sale)
+
+                # ── FISCALIZATION WAIT (SMART LOADER) ──
+                try:
+                    from services.fiscalization_service import get_fiscalization_service
+                    fs = get_fiscalization_service()
+                    if fs and fs.is_fiscalization_enabled() and not sale.get("fiscal_qr_code"):
+                        wait_dlg = FiscalWaitDialog(self, sale_id=sale.get("id"))
+                        wait_dlg.exec()
+                        if wait_dlg.success and wait_dlg.refreshed_sale:
+                            sale.update(wait_dlg.refreshed_sale)
+                except Exception as e:
+                    print(f"[FiscalWait] Fallback Error: {e}")
+
+                # ── MANUAL PRINT ──
+                try:
+                    from services.printing_service import PrintingService
+                    from models.sale import _get_active_printers
+                    _ps = PrintingService()
+                    _printers = _get_active_printers() or [None]
+                    for _pname in _printers:
+                        _ps.print_invoice_receipt(sale, printer_name=_pname)
+                except Exception as e:
+                    print(f"[Print] Fallback Error: {e}")
                 
                 self._update_prev_txn_display(
                     paid=tendered, change=change_out,
@@ -5786,7 +6192,13 @@ class POSView(QWidget):
             QMessageBox.warning(self, "Error", f"Could not open Quotation Manager:\n{e}")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Unexpected error:\n{e}")
-
+    def _open_bundle_dialog(self):
+        from views.dialogs.bundle_dialog import BundleDialog
+        dlg = BundleDialog(self)
+        dlg.exec()
+    
+    
+    
     def _add_quotation_to_cart(self, data):
         """Add quotation items to cart."""
         cart_items = data.get("cart_items", [])
@@ -6453,6 +6865,7 @@ class POSView(QWidget):
                 return _handler
 
             maint_btn.addItem("Users",              _sd("ManageUsersDialog"))
+            maint_btn.addItem("Category Visibility", lambda: CategoryVisibilityDialog(self).exec())
             maint_btn.addSeparator()
             maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
             maint_btn.addItem("POS Rules",          _sd("POSRulesDialog"))
@@ -6670,9 +7083,9 @@ class POSView(QWidget):
 
         self._current_badge_worker = _BadgeWorker(self)
 
-        def _on_done(si, cn, so, pay, cust, fiscal):
+        def _on_done(si, cn, so, pay, cust, bundle, fiscal):
             self._badge_worker_running = False
-            self._apply_badge_counts(si, cn, so, pay, cust, fiscal)
+            self._apply_badge_counts(si, cn, so, pay, cust, bundle, fiscal)
             try:
                 self._current_badge_worker.deleteLater()
                 self._current_badge_worker = None
@@ -6682,11 +7095,11 @@ class POSView(QWidget):
         self._current_badge_worker.done.connect(_on_done)
         self._current_badge_worker.start()
 
-    def _apply_badge_counts(self, si_count, cn_count, so_count, pay_count, cust_count, fiscal_count):
+    def _apply_badge_counts(self, si_count, cn_count, so_count, pay_count, cust_count, bundle_count, fiscal_count):
         """Update the Q-badge and Z-badge UI"""
         # ── Update Q-badge (sync errors) ────────────────────────────────────────
         if hasattr(self, "_q_badge"):
-            total_sync = si_count + cn_count + so_count + pay_count + cust_count
+            total_sync = si_count + cn_count + so_count + pay_count + cust_count + bundle_count
             btn = self._q_badge
 
             if total_sync == 0:
@@ -6706,7 +7119,7 @@ class POSView(QWidget):
                 btn.setToolTip(
                     f"{total_sync} unsynced record(s)\n"
                     f"  SI={si_count}  CN={cn_count}  SO={so_count}\n"
-                    f"  PAY={pay_count}  CUST={cust_count}"
+                    f"  PAY={pay_count}  CUST={cust_count}  BNDL={bundle_count}"
                 )
                 btn.setStyleSheet(f"""
                     QPushButton {{
@@ -7631,6 +8044,7 @@ class POSView(QWidget):
                 return _handler
 
             maint_btn.addItem("Users",              _sd("ManageUsersDialog"))
+            maint_btn.addItem("Category Visibility", lambda: CategoryVisibilityDialog(self).exec())
             maint_btn.addSeparator()
             maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
             maint_btn.addItem("POS Rules",          _sd("POSRulesDialog"))
@@ -9239,7 +9653,7 @@ class POSView(QWidget):
         grid = QGridLayout(card); grid.setSpacing(5); grid.setContentsMargins(6, 6, 6, 6)
 
         rows_def = [
-            [("7","digit"),("8","digit"),("9","digit"),("−","op"),   ("X","clear")      ],
+            [("7","digit"),("8","digit"),("9","digit"),("-","op"),   ("X","clear")      ],
             [("4","digit"),("5","digit"),("6","digit"),("×","op"),   ("Del\nLine","del")],
             [("1","digit"),("2","digit"),("3","digit")                                  ],
             [("0","digit"),(".","digit"),("%","op")                                     ],
@@ -9251,8 +9665,26 @@ class POSView(QWidget):
                 b = numpad_btn(ch, kind)
                 if ch in "0123456789.":
                     b.clicked.connect(lambda _, c=ch: self._numpad_press(c))
-                elif ch == "−":
-                    b.clicked.connect(lambda: self._numpad_press("-"))
+                
+                elif ch == "-":
+                    b.clicked.connect(self._open_bundle_dialog)
+                    b.setText("mix")
+                    b.setStyleSheet(f"""
+        QPushButton {{
+            background-color: #e67e22; color: {WHITE};
+            border: 1px solid {BORDER}; border-radius: 6px;
+            font-size: 11px; font-weight: bold;
+        }}
+        QPushButton:hover   {{ background-color: #d35400; }}
+        QPushButton:pressed {{ background-color: {NAVY_3}; color: {WHITE}; }}
+    """)
+        
+                    
+    # Change button to open Bundle Dialog instead of minus sign
+    
+    
+    
+        
                 elif ch == "×":
                     b.clicked.connect(self._open_qty_popup)
                 elif ch == "X":
@@ -9476,6 +9908,11 @@ class POSView(QWidget):
             self._category_names = get_categories()
         except Exception:
             self._category_names = []
+
+        # Filter out categories that have been disabled in Settings → Category Visibility
+        _disabled = load_disabled_categories()
+        if _disabled:
+            self._category_names = [c for c in self._category_names if c not in _disabled]
 
         # Always ensure "All" tab exists — products synced from server have no category
         if "All" not in self._category_names:
@@ -10148,6 +10585,7 @@ class POSView(QWidget):
             receipt = ReceiptData(
                 doc_type        = "receipt",
                 receiptType     = sale.get("receipt_type", "Invoice"),
+                companyLogoPath = co.get("logo_path", ""),
                 companyName     = co.get("company_name", ""),
                 companyAddress  = co.get("address_1", ""),
                 companyAddressLine1 = co.get("address_2", ""),
@@ -11527,7 +11965,7 @@ class MainWindow(QMainWindow):
             import logging
             logging.getLogger("MainWindow").warning(
                 "Accounts sync could not start: %s", _e)
-
+        
         # Sales Order pull — pulls Frappe Sales Orders → local DB every 5 min
         # so cashiers can finalise fully-paid laybyes into invoices offline.
         try:
@@ -11579,7 +12017,20 @@ class MainWindow(QMainWindow):
                 Qt.QueuedConnection)
         except Exception:
             pass
-
+        
+        try:
+            from services.bundle_sync_service import start_bundle_sync_daemon
+            self._bundle_sync = start_bundle_sync_daemon()
+            print("[MainWindow] Bundle sync daemon started (every 20s)")
+        except Exception as _e:
+            import logging
+            logging.getLogger("MainWindow").warning(
+                "Bundle sync service could not start: %s", _e)
+        try:
+            from services.sync_errors_service import ensure_table as _set
+            _set()
+        except Exception:
+            pass
         # ── One-shot startup sync (runs immediately in background on login) ──
         # Fires once right after MainWindow opens so products, customers,
         # users, accounts and exchange rates are all refreshed without the
@@ -12044,6 +12495,7 @@ class MainWindow(QMainWindow):
             ("Price Lists",       _sd_action("PriceListDialog")),
             ("Customers",         _sd_action("CustomerDialog")),
             ("Users",             _sd_action("ManageUsersDialog")),
+            ("Category Visibility", lambda: CategoryVisibilityDialog(self).exec()),
             (None, None),
             ("Company Defaults",  self._open_company_defaults),
             ("POS Rules",         _sd_action("POSRulesDialog")),
@@ -12920,6 +13372,98 @@ class CustomerPaymentDialog(QDialog):
         self._refresh_balances()
         if self._active_method:
             self._activate_method(self._active_method)
+# =============================================================================
+# FISCALIZATION WAIT DIALOG & THREAD
+# =============================================================================
+from PySide6.QtCore import QThread, Signal
+
+class FiscalPollThread(QThread):
+    finished = Signal(bool, dict)  # success, refreshed_sale
+
+    def __init__(self, sale_id):
+        super().__init__()
+        self.sale_id = sale_id
+        self._running = True
+
+    def run(self):
+        import time
+        from database.db import get_connection, fetchone_dict
+        
+        start_time = time.time()
+        max_wait = 6.0
+        
+        while time.time() - start_time < max_wait and self._running:
+            try:
+                # BYPASS CACHE - Direct DB check for QR code
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT id, fiscal_qr_code, fiscal_verification_code, fiscal_status FROM sales WHERE id = ?", (self.sale_id,))
+                sale = fetchone_dict(cur)
+                conn.close()
+                
+                if sale and sale.get("fiscal_qr_code") and str(sale.get("fiscal_qr_code")).strip():
+                    self.finished.emit(True, sale)
+                    return
+            except Exception as e:
+                print(f"[FiscalPoll] Error: {e}")
+            
+            time.sleep(0.5)
+        
+        self.finished.emit(False, {})
+
+    def stop(self):
+        self._running = False
+
+class FiscalWaitDialog(QDialog):
+    def __init__(self, parent=None, sale_id=None):
+        super().__init__(parent)
+        self.sale_id = sale_id
+        self.refreshed_sale = None
+        self.success = False
+        
+        self.setWindowTitle("Fiscalization")
+        self.setFixedSize(320, 200)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setStyleSheet(f"QDialog {{ background: {WHITE}; border: 2px solid {ACCENT}; border-radius: 10px; }}")
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 20, 30, 20)
+        layout.setSpacing(15)
+        
+        # Icon/Spinner Placeholder
+        self.icon_lbl = QLabel("⏳")
+        self.icon_lbl.setAlignment(Qt.AlignCenter)
+        self.icon_lbl.setStyleSheet("font-size: 40px; background: transparent;")
+        layout.addWidget(self.icon_lbl)
+        
+        self.msg_lbl = QLabel("Waiting for ZIMRA Fiscalization...")
+        self.msg_lbl.setAlignment(Qt.AlignCenter)
+        self.msg_lbl.setWordWrap(True)
+        self.msg_lbl.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {NAVY}; background: transparent;")
+        layout.addWidget(self.msg_lbl)
+        
+        # Subtext
+        self.sub_lbl = QLabel("Waiting up to 6 seconds for QR code...")
+        self.sub_lbl.setAlignment(Qt.AlignCenter)
+        self.sub_lbl.setStyleSheet(f"font-size: 12px; color: {MUTED}; background: transparent;")
+        layout.addWidget(self.sub_lbl)
+        
+        # Start polling
+        self.thread = FiscalPollThread(sale_id)
+        self.thread.finished.connect(self._on_finished)
+        self.thread.start()
+        
+    def _on_finished(self, success, sale):
+        self.success = success
+        self.refreshed_sale = sale
+        self.accept()
+
+    def closeEvent(self, event):
+        if self.thread.isRunning():
+            self.thread.stop()
+            self.thread.wait()
+        super().closeEvent(event)
+
 # # =============================================================================
 # REPRINT DIALOG  —  two tabs: Sales Invoice  |  Sales Order
 # =============================================================================

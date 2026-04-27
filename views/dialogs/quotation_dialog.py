@@ -437,6 +437,18 @@ class QuotationDialog(QDialog):
                 pass
         self.label_preview_btn.clicked.connect(self._preview_pharmacy_labels)
 
+        # Reprint — prints ZPL labels for the selected quotation inline
+        self.reprint_btn = QPushButton("Reprint Labels")
+        self.reprint_btn.setObjectName("primaryBtn")
+        self.reprint_btn.setEnabled(False)
+        self.reprint_btn.setToolTip("Reprint pharmacy labels for this quotation")
+        if qta is not None:
+            try:
+                self.reprint_btn.setIcon(qta.icon("fa5s.print", color="white"))
+            except Exception:
+                pass
+        self.reprint_btn.clicked.connect(self._reprint_labels)
+
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.setObjectName("dangerBtn")
         self.delete_btn.setEnabled(False)
@@ -447,6 +459,7 @@ class QuotationDialog(QDialog):
         close_btn.clicked.connect(self.accept)
 
         action_layout.addStretch()
+        action_layout.addWidget(self.reprint_btn)
         action_layout.addWidget(self.convert_btn)
         action_layout.addWidget(self.label_preview_btn)
         action_layout.addWidget(self.delete_btn)
@@ -625,6 +638,7 @@ class QuotationDialog(QDialog):
             self.convert_btn.setEnabled(False)
             self.delete_btn.setEnabled(False)
             self.label_preview_btn.setEnabled(False)
+            self.reprint_btn.setEnabled(False)
             self.current_quotation = None
             return
 
@@ -641,6 +655,7 @@ class QuotationDialog(QDialog):
             self.convert_btn.setEnabled(can_convert)
             self.delete_btn.setEnabled(True)
             self.label_preview_btn.setEnabled(single_selection)
+            self.reprint_btn.setEnabled(single_selection)
             self._display_quotation_details(self.current_quotation)
             self.convert_btn.setToolTip(
                 "Load quotation items into cart" if can_convert
@@ -836,6 +851,85 @@ class QuotationDialog(QDialog):
     #     from views.dialogs.external_quotation_settings_dialog import ExternalQuotationSettingsDialog
     #     dlg = ExternalQuotationSettingsDialog(self)
     #     dlg.exec()
+
+    def _reprint_labels(self):
+        """Reprint all pharmacy ZPL labels for the selected quotation, inline."""
+        if not self.current_quotation:
+            return
+        qid = getattr(self.current_quotation, "local_id", None)
+        if not qid:
+            QMessageBox.warning(
+                self, "Reprint Labels",
+                "Cannot reprint — quotation is not saved locally yet."
+            )
+            return
+        try:
+            from services.pharmacy_label_zpl_printer import (
+                _get_pharmacy_items_from_quotation,
+                _get_pharmacy_printer_name,
+                _build_zpl_label,
+                _send_to_printer,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Reprint Labels", f"Could not load printer service:\n{e}")
+            return
+
+        printer_name = _get_pharmacy_printer_name()
+        if not printer_name or printer_name == "(None)":
+            QMessageBox.warning(
+                self, "No Printer Configured",
+                "No pharmacy label printer is set.\n"
+                "Go to Settings \u2192 Hardware Settings and select a ZPL printer."
+            )
+            return
+
+        try:
+            labels = _get_pharmacy_items_from_quotation(int(qid))
+        except Exception as e:
+            QMessageBox.critical(self, "Reprint Labels", f"Failed to load pharmacy items:\n{e}")
+            return
+
+        if not labels:
+            QMessageBox.information(
+                self, "Reprint Labels",
+                "No pharmacy items found on this quotation."
+            )
+            return
+
+        printed = 0
+        failed  = 0
+        for lbl in labels:
+            expiry = lbl.get("expiry_date")
+            zpl = _build_zpl_label(
+                product_name    = lbl.get("product_name", ""),
+                part_no         = lbl.get("part_no", ""),
+                qty             = lbl.get("qty", 0),
+                uom             = lbl.get("uom", ""),
+                price           = lbl.get("price", 0),
+                batch_no        = lbl.get("batch_no", ""),
+                expiry_date     = expiry,
+                dosage          = lbl.get("dosage", ""),
+                doctor_name     = lbl.get("doctor_name", ""),
+                pharmacist_name = lbl.get("pharmacist_name", ""),
+            )
+            if _send_to_printer(zpl):
+                printed += 1
+            else:
+                failed += 1
+
+        if failed == 0:
+            self.status_label_bottom.setText(
+                f"\u2713  Reprinted {printed} label(s) \u2192 '{printer_name}'"
+            )
+        else:
+            self.status_label_bottom.setText(
+                f"Sent {printed}, failed {failed} \u2014 check printer connection."
+            )
+            QMessageBox.warning(
+                self, "Reprint Labels",
+                f"Sent {printed} label(s), but {failed} failed.\n"
+                "Check the printer connection."
+            )
 
     def _fetch_external_quotations(self):
         if getattr(self, "_ext_fetch_running", False):

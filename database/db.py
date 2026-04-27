@@ -26,7 +26,7 @@ def _best_driver() -> str:
 
 DRIVER = _best_driver()
 
-def _get_app_data_dir() -> Path:
+def get_app_data_dir() -> Path:
     """
     Returns the writable app_data directory next to the .exe (or next to
     main.py in dev mode). Mirrors the same logic used in main.py so that
@@ -39,7 +39,7 @@ def _get_app_data_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "app_data"
 
 def _load_settings() -> dict:
-    path = _get_app_data_dir() / "sql_settings.json"
+    path = get_app_data_dir() / "sql_settings.json"
     if not path.exists():
         return {
             "auth_mode": "windows",
@@ -52,7 +52,7 @@ def _load_settings() -> dict:
 
 def is_connection_valid() -> bool:
     """Returns True only if settings file exists AND connection works."""
-    path = _get_app_data_dir() / "sql_settings.json"
+    path = get_app_data_dir() / "sql_settings.json"
     print(f"[db] is_connection_valid() — checking: {path}")
     if not path.exists():
         print("[db] Settings file not found.")

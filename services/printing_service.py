@@ -16,9 +16,13 @@ import sys
 # PATH HELPER
 # =============================================================================
 def _get_app_data_dir() -> Path:
-    if hasattr(sys, "_MEIPASS"):
-        return Path(sys.executable).parent / "app_data"
-    return Path.cwd() / "app_data"
+    try:
+        from database.db import get_app_data_dir
+        return Path(get_app_data_dir())
+    except Exception:
+        if hasattr(sys, "_MEIPASS"):
+            return Path(sys.executable).parent / "app_data"
+        return Path.cwd() / "app_data"
 
 
 def _get_logo_path(logo_filename: str) -> Path:
@@ -50,18 +54,36 @@ class PrintingService:
         bold_font.setBold(True)
         return bold_font
     
-    def _draw_logo(self, painter: QPainter, settings, y: int) -> int:
+    def _draw_logo(self, painter: QPainter, receipt: ReceiptData, settings, y: int) -> int:
         try:
-            logo_filename = getattr(settings, "logoFilename", None)
+            # RESOLVE LOGO FILENAME
+            logo_filename = receipt.companyLogoPath or ""
+            
+            # Fallback to shared config if receipt doesn't have it
+            if not logo_filename:
+                try:
+                    from models.company_defaults import get_defaults
+                    co = get_defaults() or {}
+                    logo_filename = co.get("logo_path", "")
+                except Exception:
+                    pass
+
             if logo_filename:
                 logo_path = _get_logo_path(logo_filename)
                 if logo_path.exists():
                     pixmap = QPixmap(str(logo_path))
                     if not pixmap.isNull():
-                        scaled_pixmap = pixmap.scaled(150, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        # Scale to fit nicely on 80mm thermal paper width
+                        # 300px wide is proportionate on high-DPI printers
+                        max_w = min(self.paper_width - self.margin * 2, 300)
+                        scaled_pixmap = pixmap.scaled(
+                            max_w, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                        )
                         x = (self.paper_width - scaled_pixmap.width()) // 2
                         painter.drawPixmap(x, y, scaled_pixmap)
                         return y + scaled_pixmap.height() + 10
+                else:
+                    print(f"[PrintLogo] File not found: {logo_path}")
         except Exception as e:
             print(f"Logo draw error: {e}")
         return y
@@ -91,7 +113,7 @@ class PrintingService:
             bold_font   = self._make_bold(normal_font)
 
             # Logo
-            y = self._draw_logo(painter, settings, y)
+            y = self._draw_logo(painter, receipt, settings, y)
 
             # Company Header
             painter.setFont(bold_font)
@@ -224,18 +246,22 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 14
 
-            # Totals
-            fm2  = painter.fontMetrics()
-            lh2  = fm2.height() + 6
+            # Resolve payment rate for totals
+            pay_cur, pay_rate = self._sole_non_usd_payment_rate(
+                getattr(receipt, "paymentItems", None) or []
+            )
 
             def draw_cn_total(label: str, value: float, use_bold: bool = False):
                 nonlocal y
-                text = f"{receipt.currency or 'USD'} {value:,.2f}"
-                w = fm2.horizontalAdvance(text)
+                _cur = (pay_cur or receipt.currency or "USD")
+                _val = value * (pay_rate if pay_rate > 0 else 1.0)
+                text = f"{_cur} {_val:,.2f}"
+                fm_cn = painter.fontMetrics()
+                w = fm_cn.horizontalAdvance(text)
                 painter.setFont(bold_font if use_bold else normal_font)
-                painter.drawText(self.margin, y, 220, lh2, Qt.AlignLeft,  label)
-                painter.drawText(self.paper_width - self.margin - w, y, w, lh2, Qt.AlignRight, text)
-                y += lh2
+                painter.drawText(self.margin, y, 220, fm_cn.height() + 6, Qt.AlignLeft,  label)
+                painter.drawText(self.paper_width - self.margin - w, y, w, fm_cn.height() + 6, Qt.AlignRight, text)
+                y += fm_cn.height() + 6
 
             if receipt.totalVat > 0:
                 draw_cn_total("VAT", receipt.totalVat)
@@ -419,11 +445,18 @@ class PrintingService:
                 small_font.setPixelSize(new_size)
 
             # Logo
-            y = self._draw_logo(painter, settings, y)
+            from models.company_defaults import get_defaults
+            co = get_defaults() or {}
+            from models.receipt import ReceiptData
+            dummy_receipt = ReceiptData(
+                companyName     = co.get("company_name", ""),
+                companyLogoPath = co.get("logo_path", "")
+            )
+            y = self._draw_logo(painter, dummy_receipt, settings, y)
 
             # Company Name
             painter.setFont(bold_font)
-            company = getattr(settings, "companyName", None) or "Havano POS"
+            company = co.get("company_name", getattr(settings, "companyName", "Havano POS"))
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
                              Qt.AlignCenter, company.upper())
             y += 50
@@ -723,43 +756,35 @@ class PrintingService:
     # =========================================================================
     def _sole_non_usd_payment_rate(
         self, payment_items: list,
-    ) -> tuple[str, float, float, float]:
+    ) -> tuple[str, float]:
         """
         Single-non-USD-tender detection for the currency display rule.
 
-        Returns (currency_code, rate, native_amount, usd_amount).
-        All zeros + empty string when the heuristic doesn't apply:
-        no payments, >1 payment row, or the sole row is USD.
+        Returns (currency_code, rate). Rate is local-per-USD, derived from
+        the payment item itself (`native / usd`) — same rate that was
+        locked in at payment time, so totals and tendered stay internally
+        consistent.
 
-        Rate is local-per-USD, derived from the payment item itself
-        (`native / usd`) — same rate that was locked in at payment time,
-        so totals and tendered stay internally consistent.
-
-        Why return native_amount + usd_amount too:
-        `PaymentDialog._active_method` stores tendered/change in NATIVE
-        currency on the single-method path, while the splits path stores
-        them in USD. The caller uses `native_amount` / `usd_amount` to
-        work out which form a given receipt carries (by comparing to
-        `receipt.amountTendered`) so we know whether to multiply by rate
-        or display the value as-is.
+        Returns ("", 0.0) when the heuristic doesn't apply: no payments,
+        >1 payment row, or the sole row is USD.
         """
         if not payment_items or len(payment_items) != 1:
-            return ("", 0.0, 0.0, 0.0)
+            return ("", 0.0)
 
         pi       = payment_items[0]
         cur      = (getattr(pi, "productid", "") or "USD").strip().upper()
         if not cur or cur == "USD":
-            return ("", 0.0, 0.0, 0.0)
+            return ("", 0.0)
 
         try:
             native = float(getattr(pi, "price",  0) or 0)
             usd    = float(getattr(pi, "amount", 0) or 0)
         except (TypeError, ValueError):
-            return ("", 0.0, 0.0, 0.0)
+            return ("", 0.0)
         if usd <= 0.005 or native <= 0.005:
-            return ("", 0.0, 0.0, 0.0)
+            return ("", 0.0)
 
-        return (cur, native / usd, native, usd)
+        return (cur, native / usd)
 
     # =========================================================================
     # SHIFT INVOICE-COUNT HELPER
@@ -851,25 +876,6 @@ class PrintingService:
         f = QFont(font)
         f.setWeight(QFont.Bold)
         return f
-
-    # =========================================================================
-    # LOGO HELPER
-    # =========================================================================
-    def _draw_logo(self, painter: QPainter, settings: AdvanceSettings, y: int) -> int:
-        """
-        Draws the logo if configured and the file exists.
-        Returns the updated y position after the logo.
-        """
-        if settings.logoDirectory:
-            logo_full_path = _get_logo_path(settings.logoDirectory)
-            if logo_full_path.exists():
-                logo_pix = QPixmap(str(logo_full_path))
-                if not logo_pix.isNull():
-                    scaled = logo_pix.scaled(300, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    x = (self.paper_width - scaled.width()) // 2
-                    painter.drawPixmap(x, y, scaled)
-                    y += scaled.height() + 10
-        return y
 
     # =========================================================================
     # ROUTING
@@ -1027,6 +1033,12 @@ class PrintingService:
     # INVOICE RECEIPT
     # =========================================================================
     def print_invoice_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+        # ✅ FIX: Automatically convert dictionary to ReceiptData object if needed
+        if isinstance(receipt, dict):
+            print(f"[PrintingService] Converting raw sale dict to ReceiptData for invoice {receipt.get('invoice_no')}")
+            from models.sale import prepare_receipt_data
+            receipt = prepare_receipt_data(receipt)
+
         settings = AdvanceSettings.load_from_file()
 
         painter = None
@@ -1050,7 +1062,7 @@ class PrintingService:
             bold_font   = self._make_bold(normal_font)
 
             # Logo
-            y = self._draw_logo(painter, settings, y)
+            y = self._draw_logo(painter, receipt, settings, y)
 
             # Company Header
             painter.setFont(bold_font)
@@ -1195,18 +1207,23 @@ class PrintingService:
             fm = painter.fontMetrics()
             line_h = fm.height() + 6
 
+            # Amount tendered + change rules — used here for Subtotals too
+            pay_cur, pay_rate = self._sole_non_usd_payment_rate(
+                getattr(receipt, "paymentItems", None) or []
+            )
+
             def draw_total(label: str, value: float, currency: str = None):
                 nonlocal y
-                _cur = (currency or receipt.currency or "USD")
-                text = f"{_cur} {value:,.2f}"
+                # Use passed currency, or resolved sole pay currency, or receipt default, or USD
+                _cur = (currency or pay_cur or receipt.currency or "USD")
+                _val = value * (pay_rate if (not currency and pay_rate > 0) else 1.0)
+                text = f"{_cur} {_val:,.2f}"
                 w = fm.horizontalAdvance(text)
                 painter.drawText(self.margin, y, 260, line_h, Qt.AlignLeft,  label)
                 painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
                 y += line_h
 
             # Amount BEFORE tax — reverse calculation off the tax-inclusive total.
-            # Subtotal + VAT lines are fiscalisation-only — when fiscalisation is
-            # off the slip is not a tax invoice, so only the GRAND TOTAL matters.
             _grand = float(receipt.grandTotal or 0)
             _vat   = float(receipt.totalVat   or 0)
             _net   = max(_grand - _vat, 0.0)
@@ -1225,10 +1242,9 @@ class PrintingService:
             #
             # The fiscal record itself is still stored in USD upstream;
             # this only affects the printed display.
-            pay_cur, pay_rate, pay_native, pay_usd = \
-                self._sole_non_usd_payment_rate(
-                    getattr(receipt, "paymentItems", None) or []
-                )
+            pay_cur, pay_rate = self._sole_non_usd_payment_rate(
+                getattr(receipt, "paymentItems", None) or []
+            )
             _display_cur  = pay_cur or "USD"
             _display_rate = pay_rate if (pay_cur and pay_rate > 0) else 1.0
 
@@ -1249,31 +1265,31 @@ class PrintingService:
 
             y += 10
 
-            # Amount tendered + change — trickier: PaymentDialog stores
-            # these as NATIVE on single-method non-USD sales but as USD on
-            # split payments. If `receipt.amountTendered` looks closer to
-            # the payment row's native amount than its USD equivalent,
-            # assume the values are already native and display them as-is
-            # (no rate multiplication — that would double-convert).
+            # Amount tendered + change — `_print_receipt` now passes these
+            # in the active method's NATIVE currency (single-method path)
+            # or sums of native amounts (single-currency split). They are
+            # already in display units, so we never multiply by rate here.
+            # Multi-method splits in MIXED currencies skip this single
+            # Tendered/Change line — the PAYMENT DETAILS block below
+            # shows each method's tender separately, which is unambiguous.
             _tendered_base = float(getattr(receipt, "amountTendered", 0) or 0)
             _change_base   = float(getattr(receipt, "change",         0) or 0)
-
-            tendered_is_already_native = False
-            if pay_cur and pay_native > 0 and pay_usd > 0 and _tendered_base > 0:
-                _dist_native = abs(_tendered_base - pay_native)
-                _dist_usd    = abs(_tendered_base - pay_usd)
-                tendered_is_already_native = _dist_native < _dist_usd
+            _payment_items = getattr(receipt, "paymentItems", None) or []
 
             if _tendered_base > 0.005:
-                if pay_cur and tendered_is_already_native:
-                    # Already in the display currency — skip the multiply.
-                    draw_total("Amount Tendered", _tendered_base, _display_cur)
-                    draw_total("Change",          _change_base,   _display_cur)
+                if len(_payment_items) > 1:
+                    # Multi-method split: skip single Tendered line —
+                    # PAYMENT DETAILS block below shows each method individually
+                    pass
+                elif pay_cur and pay_rate > 0:
+                    # Single non-USD method detected via paymentItems rate
+                    draw_total("Amount Tendered", _tendered_base, pay_cur)
+                    draw_total("Change",          _change_base,   pay_cur)
                 else:
-                    draw_total("Amount Tendered",
-                               _tendered_base * _display_rate, _display_cur)
-                    draw_total("Change",
-                               _change_base   * _display_rate, _display_cur)
+                    # Single method: use receipt.currency (e.g. "ZIG") not hardcoded "USD"
+                    _receipt_cur = receipt.currency or "USD"
+                    draw_total("Amount Tendered", _tendered_base, _receipt_cur)
+                    draw_total("Change",          _change_base,   _receipt_cur)
 
             # Payment Details — modes + amounts per currency.
             # paymentItems is populated by _print_receipt; each carries
@@ -1468,7 +1484,7 @@ class PrintingService:
             now = datetime.now()
 
             # Logo
-            y = self._draw_logo(painter, settings, y)
+            y = self._draw_logo(painter, receipt, settings, y)
 
             # Company Details
             painter.setFont(bold_font)
@@ -1594,22 +1610,30 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 14
 
+            # Resolve payment rate for totals
+            pay_cur, pay_rate = self._sole_non_usd_payment_rate(
+                getattr(receipt, "paymentItems", None) or getattr(receipt, "itemlist", [])
+            )
+
+            def draw_pay_total(label: str, value: float, use_bold: bool = False):
+                nonlocal y
+                _cur = (pay_cur or receipt.currency or "USD")
+                _val = value * (pay_rate if pay_rate > 0 else 1.0)
+                text = f"{_cur} {_val:,.2f}"
+                w = fm.horizontalAdvance(text)
+                painter.setFont(bold_font if use_bold else normal_font)
+                painter.drawText(self.margin, y, 300, line_h, Qt.AlignLeft, label)
+                painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
+                y += line_h
+
             # Amount Paid
-            painter.setFont(bold_font)
-            amount_text = f"{receipt.total:,.2f}"
-            w = fm.horizontalAdvance(amount_text)
-            painter.drawText(self.margin, y, 300, line_h, Qt.AlignLeft, "Amount Paid")
-            painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, amount_text)
-            y += line_h + 4
+            draw_pay_total("Amount Paid", float(receipt.total or 0), use_bold=True)
+            y += 4
 
             # Customer Balance
-            painter.setFont(normal_font)
-            balance = getattr(receipt, "balanceDue", 0.0) or 0.0
-            balance_text = f"{balance:,.2f}"
-            w2 = fm.horizontalAdvance(balance_text)
-            painter.drawText(self.margin, y, 300, line_h, Qt.AlignLeft, "Customer Balance")
-            painter.drawText(self.paper_width - self.margin - w2, y, w2, line_h, Qt.AlignRight, balance_text)
-            y += line_h + 10
+            balance = float(getattr(receipt, "balanceDue", 0.0) or 0.0)
+            draw_pay_total("Customer Balance", balance)
+            y += 10
 
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 20
@@ -1658,7 +1682,7 @@ class PrintingService:
             bold_font   = self._make_bold(normal_font)
 
             # Logo
-            y = self._draw_logo(painter, settings, y)
+            y = self._draw_logo(painter, receipt, settings, y)
 
             # Company Header
             painter.setFont(bold_font)
@@ -1784,9 +1808,16 @@ class PrintingService:
             fm_n     = painter.fontMetrics()
             n_line_h = fm_n.height() + 6
 
+            # Resolve payment rate for totals
+            pay_cur, pay_rate = self._sole_non_usd_payment_rate(
+                getattr(receipt, "paymentItems", None) or []
+            )
+
             def draw_so_total(label: str, value: float):
                 nonlocal y
-                text = f"{receipt.currency or 'USD'} {value:,.2f}"
+                _cur = (pay_cur or receipt.currency or "USD")
+                _val = value * (pay_rate if pay_rate > 0 else 1.0)
+                text = f"{_cur} {_val:,.2f}"
                 w = fm_n.horizontalAdvance(text)
                 painter.drawText(self.margin, y, 260, n_line_h, Qt.AlignLeft,  label)
                 painter.drawText(self.paper_width - self.margin - w, y, w, n_line_h, Qt.AlignRight, text)
@@ -1878,7 +1909,15 @@ class PrintingService:
             bold_font   = self._make_bold(normal_font)
 
             # Logo
-            y = self._draw_logo(painter, settings, y)
+            # For laybye we create a slim receipt object to carry company info
+            from models.company_defaults import get_defaults
+            co = get_defaults() or {}
+            from models.receipt import ReceiptData
+            dummy_receipt = ReceiptData(
+                companyName = co.get("company_name", company),
+                companyLogoPath = co.get("logo_path", "")
+            )
+            y = self._draw_logo(painter, dummy_receipt, settings, y)
 
             # Company Name
             painter.setFont(bold_font)
