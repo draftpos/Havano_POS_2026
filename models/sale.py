@@ -437,15 +437,25 @@ def create_sale(
     total_amount    = float(total)
 
     # ── Multi-currency calculations ────────────────────────────────────────
-    # currency     : the currency the cashier selected (e.g. "ZWD" or "USD")
-    # total        : the invoice total IN THAT CURRENCY as displayed on screen
-    #                e.g. if currency=ZWD, total=5000 means ZWD 5000
-    # total_usd    : always the USD equivalent  → used by Frappe PE + pos_upload
-    # total_zwd    : the ZWD amount if currency==ZWD, else 0
-    # tendered_usd : USD equivalent of cash given (change display only)
-    # tendered_zwd : ZWD cash given if currency==ZWD (change display only)
-    # exchange_rate: foreign→USD rate (e.g. ZWD→USD = 0.00277)
-    #                If currency==USD this is always 1.0
+    # Currency convention used by every caller in this codebase:
+    #   currency     : the active payment method's currency (e.g. "ZWD" or "USD")
+    #   total        : the invoice total **in USD** (cart base currency).
+    #                  Even when currency=ZWG, total is the USD figure shown
+    #                  on the cart — payment_dialog.self.total never converts.
+    #   tendered     : the cash given by the customer **in the active method's
+    #                  native currency** (e.g. 7000 ZWG, 50 USD).
+    #   total_usd    : USD equivalent of total — used by Frappe PE + pos_upload.
+    #   total_zwd    : the ZWG amount equivalent (only set when currency=ZWG).
+    #   tendered_usd : USD equivalent of cash given.
+    #   tendered_zwd : ZWG cash given when currency=ZWG.
+    #   exchange_rate: foreign→USD rate (e.g. ZWD→USD ≈ 0.0333). USD-per-native.
+    #                  If currency==USD this is always 1.0.
+    #
+    # The previous implementation assumed `total` was in `currency`, which
+    # silently corrupted total_usd / total_zwd whenever a non-USD method
+    # was used (5.567 USD instead of 167; 167 ZWG instead of 5010). The
+    # math below now always treats `total` as USD and converts to native
+    # via the exchange rate when the active currency is non-USD.
     currency_upper = (currency or "USD").strip().upper()
 
     # Resolve exchange rate: use supplied value, else look up local DB
@@ -467,26 +477,33 @@ def create_sale(
             except Exception as _e:
                 print(f"[create_sale] WARNING: Could not get exchange rate for {currency_upper}→USD: {_e}")
 
-    # total_usd: if currency is USD use total directly, else convert
+    # total_usd: `total` is already in USD per the convention above, so this
+    # is just a passthrough. The explicit total_usd kwarg overrides if a
+    # caller wants to be explicit (no live caller does today).
     if total_usd is not None:
         _total_usd = float(total_usd)
-    elif currency_upper == "USD":
-        _total_usd = total_amount
     else:
-        _total_usd = round(total_amount * _exch, 4)
+        _total_usd = total_amount
 
-    # total_zwd: only set when currency is ZWD, ZWG, or ZIG
-    _total_zwd = total_amount if currency_upper in ("ZWD", "ZWG", "ZIG") else 0.0
+    # total_zwd: convert the USD total → native ZWG when currency is ZWG.
+    # exchange_rate is USD-per-native (e.g. 0.0333 for ZWG), so dividing
+    # gives native units: 167 USD / 0.0333 = 5010 ZWG.
+    if currency_upper in ("ZWD", "ZWG") and _exch > 0:
+        _total_zwd = round(total_amount / _exch, 4)
+    else:
+        _total_zwd = 0.0
 
-    # tendered split by currency
+    # tendered split by currency. Tendered IS in the active method's native
+    # currency (payment_dialog passes self._get_paid_native(method)), so
+    # multiplication by USD-per-native gives the USD equivalent.
     if currency_upper == "USD":
         _tendered_usd = tendered_amount
         _tendered_zwd = 0.0
     elif currency_upper in ("ZWD", "ZWG", "ZIG"):
         _tendered_zwd = tendered_amount
-        _tendered_usd = round(tendered_amount * _exch, 4)
+        _tendered_usd = round(tendered_amount * _exch, 4) if _exch > 0 else tendered_amount
     else:
-        _tendered_usd = round(tendered_amount * _exch, 4)
+        _tendered_usd = round(tendered_amount * _exch, 4) if _exch > 0 else tendered_amount
         _tendered_zwd = 0.0
 
     print(f"[create_sale] Currency={currency_upper}  total={total_amount}  "
@@ -502,7 +519,18 @@ def create_sale(
     if change_amount is not None:
         change_val = float(change_amount)
     else:
-        change_val = max(0.0, tendered_amount - total_amount)
+        # Fallback path — only fires when the caller didn't pass change_amount.
+        # `tendered` is native, `total` is USD, so we can't subtract them
+        # directly (was the source of the 7000 ZWG − 167 USD = 6833 receipt
+        # bug). Convert tendered to USD via the exchange rate first; fall
+        # back to a plain subtraction only when both happen to be USD.
+        if currency_upper == "USD":
+            change_val = max(0.0, tendered_amount - total_amount)
+        elif _exch > 0:
+            _t_usd     = tendered_amount * _exch
+            change_val = round(max(0.0, _t_usd - total_amount), 4)
+        else:
+            change_val = 0.0
 
     # When the POS passed a splits list (multi-method / split payment), the
     # single-active-method `tendered_amount` arg represents only one row, not
@@ -1023,34 +1051,66 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
     fiscal_v_code  = sale.get("fiscal_verification_code", "")
     fiscal_ready   = bool(fiscal_qr_code and fiscal_qr_code.strip())
 
-    # Fiscal polling removed here because it's now handled by the UI loader (FiscalWaitDialog)
-    # for a better non-blocking experience.
-    fiscal_ready = bool(fiscal_qr_code and fiscal_qr_code.strip())
+    # If fiscalization is enabled but QR not ready yet, wait up to 3 seconds
+    if fiscal_enabled and not fiscal_ready:
+        print(f"⏳ Waiting for fiscalization for sale {sale.get('id')}...")
+        wait_start   = time.time()
+        wait_seconds = 6
 
+        while time.time() - wait_start < wait_seconds:
+            try:
+                from models.sale import get_sale_by_id
+                refreshed_sale = get_sale_by_id(sale.get("id"))
+                if refreshed_sale:
+                    fiscal_qr_code = refreshed_sale.get("fiscal_qr_code", "")
+                    fiscal_v_code  = refreshed_sale.get("fiscal_verification_code", "")
+                    if fiscal_qr_code and fiscal_qr_code.strip():
+                        fiscal_ready = True
+                        print(f"✅ Fiscalization ready after {time.time() - wait_start:.1f} seconds")
+                        sale.update(refreshed_sale)
+                        break
+            except Exception as e:
+                print(f"⚠️ Error checking fiscal status: {e}")
 
-    # Resolved Tendered and Change based on transaction currency
-    # If transaction is in a specific currency (like ZIG), we show tendered/change in that currency.
-    _is_zig = (currency or "").upper() in ["ZIG", "ZWG"]
-    
-    _total_native    = float(total or 0)
-    _tendered_native = float(tendered or 0)
-    
+            time.sleep(0.3)
+
+        if not fiscal_ready:
+            print(f"⚠️ Fiscalization not ready after {wait_seconds}s, printing with pending message")
+    else:
+        fiscal_ready = bool(fiscal_qr_code and fiscal_qr_code.strip())
+
+    # Tendered + change in BASE currency (USD).
     # Priority for tendered:
-    #   1. Sum of sale["splits"][i].native_amount (if all same currency)
-    #   2. tendered arg
-    _splits = sale.get("splits") or []
-    if _splits:
-        _master_currency = (_splits[0].get("native_currency") or "USD").upper()
-        _all_same = all((s.get("native_currency") or "USD").upper() == _master_currency for s in _splits)
-        if _all_same:
-            _tendered_native = sum(float(s.get("native_amount") or 0) for s in _splits)
-    
-    _total_usd = float(sale.get("total_usd") or 0) or float(total or 0)
-    _change_native = round(max(_tendered_native - _total_native, 0.0), 4)
-    # Ensure change is 0 if it's on account
-    if sale.get("is_on_account", False):
-        _change_native = 0.0
-
+    #   1. Sum of sale["splits"][i].base_value — definitive multi-method total
+    #   2. sale.tendered_usd                   — stored on the sales row
+    #   3. (none — see below)
+    #
+    # WARNING: do NOT fall back to the raw `tendered` arg here. It's stored
+    # in the *active method's native currency* (e.g. 7000 ZWG) on single-
+    # method non-USD sales; treating it as USD made `_change_usd` collapse
+    # to `tendered - total = 7000 - 167 = 6833`, the literal cross-currency
+    # subtraction that produced the receipt bug.
+    _total_usd    = float(sale.get("total_usd") or 0) or float(total or 0)
+    _splits       = sale.get("splits") or []
+    _splits_usd   = sum(float(s.get("base_value") or 0) for s in _splits)
+    if _splits_usd > 0:
+        _tendered_usd = round(_splits_usd, 4)
+    else:
+        # Stored value first; if that's 0/missing AND we have a usable
+        # exchange_rate column, convert the native tendered ourselves.
+        _tendered_usd = float(sale.get("tendered_usd") or 0)
+        if _tendered_usd <= 0.005:
+            _exch = float(sale.get("exchange_rate") or 0)
+            _native = float(tendered or 0)
+            if _exch > 0 and _native > 0:
+                # `exchange_rate` is USD-per-native (matches create_sale —
+                # `_tendered_usd = tendered_amount * _exch`), so multiply.
+                _tendered_usd = round(_native * _exch, 4)
+            elif (currency or "USD").upper() == "USD":
+                # Single USD tender — native == USD, so the raw arg is fine.
+                _tendered_usd = _native
+            # otherwise leave at 0 — better to print 0 than the wrong currency
+    _change_usd = round(max(_tendered_usd - _total_usd, 0.0), 4)
 
     try:
         receipt = ReceiptData(

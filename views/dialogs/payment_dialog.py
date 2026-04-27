@@ -755,7 +755,28 @@ class PaymentDialog(QDialog):
         chg_usd  = max(paid_usd - self.total, 0.0)
         settled  = rem_usd <= 0.005
 
-        self._chg_usd_lbl.setText(f"USD  {chg_usd:.2f}")
+        # Display change in the *payment's* currency when exactly one
+        # method has a non-zero entry — cashiers hand back change in the
+        # currency the customer used. Multi-method (split) keeps USD as
+        # the common denominator. USD-only single tender → also USD.
+        active_methods = [
+            m for m in self._method_rows
+            if self._get_paid_native(m) > 0.005
+        ]
+        chg_text = f"USD  {chg_usd:.2f}"
+        if len(active_methods) == 1:
+            sole = active_methods[0]
+            curr, usd_per_unit, _ = self._method_info(sole)
+            if curr.upper() != "USD" and usd_per_unit > 0:
+                chg_native = max(
+                    self._get_paid_native(sole) - (self.total / usd_per_unit),
+                    0.0,
+                )
+                chg_text = f"{curr.upper()}  {chg_native:,.2f}"
+        self._chg_usd_lbl.setText(chg_text)
+
+        # Highlight the card whenever ANY change is owed back — derived
+        # from the USD figure since chg_native > 0 ↔ chg_usd > 0.
         if chg_usd > 0.005:
             self._chg_usd_lbl.setStyleSheet(
                 f"color:{SUCCESS}; font-size:18px; font-weight:bold;"
@@ -1017,10 +1038,19 @@ class PaymentDialog(QDialog):
             else:
                 accepted_meth = self._active_method
 
+            # `active_rate` is usd-per-native (see _method_info — for ZWG it
+            # might be 0.0667). Converting the USD sale total into the
+            # active method's native currency therefore needs DIVISION,
+            # not multiplication. The previous `total * rate` flipped the
+            # rate direction and produced nonsense change values
+            # (e.g. ZWG 200 - 0.667 = 199.33 instead of 200 - 150 = 50).
             active_rate = self._method_info(self._active_method)[1] or 1.0
             self.accepted_method = accepted_meth
             self.accepted_tendered = self._get_paid_native(self._active_method)
-            self.accepted_change = max(self._get_paid_native(self._active_method) - (self.total * active_rate), 0.0)
+
+            paid_native  = self._get_paid_native(self._active_method)
+            total_native = (self.total / active_rate) if active_rate > 0 else self.total
+            self.accepted_change = max(paid_native - total_native, 0.0)
             self.accepted_currency = curr
             self.accepted_splits = splits
             self.accepted_customer = self._customer

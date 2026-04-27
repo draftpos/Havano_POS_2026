@@ -756,40 +756,43 @@ class PrintingService:
     # =========================================================================
     def _sole_non_usd_payment_rate(
         self, payment_items: list,
-    ) -> tuple[str, float]:
+    ) -> tuple[str, float, float, float]:
         """
-        If the receipt was paid with exactly ONE non-USD payment line,
-        return its (currency_code, rate). Rate is local-per-USD —
-        multiply a USD figure by it to get the native equivalent.
+        Single-non-USD-tender detection for the currency display rule.
 
-        Returns ("", 0.0) when the heuristic doesn't apply (no payments,
-        >1 payment row, or the sole row is USD). Callers should fall back
-        to USD in that case.
+        Returns (currency_code, rate, native_amount, usd_amount).
+        All zeros + empty string when the heuristic doesn't apply:
+        no payments, >1 payment row, or the sole row is USD.
 
-        Rate is derived from the payment item itself: `price` holds the
-        native amount, `amount` holds the USD equivalent, so
-        `rate = native / usd`. This avoids another DB round-trip to the
-        exchange_rates table and uses the *same* rate that was locked in
-        at payment time — the change will be consistent with what the
-        cashier took in.
+        Rate is local-per-USD, derived from the payment item itself
+        (`native / usd`) — same rate that was locked in at payment time,
+        so totals and tendered stay internally consistent.
+
+        Why return native_amount + usd_amount too:
+        `PaymentDialog._active_method` stores tendered/change in NATIVE
+        currency on the single-method path, while the splits path stores
+        them in USD. The caller uses `native_amount` / `usd_amount` to
+        work out which form a given receipt carries (by comparing to
+        `receipt.amountTendered`) so we know whether to multiply by rate
+        or display the value as-is.
         """
         if not payment_items or len(payment_items) != 1:
-            return ("", 0.0)
+            return ("", 0.0, 0.0, 0.0)
 
         pi       = payment_items[0]
         cur      = (getattr(pi, "productid", "") or "USD").strip().upper()
         if not cur or cur == "USD":
-            return ("", 0.0)
+            return ("", 0.0, 0.0, 0.0)
 
         try:
             native = float(getattr(pi, "price",  0) or 0)
             usd    = float(getattr(pi, "amount", 0) or 0)
         except (TypeError, ValueError):
-            return ("", 0.0)
+            return ("", 0.0, 0.0, 0.0)
         if usd <= 0.005 or native <= 0.005:
-            return ("", 0.0)
+            return ("", 0.0, 0.0, 0.0)
 
-        return (cur, native / usd)
+        return (cur, native / usd, native, usd)
 
     # =========================================================================
     # SHIFT INVOICE-COUNT HELPER
@@ -1238,35 +1241,64 @@ class PrintingService:
             except Exception:
                 _fiscal_on = False
 
+            # Currency-display rule: when the sale was paid with exactly
+            # ONE non-USD tender, render the whole totals block + tendered
+            # + change in that native currency so the triplet stays
+            # internally consistent (a USD grand total next to a ZWG
+            # tendered looks broken). Multi-method or mixed currencies
+            # keep USD — "real" native totals are ambiguous.
+            #
+            # The fiscal record itself is still stored in USD upstream;
+            # this only affects the printed display.
+            pay_cur, pay_rate, pay_native, pay_usd = \
+                self._sole_non_usd_payment_rate(
+                    getattr(receipt, "paymentItems", None) or []
+                )
+            _display_cur  = pay_cur or "USD"
+            _display_rate = pay_rate if (pay_cur and pay_rate > 0) else 1.0
+
+            # Grand total / subtotal / VAT are ALWAYS stored in USD
+            # (sales.total / sales.subtotal / sales.total_vat are base
+            # currency). Multiply to display.
             if _fiscal_on:
-                draw_total("Subtotal (excl. tax)", _net)
+                draw_total("Subtotal (excl. tax)",
+                           _net * _display_rate, _display_cur)
                 if _vat > 0:
-                    draw_total("VAT", _vat)
+                    draw_total("VAT",
+                               _vat * _display_rate, _display_cur)
 
             painter.setFont(bold_font)
-            draw_total("GRAND TOTAL", _grand)
+            draw_total("GRAND TOTAL",
+                       _grand * _display_rate, _display_cur)
             painter.setFont(normal_font)
 
             y += 10
 
+            # Amount tendered + change — trickier: PaymentDialog stores
+            # these as NATIVE on single-method non-USD sales but as USD on
+            # split payments. If `receipt.amountTendered` looks closer to
+            # the payment row's native amount than its USD equivalent,
+            # assume the values are already native and display them as-is
+            # (no rate multiplication — that would double-convert).
             _tendered_base = float(getattr(receipt, "amountTendered", 0) or 0)
             _change_base   = float(getattr(receipt, "change",         0) or 0)
-            _payment_items = getattr(receipt, "paymentItems", None) or []
+
+            tendered_is_already_native = False
+            if pay_cur and pay_native > 0 and pay_usd > 0 and _tendered_base > 0:
+                _dist_native = abs(_tendered_base - pay_native)
+                _dist_usd    = abs(_tendered_base - pay_usd)
+                tendered_is_already_native = _dist_native < _dist_usd
 
             if _tendered_base > 0.005:
-                if len(_payment_items) > 1:
-                    # Multi-method split: skip single Tendered line —
-                    # PAYMENT DETAILS block below shows each method individually
-                    pass
-                elif pay_cur and pay_rate > 0:
-                    # Single non-USD method detected via paymentItems rate
-                    draw_total("Amount Tendered", _tendered_base, pay_cur)
-                    draw_total("Change",          _change_base,   pay_cur)
+                if pay_cur and tendered_is_already_native:
+                    # Already in the display currency — skip the multiply.
+                    draw_total("Amount Tendered", _tendered_base, _display_cur)
+                    draw_total("Change",          _change_base,   _display_cur)
                 else:
-                    # Single method: use receipt.currency (e.g. "ZIG") not hardcoded "USD"
-                    _receipt_cur = receipt.currency or "USD"
-                    draw_total("Amount Tendered", _tendered_base, _receipt_cur)
-                    draw_total("Change",          _change_base,   _receipt_cur)
+                    draw_total("Amount Tendered",
+                               _tendered_base * _display_rate, _display_cur)
+                    draw_total("Change",
+                               _change_base   * _display_rate, _display_cur)
 
             # Payment Details — modes + amounts per currency.
             # paymentItems is populated by _print_receipt; each carries
