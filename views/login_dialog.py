@@ -705,12 +705,6 @@ class LoginDialog(QDialog):
             self._show_error("Please enter your username and password.")
             return
 
-        # First-time detection — if the local products table is empty we
-        # know LoginWorker → auth_service.login → sync_from_login_response
-        # will do a full inline catalogue sync (can take ~30–60s on first
-        # install). Tell the cashier that's about to happen so the login
-        # doesn't look frozen. Returning logins (products cached) skip
-        # this — login is instant, sync runs in the background.
         self._set_btn_loading(self._email_btn)
         self.error_label.hide()
         if self._local_catalogue_is_empty():
@@ -735,9 +729,6 @@ class LoginDialog(QDialog):
             conn.close()
             return n == 0
         except Exception:
-            # If we can't tell, err on the side of not showing the prompt —
-            # returning users shouldn't see a "first-time setup" banner
-            # just because of a momentary DB hiccup.
             return False
 
     def _on_email_login_done(self, result: dict):
@@ -773,11 +764,34 @@ class LoginDialog(QDialog):
     # =========================================================================
     def _validate_and_accept(self, user: dict, source: str):
         print("[login] 🔵 _validate_and_accept called")
+
         if not user.get("active", True):
             self._show_error("Your account has been disabled.  Contact your administrator.")
             self._shake()
             self._pin_clear()
             return
+
+        # ── Warehouse / Company guard (online logins only) ────────────────────
+        if source == "online":
+            warehouse = (user.get("warehouse") or "").strip()
+            company   = (user.get("company") or "").strip()
+
+            missing = []
+            if not warehouse:
+                missing.append("Warehouse")
+            if not company:
+                missing.append("Company")
+
+            if missing:
+                missing_str = " and ".join(missing)
+                self._show_error(
+                    f"Login blocked: no {missing_str} assigned to your account. "
+                    f"Contact your administrator to set your {missing_str} in ERPNext."
+                )
+                self._shake()
+                self._pin_clear()
+                self.password_input.clear()
+                return
 
         if source in ("online", "offline") and not (user.get("pin") or "").strip():
             self._prompt_set_pin(user, source)
@@ -1048,10 +1062,6 @@ class LoginDialog(QDialog):
             print(f"[login] ❌ Error ensuring default customer: {e}")
             import traceback
             traceback.print_exc()
-        except Exception as e:
-            print(f"[login] ❌ Error creating Default customer: {e}")
-            import traceback
-            traceback.print_exc()
 
     # =========================================================================
     # Accept
@@ -1067,8 +1077,6 @@ class LoginDialog(QDialog):
         self.logged_in_user = user
         self.login_source   = source
 
-        # Load credentials once — reuse the same k/s for both set_session
-        # and the sync worker so we never do a second DB round-trip.
         k, s = "", ""
         try:
             from services.credentials import get_credentials, set_session
@@ -1081,14 +1089,11 @@ class LoginDialog(QDialog):
         except Exception as e:
             print(f"[login] credential init: {e}")
 
-        # Create Default customer after successful login
         print("[login] Calling _ensure_default_customer()...")
         self._ensure_default_customer()
 
         self.hide()
 
-        # Always start background sync — it runs users + products + taxes.
-        # Uses the credentials already fetched above (no second DB call).
         if k and s:
             self._bg_sync = BackgroundSyncWorker()
             self._bg_sync.start()

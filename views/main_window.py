@@ -10085,11 +10085,19 @@ class POSView(QWidget):
             from models.product import get_products_by_category, get_all_products
             if name == "All":
                 db_products = get_all_products()
+                _disabled = load_disabled_categories()
+                if _disabled:
+                    db_products = [p for p in db_products if p.get("category") not in _disabled]
+                
             else:
                 db_products = get_products_by_category(name)
                 # If a category is empty, fall back to everything
                 if not db_products:
+                    _disabled = load_disabled_categories()
                     db_products = get_all_products()
+                    if _disabled:
+                        db_products = [p for p in db_products if p.get("category") not in _disabled]
+                         
 
             # ── Overlay price-list prices ────────────────────────────────
             # Price comes *only* from the active customer's price list.

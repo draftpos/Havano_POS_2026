@@ -1,5 +1,8 @@
 {
   "disabled_categories": [
-    "ALCOHOL"
+    "ALCOHOL",
+    "Butchery",
+    "Consumable",
+    "Products"
   ]
 }

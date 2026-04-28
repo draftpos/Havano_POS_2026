@@ -1441,7 +1441,7 @@ def _get_active_printers() -> list[str]:
 # KITCHEN ORDER PRINTING
 # =============================================================================
 
-def print_kitchen_orders(sale: dict):
+def print_s(sale: dict):
     """Print separate KOT for every active Order 1–6 station.
     Gated on hardware_settings.kitchen_printing_enabled — when off this is a
     no-op so non-restaurant tills don't spam empty KOTs."""
