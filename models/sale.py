@@ -332,7 +332,6 @@ def get_pending_fiscalization_sales() -> list[dict]:
 # =============================================================================
 # WRITE - CREATE INVOICE
 # =============================================================================
-
 def create_sale(
     items:             list[dict],
     total:             float,
@@ -354,21 +353,12 @@ def create_sale(
     change_amount:     float = None,
     is_on_account:     bool  = False,
     skip_stock:        bool  = False,
-    skip_print:        bool  = True,   # always skip auto-print; main_window prints after fiscal wait
+    skip_print:        bool  = True,
     shift_id:          int   = None,
     transaction_id:    str   = None,
     idempotency_key:   str   = None,
-    # ── Multi-currency fields ──────────────────────────────────────────────
-    # total_usd    : invoice total in USD — always required for Frappe PE
-    #                If not supplied we calculate it from total + exchange_rate.
-    # exchange_rate: foreign_currency → USD rate at time of sale (e.g. ZWD→USD)
-    #                If currency == "USD" this is always 1.0.
     total_usd:         float = None,
     exchange_rate:     float = None,
-    # Per-method payment breakdown used for the receipt's Payment Details block.
-    # Each dict is expected to carry: method, base_value (USD), native_amount,
-    # native_currency, is_credit. Stashed on the sale dict so _print_receipt
-    # can render a multi-currency breakdown without re-querying payment_entries.
     splits:            list | None = None,
 ) -> dict:
     """
@@ -381,17 +371,14 @@ def create_sale(
     from datetime import date, datetime
     from models.product import get_product_by_id, adjust_stock
 
-    # Unify the two alias parameters — whichever is provided wins
     transaction_id = transaction_id or idempotency_key
 
-    # Log every call
     print(f"\n{'🔔' * 40}")
     print(f"CREATE_SALE CALLED at {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     print(f"Transaction ID: {transaction_id}")
     print(f"Total: {total}, Items: {len(items)}")
     print(f"{'🔔' * 40}\n")
 
-    # Duplicate prevention
     if transaction_id:
         try:
             conn = get_connection()
@@ -436,29 +423,8 @@ def create_sale(
     tendered_amount = float(tendered) if tendered else 0.0
     total_amount    = float(total)
 
-    # ── Multi-currency calculations ────────────────────────────────────────
-    # Currency convention used by every caller in this codebase:
-    #   currency     : the active payment method's currency (e.g. "ZWD" or "USD")
-    #   total        : the invoice total **in USD** (cart base currency).
-    #                  Even when currency=ZWG, total is the USD figure shown
-    #                  on the cart — payment_dialog.self.total never converts.
-    #   tendered     : the cash given by the customer **in the active method's
-    #                  native currency** (e.g. 7000 ZWG, 50 USD).
-    #   total_usd    : USD equivalent of total — used by Frappe PE + pos_upload.
-    #   total_zwd    : the ZWG amount equivalent (only set when currency=ZWG).
-    #   tendered_usd : USD equivalent of cash given.
-    #   tendered_zwd : ZWG cash given when currency=ZWG.
-    #   exchange_rate: foreign→USD rate (e.g. ZWD→USD ≈ 0.0333). USD-per-native.
-    #                  If currency==USD this is always 1.0.
-    #
-    # The previous implementation assumed `total` was in `currency`, which
-    # silently corrupted total_usd / total_zwd whenever a non-USD method
-    # was used (5.567 USD instead of 167; 167 ZWG instead of 5010). The
-    # math below now always treats `total` as USD and converts to native
-    # via the exchange rate when the active currency is non-USD.
     currency_upper = (currency or "USD").strip().upper()
 
-    # Resolve exchange rate: use supplied value, else look up local DB
     if exchange_rate is not None:
         _exch = float(exchange_rate)
     else:
@@ -470,32 +436,22 @@ def create_sale(
                 if r and float(r) > 0:
                     _exch = float(r)
                 else:
-                    # try inverse
                     inv = get_rate("USD", currency_upper)
                     if inv and float(inv) > 0:
                         _exch = 1.0 / float(inv)
             except Exception as _e:
                 print(f"[create_sale] WARNING: Could not get exchange rate for {currency_upper}→USD: {_e}")
 
-    # total_usd: `total` is already in USD per the convention above, so this
-    # is just a passthrough. The explicit total_usd kwarg overrides if a
-    # caller wants to be explicit (no live caller does today).
     if total_usd is not None:
         _total_usd = float(total_usd)
     else:
         _total_usd = total_amount
 
-    # total_zwd: convert the USD total → native ZWG when currency is ZWG.
-    # exchange_rate is USD-per-native (e.g. 0.0333 for ZWG), so dividing
-    # gives native units: 167 USD / 0.0333 = 5010 ZWG.
     if currency_upper in ("ZWD", "ZWG") and _exch > 0:
         _total_zwd = round(total_amount / _exch, 4)
     else:
         _total_zwd = 0.0
 
-    # tendered split by currency. Tendered IS in the active method's native
-    # currency (payment_dialog passes self._get_paid_native(method)), so
-    # multiplication by USD-per-native gives the USD equivalent.
     if currency_upper == "USD":
         _tendered_usd = tendered_amount
         _tendered_zwd = 0.0
@@ -517,27 +473,23 @@ def create_sale(
         )
 
     if change_amount is not None:
+        # Caller (PaymentDialog) already computed change in the correct currency
         change_val = float(change_amount)
     else:
-        # Fallback path — only fires when the caller didn't pass change_amount.
-        # `tendered` is native, `total` is USD, so we can't subtract them
-        # directly (was the source of the 7000 ZWG − 167 USD = 6833 receipt
-        # bug). Convert tendered to USD via the exchange rate first; fall
-        # back to a plain subtraction only when both happen to be USD.
+        # Fallback — caller didn't pass change_amount
+        # Single USD: plain subtraction
+        # Single non-USD: keep change in NATIVE currency
         if currency_upper == "USD":
-            change_val = max(0.0, tendered_amount - total_amount)
+            change_val = round(max(0.0, tendered_amount - total_amount), 4)
         elif _exch > 0:
-            _t_usd     = tendered_amount * _exch
-            change_val = round(max(0.0, _t_usd - total_amount), 4)
+            _total_native = round(total_amount / _exch, 4)
+            change_val    = round(max(0.0, tendered_amount - _total_native), 4)
         else:
             change_val = 0.0
 
-    # When the POS passed a splits list (multi-method / split payment), the
-    # single-active-method `tendered_amount` arg represents only one row, not
-    # the real total tendered. Sum the splits' base_value (USD) so tendered_usd,
-    # tendered_zwd and change_val reflect every method the cashier took.
-    # This must run AFTER change_val is first assigned above so it overrides
-    # the single-method calculation.
+    # Split payments — update tendered totals to reflect ALL methods combined.
+    # Change for splits is ALWAYS stored in USD (no single native currency applies).
+    # Only recalculates change when caller did NOT pass change_amount.
     if splits:
         try:
             _splits_usd = sum(float(s.get("base_value") or 0) for s in splits)
@@ -550,9 +502,13 @@ def create_sale(
                 )
                 if _z > 0:
                     _tendered_zwd = round(_z, 4)
-                change_val = round(max(_tendered_usd - _total_usd, 0.0), 4)
-                print(f"[create_sale] splits recalc → tendered_usd={_tendered_usd} "
-                      f"tendered_zwd={_tendered_zwd} change_val={change_val}")
+
+                # Split change always in USD — no single native currency to use
+                if change_amount is None:
+                    change_val = round(max(_splits_usd - _total_usd, 0.0), 4)
+
+            print(f"[create_sale] splits recalc → tendered_usd={_tendered_usd} "
+                  f"tendered_zwd={_tendered_zwd} change_val={change_val}")
         except Exception as _e:
             print(f"[create_sale] splits tendered_usd recalc failed: {_e}")
 
@@ -569,8 +525,6 @@ def create_sale(
     conn = get_connection()
     cur  = conn.cursor()
 
-    # Per-shift order number — resets to 1 whenever a new shift opens.
-    # Falls back gracefully if the column doesn't exist yet (pre-migration).
     order_number = 1
     if shift_id:
         try:
@@ -585,7 +539,6 @@ def create_sale(
             print(f"[create_sale] order_number lookup skipped: {_oe}")
             order_number = 1
 
-    # Check if fiscal_status column exists
     has_fiscal = False
     try:
         cur.execute("""
@@ -657,9 +610,6 @@ def create_sale(
         sale_id = int(cur.fetchone()[0])
         print(f"[create_sale] Created sale ID: {sale_id}")
 
-        # Pre-fetch order_1..6 (kitchen-printer routing flags) for every part_no
-        # in the cart. Cart items don't carry these fields through the UI, so we
-        # resolve them from the products table in a single batch query.
         part_nos = {str(it.get("part_no", "")).strip() for it in items if it.get("part_no")}
         order_map: dict[str, tuple] = {}
         if part_nos:
@@ -675,12 +625,9 @@ def create_sale(
             except Exception as _oe:
                 print(f"[create_sale] order_N lookup failed: {_oe}")
 
-        # Insert sale items
         item_insert_count = 0
         for idx, item in enumerate(items):
             part_no = str(item.get("part_no", "")).strip()
-            # Prefer the item's own order_N if already set (quotations / laybye
-            # conversions carry them forward); else fall back to the product lookup.
             if any(item.get(f"order_{i}") is not None for i in range(1, 7)):
                 order_flags = tuple(1 if item.get(f"order_{i}") else 0 for i in range(1, 7))
             else:
@@ -717,7 +664,6 @@ def create_sale(
             ))
             item_insert_count += 1
 
-        # Record transaction for duplicate prevention
         if transaction_id:
             try:
                 cur.execute("""
@@ -734,21 +680,14 @@ def create_sale(
 
         sale = get_sale_by_id(sale_id)
 
-        # Stash the payment split list on the sale dict so _print_receipt /
-        # receipt builders can render Payment Details without re-querying
-        # payment_entries (which are created AFTER this create_sale call).
         if splits:
             sale["splits"] = list(splits)
 
-        # Fiscalization starts FIRST so the print-wait poll has something to detect.
         _trigger_fiscalization_background(sale_id)
 
         if not skip_print:
-            # Run print on a background thread so time.sleep() in _print_receipt
-            # never blocks the Qt main thread, which would starve the fiscalization
-            # thread and make the 3-second poll always time out.
-            _sale_snap   = dict(sale)   # snapshot so thread has its own reference
-            _items_snap  = list(items)
+            _sale_snap  = dict(sale)
+            _items_snap = list(items)
             def _do_print(
                 _s=_sale_snap, _i=_items_snap,
                 _t=tendered_amount, _c=change_val, _cur=currency,
@@ -769,8 +708,6 @@ def create_sale(
         import traceback
         traceback.print_exc()
         raise
-
-
 # =============================================================================
 # FISCALIZATION
 # =============================================================================
@@ -830,183 +767,12 @@ def _mark_sale_fiscal_status(sale_id: int, status: str):
 
 # =============================================================================
 # RECEIPT PRINTING
-# =====
-# =============================================================================
-# RECEIPT PRINTING
-# =============================================================================
-# # =============================================================================
-# RECEIPT PRINTING
 # =============================================================================
 
-# def _print_receipt(sale: dict, items: list, tendered: float, change: float,
-#                    currency: str, kot: str, method: str, cashier_name: str,
-#                    customer_name: str, customer_contact: str, footer_text: str):
-#     """Internal function to print receipt with fiscalization wait (up to 3 seconds)."""
-#     import time
-#     import threading
-
-#     active_printers = _get_active_printers()
-#     if not active_printers or not sale:
-#         print("⚠️ No active printers configured")
-#         return
-
-#     footer = sale.get("footer_text", footer_text or "Thank you for your purchase!")
-#     total  = sale["total"]
-#     paid   = sale["tendered"]
-#     outstanding = total - paid
-    
-#     # ✅ IMPORTANT: Get the actual currency from the sale record
-#     # The currency field in sales table stores what currency was used for payment
-#     actual_currency = sale.get("currency", currency or "USD")
-    
-#     # Get exchange rate and convert display amounts if needed
-#     exchange_rate = sale.get("exchange_rate", 1.0)
-#     total_usd = sale.get("total_usd", total)
-#     tendered_usd = sale.get("tendered_usd", paid)
-#     change_usd = sale.get("change_amount", change)
-    
-#     # For display on receipt, we need to show amounts in the actual payment currency
-#     if actual_currency.upper() != "USD" and exchange_rate != 1.0:
-#         # Convert from USD to actual currency for display
-#         display_total = total_usd * exchange_rate if total_usd else total
-#         display_tendered = tendered_usd * exchange_rate if tendered_usd else paid
-#         display_change = change_usd * exchange_rate if change_usd else change
-#     else:
-#         display_total = total
-#         display_tendered = paid
-#         display_change = change
-
-#     # Only annotate footer for credit/partial cases
-#     if sale.get("is_on_account", False) and paid == 0:
-#         footer = f"CREDIT SALE - Total Due: {display_total:.2f} {actual_currency}\n{footer}"
-#     elif 0 < paid < total:
-#         footer = f"PARTIAL PAYMENT - Paid: {display_tendered:.2f} {actual_currency} | Balance: {outstanding:.2f} {actual_currency}\n{footer}"
-
-#     # Check if fiscalization is enabled
-#     try:
-#         from services.fiscalization_service import get_fiscalization_service
-#         fiscal_service = get_fiscalization_service()
-#         fiscal_enabled = fiscal_service.is_fiscalization_enabled() if fiscal_service else False
-#     except Exception as e:
-#         print(f"[Fiscalization] Error checking fiscal status: {e}")
-#         fiscal_enabled = False
-
-#     # Get current fiscal data
-#     fiscal_qr_code = sale.get("fiscal_qr_code", "")
-#     fiscal_v_code  = sale.get("fiscal_verification_code", "")
-#     fiscal_ready   = bool(fiscal_qr_code and fiscal_qr_code.strip())
-
-#     # If fiscalization is enabled but QR not ready yet, wait up to 3 seconds
-#     if fiscal_enabled and not fiscal_ready:
-#         print(f"⏳ Waiting for fiscalization for sale {sale.get('id')}...")
-#         wait_start   = time.time()
-#         wait_seconds = 3
-
-#         while time.time() - wait_start < wait_seconds:
-#             try:
-#                 from models.sale import get_sale_by_id
-#                 refreshed_sale = get_sale_by_id(sale.get("id"))
-#                 if refreshed_sale:
-#                     fiscal_qr_code = refreshed_sale.get("fiscal_qr_code", "")
-#                     fiscal_v_code  = refreshed_sale.get("fiscal_verification_code", "")
-#                     if fiscal_qr_code and fiscal_qr_code.strip():
-#                         fiscal_ready = True
-#                         print(f"✅ Fiscalization ready after {time.time() - wait_start:.1f} seconds")
-#                         sale.update(refreshed_sale)
-#                         # Update display amounts with refreshed data
-#                         if actual_currency.upper() != "USD" and exchange_rate != 1.0:
-#                             display_total = sale.get("total_usd", total) * exchange_rate
-#                             display_tendered = sale.get("tendered_usd", paid) * exchange_rate
-#                             display_change = sale.get("change_amount", change) * exchange_rate
-#                         break
-#             except Exception as e:
-#                 print(f"⚠️ Error checking fiscal status: {e}")
-
-#             time.sleep(0.3)
-
-#         if not fiscal_ready:
-#             print(f"⚠️ Fiscalization not ready after {wait_seconds}s, printing with pending message")
-#     else:
-#         fiscal_ready = bool(fiscal_qr_code and fiscal_qr_code.strip())
-
-#     try:
-#         receipt = ReceiptData(
-#             invoiceNo=sale["invoice_no"],
-#             invoiceDate=sale["invoice_date"],
-#             companyName=sale.get("company_name", ""),
-#             companyAddress=sale.get("address_1", ""),
-#             companyAddressLine1=sale.get("address_2", ""),
-#             companyAddressLine2="",
-#             city="",
-#             state="",
-#             postcode="",
-#             companyEmail=sale.get("email", ""),
-#             tel=sale.get("phone", ""),
-#             tin=sale.get("tin_number", ""),
-#             vatNo=sale.get("vat_number", ""),
-#             deviceSerial=sale.get("zimra_serial_no", ""),
-#             deviceId=sale.get("zimra_device_id", ""),
-#             cashierName=sale.get("cashier_name", cashier_name),
-#             customerName=sale.get("customer_name", customer_name),
-#             customerContact=sale.get("customer_contact", customer_contact),
-#             customerTin="",
-#             customerVat="",
-#             amountTendered=display_tendered,  # ✅ Use converted amount
-#             change=display_change,            # ✅ Use converted amount
-#             grandTotal=display_total,         # ✅ Use converted amount
-#             subtotal=float(sale.get("subtotal", total)),
-#             totalVat=float(sale.get("total_vat", 0)),
-#             currency=actual_currency,          # ✅ Use actual payment currency from sales table
-#             footer=footer,
-#             KOT=kot or "",
-#             paymentMode=method,
-#         )
-
-#         # Add fiscal QR code if available
-#         if fiscal_qr_code and fiscal_qr_code.strip():
-#             receipt.qrCode = fiscal_qr_code
-#             receipt.vCode  = fiscal_v_code
-#         elif fiscal_enabled:
-#             receipt.qrCode        = ""
-#             receipt.vCode         = ""
-#             receipt.fiscal_pending = True
-
-#         for it in sale.get("items", []):
-#             # For item display, convert prices to actual currency if needed
-#             item_price = float(it["price"])
-#             item_total = float(it["total"])
-            
-#             if actual_currency.upper() != "USD" and exchange_rate != 1.0:
-#                 item_price = item_price * exchange_rate
-#                 item_total = item_total * exchange_rate
-            
-#             receipt.items.append(Item(
-#                 productName=it["product_name"],
-#                 productid=it.get("part_no", ""),
-#                 qty=float(it["qty"]),
-#                 price=item_price,      # ✅ Converted price
-#                 amount=item_total,     # ✅ Converted total
-#                 tax_amount=float(it.get("tax_amount", 0)) * exchange_rate if actual_currency.upper() != "USD" else float(it.get("tax_amount", 0))
-#             ))
-
-#         for printer_name in active_printers:
-#             try:
-#                 success = printing_service.print_receipt(receipt, printer_name=printer_name)
-#                 if success:
-#                     print(f"✅ Receipt printed successfully → {printer_name} (Currency: {actual_currency})")
-#                     if fiscal_enabled and not fiscal_ready:
-#                         print(f"   Note: Printed with 'Fiscalization Pending' message")
-#             except Exception as e:
-#                 print(f"❌ Printer error on {printer_name}: {e}")
-
-#     except Exception as e:
-#         print(f"❌ PRINT ERROR: {str(e)}")
-#         import traceback
-#         traceback.print_exc()
 def _print_receipt(sale: dict, items: list, tendered: float, change: float,
                    currency: str, kot: str, method: str, cashier_name: str,
                    customer_name: str, customer_contact: str, footer_text: str):
-    """Internal function to print receipt with fiscalization wait (up to 3 seconds)."""
+    """Internal function to print receipt with fiscalization wait (up to 6 seconds)."""
     import time
     import threading
 
@@ -1015,9 +781,6 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
         print("⚠️ No active printers configured")
         return
 
-    # Pull receipt header + footer from company_defaults so the printed slip
-    # picks up whatever the user saved in Maintenance → Company Defaults
-    # instead of a hardcoded heading/footer.
     try:
         from models.company_defaults import get_defaults
         _co = get_defaults() or {}
@@ -1030,8 +793,6 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
     paid   = sale["tendered"]
     outstanding = total - paid
 
-    # Only annotate footer for credit/partial cases — change is already
-    # printed after Grand Total by printing_service, so no "FULLY PAID" line.
     if sale.get("is_on_account", False) and paid == 0:
         footer = f"CREDIT SALE - Total Due: {total:.2f}\n{footer}"
     elif 0 < paid < total:
@@ -1046,12 +807,10 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
         print(f"[Fiscalization] Error checking fiscal status: {e}")
         fiscal_enabled = False
 
-    # Get current fiscal data
     fiscal_qr_code = sale.get("fiscal_qr_code", "")
     fiscal_v_code  = sale.get("fiscal_verification_code", "")
     fiscal_ready   = bool(fiscal_qr_code and fiscal_qr_code.strip())
 
-    # If fiscalization is enabled but QR not ready yet, wait up to 3 seconds
     if fiscal_enabled and not fiscal_ready:
         print(f"⏳ Waiting for fiscalization for sale {sale.get('id')}...")
         wait_start   = time.time()
@@ -1079,38 +838,38 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
     else:
         fiscal_ready = bool(fiscal_qr_code and fiscal_qr_code.strip())
 
-    # Tendered + change in BASE currency (USD).
-    # Priority for tendered:
-    #   1. Sum of sale["splits"][i].base_value — definitive multi-method total
-    #   2. sale.tendered_usd                   — stored on the sales row
-    #   3. (none — see below)
-    #
-    # WARNING: do NOT fall back to the raw `tendered` arg here. It's stored
-    # in the *active method's native currency* (e.g. 7000 ZWG) on single-
-    # method non-USD sales; treating it as USD made `_change_usd` collapse
-    # to `tendered - total = 7000 - 167 = 6833`, the literal cross-currency
-    # subtraction that produced the receipt bug.
-    _total_usd    = float(sale.get("total_usd") or 0) or float(total or 0)
-    _splits       = sale.get("splits") or []
-    _splits_usd   = sum(float(s.get("base_value") or 0) for s in _splits)
+    # ── Totals ────────────────────────────────────────────────────────────────
+    _total_usd  = float(sale.get("total_usd") or 0) or float(total or 0)
+    _exch       = float(sale.get("exchange_rate") or 1) or 1
+    _cur        = (currency or "USD").strip().upper()
+
+    # Native grand total — used for Payment Details price field
+    if _cur not in ("USD", "US"):
+        _total_native = float(sale.get("total_zwd") or 0) or round(_total_usd / _exch, 4)
+    else:
+        _total_native = _total_usd
+
+    # Tendered in USD — only used for change calc, never for Payment Details
+    _splits_raw  = sale.get("splits") or []
+    _splits_usd  = sum(float(s.get("base_value") or 0) for s in _splits_raw)
     if _splits_usd > 0:
         _tendered_usd = round(_splits_usd, 4)
     else:
-        # Stored value first; if that's 0/missing AND we have a usable
-        # exchange_rate column, convert the native tendered ourselves.
         _tendered_usd = float(sale.get("tendered_usd") or 0)
         if _tendered_usd <= 0.005:
-            _exch = float(sale.get("exchange_rate") or 0)
             _native = float(tendered or 0)
-            if _exch > 0 and _native > 0:
-                # `exchange_rate` is USD-per-native (matches create_sale —
-                # `_tendered_usd = tendered_amount * _exch`), so multiply.
+            if _exch > 0 and _native > 0 and _cur not in ("USD", "US"):
                 _tendered_usd = round(_native * _exch, 4)
-            elif (currency or "USD").upper() == "USD":
-                # Single USD tender — native == USD, so the raw arg is fine.
+            elif _cur in ("USD", "US"):
                 _tendered_usd = _native
-            # otherwise leave at 0 — better to print 0 than the wrong currency
-    _change_usd = round(max(_tendered_usd - _total_usd, 0.0), 4)
+
+    # Native tendered — shown on receipt header (Amount Tendered field)
+    if _cur not in ("USD", "US"):
+        _tendered_native = float(sale.get("tendered_zwd") or 0) or float(tendered or 0)
+    else:
+        _tendered_native = _tendered_usd
+
+    _change_native = float(sale.get("change_amount") or 0)
 
     try:
         receipt = ReceiptData(
@@ -1147,44 +906,88 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
             orderNumber=int(sale.get("order_number", 0) or 0),
         )
 
-        # Payment Details breakdown — one row per split (method + currency).
-        # Non-split sales get a single synthetic split so the block still renders.
-        _splits = sale.get("splits") or []
-        if not _splits:
-            # For single entry, we show what was actually applied to the total,
-            # which is precisely the grand total itself (excluding change).
-            _applied_total = _total_native 
-            
-            _splits = [{
-                "method":          method or sale.get("method", "CASH"),
-                "base_value":      _total_usd,
-                "native_amount":   float(_applied_total),
-                "native_currency": (currency or "USD").upper(),
-                "is_credit":       bool(sale.get("is_on_account", False)),
-            }]
-        try:
-            from models.receipt import Item as _RItem
+        # ── Payment Details ───────────────────────────────────────────────────
+        # Priority:
+        #   1. payment_entries table — received_amount (local) + paid_amount (USD)
+        #   2. splits stashed on sale dict — for fresh sales before DB write
+        #   3. Synthesize from grand total — single payment fallback
+        pe_splits = []
+        sale_id = sale.get("id")
+        if sale_id:
+            try:
+                from database.db import get_connection as _gc
+                _conn = _gc()
+                _cur  = _conn.cursor()
+                # ── FIX: fetch received_amount (local currency) alongside paid_amount (USD) ──
+                _cur.execute("""
+                    SELECT mode_of_payment, currency, paid_amount,
+                           COALESCE(received_amount, paid_amount) AS received_amount
+                    FROM payment_entries
+                    WHERE sale_id = ?
+                      AND (payment_type IS NULL OR payment_type = 'Receive')
+                    ORDER BY id
+                """, (sale_id,))
+                _rows = _cur.fetchall()
+                _conn.close()
+                pe_splits = [
+                    {
+                        "method":        r[0],
+                        "currency":      (r[1] or "USD").strip().upper(),
+                        "amount_usd":    float(r[2]),   # paid_amount     → USD basis
+                        "amount_native": float(r[3]),   # received_amount → local currency
+                    }
+                    for r in _rows
+                ]
+            except Exception as _pe:
+                print(f"[_print_receipt] payment_entries lookup failed: {_pe}")
+
+        from models.receipt import Item as _RItem
+
+        if pe_splits:
             receipt.paymentItems = [
                 _RItem(
-                    productName = str(s.get("method", "CASH")),
-                    productid   = (s.get("native_currency") or "USD").upper(),
-                    qty         = 1,
-                    price       = float(s.get("native_amount") or s.get("base_value") or 0),
-                    amount      = float(s.get("base_value") or 0),   # USD-basis
-                    tax_amount  = 0.0,
+                    productName=ps["method"],
+                    productid=ps["currency"],
+                    qty=1,
+                    price=ps["amount_native"],   # ← local amount (e.g. 900 ZIG)
+                    amount=ps["amount_usd"],      # ← USD basis
+                    tax_amount=0.0,
                 )
-                for s in _splits
+                for ps in pe_splits
             ]
-        except Exception as _pe:
-            print(f"[_print_receipt] could not build paymentItems: {_pe}")
+        elif _splits_raw:
+            # Fresh sale — splits stashed on sale dict before payment_entries written
+            receipt.paymentItems = [
+                _RItem(
+                    productName=str(s.get("method", "CASH")),
+                    productid=(s.get("native_currency") or s.get("currency") or "USD").strip().upper(),
+                    qty=1,
+                    price=float(s.get("native_amount") or s.get("base_value") or 0),
+                    amount=float(s.get("base_value") or 0),
+                    tax_amount=0.0,
+                )
+                for s in _splits_raw
+            ]
+        else:
+            # Single payment — use grand total, never tendered
+            receipt.paymentItems = [
+                _RItem(
+                    productName=method or sale.get("method", "CASH"),
+                    productid=_cur,
+                    qty=1,
+                    price=round(_total_native, 2),  # native grand total
+                    amount=round(_total_usd, 2),     # USD grand total
+                    tax_amount=0.0,
+                )
+            ]
 
         # Add fiscal QR code if available
         if fiscal_qr_code and fiscal_qr_code.strip():
             receipt.qrCode = fiscal_qr_code
             receipt.vCode  = fiscal_v_code
         elif fiscal_enabled:
-            receipt.qrCode        = ""
-            receipt.vCode         = ""
+            receipt.qrCode         = ""
+            receipt.vCode          = ""
             receipt.fiscal_pending = True
 
         for it in sale.get("items", []):
@@ -1211,6 +1014,8 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
         print(f"❌ PRINT ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
+
+
 def update_tendered_amount(sale_id: int, additional_payment: float) -> bool:
     """
     Update the tendered amount on an existing invoice.
@@ -1290,14 +1095,14 @@ def mark_synced_with_ref(sale_id: int, frappe_ref: str = "") -> bool:
 
 def try_lock_sale(sale_id: int) -> bool:
     """
-    Atomically attempt to lock a sale for syncing. 
+    Atomically attempt to lock a sale for syncing.
     Returns True only if we successfully set syncing=1 and it was previously 0/NULL.
     """
     conn = get_connection()
     cur  = conn.cursor()
     # Atomic UPDATE with condition is the standard way to handle locks in SQL
     cur.execute(
-        "UPDATE sales SET syncing = 1 WHERE id = ? AND (syncing = 0 OR syncing IS NULL) AND synced = 0", 
+        "UPDATE sales SET syncing = 1 WHERE id = ? AND (syncing = 0 OR syncing IS NULL) AND synced = 0",
         (sale_id,)
     )
     affected = cur.rowcount
@@ -1687,7 +1492,6 @@ def print_kitchen_orders(sale: dict):
         print(f"❌ Kitchen Order printing error: {e}")
 
 
-
 # =============================================================================
 # TRANSACTION HASH HELPERS
 # =============================================================================
@@ -1822,6 +1626,8 @@ def debug_duplicate_invoices():
     print("   1. Check if your frontend is submitting the form twice")
     print("   2. Check if button click handlers are firing twice")
     print("   3. Pass idempotency_key= to create_sale() to prevent duplicates automatically")
+
+
 def prepare_receipt_data(sale: dict) -> ReceiptData:
     """Centralized converter to transform a raw sale dictionary into a ReceiptData object."""
     # Build items list
@@ -1838,29 +1644,19 @@ def prepare_receipt_data(sale: dict) -> ReceiptData:
 
     currency    = (sale.get("currency") or "USD").strip().upper()
     splits      = sale.get("splits") or []
-    is_split    = len(splits) > 1 or (
-        len(splits) == 1 and splits[0].get("native_currency", "USD").upper() not in ("USD", "US", "")
-        and splits[0].get("native_currency", "USD").upper() != currency
-    )
 
     # ── Amount Tendered ───────────────────────────────────────────────────────
-    # For split / multi-currency: show USD total (each method is in PAYMENT DETAILS)
-    # For single ZIG/ZWG/ZWD: show native tendered amount (already stored natively)
-    # For USD only: show tendered as-is
     tendered_native = float(sale.get("tendered") or 0)
     tendered_usd    = float(sale.get("tendered_usd") or 0)
 
     if len(splits) > 1:
-        # Multi-method: show USD total in PAYMENT DETAILS; use USD total here
         display_tendered = tendered_usd if tendered_usd > 0 else tendered_native
         display_currency = "USD"
     else:
-        # Single method: show native amount with native currency
         display_tendered = tendered_native
         display_currency = currency
 
     # ── Change ────────────────────────────────────────────────────────────────
-    # change_amount is already stored as native currency by PaymentDialog
     change_value = float(sale.get("change_amount") or 0)
 
     # ── Build ReceiptData ─────────────────────────────────────────────────────
@@ -1897,16 +1693,59 @@ def prepare_receipt_data(sale: dict) -> ReceiptData:
     receipt.deviceSerial = sale.get("zimra_serial_no", "")
     receipt.deviceId     = sale.get("zimra_device_id", "")
 
-    # ── Payment Details (paymentItems) from splits ────────────────────────────
-    # Each split → one Item where:
-    #   productName = method label  (e.g. "CASH", "ECOCASH")
-    #   productid   = native currency code (e.g. "ZIG", "USD")
-    #   price       = native amount  (e.g. 9000 ZIG)
-    #   amount      = USD base value (e.g. 297 USD)
-    if splits:
+    # ── Payment Details (paymentItems) ───────────────────────────────────────
+    # Priority:
+    #   1. payment_entries table — received_amount (local) + paid_amount (USD)
+    #   2. splits stashed on sale dict — fresh sales before payment_entries written
+    #   3. Synthesize from grand total — single payment fallback
+    _exch         = float(sale.get("exchange_rate") or 1) or 1
+    _total_usd    = float(sale.get("total_usd") or sale.get("total") or 0)
+    _total_native = float(sale.get("total_zwd") or 0) or (
+        round(_total_usd / _exch, 2) if currency not in ("USD", "US") else _total_usd
+    )
+
+    pe_splits = []
+    sale_id = sale.get("id")
+    if sale_id:
+        try:
+            from database.db import get_connection as _gc
+            _conn = _gc()
+            _cur  = _conn.cursor()
+            # ── FIX: fetch received_amount (local currency) alongside paid_amount (USD) ──
+            _cur.execute("""
+                SELECT mode_of_payment, currency, paid_amount,
+                       COALESCE(received_amount, paid_amount) AS received_amount
+                FROM payment_entries
+                WHERE sale_id = ?
+                  AND (payment_type IS NULL OR payment_type = 'Receive')
+                ORDER BY id
+            """, (sale_id,))
+            _rows = _cur.fetchall()
+            _conn.close()
+            pe_splits = [
+                {
+                    "method":        r[0],
+                    "currency":      (r[1] or "USD").strip().upper(),
+                    "amount_usd":    float(r[2]),   # paid_amount     → USD basis
+                    "amount_native": float(r[3]),   # received_amount → local currency
+                }
+                for r in _rows
+            ]
+        except Exception as _e:
+            print(f"[prepare_receipt_data] payment_entries lookup failed: {_e}")
+
+    if pe_splits:
+        for ps in pe_splits:
+            receipt.paymentItems.append(Item(
+                productName=ps["method"],
+                productid=ps["currency"],
+                qty=1,
+                price=ps["amount_native"],   # ← local amount (e.g. 900 ZIG)
+                amount=ps["amount_usd"],      # ← USD basis
+            ))
+    elif splits:
         for sp in splits:
             native_cur = (sp.get("native_currency") or sp.get("currency") or "USD").strip().upper()
-            # Normalise "US" stored by PaymentDialog → "USD"
             if native_cur in ("US", ""):
                 native_cur = "USD"
             receipt.paymentItems.append(Item(
@@ -1916,14 +1755,14 @@ def prepare_receipt_data(sale: dict) -> ReceiptData:
                 price=float(sp.get("native_amount") or sp.get("base_value") or 0),
                 amount=float(sp.get("base_value") or 0),
             ))
-    elif currency not in ("USD", "US"):
-        # Single non-USD payment — create one paymentItem for PAYMENT DETAILS
+    else:
+        # Single payment — grand total in native, never tendered
         receipt.paymentItems.append(Item(
             productName=sale.get("method", "PAYMENT"),
             productid=currency,
             qty=1,
-            price=display_tendered,
-            amount=tendered_usd if tendered_usd > 0 else 0,
+            price=round(_total_native, 2),  # native (e.g. 5010 ZIG)
+            amount=round(_total_usd, 2),     # USD
         ))
 
     # ── Multi-currency detail block ───────────────────────────────────────────
@@ -1934,4 +1773,3 @@ def prepare_receipt_data(sale: dict) -> ReceiptData:
         ))
 
     return receipt
-

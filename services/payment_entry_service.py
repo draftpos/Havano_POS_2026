@@ -181,13 +181,18 @@ def _resolve_amounts(sale: dict, override_rate: float = None) -> dict:
     _defaults = _get_defaults()
     base_currency = _defaults.get("server_company_currency", "USD").strip().upper() or "USD"
     currency = (sale.get("currency") or base_currency).strip().upper()
+    if currency == "US":
+        currency = "USD"
 
+    
     # paid_amount is always the USD-basis figure coming from the sale
     amount = float(sale.get("paid_amount") or sale.get("base_value") or sale.get("total") or 0)
 
     # --- resolve exchange_rate as LOCAL-per-USD (always >= 1 for ZWG/ZWD) ---
     if override_rate is not None:
         exch_rate = float(override_rate)
+        if exch_rate > 0 and exch_rate < 1 and currency in ("ZWD", "ZWG", "ZIG"):
+            exch_rate = exch_rate
     elif currency == "USD":
         exch_rate = 1.0
     else:
@@ -258,7 +263,8 @@ def _resolve_amounts(sale: dict, override_rate: float = None) -> dict:
 
 def create_payment_entry(sale: dict, override_rate: float = None,
                          override_account: str = None,
-                         _is_split: bool = False) -> int | None:
+                         _is_split: bool = False,
+                         shift_id: int = None) -> int | None:
     """
     Write one payment entry row to the local DB, then immediately trigger a
     sync cycle so it is pushed to Frappe without waiting for the next daemon tick.
@@ -295,6 +301,8 @@ def create_payment_entry(sale: dict, override_rate: float = None,
                or sale.get("paid_to") or "").strip()
     mop_name, gl_account = _resolve_mop(raw_method, gl_hint, currency)
 
+    sid = shift_id or sale.get("shift_id")
+
     log.info("[create_PE] Resolved mop_name=%s  gl_account=%s", mop_name, gl_account)
     log.info(
         "[create_PE] paid_amount(USD)=%.4f  exchange_rate=%.6f (local/USD)"
@@ -324,10 +332,11 @@ def create_payment_entry(sale: dict, override_rate: float = None,
                 paid_to, mode_of_payment,
                 reference_no, reference_date,
                 remarks, synced,
-                amount_usd, amount_zwd, amount_zwg, exchange_rate
+                amount_usd, amount_zwd, amount_zwg, exchange_rate,
+                shift_id
             )
             OUTPUT INSERTED.id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
         """, (
             sale["id"], inv_no,
             frappe_ref,  # Use the properly resolved frappe_ref
@@ -341,6 +350,7 @@ def create_payment_entry(sale: dict, override_rate: float = None,
             inv_no, inv_date,
             f"POS Payment - {mop_name}",
             amount_usd, amount_zwd, amount_zwg, exch_rate,
+            sid
         ))
 
         new_id = cur.fetchone()[0]
@@ -375,7 +385,7 @@ def create_payment_entry(sale: dict, override_rate: float = None,
         return None
 
 
-def create_split_payment_entries(sale: dict, splits: list[dict]) -> list[int]:
+def create_split_payment_entries(sale: dict, splits: list[dict], shift_id: int = None) -> list[int]:
     """
     Create one payment entry per split leg.
     Each create_payment_entry call triggers an immediate sync internally.
@@ -461,6 +471,7 @@ def create_split_payment_entries(sale: dict, splits: list[dict]) -> list[int]:
         # ------------------------------------------------------------------ #
         if currency in ("ZWD", "ZWG", "ZIG") and rate > 0:
             amount_usd = round(amount_local / rate, 6)
+            
         else:
             amount_usd = amount_local   # USD leg
 
@@ -507,6 +518,7 @@ def create_split_payment_entries(sale: dict, splits: list[dict]) -> list[int]:
             split_sale,
             override_rate=rate if rate > 0 else None,
             override_account=gl_account,
+            shift_id=shift_id or sale.get("shift_id"),
             _is_split=True,
         )
         if new_id:
@@ -684,7 +696,7 @@ def _build_payload(pe: dict, defaults: dict,
         fallback=currency if currency != "USD" else base_currency,
     )
 
-    if currency.startswith("US") and paid_to_currency in ("ZWD", "ZWG", "ZIG"):
+    if currency.startswith("USD") and paid_to_currency in ("ZWD", "ZWG", "ZIG"):
         # Special Case: Paid in USD but deposited to a local-currency account.
         # Frappe requires the received_amount to be in the target account currency.
         try:

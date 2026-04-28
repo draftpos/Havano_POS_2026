@@ -49,7 +49,7 @@ def migrate():
             max_discount_percent INT           NULL DEFAULT 0
         )
     """)
-    print("[migrate] ✅  users")
+    print("[migrate] OK users")
 
     # ── companies ─────────────────────────────────────────────────────────────
     cur.execute("""
@@ -62,7 +62,7 @@ def migrate():
             country          NVARCHAR(80)  NOT NULL
         )
     """)
-    print("[migrate] ✅  companies")
+    print("[migrate] OK  companies")
 
     # ── company_defaults ──────────────────────────────────────────────────────
     cur.execute("""
@@ -105,7 +105,7 @@ def migrate():
             server_walk_in_customer NVARCHAR(255) NOT NULL DEFAULT 'default'
         )
     """)
-    print("[migrate] ✅  company_defaults")
+    print("[migrate] OK  company_defaults")
 
     # ── cost_centers ──────────────────────────────────────────────────────────
     cur.execute("""
@@ -116,7 +116,7 @@ def migrate():
             company_id INT           NOT NULL REFERENCES companies(id)
         )
     """)
-    print("[migrate] ✅  cost_centers")
+    print("[migrate] OK  cost_centers")
 
     # ── warehouses ────────────────────────────────────────────────────────────
     cur.execute("""
@@ -127,7 +127,7 @@ def migrate():
             company_id INT           NOT NULL REFERENCES companies(id)
         )
     """)
-    print("[migrate] ✅  warehouses")
+    print("[migrate] OK  warehouses")
 
     # ── customer_groups ───────────────────────────────────────────────────────
     cur.execute("""
@@ -138,7 +138,7 @@ def migrate():
             parent_group_id INT           NULL REFERENCES customer_groups(id)
         )
     """)
-    print("[migrate] ✅  customer_groups")
+    print("[migrate] OK  customer_groups")
 
     # ── price_lists ───────────────────────────────────────────────────────────
     cur.execute("""
@@ -149,7 +149,7 @@ def migrate():
             selling BIT           NULL DEFAULT 1
         )
     """)
-    print("[migrate] ✅  price_lists")
+    print("[migrate] OK  price_lists")
 
     # ── customers ─────────────────────────────────────────────────────────────
     cur.execute("""
@@ -174,7 +174,7 @@ def migrate():
             laybye_balance           DECIMAL(18,2) NULL DEFAULT 0
         )
     """)
-    print("[migrate] ✅  customers")
+    print("[migrate] OK  customers")
     _add_column_if_missing("customers", "frappe_synced", "BIT NOT NULL DEFAULT 0")
     _add_column_if_missing("customers", "laybye_balance", "DECIMAL(18,2) NULL DEFAULT 0")
 
@@ -200,7 +200,7 @@ def migrate():
             conversion_factor  DECIMAL(12,4) NULL
         )
     """)
-    print("[migrate] ✅  products")
+    print("[migrate] OK  products")
 
     # ── product_uom_prices ────────────────────────────────────────────────────
     cur.execute("""
@@ -213,7 +213,7 @@ def migrate():
             CONSTRAINT UQ_product_uom UNIQUE (part_no, uom)
         )
     """)
-    print("[migrate] ✅  product_uom_prices")
+    print("[migrate] OK  product_uom_prices")
 
     # ── item_groups ───────────────────────────────────────────────────────────
     cur.execute("""
@@ -228,7 +228,7 @@ def migrate():
             updated_at          DATETIME2     NOT NULL DEFAULT SYSDATETIME()
         )
     """)
-    print("[migrate] ✅  item_groups")
+    print("[migrate] OK  item_groups")
 
     # ── sales ─────────────────────────────────────────────────────────────────
     cur.execute("""
@@ -260,11 +260,13 @@ def migrate():
             created_at       DATETIME2     NULL DEFAULT SYSDATETIME(),
             payment_entry_ref NVARCHAR(80) NULL,
             payment_synced   BIT           NOT NULL DEFAULT 0,
-            is_on_account    BIT           NOT NULL DEFAULT 0
+            is_on_account    BIT           NOT NULL DEFAULT 0,
+            shift_id         INT           NULL
         )
     """)
-    print("[migrate] ✅  sales")
+    print("[migrate] OK  sales")
     _add_column_if_missing("sales", "is_on_account", "BIT NOT NULL DEFAULT 0")
+    _add_column_if_missing("sales", "shift_id", "INT NULL")
 
     # ── sale_items ────────────────────────────────────────────────────────────
     cur.execute("""
@@ -291,7 +293,7 @@ def migrate():
             order_6      BIT           NOT NULL DEFAULT 0
         )
     """)
-    print("[migrate] ✅  sale_items")
+    print("[migrate] OK  sale_items")
 
     # ── shifts ────────────────────────────────────────────────────────────────
     cur.execute("""
@@ -310,7 +312,7 @@ def migrate():
             created_at   DATETIME2     NULL DEFAULT SYSDATETIME()
         )
     """)
-    print("[migrate] ✅  shifts")
+    print("[migrate] OK  shifts")
 
     # ── shift_rows ────────────────────────────────────────────────────────────
     cur.execute("""
@@ -319,12 +321,14 @@ def migrate():
             id          INT           IDENTITY(1,1) PRIMARY KEY,
             shift_id    INT           NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
             method      NVARCHAR(50)  NOT NULL,
+            currency    NVARCHAR(10)  NOT NULL DEFAULT 'USD',
             start_float DECIMAL(12,2) NOT NULL DEFAULT 0,
             income      DECIMAL(12,2) NOT NULL DEFAULT 0,
             counted     DECIMAL(12,2) NOT NULL DEFAULT 0
         )
     """)
-    print("[migrate] ✅  shift_rows")
+    print("[migrate] OK  shift_rows")
+    _add_column_if_missing("shift_rows", "currency", "NVARCHAR(10) NOT NULL DEFAULT 'USD'")
 
     # ── shift_reports ─────────────────────────────────────────────────────────
     cur.execute("""
@@ -341,7 +345,7 @@ def migrate():
             created_at     DATETIME2     NULL DEFAULT SYSDATETIME()
         )
     """)
-    print("[migrate] ✅  shift_reports")
+    print("[migrate] OK  shift_reports")
 
     # ── shift_report_details ──────────────────────────────────────────────────
     cur.execute("""
@@ -356,7 +360,7 @@ def migrate():
             created_at       DATETIME2     NULL DEFAULT SYSDATETIME()
         )
     """)
-    print("[migrate] ✅  shift_report_details")
+    print("[migrate] OK  shift_report_details")
 
     # ── credit_notes ──────────────────────────────────────────────────────────
     cur.execute("""
@@ -376,7 +380,7 @@ def migrate():
             created_at         DATETIME2     NOT NULL DEFAULT SYSDATETIME()
         )
     """)
-    print("[migrate] ✅  credit_notes")
+    print("[migrate] OK  credit_notes")
 
     # ── credit_note_items ─────────────────────────────────────────────────────
     cur.execute("""
@@ -392,7 +396,7 @@ def migrate():
             reason         NVARCHAR(255) NOT NULL DEFAULT 'Customer Return'
         )
     """)
-    print("[migrate] ✅  credit_note_items")
+    print("[migrate] OK  credit_note_items")
 
     # ── gl_accounts ───────────────────────────────────────────────────────────
     cur.execute("""
@@ -409,7 +413,7 @@ def migrate():
             updated_at       DATETIME2     NOT NULL DEFAULT SYSDATETIME()
         )
     """)
-    print("[migrate] ✅  gl_accounts")
+    print("[migrate] OK  gl_accounts")
 
     # ── payment_entries ───────────────────────────────────────────────────────
     cur.execute("""
@@ -438,14 +442,16 @@ def migrate():
             frappe_so_ref           NVARCHAR(255) NULL,
             sync_attempts           INT           NOT NULL DEFAULT 0,
             sync_error              NVARCHAR(MAX) NULL,
-            last_error              NVARCHAR(MAX) NULL
+            last_error              NVARCHAR(MAX) NULL,
+            shift_id                INT           NULL
         )
     """)
-    print("[migrate] ✅  payment_entries")
+    print("[migrate] OK  payment_entries")
     _add_column_if_missing("payment_entries", "sync_attempts", "INT NOT NULL DEFAULT 0")
     _add_column_if_missing("payment_entries", "last_error", "NVARCHAR(MAX) NULL")
     _add_column_if_missing("payment_entries", "sync_error", "NVARCHAR(MAX) NULL")
     _add_column_if_missing("payment_entries", "frappe_so_ref", "NVARCHAR(255) NULL")
+    _add_column_if_missing("payment_entries", "shift_id", "INT NULL")
 
     # ── sales_order ───────────────────────────────────────────────────────────
     cur.execute("""
@@ -469,7 +475,7 @@ def migrate():
             created_at      NVARCHAR(50)  NULL
         )
     """)
-    print("[migrate] ✅  sales_order")
+    print("[migrate] OK  sales_order")
 
     # ── sales_order_item ──────────────────────────────────────────────────────
     cur.execute("""
@@ -485,7 +491,7 @@ def migrate():
             warehouse       NVARCHAR(255) NOT NULL DEFAULT ''
         )
     """)
-    print("[migrate] ✅  sales_order_item")
+    print("[migrate] OK  sales_order_item")
 
     # ── laybye_payment_entries ────────────────────────────────────────────────
     cur.execute("""
@@ -509,7 +515,7 @@ def migrate():
             error_message       NVARCHAR(MAX) NOT NULL DEFAULT ''
         )
     """)
-    print("[migrate] ✅  laybye_payment_entries")
+    print("[migrate] OK  laybye_payment_entries")
 
     # ── customer_payments ─────────────────────────────────────────────────────
     cur.execute("""
@@ -527,7 +533,7 @@ def migrate():
             payment_date DATE          NULL
         )
     """)
-    print("[migrate] ✅  customer_payments")
+    print("[migrate] OK  customer_payments")
 
     # ── exchange_rates ────────────────────────────────────────────────────────
     cur.execute("""
@@ -542,7 +548,7 @@ def migrate():
             CONSTRAINT UQ_exchange_rates UNIQUE (from_currency, to_currency, rate_date)
         )
     """)
-    print("[migrate] ✅  exchange_rates")
+    print("[migrate] OK  exchange_rates")
 
     # ── pos_settings ──────────────────────────────────────────────────────────
     cur.execute("""
@@ -552,7 +558,7 @@ def migrate():
             setting_value NVARCHAR(255) NOT NULL DEFAULT '0'
         )
     """)
-    print("[migrate] ✅  pos_settings")
+    print("[migrate] OK  pos_settings")
 
     # ── doctors ───────────────────────────────────────────────────────────────
     cur.execute("""
@@ -569,7 +575,7 @@ def migrate():
             sync_date     DATETIME      NULL
         )
     """)
-    print("[migrate] ✅  doctors")
+    print("[migrate] OK  doctors")
 
     # ── dosages ───────────────────────────────────────────────────────────────
     cur.execute("""
@@ -583,7 +589,7 @@ def migrate():
             sync_date   DATETIME      NULL
         )
     """)
-    print("[migrate] ✅  dosages")
+    print("[migrate] OK  dosages")
 
     # ── product_batches ───────────────────────────────────────────────────────
     cur.execute("""
@@ -597,17 +603,17 @@ def migrate():
             synced      BIT           NOT NULL DEFAULT 0
         )
     """)
-    print("[migrate] ✅  product_batches")
+    print("[migrate] OK  product_batches")
 
     # ── pharmacy ALTER TABLE additions ────────────────────────────────────────
     # products.is_pharmacy_product
     _add_column_if_missing("products", "is_pharmacy_product", "BIT NOT NULL DEFAULT 0")
-    print("[migrate] ✅  products.is_pharmacy_product")
+    print("[migrate] OK  products.is_pharmacy_product")
 
     # customers.doctor_id / doctor_frappe_name
     _add_column_if_missing("customers", "doctor_id",          "INT NULL")
     _add_column_if_missing("customers", "doctor_frappe_name", "NVARCHAR(140) NULL")
-    print("[migrate] ✅  customers.doctor_id / doctor_frappe_name")
+    print("[migrate] OK  customers.doctor_id / doctor_frappe_name")
 
     # quotation_items pharmacy columns
     # Ensure the quotations + quotation_items tables exist before altering.
@@ -621,27 +627,27 @@ def migrate():
     _add_column_if_missing("quotation_items", "dosage",      "NVARCHAR(500) NULL")
     _add_column_if_missing("quotation_items", "batch_no",    "NVARCHAR(100) NULL")
     _add_column_if_missing("quotation_items", "expiry_date", "DATE NULL")
-    print("[migrate] ✅  quotation_items pharmacy columns")
+    print("[migrate] OK  quotation_items pharmacy columns")
 
     # sale_items pharmacy columns
     _add_column_if_missing("sale_items", "is_pharmacy", "BIT NOT NULL DEFAULT 0")
     _add_column_if_missing("sale_items", "dosage",      "NVARCHAR(500) NULL")
     _add_column_if_missing("sale_items", "batch_no",    "NVARCHAR(100) NULL")
     _add_column_if_missing("sale_items", "expiry_date", "DATE NULL")
-    print("[migrate] ✅  sale_items pharmacy columns")
+    print("[migrate] OK  sale_items pharmacy columns")
 
     # ── Pharmacy label data gaps (Phase 9) ────────────────────────────────────
     # quotations.cashier_name — the creator of the quote, used on label preview
     # as the pharmacist name. Legacy rows stay NULL and fall back to the
     # current logged-in user.
     _add_column_if_missing("quotations", "cashier_name", "NVARCHAR(120) NULL")
-    print("[migrate] ✅  quotations.cashier_name")
+    print("[migrate] OK  quotations.cashier_name")
 
     # sale_items.uom — so sale labels can render "30 tablets" instead of just
     # "30". Populated from the cart at save time; legacy rows stay NULL and
     # render as empty string on the label.
     _add_column_if_missing("sale_items", "uom", "NVARCHAR(20) NULL")
-    print("[migrate] ✅  sale_items.uom")
+    print("[migrate] OK  sale_items.uom")
 
     # ── De-duplicate products + add UNIQUE (part_no) ──────────────────────────
     # Two sync paths (login sync_service.sync_products AND background
@@ -674,7 +680,7 @@ def migrate():
             ALTER TABLE products ADD CONSTRAINT UQ_products_part_no UNIQUE (part_no)
         """)
         conn.commit()
-        print("[migrate] ✅  products.part_no UNIQUE constraint")
+        print("[migrate] OK  products.part_no UNIQUE constraint")
     except Exception as _e:
         print(f"[migrate]   ! product dedupe / UNIQUE failed: {_e}")
 
@@ -687,7 +693,7 @@ def migrate():
             "INSERT INTO users (username, password, role, display_name, full_name) VALUES (?, ?, ?, ?, ?)",
             ("admin", hashed, "admin", "Administrator", "Administrator")
         )
-        print("[migrate] ✅  Default admin created  (admin / admin123)")
+        print("[migrate] OK  Default admin created  (admin / admin123)")
 
     conn.commit()
     conn.close()

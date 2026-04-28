@@ -40,7 +40,7 @@ class PrintingService:
     def __init__(self):
         self.paper_width = 550
         self.margin = 10
-        
+
     def _create_font(self, font_name: str, size: int, style: str) -> QFont:
         font = QFont(font_name if font_name else "Arial", size if size else 10)
         if style == "Bold":
@@ -48,17 +48,17 @@ class PrintingService:
         elif style == "Italic":
             font.setItalic(True)
         return font
-    
+
     def _make_bold(self, font: QFont) -> QFont:
         bold_font = QFont(font)
         bold_font.setBold(True)
         return bold_font
-    
+
     def _draw_logo(self, painter: QPainter, receipt: ReceiptData, settings, y: int) -> int:
         try:
             # RESOLVE LOGO FILENAME
             logo_filename = receipt.companyLogoPath or ""
-            
+
             # Fallback to shared config if receipt doesn't have it
             if not logo_filename:
                 try:
@@ -79,15 +79,45 @@ class PrintingService:
                         scaled_pixmap = pixmap.scaled(
                             max_w, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation
                         )
-                        x = (self.paper_width - scaled_pixmap.width()) // 2
-                        painter.drawPixmap(x, y, scaled_pixmap)
-                        return y + scaled_pixmap.height() + 10
+
+                        # ── Force logo to high-contrast black for thermal printing ──
+                        # Thermal printers render grey as washed-out/invisible.
+                        # We snap every dark pixel to pure black and drop near-white
+                        # pixels to transparent so the white paper shows through.
+                        from PySide6.QtGui import QImage
+                        image = scaled_pixmap.toImage().convertToFormat(QImage.Format_ARGB32)
+                        for px_y in range(image.height()):
+                            for px_x in range(image.width()):
+                                color = QColor(image.pixel(px_x, px_y))
+                                alpha = color.alpha()
+                                if alpha < 30:
+                                    # Fully transparent pixel — leave untouched
+                                    continue
+                                # Perceived luminance (standard Rec.601 coefficients)
+                                lum = (
+                                    0.299 * color.red()
+                                    + 0.587 * color.green()
+                                    + 0.114 * color.blue()
+                                )
+                                if lum < 180:
+                                    # Dark pixel → pure black, keep original alpha
+                                    image.setPixel(px_x, px_y, QColor(0, 0, 0, alpha).rgba())
+                                else:
+                                    # Near-white pixel → fully transparent
+                                    # (white paper background shows through)
+                                    image.setPixel(px_x, px_y, QColor(0, 0, 0, 0).rgba())
+                        # ────────────────────────────────────────────────────────────
+
+                        dark_pixmap = QPixmap.fromImage(image)
+                        x = (self.paper_width - dark_pixmap.width()) // 2
+                        painter.drawPixmap(x, y, dark_pixmap)
+                        return y + dark_pixmap.height() + 10
                 else:
                     print(f"[PrintLogo] File not found: {logo_path}")
         except Exception as e:
             print(f"Logo draw error: {e}")
         return y
-    
+
     def print_credit_note(self, receipt: ReceiptData, printer_name: str = None) -> bool:
         """Full credit note receipt with fiscal QR code support and waiting for fiscalization."""
         settings = AdvanceSettings.load_from_file()
@@ -247,7 +277,7 @@ class PrintingService:
             y += 14
 
             # Resolve payment rate for totals
-            pay_cur, pay_rate = self._sole_non_usd_payment_rate(
+            pay_cur, pay_rate, _pay_native, _pay_usd = self._sole_non_usd_payment_rate(
                 getattr(receipt, "paymentItems", None) or []
             )
 
@@ -322,10 +352,6 @@ class PrintingService:
                 except Exception as e:
                     print(f"[PrintService] Error drawing fiscal QR for credit note: {e}")
             elif fiscal_enabled and not fiscal_ready:
-                # Placeholder QR + label + explanation. The image must
-                # advance `y` before the label renders or the two overlap
-                # on the slip (the original merged code missed that and
-                # drew the text right on top of the pixmap).
                 pixmap = QPixmap("assets/qr.png")
                 if not pixmap.isNull():
                     painter.drawPixmap(
@@ -398,9 +424,9 @@ class PrintingService:
         except Exception:
             return ["(None)", "Default Printer"]
 
-
-# # Singleton instance
-# printing_service = PrintingService()
+    # =========================================================================
+    # SHIFT RECONCILIATION
+    # =========================================================================
     def print_shift_reconciliation(
         self,
         shift: dict = None,
@@ -473,7 +499,7 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 20
 
-            # Shift Meta - use reconciliation_data first
+            # Shift Meta
             if reconciliation_data:
                 shift_num = reconciliation_data.get('shift_number', '—')
                 shift_date = reconciliation_data.get('date', datetime.now().strftime("%d/%m/%Y"))
@@ -495,7 +521,7 @@ class PrintingService:
 
             painter.setFont(normal_font)
             fm = painter.fontMetrics()
-            line_h = fm.height() + 6
+            line_h = fm.height() + 8  # slightly more breathing room
 
             def draw_meta(label: str, value: str):
                 nonlocal y
@@ -518,12 +544,106 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 16
 
-            # Column positions
-            COL_METHOD = self.margin
-            COL_EXP = self.margin + 130
-            COL_ACTUAL = self.margin + 230
-            COL_VAR = self.margin + 320
-            COL_W = 75
+            # =========================================================================
+            # SHIFT RECONCILIATION TABLE COLUMN LAYOUT
+            # paper_width = 550, margin = 10 each side → usable = 530
+            #
+            # We split the usable width into 4 columns:
+            #   Method  : left-aligned, takes whatever space is left
+            #   Expected: right-aligned, fixed width
+            #   Counted : right-aligned, fixed width
+            #   Variance: right-aligned, fixed width
+            #
+            # Column widths are measured from the FONT at runtime so that
+            # the widest realistic value ("12,345.67") always fits regardless
+            # of the user's chosen font/size. We add padding on each side.
+            # =========================================================================
+            painter.setFont(normal_font)
+            fm = painter.fontMetrics()
+
+            # Measure a representative wide number to size the numeric columns
+            _sample_num = fm.horizontalAdvance("12,345.67")
+            _sample_hdr_exp = fm.horizontalAdvance("Expected")
+            _sample_hdr_cnt = fm.horizontalAdvance("Counted")
+            _sample_hdr_var = fm.horizontalAdvance("Variance")
+
+            # Each numeric column is wide enough for the header OR widest number,
+            # whichever is larger, plus generous horizontal padding (16px each side)
+            NUM_PAD  = 20
+            COL_EXP_W  = max(_sample_num, _sample_hdr_exp) + NUM_PAD
+            COL_CNT_W  = max(_sample_num, _sample_hdr_cnt) + NUM_PAD
+            COL_VAR_W  = max(_sample_num, _sample_hdr_var) + NUM_PAD
+
+            # Right edges (columns drawn right-to-left from paper edge)
+            VAR_RIGHT = self.paper_width - self.margin          # right edge of Variance col
+            CNT_RIGHT = VAR_RIGHT - COL_VAR_W - 6              # right edge of Counted col
+            EXP_RIGHT = CNT_RIGHT - COL_CNT_W - 6              # right edge of Expected col
+
+            # Left x-positions (for drawText origin)
+            COL_VAR_X   = VAR_RIGHT - COL_VAR_W
+            COL_CNT_X   = CNT_RIGHT - COL_CNT_W
+            COL_EXP_X   = EXP_RIGHT - COL_EXP_W
+            COL_METHOD_X = self.margin
+
+            # Method column width = everything to the left of Expected
+            COL_METHOD_W = COL_EXP_X - COL_METHOD_X - 6
+
+            # ---- helper: draw one summary row --------------------------------
+            def _draw_recon_row(
+                method_label: str,
+                expected: float,
+                counted: float,
+                variance: float,
+                row_font,
+                method_color=None,
+                variance_color=None,
+            ):
+                nonlocal y
+                painter.setFont(row_font)
+                lh = painter.fontMetrics().height() + 6
+
+                # Method
+                painter.setPen(QColor(method_color or DARK_TEXT))
+                # Truncate if still too wide (rare for long method names)
+                display_method = method_label
+                while (
+                    painter.fontMetrics().horizontalAdvance(display_method) > COL_METHOD_W
+                    and len(display_method) > 4
+                ):
+                    display_method = display_method[:-1]
+                if display_method != method_label:
+                    display_method = display_method[:-1] + "…"
+                painter.drawText(COL_METHOD_X, y, COL_METHOD_W, lh, Qt.AlignLeft | Qt.AlignVCenter, display_method)
+
+                # Expected
+                painter.setPen(QColor(DARK_TEXT))
+                exp_txt = f"{expected:,.2f}"
+                painter.drawText(COL_EXP_X, y, COL_EXP_W, lh, Qt.AlignRight | Qt.AlignVCenter, exp_txt)
+
+                # Counted
+                cnt_txt = f"{counted:,.2f}"
+                painter.drawText(COL_CNT_X, y, COL_CNT_W, lh, Qt.AlignRight | Qt.AlignVCenter, cnt_txt)
+
+                # Variance
+                var_clr = variance_color or (DANGER if variance < 0 else SUCCESS if variance > 0 else DARK_TEXT)
+                painter.setPen(QColor(var_clr))
+                var_txt = f"{variance:+,.2f}"
+                painter.drawText(COL_VAR_X, y, COL_VAR_W, lh, Qt.AlignRight | Qt.AlignVCenter, var_txt)
+
+                painter.setPen(QColor(DARK_TEXT))
+                y += lh + 2
+
+            # ---- helper: draw column headers ---------------------------------
+            def _draw_recon_headers(hdr_font):
+                nonlocal y
+                painter.setFont(hdr_font)
+                lh = painter.fontMetrics().height() + 6
+                painter.setPen(QColor(DARK_TEXT))
+                painter.drawText(COL_METHOD_X, y, COL_METHOD_W, lh, Qt.AlignLeft  | Qt.AlignVCenter, "Method")
+                painter.drawText(COL_EXP_X,    y, COL_EXP_W,    lh, Qt.AlignRight | Qt.AlignVCenter, "Expected")
+                painter.drawText(COL_CNT_X,    y, COL_CNT_W,    lh, Qt.AlignRight | Qt.AlignVCenter, "Counted")
+                painter.drawText(COL_VAR_X,    y, COL_VAR_W,    lh, Qt.AlignRight | Qt.AlignVCenter, "Variance")
+                y += lh + 4
 
             # Get data from reconciliation_data or print_data
             cashiers = []
@@ -571,18 +691,12 @@ class PrintingService:
                     y += 4
 
                     # Table headers
-                    painter.setFont(bold_font)
-                    painter.drawText(COL_METHOD, y, 120, line_h, Qt.AlignLeft, "Method")
-                    painter.drawText(COL_EXP,    y, COL_W, line_h, Qt.AlignRight, "Expected")
-                    painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, "Counted")
-                    painter.drawText(COL_VAR,    y, COL_W, line_h, Qt.AlignRight, "Variance")
-                    y += line_h + 2
+                    _draw_recon_headers(bold_font)
 
                     painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                     y += 8
 
-                    # "rows" is the primary key (set by _build_reconciliation_data).
-                    # Fall back to "payment_breakdown" for any old saved JSON.
+                    # "rows" is the primary key; fall back to "payment_breakdown"
                     rows_to_print = cashier.get('rows') or cashier.get('payment_breakdown', [])
 
                     painter.setFont(normal_font)
@@ -595,26 +709,15 @@ class PrintingService:
                                              row.get('amount_collected', 0))))
                             variance = counted - expected
 
-                            display_method = method if len(method) <= 18 else method[:15] + "..."
-                            
-                            # Special styling for ON ACCOUNT
-                            if method.upper() == "ON ACCOUNT":
-                                painter.setPen(QColor(ORANGE))
-                                painter.setFont(bold_font)
-                            else:
-                                painter.setPen(QColor(DARK_TEXT))
-                                painter.setFont(normal_font)
-
-                            painter.drawText(COL_METHOD, y, 120, line_h, Qt.AlignLeft, display_method)
-                            painter.drawText(COL_EXP,    y, COL_W, line_h, Qt.AlignRight, f"{expected:,.2f}")
-                            painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, f"{counted:,.2f}")
-
-                            variance_color = DANGER if variance < 0 else SUCCESS if variance > 0 else DARK_TEXT
-                            old_color = painter.pen().color()
-                            painter.setPen(QColor(variance_color))
-                            painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, f"{variance:+,.2f}")
-                            painter.setPen(old_color)
-                            y += line_h + 2
+                            is_on_account = method.upper() == "ON ACCOUNT"
+                            _draw_recon_row(
+                                method_label=method,
+                                expected=expected,
+                                counted=counted,
+                                variance=variance,
+                                row_font=bold_font if is_on_account else normal_font,
+                                method_color=ORANGE if is_on_account else DARK_TEXT,
+                            )
                     else:
                         painter.setFont(small_font)
                         painter.drawText(self.margin + 10, y, self.paper_width - self.margin * 2, line_h,
@@ -627,21 +730,18 @@ class PrintingService:
                     painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                     y += 6
 
-                    painter.setFont(bold_font)
                     total_exp = float(cashier.get('total_expected', 0))
                     total_cnt = float(cashier.get('total_counted', cashier.get('total_sales', 0)))
                     total_var = total_cnt - total_exp
 
-                    painter.drawText(COL_METHOD, y, 120, line_h, Qt.AlignLeft, "SUB-TOTAL")
-                    painter.drawText(COL_EXP,    y, COL_W, line_h, Qt.AlignRight, f"{total_exp:,.2f}")
-                    painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, f"{total_cnt:,.2f}")
-
-                    variance_color = DANGER if total_var < 0 else SUCCESS if total_var > 0 else DARK_TEXT
-                    old_color = painter.pen().color()
-                    painter.setPen(QColor(variance_color))
-                    painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, f"{total_var:+,.2f}")
-                    painter.setPen(old_color)
-                    y += line_h + 8
+                    _draw_recon_row(
+                        method_label="SUB-TOTAL",
+                        expected=total_exp,
+                        counted=total_cnt,
+                        variance=total_var,
+                        row_font=bold_font,
+                    )
+                    y += 8
 
                     # Separator between cashiers
                     painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
@@ -651,69 +751,55 @@ class PrintingService:
                         printer.newPage()
                         y = 20
 
-            # Payment methods only (no cashier breakdown) - INCLUDING ON ACCOUNT
+            # Payment methods summary table
             if payment_methods:
+                # ── "SUMMARY TABLE" heading ──────────────────────────────────
                 painter.setFont(bold_font)
-                painter.drawText(COL_METHOD, y, 130, line_h, Qt.AlignLeft, "Method")
-                painter.drawText(COL_EXP, y, COL_W, line_h, Qt.AlignRight, "Expected")
-                painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, "Counted")
-                painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, "Variance")
-                y += line_h + 4
+                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, line_h,
+                                 Qt.AlignCenter, "─── SUMMARY TABLE ───")
+                y += line_h + 6
+
+                _draw_recon_headers(bold_font)
 
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                 y += 10
 
                 painter.setFont(normal_font)
                 for pm in payment_methods:
-                    method = pm.get('method', '')
+                    method   = pm.get('method', '')
                     expected = float(pm.get('expected', 0))
-                    counted = float(pm.get('counted', pm.get('actual', 0)))
+                    counted  = float(pm.get('counted', pm.get('actual', 0)))
                     variance = counted - expected
-                    
-                    # Special styling for ON ACCOUNT
-                    if method.upper() == "ON ACCOUNT":
-                        painter.setPen(QColor(ORANGE))
-                        painter.setFont(bold_font)
-                    else:
-                        painter.setPen(QColor(DARK_TEXT))
-                        painter.setFont(normal_font)
 
-                    painter.drawText(COL_METHOD, y, 130, line_h, Qt.AlignLeft, method)
-                    painter.drawText(COL_EXP, y, COL_W, line_h, Qt.AlignRight, f"{expected:,.2f}")
-                    painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, f"{counted:,.2f}")
-                    
-                    variance_color = DANGER if variance < 0 else SUCCESS if variance > 0 else DARK_TEXT
-                    old_color = painter.pen().color()
-                    painter.setPen(QColor(variance_color))
-                    painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, f"{variance:+,.2f}")
-                    painter.setPen(old_color)
-                    y += line_h + 4
+                    is_on_account = method.upper() == "ON ACCOUNT"
+                    _draw_recon_row(
+                        method_label=method,
+                        expected=expected,
+                        counted=counted,
+                        variance=variance,
+                        row_font=bold_font if is_on_account else normal_font,
+                        method_color=ORANGE if is_on_account else DARK_TEXT,
+                    )
 
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                 y += 10
 
-                painter.setFont(bold_font)
-                painter.drawText(COL_METHOD, y, 130, line_h, Qt.AlignLeft, "TOTAL")
-                painter.drawText(COL_EXP, y, COL_W, line_h, Qt.AlignRight, f"{grand_expected:,.2f}")
-                painter.drawText(COL_ACTUAL, y, COL_W, line_h, Qt.AlignRight, f"{grand_counted:,.2f}")
-
+                # Grand total row
                 grand_var = grand_counted - grand_expected
-                variance_color = DANGER if grand_var < 0 else SUCCESS if grand_var > 0 else DARK_TEXT
-                old_color = painter.pen().color()
-                painter.setPen(QColor(variance_color))
-                painter.drawText(COL_VAR, y, COL_W, line_h, Qt.AlignRight, f"{grand_var:+,.2f}")
-                painter.setPen(old_color)
-                y += line_h + 6
+                _draw_recon_row(
+                    method_label="TOTAL",
+                    expected=grand_expected,
+                    counted=grand_counted,
+                    variance=grand_var,
+                    row_font=bold_font,
+                )
 
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                 y += 20
 
-            # ─────────────────────────────────────────────────────────────
-            # Invoice count — aggregate across all cashiers for this shift.
-            # Sources, in order: reconciliation_data.total_invoices (if the
-            # caller already computed it), sum of per-cashier transaction
-            # counts, or a direct DB count keyed by shift id.
-            # ─────────────────────────────────────────────────────────────
+            # ─────────────────────────────────────────────────────────────────
+            # Invoice count
+            # ─────────────────────────────────────────────────────────────────
             invoice_count = self._resolve_shift_invoice_count(
                 reconciliation_data=reconciliation_data,
                 print_data=print_data,
@@ -933,10 +1019,6 @@ class PrintingService:
             painter.translate(0, -rect.top())
             y = 20
 
-            # Kitchen font sizes live on their own fields so a change to
-            # the receipt's contentFontSize never re-scales the KOT. Fall
-            # back to the old derived sizes on pre-migration AdvanceSettings
-            # files so the first launch after an upgrade still prints sanely.
             kitchen_body_size   = int(getattr(settings, "kitchenBodySize", 0)
                                       or settings.contentFontSize or 10)
             kitchen_header_size = int(getattr(settings, "kitchenHeaderSize", 0)
@@ -946,15 +1028,11 @@ class PrintingService:
                                             kitchen_body_size,
                                             settings.contentFontStyle)
             bold_font   = self._make_bold(normal_font)
-            # Order-number header — large + bold so kitchen staff can read
-            # it from across the bench. Independent of receipt header size.
             header_font = self._make_bold(self._create_font(
                 settings.contentFontName,
                 kitchen_header_size,
                 settings.contentFontStyle,
             ))
-            # Terminal tag at the footer — clamped to a small readable size
-            # (~2pt below the body) so it doesn't compete with the header.
             small_font = self._create_font(settings.contentFontName,
                                            max(kitchen_body_size - 2, 6),
                                            settings.contentFontStyle)
@@ -962,8 +1040,6 @@ class PrintingService:
             station = (getattr(receipt, "KOT", "") or "KITCHEN").strip() or "KITCHEN"
             order_no = int(getattr(receipt, "orderNumber", 0) or 0)
 
-            # Order number is the KOT header (falls back to invoice no on pre-
-            # migration rows where order_number = 0).
             painter.setFont(header_font)
             if order_no > 0:
                 header_text = f"Order #{order_no}"
@@ -976,9 +1052,6 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 22
 
-            # Meta — invoice, cashier, time.
-            # Invoice prints here (below the Order # header) when we have both,
-            # so kitchen staff can still cross-reference the bar/till slip.
             painter.setFont(normal_font)
             if order_no > 0 and receipt.invoiceNo:
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 26,
@@ -995,8 +1068,6 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 20
 
-            # Items — qty and product name only.  Grouped by product name so
-            # multiple cart rows of the same dish merge into a single line.
             grouped: dict[str, float] = {}
             for it in receipt.items:
                 name = (getattr(it, "productName", "") or "").strip() or "(item)"
@@ -1020,9 +1091,6 @@ class PrintingService:
                              Qt.AlignCenter, "— end of order —")
             y += 28
 
-            # Terminal tag — small, footer-sized text under the end-of-order
-            # line so kitchen staff see which printer/station the slip came
-            # from when tearing it off, without competing with the header.
             painter.setFont(small_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 22,
                              Qt.AlignCenter, f"Terminal: {station}")
@@ -1113,7 +1181,7 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 25
 
-            # Receipt Heading — configurable via Company Settings → Receipt Header
+            # Receipt Heading
             painter.setFont(bold_font)
             _heading = (getattr(receipt, "receiptHeader", "") or "").strip() or "*** SALES RECEIPT ***"
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 44,
@@ -1215,14 +1283,8 @@ class PrintingService:
             fm = painter.fontMetrics()
             line_h = fm.height() + 6
 
-            # Amount tendered + change rules — used here for Subtotals too
-            pay_cur, pay_rate = self._sole_non_usd_payment_rate(
-                getattr(receipt, "paymentItems", None) or []
-            )
-
             def draw_total(label: str, value: float, currency: str = None):
                 nonlocal y
-                # Use passed currency, or resolved sole pay currency, or receipt default, or USD
                 _cur = (currency or pay_cur or receipt.currency or "USD")
                 _val = value * (pay_rate if (not currency and pay_rate > 0) else 1.0)
                 text = f"{_cur} {_val:,.2f}"
@@ -1231,7 +1293,6 @@ class PrintingService:
                 painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
                 y += line_h
 
-            # Amount BEFORE tax — reverse calculation off the tax-inclusive total.
             _grand = float(receipt.grandTotal or 0)
             _vat   = float(receipt.totalVat   or 0)
             _net   = max(_grand - _vat, 0.0)
@@ -1241,15 +1302,6 @@ class PrintingService:
             except Exception:
                 _fiscal_on = False
 
-            # Currency-display rule: when the sale was paid with exactly
-            # ONE non-USD tender, render the whole totals block + tendered
-            # + change in that native currency so the triplet stays
-            # internally consistent (a USD grand total next to a ZWG
-            # tendered looks broken). Multi-method or mixed currencies
-            # keep USD — "real" native totals are ambiguous.
-            #
-            # The fiscal record itself is still stored in USD upstream;
-            # this only affects the printed display.
             pay_cur, pay_rate, pay_native, pay_usd = \
                 self._sole_non_usd_payment_rate(
                     getattr(receipt, "paymentItems", None) or []
@@ -1257,9 +1309,6 @@ class PrintingService:
             _display_cur  = pay_cur or "USD"
             _display_rate = pay_rate if (pay_cur and pay_rate > 0) else 1.0
 
-            # Grand total / subtotal / VAT are ALWAYS stored in USD
-            # (sales.total / sales.subtotal / sales.total_vat are base
-            # currency). Multiply to display.
             if _fiscal_on:
                 draw_total("Subtotal (excl. tax)",
                            _net * _display_rate, _display_cur)
@@ -1274,12 +1323,6 @@ class PrintingService:
 
             y += 10
 
-            # Amount tendered + change — trickier: PaymentDialog stores
-            # these as NATIVE on single-method non-USD sales but as USD on
-            # split payments. If `receipt.amountTendered` looks closer to
-            # the payment row's native amount than its USD equivalent,
-            # assume the values are already native and display them as-is
-            # (no rate multiplication — that would double-convert).
             _tendered_base = float(getattr(receipt, "amountTendered", 0) or 0)
             _change_base   = float(getattr(receipt, "change",         0) or 0)
 
@@ -1291,7 +1334,6 @@ class PrintingService:
 
             if _tendered_base > 0.005:
                 if pay_cur and tendered_is_already_native:
-                    # Already in the display currency — skip the multiply.
                     draw_total("Amount Tendered", _tendered_base, _display_cur)
                     draw_total("Change",          _change_base,   _display_cur)
                 else:
@@ -1300,12 +1342,6 @@ class PrintingService:
                     draw_total("Change",
                                _change_base   * _display_rate, _display_cur)
 
-            # Payment Details — modes + amounts per currency.
-            # paymentItems is populated by _print_receipt; each carries
-            #   productName = MOP name
-            #   productid   = native currency code
-            #   price       = native amount
-            #   amount      = USD base equivalent
             payment_items = getattr(receipt, "paymentItems", None) or []
             if payment_items:
                 y += 10
@@ -1324,35 +1360,22 @@ class PrintingService:
                     native_amt  = float(getattr(_pi, "price",  0) or 0)
                     usd_amt     = float(getattr(_pi, "amount", 0) or 0)
 
-                    # "<Method>                     <NATIVE> 123.00"
-                    right_text = f"{native_cur} {native_amt:,.2f}"
+                    right_text = f"{native_amt:,.2f}"
                     w = fm.horizontalAdvance(right_text)
                     painter.drawText(self.margin, y, 260, line_h, Qt.AlignLeft, method_name)
                     painter.drawText(self.paper_width - self.margin - w, y, w, line_h,
                                      Qt.AlignRight, right_text)
                     y += line_h
 
-                    # # Show USD equivalent on its own line when native != USD
-                    # if native_cur != "USD" and usd_amt > 0.005:
-                    #     eq_text = f"(= USD {usd_amt:,.2f})"
-                    #     w2 = fm.horizontalAdvance(eq_text)
-                    #     painter.drawText(self.paper_width - self.margin - w2, y, w2, line_h,
-                    #                      Qt.AlignRight, eq_text)
-                    #     y += line_h
-
             y += 20
 
             # =========================================================================
             # FISCAL QR CODE SECTION
-            # Always do a fresh DB lookup right before drawing — the receipt object
-            # may have been built before fiscalization completed, so receipt.qrCode
-            # is unreliable.  The DB is the only source of truth at print time.
             # =========================================================================
             fiscal_service = get_fiscalization_service()
             fiscal_enabled = fiscal_service.is_fiscalization_enabled() if fiscal_service else False
 
             if fiscal_enabled:
-                # Fresh lookup by invoice number — never trust the receipt object here
                 qr_code  = ""
                 v_code   = ""
                 try:
@@ -1371,7 +1394,6 @@ class PrintingService:
                         v_code  = (_row[1] or "").strip()
                 except Exception as _e:
                     print(f"[PrintService] DB fiscal lookup failed: {_e}")
-                    # Fall back to whatever was set on the receipt object
                     qr_code = (getattr(receipt, "qrCode", "") or "").strip()
                     v_code  = (getattr(receipt, "vCode",  "") or "").strip()
 
@@ -1408,15 +1430,6 @@ class PrintingService:
                     except Exception as e:
                         print(f"[PrintService] Error drawing fiscal QR: {e}")
                 else:
-                    # Fiscalization enabled but QR not in DB yet — already
-                    # waited upstream. We show three things in this case:
-                    #   1. A placeholder QR image (assets/qr.png) so the
-                    #      receipt visually resembles a fiscalised slip
-                    #      even without the real code yet.
-                    #   2. A clear "NOT FISCALIZED" label so staff don't
-                    #      mistake the placeholder for a live QR.
-                    #   3. A small note explaining that the receipt will
-                    #      be re-issued once fiscalisation succeeds.
                     y += 20
                     pixmap = QPixmap("assets/qr.png")
                     if not pixmap.isNull():
@@ -1440,12 +1453,7 @@ class PrintingService:
                                      self.paper_width - self.margin, y)
                     y += 14
 
-
-            # Footer — fully user-configurable via Company Defaults → Footer Text.
-            # Multi-line values are rendered as separate centered lines so the
-            # user can put "Thank you for your purchase!" / "Come again soon!"
-            # / anything else in the settings instead of shipping a hardcoded
-            # second line.
+            # Footer
             painter.setFont(normal_font)
             _footer_raw = (receipt.footer or "Thank you for your purchase!").strip()
             for _line in _footer_raw.splitlines():
@@ -1619,8 +1627,7 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 14
 
-            # Resolve payment rate for totals
-            pay_cur, pay_rate = self._sole_non_usd_payment_rate(
+            pay_cur, pay_rate, _pay_native, _pay_usd = self._sole_non_usd_payment_rate(
                 getattr(receipt, "paymentItems", None) or getattr(receipt, "itemlist", [])
             )
 
@@ -1635,11 +1642,9 @@ class PrintingService:
                 painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
                 y += line_h
 
-            # Amount Paid
             draw_pay_total("Amount Paid", float(receipt.total or 0), use_bold=True)
             y += 4
 
-            # Customer Balance
             balance = float(getattr(receipt, "balanceDue", 0.0) or 0.0)
             draw_pay_total("Customer Balance", balance)
             y += 10
@@ -1817,8 +1822,7 @@ class PrintingService:
             fm_n     = painter.fontMetrics()
             n_line_h = fm_n.height() + 6
 
-            # Resolve payment rate for totals
-            pay_cur, pay_rate = self._sole_non_usd_payment_rate(
+            pay_cur, pay_rate, _pay_native, _pay_usd = self._sole_non_usd_payment_rate(
                 getattr(receipt, "paymentItems", None) or []
             )
 
@@ -1840,7 +1844,6 @@ class PrintingService:
 
             y += 6
 
-            # Forms of Payment
             payment_items = getattr(receipt, "paymentItems", None) or []
 
             if payment_items:
@@ -1884,10 +1887,6 @@ class PrintingService:
             return False
 
     # =========================================================================
-    # CREDIT NOTE
-    # =========================================================================
-    
-    # =========================================================================
     # LAYBYE DEPOSIT (from order_id)
     # =========================================================================
     def print_laybye_deposit(self, order_id, printer_name: str = None) -> bool:
@@ -1917,8 +1916,6 @@ class PrintingService:
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
             bold_font   = self._make_bold(normal_font)
 
-            # Logo
-            # For laybye we create a slim receipt object to carry company info
             from models.company_defaults import get_defaults
             co = get_defaults() or {}
             from models.receipt import ReceiptData
@@ -2012,7 +2009,6 @@ class PrintingService:
 
             draw_total("Order Total:", order_total, use_bold=True)
 
-            # Forms of Payment
             raw_methods   = order.get("deposit_methods") or []
             single_method = order.get("deposit_method", "") or ""
 

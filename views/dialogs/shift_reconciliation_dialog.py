@@ -174,42 +174,7 @@ class ShiftReconciliationDialog(QDialog):
         info_layout.addStretch()
         layout.addWidget(info_frame)
 
-        # Tab widget
-        self.tab_widget = QTabWidget()
-        layout.addWidget(self.tab_widget)
-
-        # Main reconciliation tab
-        main_tab = QWidget()
-        main_layout = QVBoxLayout(main_tab)
-        
-        instr_label = QLabel("Enter actual counted amounts for each payment method:")
-        instr_label.setStyleSheet("font-weight: bold; margin-bottom: 5px; color: #212121;")
-        main_layout.addWidget(instr_label)
-
-        # Main table
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Payment Method", "Expected ($)", "Actual ($)", "Variance ($)"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.setColumnWidth(1, 140)
-        self.table.setColumnWidth(2, 160)
-        self.table.setColumnWidth(3, 140)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        main_layout.addWidget(self.table)
-
-        # Summary panel
-        summary_frame = QFrame()
-        summary_frame.setStyleSheet("QFrame { background: #f5f5f5; border-radius: 6px; margin-top: 10px; }")
-        summary_layout = QHBoxLayout(summary_frame)
-        
-        self.summary_label = QLabel("Expected: $0.00  |  Counted: $0.00  |  Variance: $0.00")
-        self.summary_label.setStyleSheet("font-weight: bold; font-size: 14px; padding: 12px;")
-        summary_layout.addWidget(self.summary_label)
-        main_layout.addWidget(summary_frame)
-
-        self.tab_widget.addTab(main_tab, "Reconciliation")
-
-        # Button panel
+        # Button panel (Moved to Top)
         button_layout = QHBoxLayout()
         button_layout.setSpacing(15)
         
@@ -225,6 +190,42 @@ class ShiftReconciliationDialog(QDialog):
         button_layout.addWidget(self.close_btn)
         button_layout.addWidget(cancel_btn)
         layout.addLayout(button_layout)
+
+        # Tab widget
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
+
+        # Main reconciliation tab
+        main_tab = QWidget()
+        main_layout = QVBoxLayout(main_tab)
+        
+        instr_label = QLabel("Enter actual counted amounts for each payment method:")
+        instr_label.setStyleSheet("font-weight: bold; margin-bottom: 5px; color: #212121;")
+        main_layout.addWidget(instr_label)
+
+        # Main table — 5 columns: Method | Currency | Expected | Actual | Variance
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Payment Method", "Currency", "Expected", "Actual", "Variance ($)"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.setColumnWidth(1, 80)
+        self.table.setColumnWidth(2, 120)
+        self.table.setColumnWidth(3, 160)
+        self.table.setColumnWidth(4, 120)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        main_layout.addWidget(self.table)
+
+        # Summary panel
+        summary_frame = QFrame()
+        summary_frame.setStyleSheet("QFrame { background: #f5f5f5; border-radius: 6px; margin-top: 10px; }")
+        summary_layout = QHBoxLayout(summary_frame)
+        
+        self.summary_label = QLabel("Expected: $0.00  |  Counted: $0.00  |  Variance: $0.00")
+        self.summary_label.setStyleSheet("font-weight: bold; font-size: 14px; padding: 12px;")
+        summary_layout.addWidget(self.summary_label)
+        main_layout.addWidget(summary_frame)
+
+        self.tab_widget.addTab(main_tab, "Reconciliation")
 
     def _load_data(self):
         if not self._active_shift:
@@ -253,129 +254,48 @@ class ShiftReconciliationDialog(QDialog):
         # Load cashier tabs (ALL cashiers who worked this shift)
         self._load_cashier_tabs()
         
-        # Load main table — build rows from MOPs (same source as payment_dialog)
-        # then merge in actual income/counted from the shift rows.
-        shift_id = self._active_shift.get("id")
+        # Load data directly from shift_rows - the RAW source of truth
         shift_rows = self._active_shift.get("rows", [])
         print(f"\n[DEBUG] _load_data: Found {len(shift_rows)} shift rows")
 
-        # Build a lookup from shift rows keyed by UPPER(method)
-        shift_row_by_method = {}
+        # Build list of methods to display
+        methods_to_show = []
         for sr in shift_rows:
-            key = sr.get("method", "").strip().upper()
-            shift_row_by_method[key] = sr
-
-        # Load MOPs (same query as payment_dialog._load_payment_methods)
-        mop_rows = []
-        try:
-            from database.db import get_connection, fetchall_dicts
-            _conn = get_connection()
-            _cur = _conn.cursor()
-            _cur.execute("""
-                SELECT
-                    m.name            AS mop_name,
-                    m.gl_account      AS gl_account,
-                    m.account_currency AS currency
-                FROM modes_of_payment m
-                WHERE m.gl_account IS NOT NULL
-                  AND m.gl_account <> ''
-                  AND m.enabled = 1
-                ORDER BY m.name
-            """)
-            mop_rows = fetchall_dicts(_cur)
-            _conn.close()
-            print(f"[DEBUG] Loaded {len(mop_rows)} MOPs from modes_of_payment")
-        except Exception as e:
-            print(f"[DEBUG] Could not load MOPs: {e}")
-
-        # Skip group accounts (no account_type), same as payment_dialog
-        valid_mops = []
-        seen_mop = set()
-        for row in mop_rows:
-            mop_name = (row.get("mop_name") or "").strip()
-            gl_account = (row.get("gl_account") or "").strip()
-            if not mop_name or not gl_account:
+            method_name = sr.get("method", "").strip()
+            if not method_name:
                 continue
-            key = mop_name.lower()
-            if key in seen_mop:
-                continue
-            try:
-                from database.db import get_connection as _gc, fetchone_dict as _fd
-                _c = _gc(); _cu = _c.cursor()
-                _cu.execute("SELECT account_type FROM gl_accounts WHERE name = ?", (gl_account,))
-                _r = _fd(_cu)
-                _c.close()
-                if _r is not None and (_r.get("account_type") or "").strip() == "":
-                    print(f"  [skip] '{gl_account}' is a group account")
-                    continue
-            except Exception:
-                pass
-            seen_mop.add(key)
-            valid_mops.append(mop_name)
-        print(f"[DEBUG] Valid MOPs after filtering: {valid_mops}")
+            
+            expected = float(sr.get("total", 0.0))
+            counted = float(sr.get("counted", 0.0))
+            currency = sr.get("currency", "USD")
+            
+            methods_to_show.append({
+                "method": method_name,
+                "expected": expected,
+                "counted": counted,
+                "currency": currency
+            })
 
-        # Build method_map: start from MOPs, fill totals from shift rows.
-        # Any shift method not in MOPs is still included (e.g. ON ACCOUNT).
-        method_map = {}
-        for mop_name in valid_mops:
-            upper = mop_name.strip().upper()
-            sr = shift_row_by_method.get(upper, {})
-            method_map[mop_name] = {
-                "method": mop_name,
-                "total":   float(sr.get("total",   0.0)),
-                "counted": float(sr.get("counted",  0.0)),
-            }
+        # Sort so ON ACCOUNT is last
+        methods_to_show.sort(key=lambda x: (x["method"].upper() == "ON ACCOUNT", x["method"]))
 
-        # Add any shift rows whose method is NOT already in method_map
-        for sr in shift_rows:
-            m = sr.get("method", "").strip()
-            if m.upper() not in {k.upper() for k in method_map}:
-                method_map[m] = {
-                    "method": m,
-                    "total":   float(sr.get("total",   0.0)),
-                    "counted": float(sr.get("counted",  0.0)),
-                }
-
-        # Check for credit sales — add ON ACCOUNT if needed
-        from models.sale import get_sales_by_shift
-        credit_sales = get_sales_by_shift(shift_id) if shift_id else []
-        on_account_total = sum(
-            s.get("total", 0) - s.get("tendered", 0)
-            for s in credit_sales if s.get("is_on_account", False)
-        )
-        has_on_account = any(k.upper() == "ON ACCOUNT" for k in method_map)
-        if on_account_total > 0 and not has_on_account:
-            print(f"[DEBUG] Adding ON ACCOUNT row with total: {on_account_total}")
-            method_map["ON ACCOUNT"] = {
-                "method": "ON ACCOUNT",
-                "total":   on_account_total,
-                "counted": 0.0,
-            }
-
-        for name, row_data in method_map.items():
-            print(f"  - {name}: total={row_data.get('total')}, counted={row_data.get('counted')}")
-
-        if not method_map:
+        if not methods_to_show:
             QMessageBox.warning(self, "No Data", "No payment methods found for this shift.")
             self.close_btn.setEnabled(False)
             return
 
-        methods = sorted(k for k in method_map if k.upper() != "ON ACCOUNT")
+        self.table.setRowCount(len(methods_to_show))
         
-        # Add ON ACCOUNT at the end if it exists
-        if "ON ACCOUNT" in method_map:
-            methods.append("ON ACCOUNT")
-        
-        self.table.setRowCount(len(methods))
-        
-        for i, method in enumerate(methods):
-            row_data = method_map.get(method) or method_map.get(method.upper(), {})
-            expected = float(row_data.get("total", 0.0))
-            counted = float(row_data.get("counted", 0.0))
+        for i, data in enumerate(methods_to_show):
+            method = data["method"]
+            expected = data["expected"]
+            counted = data["counted"]
+            curr = data["currency"]
             variance = counted - expected
-            
+
             print(f"[DEBUG] Method {method}: expected={expected}, counted={counted}, variance={variance}")
-            
+
+            # Col 0 — Payment Method
             name_item = QTableWidgetItem(method)
             name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             name_item.setForeground(QColor("#212121"))
@@ -383,13 +303,22 @@ class ShiftReconciliationDialog(QDialog):
             font.setBold(True)
             name_item.setFont(font)
             self.table.setItem(i, 0, name_item)
-            
+
+            # Col 1 — Currency
+            curr_item = QTableWidgetItem(curr)
+            curr_item.setTextAlignment(Qt.AlignCenter)
+            curr_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            curr_item.setForeground(QColor("#757575"))
+            self.table.setItem(i, 1, curr_item)
+
+            # Col 2 — Expected
             exp_item = QTableWidgetItem(f"{expected:,.2f}")
             exp_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             exp_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             exp_item.setForeground(QColor("#212121"))
-            self.table.setItem(i, 1, exp_item)
-            
+            self.table.setItem(i, 2, exp_item)
+
+            # Col 3 — Actual (editable QLineEdit)
             actual_edit = QLineEdit()
             actual_edit.setAlignment(Qt.AlignRight)
             actual_edit.setMinimumHeight(32)
@@ -412,28 +341,38 @@ class ShiftReconciliationDialog(QDialog):
                 }
             """)
             
-            # For ON ACCOUNT, disable editing and set to 0
             if method.upper() == "ON ACCOUNT":
                 actual_edit.setEnabled(False)
-                actual_edit.setText("0.00")
+                # Only show a value if counted is non-zero
+                if counted:
+                    actual_edit.setText(f"{counted:.2f}")
                 actual_edit.setStyleSheet(actual_edit.styleSheet() + "background: #f5f5f5; color: #757575;")
             elif counted > 0:
                 actual_edit.setText(f"{counted:.2f}")
-                
+            # Leave blank when there is nothing counted — no 0.00 placeholder
+
             actual_edit.textChanged.connect(lambda _, row=i: self._update_variance(row))
-            self.table.setCellWidget(i, 2, actual_edit)
-            
-            var_item = QTableWidgetItem(f"{variance:,.2f}")
+            self.table.setCellWidget(i, 3, actual_edit)
+
+            # Col 4 — Variance
+            # Only show a variance value when the actual field has content
+            if method.upper() == "ON ACCOUNT" or counted > 0:
+                var_text = f"{variance:,.2f}"
+            else:
+                var_text = ""
+
+            var_item = QTableWidgetItem(var_text)
             var_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             var_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            if variance < 0:
-                var_item.setForeground(QColor("#d32f2f"))
-            elif variance > 0:
-                var_item.setForeground(QColor("#388e3c"))
-            else:
-                var_item.setForeground(QColor("#757575"))
-            self.table.setItem(i, 3, var_item)
-            
+            if var_text:
+                if variance < 0:
+                    var_item.setForeground(QColor("#d32f2f"))
+                elif variance > 0:
+                    var_item.setForeground(QColor("#388e3c"))
+                else:
+                    var_item.setForeground(QColor("#757575"))
+            self.table.setItem(i, 4, var_item)   # ← correct column index 4
+
             self.table.setRowHeight(i, 45)
         
         self._update_summary()
@@ -576,19 +515,30 @@ class ShiftReconciliationDialog(QDialog):
 
     def _update_variance(self, row):
         try:
-            exp_item = self.table.item(row, 1)
-            actual_edit = self.table.cellWidget(row, 2)
-            
+            exp_item = self.table.item(row, 2)       # Col 2 — Expected
+            actual_edit = self.table.cellWidget(row, 3)  # Col 3 — Actual widget
+
             if not exp_item or not actual_edit:
                 return
-                
+
             expected = float(exp_item.text().replace(",", "")) if exp_item.text() else 0
             actual_text = actual_edit.text().strip()
-            actual = float(actual_text) if actual_text else 0
-            variance = actual - expected
-            
-            var_item = self.table.item(row, 3)
-            if var_item:
+
+            var_item = self.table.item(row, 4)        # Col 4 — Variance
+            if not var_item:
+                var_item = QTableWidgetItem("")
+                var_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                var_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.table.setItem(row, 4, var_item)
+
+            if not actual_text:
+                # Blank actual → blank variance, no colour
+                var_item.setText("")
+                var_item.setForeground(QColor("#757575"))
+                var_item.setBackground(QColor("white"))
+            else:
+                actual = float(actual_text)
+                variance = actual - expected
                 var_item.setText(f"{variance:,.2f}")
                 if variance < 0:
                     var_item.setForeground(QColor("#d32f2f"))
@@ -599,12 +549,14 @@ class ShiftReconciliationDialog(QDialog):
                 else:
                     var_item.setForeground(QColor("#757575"))
                     var_item.setBackground(QColor("white"))
+
         except ValueError:
-            var_item = self.table.item(row, 3)
+            var_item = self.table.item(row, 4)
             if var_item:
-                var_item.setText("0.00")
+                var_item.setText("")
                 var_item.setForeground(QColor("#757575"))
                 var_item.setBackground(QColor("white"))
+
         self._update_summary()
 
     def _update_summary(self):
@@ -613,8 +565,8 @@ class ShiftReconciliationDialog(QDialog):
         
         for row in range(self.table.rowCount()):
             try:
-                exp_item = self.table.item(row, 1)
-                actual_edit = self.table.cellWidget(row, 2)
+                exp_item = self.table.item(row, 2)       # Col 2 — Expected
+                actual_edit = self.table.cellWidget(row, 3)  # Col 3 — Actual widget
                 
                 if exp_item and actual_edit:
                     expected = float(exp_item.text().replace(",", "")) if exp_item.text() else 0
@@ -656,11 +608,9 @@ class ShiftReconciliationDialog(QDialog):
         shift_id = self._active_shift.get("id")
 
         # ── Step 1: expected per method from already-loaded shift rows ────────
-        # shift_rows.total = start_float + income — the authoritative expected value.
         expected_by_method = {}
         shift_rows = self._active_shift.get("rows", [])
         
-        # Add ON ACCOUNT to expected_by_method if it exists in shift_rows
         for sr in shift_rows:
             method_key = sr["method"].strip().upper()
             total_value = float(sr.get("total", 0))
@@ -686,7 +636,6 @@ class ShiftReconciliationDialog(QDialog):
         for cashier in cashier_sales:
             print(f"\n  Cashier: {cashier.get('cashier_name')}")
             for method_key, amount in cashier.get("totals", {}).get("payment_methods", {}).items():
-                # Store the original method name and also create a normalized version
                 key = method_key.strip().upper()
                 total_collected_per_method[key] = total_collected_per_method.get(key, 0.0) + float(amount)
                 print(f"    {key}: +{amount} = {total_collected_per_method[key]}")
@@ -698,7 +647,6 @@ class ShiftReconciliationDialog(QDialog):
         for cashier in cashier_sales:
             cashier_payment_methods = cashier.get("totals", {}).get("payment_methods", {})
             
-            # Add ON ACCOUNT to cashier's payment methods if they have credit sales
             cashier_credit_total = 0.0
             for sale in cashier.get("sales", []):
                 if sale.get("is_on_account", False) and sale.get("total", 0) > sale.get("tendered", 0):
@@ -721,31 +669,8 @@ class ShiftReconciliationDialog(QDialog):
                 total_collected = total_collected_per_method.get(method_upper, 0.0)
                 proportion = (amount_collected / total_collected) if total_collected > 0 else 0.0
 
-                # FIX: Match expected and counted by finding the method in expected_by_method and counted_by_method
-                # Try exact match first, then try to find a match without suffixes
-                expected_value = 0.0
-                counted_value = 0.0
-                
-                # Try exact match
-                if method_upper in expected_by_method:
-                    expected_value = expected_by_method[method_upper]
-                else:
-                    # Try to find a match where the expected method key contains this method
-                    for exp_method in expected_by_method:
-                        if method_upper in exp_method or exp_method in method_upper:
-                            print(f"    Fuzzy match: {method_upper} matched to {exp_method}")
-                            expected_value = expected_by_method[exp_method]
-                            break
-                
-                # Same for counted
-                if method_upper in counted_by_method:
-                    counted_value = counted_by_method[method_upper]
-                else:
-                    for cnt_method in counted_by_method:
-                        if method_upper in cnt_method or cnt_method in method_upper:
-                            print(f"    Fuzzy match counted: {method_upper} matched to {cnt_method}")
-                            counted_value = counted_by_method[cnt_method]
-                            break
+                expected_value = expected_by_method.get(method_upper, 0.0)
+                counted_value = counted_by_method.get(method_upper, 0.0)
 
                 cashier_expected = expected_value * proportion
                 cashier_counted = counted_value * proportion
@@ -762,7 +687,6 @@ class ShiftReconciliationDialog(QDialog):
                         if pm.strip().upper() == method_upper:
                             tx_count += 1
                             break
-                    # Count ON ACCOUNT transactions
                     if method_upper == "ON ACCOUNT" and sale.get("is_on_account", False):
                         tx_count += 1
 
@@ -799,8 +723,8 @@ class ShiftReconciliationDialog(QDialog):
         print(f"\n[DEBUG] Building payment_methods from main table ({self.table.rowCount()} rows)")
         for row in range(self.table.rowCount()):
             method = self.table.item(row, 0).text()
-            expected = float(self.table.item(row, 1).text().replace(",", "")) if self.table.item(row, 1) else 0
-            actual_edit = self.table.cellWidget(row, 2)
+            expected = float(self.table.item(row, 2).text().replace(",", "")) if self.table.item(row, 2) else 0
+            actual_edit = self.table.cellWidget(row, 3)
             actual_text = actual_edit.text().strip() if actual_edit else ""
             actual = float(actual_text) if actual_text else 0
             
@@ -823,12 +747,10 @@ class ShiftReconciliationDialog(QDialog):
         else:
             start_time_str = "—"
         
-        # Get date as string
         shift_date = self._active_shift.get("date", "")
         if hasattr(shift_date, 'strftime'):
             shift_date = shift_date.strftime("%Y-%m-%d")
         
-        # Build the data dictionary with proper types
         data = {
             "shift_id": int(shift_id) if shift_id else None,
             "shift_number": int(self._active_shift.get("shift_number", 0)),
@@ -857,7 +779,6 @@ class ShiftReconciliationDialog(QDialog):
         print("DEBUG: _build_reconciliation_data - END")
         print("="*80 + "\n")
         
-        # Clean the data for JSON serialization
         return self._clean_for_json(data)
 
     def _on_finalize(self):
@@ -867,14 +788,14 @@ class ShiftReconciliationDialog(QDialog):
         
         # Validate all inputs first
         for row in range(self.table.rowCount()):
-            actual_edit = self.table.cellWidget(row, 2)
+            actual_edit = self.table.cellWidget(row, 3)
             if actual_edit:
                 actual_text = actual_edit.text().strip()
                 if actual_text:
                     try:
                         float(actual_text)
                     except ValueError:
-                        QMessageBox.warning(self, "Invalid Input", f"Row {row + 1} has an invalid amount: '{actual_text}'")
+                        QMessageBox.warning(self, "Invalid Amount", f"Row {row + 1} ('{self.table.item(row, 0).text()}') has an invalid amount: '{actual_text}'")
                         actual_edit.setFocus()
                         return
         
@@ -897,18 +818,20 @@ class ShiftReconciliationDialog(QDialog):
         for row in range(self.table.rowCount()):
             try:
                 method = self.table.item(row, 0).text()
-                expected = float(self.table.item(row, 1).text().replace(",", "")) if self.table.item(row, 1) else 0
-                actual_edit = self.table.cellWidget(row, 2)
+                currency = self.table.item(row, 1).text()
+                expected = float(self.table.item(row, 2).text().replace(",", "")) if self.table.item(row, 2) else 0
+                actual_edit = self.table.cellWidget(row, 3)
                 actual_text = actual_edit.text().strip() if actual_edit else ""
                 actual = float(actual_text) if actual_text else 0
                 
                 totals.append({
                     "method": method,
+                    "currency": currency,
                     "expected": expected,
                     "actual": actual,
                     "variance": actual - expected
                 })
-                print(f"  {method}: expected={expected}, actual={actual}, variance={actual-expected}")
+                print(f"  {method} ({currency}): expected={expected}, actual={actual}, variance={actual-expected}")
             except Exception as e:
                 QMessageBox.warning(self, "Invalid Data", f"Row {row + 1} has invalid data: {e}")
                 return
@@ -923,10 +846,8 @@ class ShiftReconciliationDialog(QDialog):
 
             print(f"\n[DEBUG] Active shift ID: {active['id']}, Number: {active.get('shift_number')}")
 
-            # Build complete reconciliation data (includes ALL cashiers)
             reconciliation_data = self._build_reconciliation_data(totals)
             
-            # Debug the reconciliation data before saving
             print("\n[DEBUG] Reconciliation data before save:")
             print(f"  cashiers count: {len(reconciliation_data.get('cashiers', []))}")
             for c in reconciliation_data.get('cashiers', []):
@@ -937,7 +858,6 @@ class ShiftReconciliationDialog(QDialog):
                 for r in c.get('rows', []):
                     print(f"        {r.get('method')}: expected={r.get('expected')}, counted={r.get('counted')}, variance={r.get('variance')}")
             
-            # Save to database FIRST
             reconciliation_id = save_shift_reconciliation(active["id"], reconciliation_data)
             
             if reconciliation_id:
@@ -946,16 +866,14 @@ class ShiftReconciliationDialog(QDialog):
             else:
                 print("⚠️ Failed to save reconciliation")
             
-            # Close the shift
-            counted_map = {t["method"]: t["actual"] for t in totals}
-            print(f"\n[DEBUG] Closing shift with counted_map: {counted_map}")
+            counted_map = {(t["method"], t["currency"]): t["actual"] for t in totals}
+            print(f"\n[DEBUG] Closing shift with counted_map (composite keys): {counted_map}")
             closed_shift = end_shift(active["id"], counted_map)
             
             if not closed_shift:
                 QMessageBox.warning(self, "Error", "Failed to close shift.")
                 return
 
-            # Print receipt
             print("\n[DEBUG] Attempting to print shift reconciliation...")
             try:
                 from services.printing_service import printing_service
@@ -974,7 +892,6 @@ class ShiftReconciliationDialog(QDialog):
                     printer_name=printer_name
                 )
                 
-                # Update print status
                 try:
                     from models.shift import update_reconciliation_print_status
                     update_reconciliation_print_status(reconciliation_id, True)
@@ -1001,8 +918,6 @@ class ShiftReconciliationDialog(QDialog):
             print("="*80 + "\n")
             self.accept()
 
-            # Shift is now closed — return to login screen so the next cashier
-            # (or the same one starting a fresh shift) sees a clean prompt.
             try:
                 mw = self.window()
                 while mw is not None and not hasattr(mw, "_logout_after_shift_close"):
@@ -1018,8 +933,6 @@ class ShiftReconciliationDialog(QDialog):
             print(f"[DEBUG] Error in _on_finalize: {e}")
             traceback.print_exc()
             QMessageBox.critical(self, "Error", f"Failed to close shift: {str(e)}")
-            import traceback
-            traceback.print_exc()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:

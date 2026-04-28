@@ -1017,9 +1017,9 @@ class PaymentDialog(QDialog):
                     split_data = {
                         "method":        mop_name_for_split,  # ← Frappe MOP name
                         "base_value":    amt_usd,
-                        "paid_amount":   amt_usd,    # ← always USD basis for DB storage
+                        "paid_amount":   amt_native,    # ← always USD basis for DB storage
                         "exchange_rate": rate,
-                        "currency":      "US",       # ← always store as USD in DB
+                        "currency":      curr_label,       # ← always store as USD in DB
                         "native_currency":  curr_label,   # ← original currency kept for reference
                         "native_amount":    amt_native,   # ← original local amount kept for reference
                         "is_credit":     is_oa,
@@ -1047,10 +1047,14 @@ class PaymentDialog(QDialog):
             active_rate = self._method_info(self._active_method)[1] or 1.0
             self.accepted_method = accepted_meth
             self.accepted_tendered = self._get_paid_native(self._active_method)
+            if accepted_meth == "SPLIT":
+                _total_splits_usd = sum(s.get("base_value", 0) for s in splits if not s.get("on_account"))
+                self.accepted_change = round(max(_total_splits_usd - self.total, 0.0), 4)
+            else:
+                paid_native  = self._get_paid_native(self._active_method)
+                total_native = (self.total / active_rate) if active_rate > 0 else self.total
+                self.accepted_change = round(max(paid_native - total_native, 0.0), 4)
 
-            paid_native  = self._get_paid_native(self._active_method)
-            total_native = (self.total / active_rate) if active_rate > 0 else self.total
-            self.accepted_change = max(paid_native - total_native, 0.0)
             self.accepted_currency = curr
             self.accepted_splits = splits
             self.accepted_customer = self._customer
@@ -1167,11 +1171,11 @@ class PaymentDialog(QDialog):
                     
                     if self.accepted_method == "SPLIT":
                         from services.payment_entry_service import create_split_payment_entries
-                        create_split_payment_entries(sale_copy, splits)
+                        create_split_payment_entries(sale_copy, splits, shift_id=self.shift_id)
                         print(f"[PaymentDialog] Created split payment entries for sale {self.accepted_sale_id}")
                     else:
                         from services.payment_entry_service import create_payment_entry
-                        create_payment_entry(sale_copy)
+                        create_payment_entry(sale_copy, shift_id=self.shift_id)
                         print(f"[PaymentDialog] Created single payment entry for sale {self.accepted_sale_id}")
                 except Exception as e:
                     print(f"[ERROR] Failed to create payment entry records: {e}")

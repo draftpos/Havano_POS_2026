@@ -222,13 +222,64 @@ def _extract_selling_price(prices: list, stock_uom: str = "Nos") -> float:
             return float(p.get("price") or 0)
     return float(selling[0].get("price") or 0)
 
+def _get_company_warehouse() -> str:
+    """
+    Retrieve the company's default warehouse from company defaults.
+    
+    Returns:
+        Warehouse name or empty string if not found
+    """
+    try:
+        from models.company_defaults import get_defaults
+        defaults = get_defaults() or {}
+        warehouse = defaults.get("server_warehouse", "").strip()
+        if warehouse:
+            log.debug(f"[STOCK] Using company warehouse: {warehouse}")
+            return warehouse
+        else:
+            log.debug("[STOCK] No company warehouse configured")
+            return ""
+    except Exception as e:
+        log.warning(f"[STOCK] Failed to get company warehouse: {e}")
+        return ""
 
-def _extract_stock(warehouses: list) -> int:
-    """Sum qtyOnHand across all warehouses."""
-    total = 0.0
-    for w in (warehouses or []):
-        total += float(w.get("qtyOnHand") or 0)
-    return int(total)
+
+def _extract_stock(warehouses: list) -> float:
+    """
+    Sum qtyOnHand ONLY for the company's configured warehouse.
+    
+    If no company warehouse is configured, falls back to summing all warehouses.
+    """
+    target_warehouse = _get_company_warehouse()
+    
+    if not warehouses:
+        return 0.0
+    
+    # If no target warehouse specified, sum all (fallback behavior)
+    if not target_warehouse:
+        total = 0.0
+        for w in warehouses:
+            try:
+                total = 0
+            except (TypeError, ValueError):
+                pass
+        return total
+    
+    # Filter for the specific warehouse
+    target_warehouse_upper = target_warehouse.strip().upper()
+    for w in warehouses:
+        warehouse_name = str(w.get("warehouse") or "").strip().upper()
+        if warehouse_name == target_warehouse_upper:
+            try:
+                qty = float(w.get("qtyOnHand") or 0)
+                log.debug(f"[STOCK] Found stock for warehouse '{target_warehouse}': {qty}")
+                return qty
+            except (TypeError, ValueError):
+                return 0.0
+    
+    # Warehouse not found in the list
+    log.debug(f"[STOCK] Warehouse '{target_warehouse}' not found in product warehouses")
+    return 0.0
 
 
 def _extract_tax_info(taxes: list, part_no: str = "") -> dict | None:

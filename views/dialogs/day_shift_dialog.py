@@ -58,15 +58,62 @@ class DayShiftDialog(QDialog):
         self._income_timer.timeout.connect(self._refresh_income_display)
 
     def _load_payment_methods(self) -> list:
-        """Load all GL account names — no type filter, matches payment dialog."""
+        """
+        Load payment methods from modes_of_payment — same source as the payment dialog.
+        Only enabled MOPs with a valid gl_account (leaf accounts only) are included.
+        Returns a list of MOP name strings.
+        """
         try:
-            from models.gl_account import get_all_accounts
-            accounts = get_all_accounts() or []
-            methods = [a["name"] for a in accounts if a.get("name")]
+            from database.db import get_connection, fetchall_dicts
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT
+                    m.name       AS mop_name,
+                    m.gl_account AS gl_account
+                FROM modes_of_payment m
+                WHERE m.gl_account IS NOT NULL
+                  AND m.gl_account <> \'\'
+                  AND m.enabled = 1
+                ORDER BY COALESCE(m.display_order, 0), m.name
+            """)
+            rows = fetchall_dicts(cur)
+            conn.close()
+
+            methods = []
+            seen = set()
+            for row in rows:
+                mop_name   = (row.get("mop_name")   or "").strip()
+                gl_account = (row.get("gl_account") or "").strip()
+                if not mop_name or not gl_account:
+                    continue
+                # Skip group GL accounts (same logic as payment dialog)
+                try:
+                    from database.db import get_connection as _gc, fetchone_dict as _fd
+                    _conn = _gc(); _cur = _conn.cursor()
+                    _cur.execute(
+                        "SELECT account_type FROM gl_accounts WHERE name = ?",
+                        (gl_account,)
+                    )
+                    _row = _fd(_cur)
+                    _conn.close()
+                    if _row is not None and (_row.get("account_type") or "").strip() == "":
+                        continue  # group account — skip
+                except Exception:
+                    pass
+
+                key = mop_name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                methods.append(mop_name)
+
             if methods:
+                print(f"[DayShift] Loaded {len(methods)} payment methods: {methods}")
                 return methods
         except Exception as e:
-            print(f"Error loading GL accounts: {e}")
+            print(f"[DayShift] Error loading payment methods: {e}")
+
         return ["CASH", "CHECK", "CREDIT CARD", "EFTPOS", "BANK TRANSFER"]
 
     def _build_ui(self):

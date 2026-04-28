@@ -231,7 +231,8 @@ def pull_all_bundles() -> Dict:
                     'item_code': item.get('item_code', ''),
                     'quantity': float(item.get('qty', 1)),
                     'rate': float(item.get('rate', 0)),
-                    'uom': item.get('uom', 'Nos')
+        
+                    'uom': item.get('uom') or 'Nos'
                 })
             
             debug_print(f"  Items: {len(items)} product(s)")
