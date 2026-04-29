@@ -39,11 +39,17 @@ EXTERNAL_PREFIX = "EXT-"
 def _get_external_settings() -> dict:
     print("[ExternalQtn] Loading settings from disk…")
     try:
-        from views.dialogs.external_quotation_settings_dialog import load_external_settings
-        cfg = load_external_settings()
-        masked = {**cfg, "api_secret": ("***" if cfg.get("api_secret") else "<empty>")}
+        from views.dialogs.external_quotation_settings_dialog import load_xtrnal_site_config
+        cfg = load_xtrnal_site_config()
+        # Map xtrnal_ keys to internal service keys for backward compatibility or cleaner internal use
+        mapped = {
+            "url":        cfg.get("xtrnal_site_url", ""),
+            "api_key":    cfg.get("xtrnal_api_key", ""),
+            "api_secret": cfg.get("xtrnal_api_secret", "")
+        }
+        masked = {**mapped, "api_secret": ("***" if mapped.get("api_secret") else "<empty>")}
         print(f"[ExternalQtn] Settings loaded: {masked}")
-        return cfg
+        return mapped
     except Exception as e:
         print(f"[ExternalQtn] ERROR loading settings: {e}")
         traceback.print_exc()

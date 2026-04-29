@@ -21,7 +21,7 @@ log = logging.getLogger("QuotationSync")
 REQUEST_TIMEOUT   = 30
 MAX_PER_MINUTE    = 20                      # Frappe rate limit guard
 INTER_PUSH_DELAY  = 60 / MAX_PER_MINUTE    # 3 s between each push
-SYNC_INTERVAL     = 300                     # 5 minutes between sync cycles
+SYNC_INTERVAL     = 15                     # 15 seconds between sync cycles
 
 
 # =============================================================================

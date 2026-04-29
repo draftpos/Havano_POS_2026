@@ -9226,6 +9226,29 @@ class POSView(QWidget):
 
         rows = self._get_price_rows_for_list(part_no, price_list)
         if not rows:
+            # [BUNDLE-PRICE] Fallback to bundle component total if no parent price list entry
+            try:
+                from models.product_bundle import get_all_bundles_with_items
+                b_defs = get_all_bundles_with_items()
+                if part_no in b_defs:
+                    # Calculate total using components' prices in this list
+                    from models.item_price import get_prices_map
+                    pm = get_prices_map(price_list)
+                    
+                    bundle_total = 0.0
+                    for b_item in b_defs[part_no]:
+                        i_code = (b_item.get("item_code") or "").upper().strip()
+                        i_qty  = float(b_item.get("quantity") or 0)
+                        i_rate = float(b_item.get("rate") or 0)
+                        if i_rate <= 0:
+                            i_rate = float(pm.get(i_code, 0) or 0)
+                        bundle_total += (i_qty * i_rate)
+                    
+                    if bundle_total > 0:
+                        rows = [{"uom": base_uom, "price": bundle_total}]
+            except Exception: pass
+
+        if not rows:
             self._warn_popup(
                 "Item not priced",
                 f"<b>{name}</b> has no price in the <b>{price_list}</b> "
@@ -10123,11 +10146,34 @@ class POSView(QWidget):
             tuples:  list[tuple] = []
             meta:    dict[str, dict] = {}
             hidden_no_price = 0
+
+            # Load bundle definitions for dynamic price-list-aware calculation
+            bundle_defs = {}
+            try:
+                from models.product_bundle import get_all_bundles_with_items
+                bundle_defs = get_all_bundles_with_items()
+            except Exception: pass
+
             for p in db_products:
                 part_no = (p.get("part_no") or "").upper()
                 # Single source of truth: price_map[part_no] or 0. No
                 # fallback to products.price under any condition.
                 price = float(price_map.get(part_no, 0) or 0)
+
+                # [BUNDLE-PRICE] If price is 0, calculate it from components
+                is_bundle = part_no in bundle_defs
+                if price <= 0 and is_bundle:
+                    bundle_total = 0.0
+                    for b_item in bundle_defs[part_no]:
+                        item_code = (b_item.get("item_code") or "").upper().strip()
+                        qty       = float(b_item.get("quantity") or 0)
+                        # Use bundle rate if set (>0), otherwise component's price list price
+                        rate      = float(b_item.get("rate") or 0)
+                        if rate <= 0:
+                            rate = float(price_map.get(item_code, 0) or 0)
+                        
+                        bundle_total += (qty * rate)
+                    price = bundle_total
 
                 tuples.append((
                     p["name"], p["part_no"], price, p["id"],
@@ -10140,6 +10186,7 @@ class POSView(QWidget):
                     "attributes":   p.get("attributes") or "",
                     "uom":          p.get("uom") or "Nos",
                     "stock":        p.get("stock"),
+                    "is_bundle":    is_bundle, # Stash for cart expanded logic later
                 }
                 if active_list and price <= 0 and not p.get("is_template"):
                     hidden_no_price += 1
@@ -12617,6 +12664,8 @@ class MainWindow(QMainWindow):
         except Exception:
             QApplication.quit()
         self.close()
+
+        
 # =============================================================================
 # CUSTOMER PAYMENT ENTRY DIALOG
 # Clean version - No confirmations, just save and close
@@ -13300,55 +13349,85 @@ class CustomerPaymentDialog(QDialog):
         
         self._processing_save = True
         
+        # Remove outer try and merge into the main one below
+        from models.payment import create_customer_payment
+        from database.db import get_connection
+
+        # Group methods into one recording with splits
+        splits = []
+        total_usd_tendered = 0
+        
+        for method in self._methods:
+            native_amt = self._get_paid_amount_native(method["label"])
+            if native_amt > 0.005:
+                curr, rate, gl_account = self._method_info(method["label"])
+                usd_amt = self._get_paid_amount_usd(method["label"])
+                total_usd_tendered += usd_amt
+                splits.append({
+                    "method": method["label"],
+                    "currency": curr,
+                    "amount": native_amt,
+                    "amount_usd": usd_amt,
+                    "exchange_rate": rate
+                })
+
+        if not splits:
+            QMessageBox.warning(self, "No Payment", "Please enter a payment amount.")
+            self._processing_save = False
+            return
+
+
         try:
             from models.payment import create_customer_payment
-            from database.db import get_connection
+            
+            saved_ids = []
+            for split in splits:
+                curr, rate, gl_account = self._method_info(split["method"])
+                
+                payment_rec = create_customer_payment(
+                    customer_id=self._customer["id"],
+                    amount=split["amount"],
+                    currency=split["currency"],
+                    method=split["method"],
+                    account_name=gl_account, # Pass the GL account name
+                    reference=self._ref_input.text().strip(),
+                    cashier_id=self._get_cashier_id(),
+                    payment_date=self._date_edit.date().toString("yyyy-MM-dd"),
+                    payment_type=self._payment_type,
+                    amount_usd=split["amount_usd"],
+                    exchange_rate=split["exchange_rate"]
+                )
 
-            saved_ledger_ids = []
-            
-            # Save each method with > 0 amount as its own record
-            for method in self._methods:
-                native_amt = self._get_paid_amount_native(method["label"])
-                if native_amt > 0.005:
-                    curr, rate, gl_account = self._method_info(method["label"])
+                if payment_rec and payment_rec.get("id"):
+                    pid = payment_rec["id"]
+                    saved_ids.append(pid)
                     
-                    # Create payment record for this leg
-                    payment_rec = create_customer_payment(
-                        customer_id=self._customer["id"],
-                        amount=native_amt,
-                        method=method["label"],
-                        currency=curr,
-                        reference=self._ref_input.text().strip(),
-                        cashier_id=self._get_cashier_id(),
-                        payment_date=self._date_edit.date().toString("yyyy-MM-dd"),
-                        payment_type=self._payment_type,
-                        account_name=gl_account
-                    )
-                    if payment_rec and payment_rec.get("id"):
-                        saved_ledger_ids.append(payment_rec["id"])
-            
-            if saved_ledger_ids:
-                # Try to sync each to Frappe (non-blocking)
-                try:
-                    from services.payment_upload_service import post_payment_entry_to_frappe
-                    import threading
-                    for pid in saved_ledger_ids:
+                    # Sync to Frappe (non-blocking)
+                    try:
+                        from services.payment_upload_service import post_payment_entry_to_frappe
+                        import threading
                         threading.Thread(target=post_payment_entry_to_frappe, args=(pid,)).start()
-                except Exception as e:
-                    print(f"Sync trigger error: {e}")
-                
-                # Print receipt (separately per leg for now, clean and accurate)
-                try:
-                    from models.payment import print_customer_payment
-                    for pid in saved_ledger_ids:
+                    except Exception as e:
+                        print(f"Sync trigger error: {e}")
+                    
+                    # Print THIS receipt
+                    try:
+                        from models.payment import print_customer_payment
+                        from PySide6.QtCore import QCoreApplication
+                        import time
+                        
+                        QCoreApplication.processEvents()
+                        print(f"DEBUG: Printing Payment ID {pid}")
                         print_customer_payment(pid)
-                except Exception as e:
-                    print(f"Print error: {e}")
-                
+                        time.sleep(2) # Give printer time to finish
+                    except Exception as e:
+                        print(f"Print error: {e}")
+
+            if saved_ids:
                 self.accept()
             else:
-                QMessageBox.warning(self, "Error", "Failed to create payment record.")
-                
+                QMessageBox.warning(self, "Error", "Failed to create payment records.")
+            
         except Exception as e:
             print(f"Error saving payment: {e}")
             QMessageBox.critical(self, "Error", f"Failed to save payment: {e}")

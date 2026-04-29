@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from database.db import get_connection, fetchone_dict
 from models.receipt import ReceiptData, Item, MultiCurrencyDetail
-from services.printing_service import PrintingService
+from services.printing_service import printing_service
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +170,8 @@ def auto_migrate():
     _add_column("customer_payments", "last_sync_attempt", "DATETIME2 NULL")
     _add_column("customer_payments", "sync_error", "NVARCHAR(MAX) NULL")
     _add_column("customer_payments", "syncing", "INT NOT NULL DEFAULT 0")
+    _add_column("customer_payments", "amount_usd", "DECIMAL(18,2) NOT NULL DEFAULT 0")
+    _add_column("customer_payments", "exchange_rate", "DECIMAL(18,6) NOT NULL DEFAULT 1.0")
     
     # Create payment_splits table and its foreign key
     _create_payment_splits_table()
@@ -360,7 +362,8 @@ def _trigger_payment_sync(payment_id: int):
 
 def create_customer_payment(customer_id, amount, method, reference, cashier_id, 
                             currency="USD", splits=None, payment_date=None, 
-                            account_name=None, payment_type="outstanding"):
+                            account_name=None, payment_type="outstanding",
+                            amount_usd=None, exchange_rate=1.0):
     """
     Saves a customer payment to the database and reduces the customer's debt.
     Automatically triggers background sync to Frappe.
@@ -386,13 +389,15 @@ def create_customer_payment(customer_id, amount, method, reference, cashier_id,
         # 1. RECORD THE PAYMENT with splits_json and payment_type
         splits_json = json.dumps(splits) if splits else None
         
+        amt_usd_float = float(amount_usd) if amount_usd is not None else amt_float
+        
         cur.execute("""
             INSERT INTO customer_payments (
                 customer_id, amount, currency, method, account_name, 
                 reference, cashier_id, payment_date, created_at, payment_type, splits_json,
-                synced, frappe_ref, sync_attempts
+                synced, frappe_ref, sync_attempts, amount_usd, exchange_rate
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, SYSDATETIME(), ?, ?, 0, '', 0)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, SYSDATETIME(), ?, ?, 0, '', 0, ?, ?)
         """, (
             customer_id, 
             amt_float, 
@@ -403,7 +408,9 @@ def create_customer_payment(customer_id, amount, method, reference, cashier_id,
             cashier_id, 
             payment_date,
             payment_type,
-            splits_json
+            splits_json,
+            amt_usd_float,
+            float(exchange_rate)
         ))
         
         # Get the new ID
@@ -431,19 +438,19 @@ def create_customer_payment(customer_id, amount, method, reference, cashier_id,
                     split.get("exchange_rate", 1.0)
                 ))
 
-        # 3. REDUCE THE CUSTOMER'S BALANCE based on payment_type
+        # 3. REDUCE THE CUSTOMER'S BALANCE based on payment_type using amount_usd
         if payment_type == "laybye":
             cur.execute("""
                 UPDATE customers 
                 SET laybye_balance = ISNULL(laybye_balance, 0) - ?
                 WHERE id = ?
-            """, (amt_float, customer_id))
+            """, (amt_usd_float, customer_id))
         else:
             cur.execute("""
                 UPDATE customers 
                 SET outstanding_amount = ISNULL(outstanding_amount, 0) - ?
                 WHERE id = ?
-            """, (amt_float, customer_id))
+            """, (amt_usd_float, customer_id))
 
         conn.commit()
 
@@ -516,11 +523,13 @@ def print_customer_payment(payment_id: int, printer_name: str = None) -> bool:
         from models.company_defaults import get_defaults
         co = get_defaults() or {}
 
-        ps = PrintingService()
+        # Use the singleton instance instead of creating a new one
+        ps = printing_service
 
         receipt = ReceiptData()
         receipt.receiptType = "PAYMENT RECEIPT"
         receipt.doc_type    = "payment"
+        receipt.total = 0.0 # Initialize dynamic field
 
         # Company details
         receipt.companyName         = co.get("company_name", "")
@@ -532,12 +541,17 @@ def print_customer_payment(payment_id: int, printer_name: str = None) -> bool:
         receipt.vatNo               = co.get("vat_number", "")
 
         # Payment details
-        receipt.customer = payment.get("customer_name") or "Walk-in"
+        payment_native_amt = float(payment.get("amount", 0))
+        payment_usd_amt    = float(payment.get("amount_usd") or payment_native_amt)
+        payment_curr       = payment.get("currency", "USD")
+        payment_rate       = float(payment.get("exchange_rate") or 1.0)
+        
+        receipt.customerName = payment.get("customer_name") or "Walk-in"
         receipt.cashier  = str(payment.get("cashier_id") or "")
         receipt.orderNo  = f"PAY-{payment.get('id'):05d}"
         receipt.date     = str(payment.get("payment_date") or "")
-        receipt.total    = float(payment.get("amount", 0))
-        receipt.amountReceived = receipt.total
+        receipt.grandTotal    = payment_usd_amt
+        receipt.amountTendered = payment_usd_amt
         
         # Balance based on payment type
         payment_type = payment.get("payment_type", "outstanding")
@@ -546,33 +560,81 @@ def print_customer_payment(payment_id: int, printer_name: str = None) -> bool:
         else:
             receipt.balanceDue = float(payment.get("customer_outstanding") or 0.0)
 
+        # Populate paymentItems so PrintingService can detect the currency and rate
+        receipt.paymentItems = [
+            Item(
+                productName=payment.get("method", "Payment"),
+                productid=payment_curr,
+                price=payment_native_amt,
+                amount=payment_usd_amt
+            )
+        ]
+
         # Items - show splits if multiple methods used
         splits = payment.get("splits", [])
         if splits and len(splits) > 1:
             receipt.items = []
+            receipt.paymentItems = [] # Clear and rebuild if splits exist
             for split in splits:
-                receipt.items.append(Item(
-                    productName=f"Payment ({split.get('method')} - {split.get('currency')})",
+                s_curr = split.get("currency", "USD")
+                s_amt = float(split.get("amount", 0))
+                s_usd = float(split.get("amount_usd") or s_amt)
+                s_rate = float(split.get("exchange_rate") or 1.0)
+                
+                # Format without rate per user request
+                name_str = f"Payment ({split.get('method')}) {s_amt:,.2f} {s_curr}"
+                    
+                it = Item(
+                    productName=name_str,
                     qty=1,
-                    price=float(split.get("amount", 0)),
-                    amount=float(split.get("amount", 0))
+                    price=s_usd,
+                    amount=s_usd
+                )
+                receipt.items.append(it)
+                receipt.paymentItems.append(Item(
+                    productName=split.get("method", "Payment"),
+                    productid=s_curr,
+                    price=s_amt,
+                    amount=s_usd
                 ))
         else:
+            if payment_curr.upper() != "USD":
+                name_str = f"Account Payment ({payment.get('method')}) {payment_native_amt:,.2f} {payment_curr}"
+            else:
+                name_str = f"Account Payment ({payment.get('method')})"
+                
             receipt.items = [
                 Item(
-                    productName=f"Account Payment ({payment.get('method')})",
+                    productName=name_str,
                     qty=1,
-                    price=receipt.total,
-                    amount=receipt.total
+                    price=receipt.grandTotal,
+                    amount=receipt.grandTotal
                 )
             ]
         
-        receipt.multiCurrencyDetails = [
-            MultiCurrencyDetail(key=str(payment.get("currency") or "USD"), value=receipt.total)
-        ]
+        # Add to multiCurrencyDetails for totals section display
+        if payment_curr.upper() != "USD":
+             receipt.multiCurrencyDetails = [
+                MultiCurrencyDetail(key=payment_curr, value=payment_native_amt)
+            ]
+        else:
+            receipt.multiCurrencyDetails = []
+
         receipt.footer = co.get("footer_text", "Thank you for your payment!")
 
-        return ps.print_receipt(receipt, printer_name=printer_name)
+        # Set doc_type second time to be safe
+        receipt.doc_type = "payment"
+        
+        # Use total as well for backward compatibility
+        receipt.total = receipt.grandTotal
+        # Sync itemlist for any consumers that prefer it
+        receipt.itemlist = receipt.items
+
+        try:
+             return ps.print_receipt(receipt, printer_name=printer_name)
+        except Exception as pe:
+             log.error(f"Error inside ps.print_receipt: {pe}")
+             return False
 
     except Exception as e:
         log.error(f"Printing Service Error: {e}")

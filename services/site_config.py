@@ -49,3 +49,52 @@ def invalidate_cache():
     """Call after saving new sql_settings.json so next get_host() re-reads."""
     global _cached
     _cached = None
+
+# =============================================================================
+# SERVER CHANGE DETECTION & DB WIPE
+# =============================================================================
+
+_LAST_URL_FILE = Path("app_data/last_known_url.txt")
+
+def check_url_changed() -> bool:
+    """True if current api_url differs from last saved URL."""
+    current = get_host().strip().lower()
+    if not _LAST_URL_FILE.exists():
+        return False
+    try:
+        last = _LAST_URL_FILE.read_text(encoding="utf-8").strip().lower()
+        return current != last
+    except Exception:
+        return False
+
+def save_current_url():
+    """Save current api_url so check_url_changed() returns False on next run."""
+    try:
+        _LAST_URL_FILE.write_text(get_host().strip(), encoding="utf-8")
+    except Exception as e:
+        log.error("[site_config] Could not save current URL: %s", e)
+
+def wipe_database():
+    """Drops all application tables to ensure clean sync with a different server."""
+    from database.db import get_connection
+    conn = get_connection()
+    cur  = conn.cursor()
+    
+    tables = [
+        "products", "customers", "users", "sales", "sale_items", 
+        "shifts", "shift_rows", "item_prices", "payment_entries",
+        "warehouses", "cost_centers", "price_lists", "companies",
+        "company_defaults", "customer_groups", "schema_info"
+    ]
+    
+    print("[site_config] Wiping database for fresh server sync...")
+    for t in tables:
+        try:
+            cur.execute(f"IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[{t}]') AND type in (N'U')) DROP TABLE [dbo].[{t}]")
+            print(f"  - Dropped table {t}")
+        except Exception as e:
+            print(f"  ! Error dropping {t}: {e}")
+            
+    conn.commit()
+    conn.close()
+    print("[site_config] Database wipe complete.")

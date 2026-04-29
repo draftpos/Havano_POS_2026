@@ -42,7 +42,9 @@ class PrintingService:
         self.margin = 10
 
     def _create_font(self, font_name: str, size: int, style: str) -> QFont:
-        font = QFont(font_name if font_name else "Arial", size if size else 10)
+        # Prevent invalid font sizes (0 or -1) which cause invisible text or crashes
+        font_size = int(size) if size and int(size) > 0 else 10
+        font = QFont(font_name if font_name else "Arial", font_size)
         if style == "Bold":
             font.setBold(True)
         elif style == "Italic":
@@ -1262,12 +1264,73 @@ class PrintingService:
 
             painter.setFont(normal_font)
             line_h = fm.height() + 6
-            
+
+            # Small font for batch info — 1pt smaller than content font
+            small_batch_font = QFont(normal_font)
+            _bps = normal_font.pointSize()
+            if _bps > 0:
+                small_batch_font.setPointSize(max(_bps - 1, 7))
+            else:
+                small_batch_font.setPixelSize(max(normal_font.pixelSize() - 2, 7))
+
             for item in receipt.items:
                 name = item.productName or ""
                 rect = fm.boundingRect(0, 0, self.paper_width - self.margin * 2, 1000, Qt.TextWordWrap, name)
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, rect.height(), Qt.TextWordWrap, name)
                 y += rect.height() + 4
+
+                # ── Batch / expiry — look up product_batches by part_no ──
+                _part_no = (getattr(item, "productid", None) or "").strip().upper()
+                _batches = []
+                if _part_no:
+                    try:
+                        from database.db import get_connection
+                        _bc = get_connection()
+                        _bcur = _bc.cursor()
+                        _bcur.execute(
+                            """
+                            SELECT pb.batch_no, pb.expiry_date
+                            FROM product_batches pb
+                            JOIN products p ON pb.product_id = p.id
+                            WHERE UPPER(p.part_no) = ?
+                              AND (pb.qty IS NULL OR pb.qty > 0)
+                            ORDER BY pb.expiry_date ASC
+                            """,
+                            (_part_no,),
+                        )
+                        _batches = _bcur.fetchall() or []
+                        _bc.close()
+                    except Exception as _be:
+                        print(f"[Print] batch lookup failed for {_part_no}: {_be}")
+
+                if _batches:
+                    painter.setFont(small_batch_font)
+                    _bfm = painter.fontMetrics()
+                    _blh = _bfm.height() + 2
+                    for _row in _batches:
+                        _bn  = (str(_row[0] or "")).strip()
+                        _exp = _row[1]
+                        _parts = []
+                        if _bn:
+                            _parts.append(f"Batch: {_bn}")
+                        if _exp:
+                            try:
+                                from datetime import datetime as _dt
+                                _exp_str = _exp.isoformat() if hasattr(_exp, "isoformat") else str(_exp)
+                                _exp_fmt = _dt.strptime(_exp_str[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+                            except Exception:
+                                _exp_fmt = str(_exp)
+                            _parts.append(f"Exp: {_exp_fmt}")
+                        if _parts:
+                            painter.drawText(
+                                self.margin + 4, y,
+                                self.paper_width - self.margin * 2 - 4, _blh,
+                                Qt.AlignLeft, "  ".join(_parts),
+                            )
+                            y += _blh + 2
+                    painter.setFont(normal_font)
+                # ─────────────────────────────────────────────────────────
+
                 painter.drawText(QTY_X,   y, max_qty_w,   line_h, Qt.AlignCenter, f"{item.qty:.0f}")
                 painter.drawText(PRICE_X, y, max_price_w, line_h, Qt.AlignRight,  f"{item.price:,.2f}")
                 painter.drawText(TOTAL_X, y, max_total_w, line_h, Qt.AlignRight,  f"{item.amount:,.2f}")
@@ -1487,14 +1550,12 @@ class PrintingService:
                 if not info.isNull():
                     printer.setPrinterName(printer_name)
 
-            printer.setPageSize(QPageSize(QSizeF(100, 1000), QPageSize.Millimeter))
+            printer.setPageSize(QPageSize(QSizeF(80, 2000), QPageSize.Millimeter))
             printer.setFullPage(True)
             printer.setPageMargins(QMarginsF(0, 0, 0, 0))
 
             painter = QPainter(printer)
-            rect = printer.pageRect(QPrinter.DevicePixel)
-            painter.translate(0, -rect.top())
-            y = 0
+            y = 10
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
             bold_font   = self._make_bold(normal_font)
@@ -1631,10 +1692,15 @@ class PrintingService:
                 getattr(receipt, "paymentItems", None) or getattr(receipt, "itemlist", [])
             )
 
-            def draw_pay_total(label: str, value: float, use_bold: bool = False):
+            def draw_pay_total(label: str, value: float, use_bold: bool = False, force_usd: bool = False):
                 nonlocal y
-                _cur = (pay_cur or receipt.currency or "USD")
-                _val = value * (pay_rate if pay_rate > 0 else 1.0)
+                if force_usd:
+                    _cur = "USD"
+                    _val = value
+                else:
+                    _cur = (pay_cur or receipt.currency or "USD")
+                    _val = value * (pay_rate if pay_rate > 0 else 1.0)
+                
                 text = f"{_cur} {_val:,.2f}"
                 w = fm.horizontalAdvance(text)
                 painter.setFont(bold_font if use_bold else normal_font)
@@ -1646,7 +1712,7 @@ class PrintingService:
             y += 4
 
             balance = float(getattr(receipt, "balanceDue", 0.0) or 0.0)
-            draw_pay_total("Customer Balance", balance)
+            draw_pay_total("Customer Balance", balance, force_usd=True)
             y += 10
 
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)

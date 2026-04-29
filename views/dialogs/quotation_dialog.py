@@ -219,7 +219,7 @@ class QuotationDialog(QDialog):
 
         self.date_filter = QComboBox()
         self.date_filter.addItems(["All", "Today", "Yesterday", "This Week", "This Month", "Custom"])
-        self.date_filter.setCurrentText("Today")
+        self.date_filter.setCurrentText("All")
         self.date_filter.setFixedWidth(130)
         self.date_filter.currentTextChanged.connect(self._on_date_filter_changed)
         toolbar_layout.addWidget(self.date_filter)
@@ -1010,6 +1010,9 @@ class QuotationDialog(QDialog):
                 f"  Errors             : {stats.get('errors', 0)}\n"
                 f"  Pages fetched      : {stats.get('pages', 0)}"
             )
+            # Switch date filter to 'All' so the user actually sees the newly pulled quotations
+            # (which might have older transaction dates than 'Today')
+            self.date_filter.setCurrentText("All")
             self._load_quotations()
 
         self._ext_thread.wait(3000)

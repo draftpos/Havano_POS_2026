@@ -14,7 +14,7 @@ API_BASE_URL    = _site_get_host()
 # on anyone without read perm on that doctype.
 LOGIN_ENDPOINT  = f"{_site_get_host()}/api/method/saas_api.www.api.login"
 TIMEZONE        = "Africa/Harare"
-REQUEST_TIMEOUT = 8
+REQUEST_TIMEOUT = 60
 
 _session = {
     "token":          None,
@@ -30,6 +30,20 @@ _session = {
 # =============================================================================
 
 def login(username: str, password: str) -> dict:
+    # 1. Try offline first (fast, reliable)
+    offline = _try_offline_login(username, password)
+
+    if offline["success"]:
+        _session["source"] = "offline"
+        user = offline["user"]
+        print(f"[auth] ✅ Offline login OK (Primary) — {user['username']} ({user['role']})")
+        return {"success": True, "user": user, "source": "offline", "sync_result": None}
+
+    # 2. Offline failed (wrong password or user not found), try online
+    # We try online even if offline "failed" because the password might have
+    # been changed on the server but not yet synced locally.
+    print(f"[auth] ⚠️ Offline failed/missing, trying online (Extended timeout)...")
+    
     online = _try_online_login(username, password)
 
     if online["success"]:
@@ -81,16 +95,11 @@ def login(username: str, password: str) -> dict:
             existing["server_vat_enabled"]      = _str(user_rights.get("is_additional_tax_enabled"))
             existing["server_taxes_and_charges"]= _str(user_block.get("taxes_and_charges") or user_rights.get("taxes_and_charges"))
             existing["server_api_host"]         = _str(raw.get("api_host") or API_BASE_URL)
-            # Default customer bound to this user in ERPNext (User Permission,
-            # is_default=1). Saved as the customer's *name* — the POS resolves
-            # it to a full local Customer row at MainWindow init.
             existing["server_default_customer"] = _str(user_block.get("default_customer"))
             save_defaults(existing)
             print("[auth] ✅ Server defaults saved.")
         except Exception as e:
             print(f"[auth] ⚠️  Could not save server defaults: {e}")
-
-
 
         sync_result = None
         if online.get("raw_data"):
@@ -104,19 +113,10 @@ def login(username: str, password: str) -> dict:
 
         return {"success": True, "user": user, "source": "online", "sync_result": sync_result}
 
-    if online.get("auth_failed"):
-        return {"success": False, "error": online["error"], "source": "online"}
+    # If both offline and online fail
+    error_msg = online.get("error", "Wrong username or password.")
+    return {"success": False, "error": error_msg, "source": "online" if online.get("auth_failed") else "offline"}
 
-    print(f"[auth] ⚠️  Online unavailable ({online['error']}), trying offline...")
-    offline = _try_offline_login(username, password)
-
-    if offline["success"]:
-        _session["source"] = "offline"
-        user = offline["user"]
-        print(f"[auth] ✅ Offline login OK — {user['username']} ({user['role']})")
-        return {"success": True, "user": user, "source": "offline", "sync_result": None}
-
-    return {"success": False, "error": offline["error"], "source": "offline"}
 
 
 def get_session() -> dict:

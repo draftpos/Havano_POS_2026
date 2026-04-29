@@ -1027,6 +1027,33 @@ def _get_exchange_rate(from_currency: str, to_currency: str,
     return 1.0
 
 
+def _get_batch_for_item(item_code: str) -> str:
+    """Fetch the oldest valid batch_no for an item_code."""
+    if not item_code:
+        return ""
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT TOP 1 pb.batch_no
+            FROM product_batches pb
+            JOIN products p ON pb.product_id = p.id
+            WHERE UPPER(p.part_no) = UPPER(?)
+              AND (pb.qty IS NULL OR pb.qty > 0)
+            ORDER BY pb.expiry_date ASC
+            """,
+            (item_code,)
+        )
+        row = cur.fetchone()
+        conn.close()
+        return str(row[0]).strip() if row and row[0] else ""
+    except Exception as e:
+        log.debug("Batch lookup failed for %s: %s", item_code, e)
+        return ""
+
+
 def _resolve_zwd_per_usd(
     sale: dict,
     api_key: str,
@@ -1260,6 +1287,18 @@ def _build_payload_usd(sale: dict, items: list[dict], defaults: dict) -> dict:
             "rate":      rate,
             "uom":       (it.get("uom") or "Nos"),
         }
+        
+        batch_no = str(it.get("batch_no") or "").strip()
+        if not batch_no:
+            batch_no = _get_batch_for_item(item_code)
+            
+        if batch_no:
+            row["batch_no"] = batch_no
+            
+        serial_no = str(it.get("serial_no") or "").strip()
+        if serial_no:
+            row["serial_no"] = serial_no
+
         if cost_center:
             row["cost_center"] = cost_center
 
@@ -1342,6 +1381,18 @@ def _build_payload_local_currency(
             "rate":      rate,
             "uom":       (it.get("uom") or "Nos"),
         }
+        
+        batch_no = str(it.get("batch_no") or "").strip()
+        if not batch_no:
+            batch_no = _get_batch_for_item(item_code)
+            
+        if batch_no:
+            row["batch_no"] = batch_no
+            
+        serial_no = str(it.get("serial_no") or "").strip()
+        if serial_no:
+            row["serial_no"] = serial_no
+
         if cost_center:
             row["cost_center"] = cost_center
 
@@ -1436,6 +1487,18 @@ def _build_payload_mixed_to_usd(
             "rate":      rate_usd,
             "uom":       (it.get("uom") or "Nos"),
         }
+        
+        batch_no = str(it.get("batch_no") or "").strip()
+        if not batch_no:
+            batch_no = _get_batch_for_item(item_code)
+            
+        if batch_no:
+            row["batch_no"] = batch_no
+            
+        serial_no = str(it.get("serial_no") or "").strip()
+        if serial_no:
+            row["serial_no"] = serial_no
+
         if cost_center:
             row["cost_center"] = cost_center
 
@@ -1619,6 +1682,7 @@ def _push_sale(sale: dict, api_key: str, api_secret: str,
                 "Content-Type":  "application/json",
                 "Accept":        "application/json",
                 "Authorization": f"token {api_key}:{api_secret}",
+                "Idempotency-Key": f"pos_sale_{inv_no}_{i}",
             },
         )
 

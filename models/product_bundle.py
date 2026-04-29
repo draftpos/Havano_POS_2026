@@ -8,6 +8,44 @@ def get_all_bundles():
     conn.close()
     return bundles
 
+def get_bundle_prices_map():
+    """Returns a map of {bundle_name: total_price} summed from bundle_items"""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT pb.name, SUM(bi.quantity * bi.rate) as total_price
+            FROM product_bundles pb
+            JOIN bundle_items bi ON pb.id = bi.bundle_id
+            GROUP BY pb.name
+        """)
+        rows = cur.fetchall()
+        return {str(name).upper().strip(): float(price or 0) for name, price in rows}
+    except Exception as e:
+        print(f"[Bundle] Error fetching bundle prices map: {e}")
+        return {}
+    finally:
+        conn.close()
+
+def get_all_bundles_with_items() -> dict[str, list[dict]]:
+    """Returns {bundle_name: [{'item_code': ..., 'quantity': ..., 'rate': ...}, ...]}"""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, name FROM product_bundles")
+        bundles = cur.fetchall()
+        result = {}
+        for bid, bname in bundles:
+            cur.execute("SELECT item_code, quantity, rate FROM bundle_items WHERE bundle_id = ?", (bid,))
+            items = fetchall_dicts(cur)
+            result[str(bname).upper().strip()] = items
+        return result
+    except Exception as e:
+        print(f"[Bundle] Error fetching bundles with items: {e}")
+        return {}
+    finally:
+        conn.close()
+
 def get_bundle_by_id(bundle_id):
     conn = get_connection()
     cur = conn.cursor()

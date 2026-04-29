@@ -117,6 +117,74 @@ class PinDots(QWidget):
 # =============================================================================
 # Main dialog
 # =============================================================================
+# =============================================================================
+# Catchy Error Dialog
+# =============================================================================
+class CatchyErrorDialog(QDialog):
+    def __init__(self, title, message, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(380, 300)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        card = QFrame()
+        card.setObjectName("errorCard")
+        card.setStyleSheet(f"""
+            QFrame#errorCard {{
+                background-color: #1e1e2e;
+                border: 2px solid {DANGER};
+                border-radius: 15px;
+            }}
+        """)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(24, 24, 24, 24)
+        
+        # Icon + Title
+        header = QHBoxLayout()
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(qta.icon("fa5s.exclamation-triangle", color=DANGER).pixmap(24, 24))
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(f"color: {WHITE}; font-size: 16px; font-weight: bold; margin-left: 10px;")
+        header.addWidget(icon_lbl)
+        header.addWidget(title_lbl)
+        header.addStretch()
+        card_layout.addLayout(header)
+        
+        # Message
+        msg_lbl = QLabel(message)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setStyleSheet(f"color: {MID}; font-size: 13px; line-height: 18px;")
+        card_layout.addWidget(msg_lbl, 1)
+        
+        # OK Button
+        card_layout.addStretch()
+        btn = QPushButton("Understood")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setMinimumHeight(45)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {DANGER};
+                color: {WHITE};
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 14px;
+            }}
+            QPushButton:hover {{ background-color: #e74c3c; }}
+            QPushButton:pressed {{ background-color: #c0392b; }}
+        """)
+        btn.clicked.connect(self.accept)
+        card_layout.addWidget(btn)
+        
+        layout.addWidget(card)
+
+    def paintEvent(self, event):
+        # Shadow / Blur effect simulation via border-radius in CSS
+        super().paintEvent(event)
+
+
 class LoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -772,6 +840,7 @@ class LoginDialog(QDialog):
             return
 
         # ── Warehouse / Company guard (online logins only) ────────────────────
+        # Re-enabled for all users (including admin) as requested.
         if source == "online":
             warehouse = (user.get("warehouse") or "").strip()
             company   = (user.get("company") or "").strip()
@@ -784,18 +853,52 @@ class LoginDialog(QDialog):
 
             if missing:
                 missing_str = " and ".join(missing)
-                self._show_error(
-                    f"Login blocked: no {missing_str} assigned to your account. "
-                    f"Contact your administrator to set your {missing_str} in ERPNext."
+                print(f"[login] ❌ BLOCKED: User '{user.get('username')}' missing {missing_str}")
+                
+                # Show explicit custom catchy popup
+                dlg = CatchyErrorDialog(
+                    "Configuration Missing",
+                    f"Your account is missing a {missing_str} assignment. Please contact your administrator to update your account configuration settings.",
+                    self
                 )
+                dlg.exec()
+                
+                self._show_error(f"Missing {missing_str}")
+                if hasattr(self, "_email_btn"):
+                    self._set_btn_error(self._email_btn)
                 self._shake()
                 self._pin_clear()
                 self.password_input.clear()
                 return
 
-        if source in ("online", "offline") and not (user.get("pin") or "").strip():
-            self._prompt_set_pin(user, source)
-            return
+        # ── PIN setup check ───────────────────────────────────────────────────
+        # First, check if the local DB already has a PIN for this user.
+        # This prevents prompting for PIN setup every time someone logs in with Email/Password.
+        if not (user.get("pin") or "").strip():
+            try:
+                from database.db import get_connection
+                email       = (user.get("email") or "").strip()
+                frappe_name = (user.get("name") or user.get("frappe_user") or "").strip()
+                username    = (user.get("username") or "").strip()
+                
+                conn = get_connection()
+                cur  = conn.cursor()
+                cur.execute(
+                    "SELECT pin FROM users WHERE (email=? AND email<>'') OR (frappe_user=? AND frappe_user<>'') OR username=?",
+                    (email, frappe_name, username)
+                )
+                row = cur.fetchone()
+                conn.close()
+                if row and row[0]:
+                    user["pin"] = row[0]
+                    print(f"[login] Found existing local PIN for {username}")
+            except Exception as e:
+                print(f"[login] ⚠️  Error checking local PIN: {e}")
+
+        if source in ("online", "offline"):
+            if not (user.get("pin") or "").strip():
+                self._prompt_set_pin(user, source)
+                return
 
         self._accept_user(user, source)
 
@@ -1032,13 +1135,26 @@ class LoginDialog(QDialog):
                         user_id = row[0]
 
                 if user_id:
-                    set_user_pin(user_id, pin)
-                    self._pin_setup_user["pin"] = pin
-                    print(f"[login] ✅ PIN saved for user id={user_id}")
+                    if set_user_pin(user_id, pin):
+                        self._pin_setup_user["pin"] = pin
+                        print(f"[login] ✅ PIN saved for user id={user_id}")
+                    else:
+                        # Uniqueness failure or invalid PIN
+                        print(f"[login] ❌ set_user_pin failed (likely duplicate PIN)")
+                        self._pin_setup_buf   = ""
+                        self._pin_setup_step  = "enter"
+                        self._pin_setup_first = ""
+                        self._pin_setup_dots.set_filled(0)
+                        self._pin_setup_title.setText("Choose a Different PIN")
+                        self._pin_setup_sub.setText("That PIN is already used by another user.")
+                        self._pin_setup_err.setText("PIN already in use. Please try another.")
+                        self._pin_setup_err.show()
+                        return
                 else:
                     print(f"[login] ⚠️  Could not find local user to save PIN")
             except Exception as e:
                 print(f"[login] ⚠️  Could not save PIN: {e}")
+        
         overlay.hide()
         overlay.deleteLater()
         self._accept_user(self._pin_setup_user, self._pin_setup_source)

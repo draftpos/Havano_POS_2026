@@ -468,10 +468,10 @@ class SqlSettingsDialog(QDialog):
             )
             return
 
+        # Step 3: Success message and close setup (don't exit app)
         QMessageBox.information(
             self, "Done",
             f"Database '{db_name}' is ready!\n\n"
             f"Default login:  admin / admin123"
         )
         self.accept()
-        sys.exit(0)

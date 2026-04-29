@@ -13,6 +13,8 @@
 #     price: float = 0.0
 #     amount: float = 0.0
 #     tax_amount: float = 0.0
+#     batch_no: str = ""
+#     expiry_date: str = ""
 
 
 # @dataclass
@@ -124,6 +126,8 @@ class Item:
     price: float = 0.0
     amount: float = 0.0
     tax_amount: float = 0.0
+    batch_no: str = ""
+    expiry_date: str = ""
 
 
 @dataclass

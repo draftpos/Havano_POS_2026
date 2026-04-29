@@ -69,8 +69,8 @@ def authenticate(username: str, password: str) -> dict | None:
     cur  = conn.cursor()
     _ensure_perm_cols(cur, conn)
     cur.execute(
-        "SELECT id, password, pin FROM users WHERE username = ?",
-        (username,)
+        "SELECT id, password, pin FROM users WHERE (username = ? OR email = ?) AND active = 1",
+        (username.strip(), username.strip())
     )
     row = fetchone_dict(cur)
     conn.close()
@@ -224,13 +224,21 @@ def update_user_password(user_id: int, new_password: str) -> bool:
 
 
 def set_user_pin(user_id: int, pin: str) -> bool:
-    """Save or update a user's PIN by their local DB id."""
+    """Save or update a user's PIN by their local DB id. Enforces uniqueness."""
     if not pin or not pin.strip().isdigit():
         return False
+    
+    pin = pin.strip()
     conn = get_connection()
     cur  = conn.cursor()
     try:
-        cur.execute("UPDATE users SET pin = ? WHERE id = ?", (pin.strip(), user_id))
+        # Check if another user already has this PIN
+        cur.execute("SELECT id FROM users WHERE pin = ? AND id <> ?", (pin, user_id))
+        if cur.fetchone():
+            print(f"[user] PIN {pin} is already in use by another account.")
+            return False
+
+        cur.execute("UPDATE users SET pin = ? WHERE id = ?", (pin, user_id))
         conn.commit()
         return cur.rowcount > 0
     finally:
@@ -238,13 +246,13 @@ def set_user_pin(user_id: int, pin: str) -> bool:
 
 
 def upsert_frappe_user(u: dict) -> dict | None:
-    """Insert or update a user coming from Frappe sync."""
+    """Insert or update a user coming from Frappe sync. IGNORING the server PIN."""
     frappe_name = (u.get("name")        or "").strip()
     email       = (u.get("email")       or frappe_name).strip()
     full_name   = (u.get("full_name")   or "").strip()
     first_name  = (u.get("first_name")  or "").strip()
     last_name   = (u.get("last_name")   or "").strip()
-    pin         = (u.get("pin")         or "").strip()
+    # IGNORE 'pin' from 'u' as requested — PIN is local-only now.
     company     = (u.get("company")     or "").strip()
     cost_center = (u.get("cost_center") or "").strip()
     warehouse   = (u.get("warehouse")   or "").strip()
@@ -267,38 +275,27 @@ def upsert_frappe_user(u: dict) -> dict | None:
     existing = cur.fetchone()
 
     if existing:
-        # Never wipe a locally-set PIN with an empty value from Frappe.
-        # Only update pin if Frappe actually sent one.
-        if pin:
-            cur.execute("""
-                UPDATE users SET
-                    username=?, role=?, email=?, full_name=?, first_name=?,
-                    last_name=?, pin=?, company=?, cost_center=?, warehouse=?,
-                    synced_from_frappe=1
-                WHERE frappe_user=?
-            """, (username, role, email, full_name, first_name,
-                  last_name, pin, company, cost_center, warehouse, frappe_name))
-        else:
-            # Preserve the existing local PIN — do not overwrite with empty
-            cur.execute("""
-                UPDATE users SET
-                    username=?, role=?, email=?, full_name=?, first_name=?,
-                    last_name=?, company=?, cost_center=?, warehouse=?,
-                    synced_from_frappe=1
-                WHERE frappe_user=?
-            """, (username, role, email, full_name, first_name,
-                  last_name, company, cost_center, warehouse, frappe_name))
+        # Update everything EXCEPT the 'pin'. Preserve local-only PIN.
+        cur.execute("""
+            UPDATE users SET
+                username=?, role=?, email=?, full_name=?, first_name=?,
+                last_name=?, company=?, cost_center=?, warehouse=?,
+                synced_from_frappe=1
+            WHERE frappe_user=?
+        """, (username, role, email, full_name, first_name,
+                last_name, company, cost_center, warehouse, frappe_name))
         conn.commit()
         user_id = existing[0]
     else:
+        # Create user WITHOUT a PIN (will prompt to set one during login)
         cur.execute("""
             INSERT INTO users
                 (username, password, role, email, full_name, first_name, last_name,
                  pin, company, cost_center, warehouse, frappe_user, synced_from_frappe)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-        """, (username, _hash(pin) if pin else _hash("changeme"),
+            VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, 1)
+        """, (username, _hash("changeme"), # Default password
               role, email, full_name, first_name, last_name,
-              pin, company, cost_center, warehouse, frappe_name))
+              company, cost_center, warehouse, frappe_name))
         conn.commit()
         cur.execute("SELECT id FROM users WHERE frappe_user=?", (frappe_name,))
         row = cur.fetchone()

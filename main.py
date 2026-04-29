@@ -146,8 +146,8 @@ if __name__ == "__main__":
             print("[startup] Missing or invalid SQL settings. Prompting user...")
             dlg = SqlSettingsDialog()
             if dlg.exec() != QDialog.Accepted:
-                print("[startup] Setup cancelled by user. Exiting.")
-                sys.exit(0)
+                print("[startup] Setup cancelled. Retrying connection check...")
+                continue
             # After accepting dialog, loop back to verify connection
             continue
         break
@@ -175,8 +175,7 @@ if __name__ == "__main__":
                 save_current_url()
                 print("[startup] Database wiped successfully.")
             else:
-                print("[startup] User declined DB wipe. Exiting.")
-                sys.exit(0)
+                print("[startup] User declined DB wipe. Proceeding at own risk.")
         else:
             save_current_url()
     except Exception as e:

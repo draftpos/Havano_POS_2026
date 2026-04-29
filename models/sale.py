@@ -1005,7 +1005,9 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
                 qty=float(it["qty"]),
                 price=float(it["price"]),
                 amount=float(it["total"]),
-                tax_amount=float(it.get("tax_amount", 0))
+                tax_amount=float(it.get("tax_amount", 0)),
+                batch_no=it.get("batch_no") or "",
+                expiry_date=it.get("expiry_date") or "",
             ))
 
         for printer_name in active_printers:
@@ -1701,7 +1703,9 @@ def prepare_receipt_data(sale: dict) -> ReceiptData:
             qty=float(it.get("qty", 1)),
             price=float(it.get("price", 0)),
             amount=float(it.get("total", 0)),
-            tax_amount=float(it.get("tax_amount", 0))
+            tax_amount=float(it.get("tax_amount", 0)),
+            batch_no=it.get("batch_no") or "",
+            expiry_date=it.get("expiry_date") or "",
         ))
 
     currency    = (sale.get("currency") or "USD").strip().upper()
