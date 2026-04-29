@@ -1151,7 +1151,10 @@ class PaymentDialog(QDialog):
             self.accepted_sale_id = sale.get("id")
             self.accepted_sale = sale
             print(f"[PaymentDialog] Sale created with ID: {self.accepted_sale_id}")
-            
+            if sale and sale.get("items"):
+                from models.sale import print_s
+                print(f"[PaymentDialog] Printing kitchen orders for sale {self.accepted_sale_id}")
+                print_s(sale)  # This will print kitchen orders without reprinting the receipt
             # ✅ Record the transaction hash in database
             try:
                 from models.sale import record_transaction_hash

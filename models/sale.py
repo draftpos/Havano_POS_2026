@@ -328,7 +328,6 @@ def get_pending_fiscalization_sales() -> list[dict]:
     conn.close()
     return rows
 
-
 # =============================================================================
 # WRITE - CREATE INVOICE
 # =============================================================================
@@ -353,7 +352,7 @@ def create_sale(
     change_amount:     float = None,
     is_on_account:     bool  = False,
     skip_stock:        bool  = False,
-    skip_print:        bool  = True,
+    skip_print:        bool  = False,
     shift_id:          int   = None,
     transaction_id:    str   = None,
     idempotency_key:   str   = None,
@@ -633,6 +632,13 @@ def create_sale(
             else:
                 order_flags = order_map.get(part_no, (0, 0, 0, 0, 0, 0))
 
+            # 🔥🔥🔥 TEST CODE - FORCE ORDER 1 FOR TESTING 🔥🔥🔥
+            # Remove this block after testing
+            # print(f"[DEBUG] Original order_flags for '{item.get('product_name')}': {order_flags}")
+            # order_flags = (1, 0, 0, 0, 0, 0)  # Force ALL items to Order 1
+            # print(f"[DEBUG] FORCED order_flags to: {order_flags}")
+            # # 🔥🔥🔥 END TEST CODE 🔥🔥5555🔥
+
             cur.execute("""
                 INSERT INTO sale_items (
                     sale_id, part_no, product_name, qty, price,
@@ -686,6 +692,7 @@ def create_sale(
         _trigger_fiscalization_background(sale_id)
 
         if not skip_print:
+            print(f"[DEBUG] create_sale: Starting print thread because skip_print={skip_print}")
             _sale_snap  = dict(sale)
             _items_snap = list(items)
             def _do_print(
@@ -695,10 +702,11 @@ def create_sale(
                 _cust=customer_name, _cc=customer_contact, _f=footer
             ):
                 _print_receipt(_s, _i, _t, _c, _cur, _k, _m, _cn, _cust, _cc, _f)
-                print_kitchen_orders(_s)
-
+                print_s(_s)  # ← FIXED: was print_kitchen_orders(_s)
+            
             threading.Thread(target=_do_print, daemon=True).start()
-
+        else:
+            print(f"[DEBUG] create_sale: SKIPPING print because skip_print={skip_print}")
         return sale
 
     except Exception as e:
@@ -1440,21 +1448,65 @@ def _get_active_printers() -> list[str]:
 # =============================================================================
 # KITCHEN ORDER PRINTING
 # =============================================================================
-
 def print_s(sale: dict):
     """Print separate KOT for every active Order 1–6 station.
     Gated on hardware_settings.kitchen_printing_enabled — when off this is a
     no-op so non-restaurant tills don't spam empty KOTs."""
     try:
+        from pathlib import Path
+        import json
+        from models.receipt import ReceiptData, Item
+        from services.printing_service import PrintingService
+        
+        print(f"\n{'='*60}")
+        print(f"[KITCHEN DEBUG] print_s() called for invoice: {sale.get('invoice_no', 'N/A')}")
+        print(f"[KITCHEN DEBUG] Sale has {len(sale.get('items', []))} items")
+        
+        # Debug: Print all items and their order flags
+        for idx, it in enumerate(sale.get("items", [])):
+            print(f"[KITCHEN DEBUG]   Item {idx+1}: {it.get('product_name')}")
+            print(f"[KITCHEN DEBUG]     order_1={it.get('order_1', 0)}, order_2={it.get('order_2', 0)}, order_3={it.get('order_3', 0)}")
+            print(f"[KITCHEN DEBUG]     order_4={it.get('order_4', 0)}, order_5={it.get('order_5', 0)}, order_6={it.get('order_6', 0)}")
+        
+        # Check hardware settings file
         hw_file = Path("app_data/hardware_settings.json")
+        print(f"[KITCHEN DEBUG] Looking for hardware file at: {hw_file.absolute()}")
+        print(f"[KITCHEN DEBUG] File exists: {hw_file.exists()}")
+        
+        if not hw_file.exists():
+            print(f"[KITCHEN DEBUG] ❌ hardware_settings.json NOT FOUND at {hw_file.absolute()}")
+            print(f"[KITCHEN DEBUG] Current working directory: {Path.cwd()}")
+            return
+        
         with open(hw_file, "r", encoding="utf-8") as f:
             hw = json.load(f)
-
-        if not bool(hw.get("kitchen_printing_enabled", False)):
+        
+        print(f"[KITCHEN DEBUG] Loaded HW settings: {json.dumps(hw, indent=2)}")
+        
+        kitchen_enabled = True
+        print(f"[KITCHEN DEBUG] kitchen_printing_enabled = {kitchen_enabled}")
+        
+        if not kitchen_enabled:
+            print(f"[KITCHEN DEBUG] ❌ Kitchen printing disabled in settings - exiting")
             return
 
         orders_config = hw.get("orders", {})
+        print(f"[KITCHEN DEBUG] Orders config: {orders_config}")
+        
+        any_active = False
+        for order_key in ["Order 1", "Order 2", "Order 3", "Order 4", "Order 5", "Order 6"]:
+            config = orders_config.get(order_key, {})
+            is_active = config.get("active", False)
+            printer = config.get("printer", "(None)")
+            print(f"[KITCHEN DEBUG] {order_key}: active={is_active}, printer={printer}")
+            if is_active and printer != "(None)":
+                any_active = True
+        
+        if not any_active:
+            print(f"[KITCHEN DEBUG] ❌ No active order stations with printers configured")
+            return
 
+        printed_count = 0
         for order_key in ["Order 1", "Order 2", "Order 3", "Order 4", "Order 5", "Order 6"]:
             config = orders_config.get(order_key, {})
             if not config.get("active", False):
@@ -1465,11 +1517,15 @@ def print_s(sale: dict):
                 continue
 
             order_field = order_key.lower().replace(" ", "_")
+            print(f"[KITCHEN DEBUG] Checking for {order_key} (field: {order_field})")
+            
             order_items = [it for it in sale.get("items", []) if it.get(order_field)]
-
+            print(f"[KITCHEN DEBUG]   Found {len(order_items)} items for {order_key}: {[it.get('product_name') for it in order_items]}")
+            
             if not order_items:
                 continue
 
+            print(f"[KITCHEN DEBUG] Creating KOT receipt for {order_key} with {len(order_items)} items")
             kot_receipt = ReceiptData(
                 invoiceNo=sale["invoice_no"],
                 KOT=order_key,
@@ -1481,16 +1537,22 @@ def print_s(sale: dict):
                     productid=it.get("part_no", "")
                 ) for it in order_items]
             )
-
+            
+            print(f"[KITCHEN DEBUG] Sending to printer: {printer_name}")
             success = PrintingService().print_kitchen_order(kot_receipt, printer_name=printer_name)
             if success:
                 print(f"✅ KOT printed for {order_key} → {printer_name}")
+                printed_count += 1
             else:
-                print(f"⚠️ KOT failed for {order_key}")
+                print(f"⚠️ KOT failed for {order_key} → {printer_name}")
+        
+        print(f"[KITCHEN DEBUG] Total KOTs printed: {printed_count}")
+        print(f"{'='*60}\n")
 
     except Exception as e:
         print(f"❌ Kitchen Order printing error: {e}")
-
+        import traceback
+        traceback.print_exc()
 
 # =============================================================================
 # TRANSACTION HASH HELPERS

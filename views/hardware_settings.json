@@ -1,5 +1,6 @@
 {
   "main_printer": "XP-80C",
+  "kitchen_printing_enabled": true,
   "orders": {
     "Order 1": {
       "active": true,
