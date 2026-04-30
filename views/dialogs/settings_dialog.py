@@ -923,6 +923,217 @@ class HardwareDialog(_Base):
      
 
 # =============================================================================
+# MaintenanceDialog — Operational / Print behaviour toggles
+# Lives under Settings → HARDWARE & PRINTING, replaces the old printer-setup
+# placeholder the user referenced.
+# =============================================================================
+class MaintenanceDialog(QDialog):
+    """
+    Maintenance settings dialog.
+
+    Current toggles
+    ───────────────
+    • allow_loaded_quotation_qty_change
+        When ON  → cashier can freely edit the Qty of pharmacy items that were
+                   loaded from a quotation (same behaviour as non-pharmacy rows).
+        When OFF → Qty on loaded pharmacy quotation rows stays locked (default).
+
+    • print_batch_on_receipt
+        When ON  → batch number + expiry date are printed under each line item
+                   on the customer receipt (current behaviour).
+        When OFF → batch / expiry lines are suppressed on the receipt.
+    """
+
+    _RULES = [
+        (
+            "allow_loaded_quotation_qty_change",
+            "ALLOW QTY CHANGE ON LOADED QUOTATION",
+            "Let cashiers edit the quantity of pharmacy items\n"
+            "after a quotation has been loaded into the POS cart.",
+        ),
+        (
+            "print_batch_on_receipt",
+            "PRINT BATCH NUMBERS ON RECEIPT",
+            "Include batch number and expiry date lines beneath\n"
+            "each pharmacy item on the printed customer receipt.",
+        ),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._toggles: dict = {}
+        self.setFixedSize(520, 300)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setStyleSheet("QDialog { background:#ffffff; border:1px solid #0d1f3c; }")
+        self._build()
+        self._load()
+
+    # ── UI ───────────────────────────────────────────────────────────────────
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Header
+        header = QWidget()
+        header.setFixedHeight(55)
+        header.setStyleSheet("background:#f8fafc; border-bottom:1px solid #d1d9e6;")
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(20, 0, 15, 0)
+
+        title = QLabel("MAINTENANCE SETTINGS")
+        title.setStyleSheet(
+            "font-size:11px; font-weight:bold; color:#0d1f3c; letter-spacing:1.5px;"
+        )
+
+        self._save_btn = QPushButton("SAVE")
+        self._save_btn.setFixedSize(90, 32)
+        self._save_btn.setStyleSheet(
+            "QPushButton { background:#0d1f3c; color:white; border-radius:4px;"
+            "  font-weight:bold; font-size:10px; border:none; }"
+            "QPushButton:hover { background:#1a5fb4; }"
+            "QPushButton:disabled { background:#ffffff; color:#10b981;"
+            "  border:1px solid #10b981; }"
+        )
+        self._save_btn.clicked.connect(self._save)
+
+        close_btn = QPushButton("CLOSE")
+        close_btn.setFixedSize(70, 32)
+        close_btn.setStyleSheet(
+            "QPushButton { background:transparent; color:#0d1f3c; border:1px solid #0d1f3c;"
+            "  border-radius:4px; font-weight:bold; font-size:10px; }"
+            "QPushButton:hover { background:#eef2f7; }"
+        )
+        close_btn.clicked.connect(self.reject)
+
+        hl.addWidget(title)
+        hl.addStretch()
+        hl.addWidget(self._save_btn)
+        hl.addSpacing(6)
+        hl.addWidget(close_btn)
+        root.addWidget(header)
+
+        # Body
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(30, 10, 30, 16)
+        bl.setSpacing(0)
+
+        for key, lbl, desc in self._RULES:
+            bl.addWidget(self._rule_row(key, lbl, desc))
+
+        bl.addStretch()
+
+        self._status_lbl = QLabel("● SYSTEM CONFIGURATION")
+        self._status_lbl.setStyleSheet(
+            "color:#0d1f3c; font-size:9px; font-weight:bold; opacity:0.6;"
+        )
+        bl.addWidget(self._status_lbl)
+        root.addWidget(body)
+
+    def _rule_row(self, key: str, label: str, desc: str) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 12, 0, 12)
+
+        row = QHBoxLayout()
+        txt = QVBoxLayout(); txt.setSpacing(2)
+
+        title_lbl = QLabel(label)
+        title_lbl.setStyleSheet("color:#0d1f3c; font-size:11px; font-weight:bold;")
+        sub_lbl = QLabel(desc)
+        sub_lbl.setStyleSheet("color:#64748b; font-size:10px;")
+        sub_lbl.setWordWrap(True)
+
+        txt.addWidget(title_lbl)
+        txt.addWidget(sub_lbl)
+
+        tog = SlidingToggle()
+        self._toggles[key] = tog
+
+        row.addLayout(txt, 1)
+        row.addSpacing(16)
+        row.addWidget(tog, 0, Qt.AlignVCenter)
+        layout.addLayout(row)
+
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background:#eef2f7; border:none;")
+        layout.addWidget(line)
+        return container
+
+    # ── Persistence ──────────────────────────────────────────────────────────
+    def _load(self):
+        # Default: allow_loaded_quotation_qty_change = OFF (0)
+        #          print_batch_on_receipt             = ON  (1)
+        defaults = {
+            "allow_loaded_quotation_qty_change": False,
+            "print_batch_on_receipt": True,
+        }
+        for key, tog in self._toggles.items():
+            tog.setChecked(defaults.get(key, False))
+            tog.position = 1.0 if defaults.get(key, False) else 0.0
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_key, setting_value FROM pos_settings")
+            for k, v in cur.fetchall():
+                if k in self._toggles:
+                    checked = (str(v) == "1")
+                    self._toggles[k].setChecked(checked)
+                    self._toggles[k].position = 1.0 if checked else 0.0
+            conn.close()
+        except Exception:
+            pass
+
+    def _save(self):
+        try:
+            self._save_btn.setEnabled(False)
+            self._save_btn.setText("SAVING…")
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            for key, tog in self._toggles.items():
+                val = "1" if tog.isChecked() else "0"
+                cur.execute(
+                    """
+                    MERGE pos_settings AS t
+                    USING (SELECT ? AS k, ? AS v) AS s ON t.setting_key = s.k
+                    WHEN MATCHED     THEN UPDATE SET setting_value = s.v
+                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
+                                          VALUES (s.k, s.v);
+                    """,
+                    (key, val),
+                )
+            conn.commit(); conn.close()
+            self._save_btn.setText("SAVED")
+            try:
+                import qtawesome as qta
+                self._save_btn.setIcon(qta.icon("fa5s.check", color="white"))
+            except Exception:
+                pass
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1500, self._reset_btn)
+        except Exception as e:
+            self._save_btn.setEnabled(True)
+            self._save_btn.setText("SAVE")
+            QMessageBox.warning(self, "Error", f"Failed to save settings:\n{e}")
+
+    def _reset_btn(self):
+        self._save_btn.setEnabled(True)
+        self._save_btn.setText("SAVE")
+        try:
+            self._save_btn.setIcon(QIcon())
+        except Exception:
+            pass
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.reject()
+        else:
+            super().keyPressEvent(event)
+
+
+# =============================================================================
 # SettingsDialog — Main Menu
 # =============================================================================
 class SettingsDialog(QDialog):
@@ -1022,7 +1233,8 @@ class SettingsDialog(QDialog):
         # ── HARDWARE & PRINTING ────────────────────────────────────────────────
         ml.addWidget(_section_divider("HARDWARE & PRINTING"))
         _add_items([
-            ("fa5s.print", "Hardware Settings",  lambda: HardwareDialog(self).exec()),
+            ("fa5s.print",   "Hardware Settings",     lambda: HardwareDialog(self).exec()),
+            ("fa5s.tools",   "Maintenance",            lambda: MaintenanceDialog(self).exec()),
             # ("fa5s.print", "Advanced Printing",  _open_adv_printing),
         ])
 

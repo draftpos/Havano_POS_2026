@@ -4599,6 +4599,147 @@ class OptionsDialog(QDialog):
             )
             self._sync_status_lbl.setText(f"Failed: {msg[:120]}")
 # =============================================================================
+# MAINTENANCE DIALOG — accessible from Maintenance menu
+# =============================================================================
+class MaintenanceDialog(QDialog):
+    """
+    Two operational toggles placed right below Category Visibility in Maintenance.
+
+      print_batch_on_receipt
+          ON  -> batch number + expiry date printed under each pharmacy item on receipt.
+          OFF -> batch / expiry lines suppressed.
+
+      allow_loaded_quotation_qty_change
+          ON  -> cashiers may edit Qty of pharmacy items loaded from a quotation.
+          OFF -> those rows stay locked (default).
+    """
+
+    _RULES = [
+        (
+            "print_batch_on_receipt",
+            "PRINT BATCH NUMBERS ON RECEIPT",
+            "Print batch number and expiry date under each pharmacy item on the receipt.",
+        ),
+        (
+            "allow_loaded_quotation_qty_change",
+            "ALLOW QTY CHANGE ON LOADED QUOTATION",
+            "Let cashiers edit the quantity of pharmacy items loaded from a quotation.",
+        ),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._toggles = {}
+        self.setWindowTitle("Maintenance Settings")
+        self.setFixedSize(500, 260)
+        self.setModal(True)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setStyleSheet(f"QDialog {{ background:{WHITE}; border:1px solid {NAVY}; }}")
+        self._build()
+        self._load()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Header
+        hdr = QWidget(); hdr.setFixedHeight(50)
+        hdr.setStyleSheet(f"background:{NAVY};")
+        hl = QHBoxLayout(hdr); hl.setContentsMargins(18, 0, 12, 0)
+        ttl = QLabel("MAINTENANCE SETTINGS")
+        ttl.setStyleSheet("font-size:11px; font-weight:bold; color:#fff; letter-spacing:1.5px; background:transparent;")
+        self._save_btn = QPushButton("SAVE")
+        self._save_btn.setFixedSize(78, 28)
+        self._save_btn.setStyleSheet(
+            "QPushButton{background:#10b981;color:#fff;border:none;border-radius:3px;font-weight:bold;font-size:10px;}"
+            "QPushButton:hover{background:#059669;}"
+            "QPushButton:disabled{background:transparent;color:#10b981;border:1px solid #10b981;}"
+        )
+        self._save_btn.clicked.connect(self._save)
+        close_btn = QPushButton("\u2715")
+        close_btn.setFixedSize(28, 28)
+        close_btn.setStyleSheet(
+            "QPushButton{background:transparent;color:#fff;border:none;font-size:13px;}"
+            "QPushButton:hover{background:#c0392b;border-radius:3px;}"
+        )
+        close_btn.clicked.connect(self.reject)
+        hl.addWidget(ttl); hl.addStretch()
+        hl.addWidget(self._save_btn); hl.addSpacing(6); hl.addWidget(close_btn)
+        root.addWidget(hdr)
+
+        # Body
+        body = QWidget()
+        bl = QVBoxLayout(body); bl.setContentsMargins(26, 8, 26, 10); bl.setSpacing(0)
+        for key, lbl, desc in self._RULES:
+            bl.addWidget(self._rule_row(key, lbl, desc))
+        bl.addStretch()
+        root.addWidget(body)
+
+    def _rule_row(self, key, label, desc):
+        container = QWidget()
+        lay = QVBoxLayout(container); lay.setContentsMargins(0, 12, 0, 12)
+        row = QHBoxLayout(); txt = QVBoxLayout(); txt.setSpacing(2)
+        t = QLabel(label)
+        t.setStyleSheet(f"color:{DARK_TEXT};font-size:11px;font-weight:bold;")
+        s = QLabel(desc)
+        s.setStyleSheet("color:#64748b;font-size:10px;")
+        s.setWordWrap(True)
+        txt.addWidget(t); txt.addWidget(s)
+        # Use the _TogglePill widget that is already defined in this file
+        tog = _TogglePill(size=22)
+        self._toggles[key] = tog
+        row.addLayout(txt, 1); row.addSpacing(14)
+        row.addWidget(tog, 0, Qt.AlignVCenter)
+        lay.addLayout(row)
+        sep = QFrame(); sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background:{BORDER};border:none;")
+        lay.addWidget(sep)
+        return container
+
+    def _load(self):
+        defaults = {"print_batch_on_receipt": True, "allow_loaded_quotation_qty_change": False}
+        for key, tog in self._toggles.items():
+            tog.setChecked(defaults.get(key, False))
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_key, setting_value FROM pos_settings")
+            for k, v in cur.fetchall():
+                if k in self._toggles:
+                    self._toggles[k].setChecked(str(v) == "1")
+            conn.close()
+        except Exception:
+            pass
+
+    def _save(self):
+        try:
+            self._save_btn.setEnabled(False); self._save_btn.setText("SAVING\u2026")
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            for key, tog in self._toggles.items():
+                val = "1" if tog.isChecked() else "0"
+                cur.execute(
+                    "MERGE pos_settings AS t "
+                    "USING (SELECT ? AS k, ? AS v) AS s ON t.setting_key = s.k "
+                    "WHEN MATCHED THEN UPDATE SET setting_value = s.v "
+                    "WHEN NOT MATCHED THEN INSERT (setting_key, setting_value) VALUES (s.k, s.v);",
+                    (key, val),
+                )
+            conn.commit(); conn.close()
+            self._save_btn.setText("\u2713 SAVED")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1500, lambda: (self._save_btn.setEnabled(True), self._save_btn.setText("SAVE")))
+        except Exception as e:
+            self._save_btn.setEnabled(True); self._save_btn.setText("SAVE")
+            QMessageBox.warning(self, "Error", f"Save failed:\n{e}")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape: self.reject()
+        else: super().keyPressEvent(event)
+
+
+# =============================================================================
 # POS RULES DIALOG  —  standalone, accessible from Options menu & Maintenance
 # =============================================================================
 class POSRulesDialog(QDialog):
@@ -6294,6 +6435,7 @@ class POSView(QWidget):
                         "batch_no":    item.get("batch_no"),
                         "expiry_date": item.get("expiry_date"),
                         "product_id":  product_id,
+                        "from_quotation": True,
                     })
                     try:
                         row_item.setIcon(qta.icon("fa5s.prescription-bottle-alt",
@@ -6866,6 +7008,7 @@ class POSView(QWidget):
 
             maint_btn.addItem("Users",              _sd("ManageUsersDialog"))
             maint_btn.addItem("Category Visibility", lambda: CategoryVisibilityDialog(self).exec())
+            maint_btn.addItem("Maintenance Settings", lambda: MaintenanceDialog(self.parent_window or self).exec())
             maint_btn.addSeparator()
             maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
             maint_btn.addItem("POS Rules",          _sd("POSRulesDialog"))
@@ -7347,22 +7490,67 @@ class POSView(QWidget):
 
     def _is_pharmacy_row_locked(self, row: int) -> bool:
         # Cashiers cannot modify or delete rows stamped as pharmacy line items.
+        # If the row is from a loaded quotation, 'allow_loaded_quotation_qty_change'
+        # strictly allows or denies quantity modifications for BOTH cashiers & pharmacists.
         if row is None or row < 0:
             return False
         col0 = self.invoice_table.item(row, 0)
-        if not col0 or not col0.data(self.PHARMACY_META_ROLE):
+        if not col0:
             return False
+        
+        meta = col0.data(self.PHARMACY_META_ROLE)
+        if not meta:
+            return False
+            
+        is_from_quotation = meta.get("from_quotation", False)
+        
+        try:
+            from database.db import get_connection as _gc
+            _conn = _gc(); _cur = _conn.cursor()
+            _cur.execute(
+                "SELECT setting_value FROM pos_settings WHERE setting_key=?",
+                ("allow_loaded_quotation_qty_change",),
+            )
+            _row = _cur.fetchone(); _conn.close()
+            
+            # If from quotation and setting is set, apply it to everyone
+            if is_from_quotation and _row:
+                if str(_row[0]) == "1":
+                    return False  # explicitly allowed
+                elif str(_row[0]) == "0":
+                    return True   # explicitly blocked for everyone
+        except Exception:
+            pass
+            
         try:
             from utils.roles import is_pharmacist
             return not is_pharmacist(getattr(self, "user", None))
         except Exception:
             return False
 
-    def _notify_pharmacy_locked(self):
+    def _notify_pharmacy_locked(self, row: int = -1):
+        # Provide different message if it's locked because it's a quotation
+        msg = "Pharmacy line items are locked — only a pharmacist can modify them."
+        if row >= 0:
+            col0 = self.invoice_table.item(row, 0)
+            if col0:
+                meta = col0.data(self.PHARMACY_META_ROLE)
+                if meta and meta.get("from_quotation"):
+                    try:
+                        from database.db import get_connection as _gc
+                        _conn = _gc(); _cur = _conn.cursor()
+                        _cur.execute(
+                            "SELECT setting_value FROM pos_settings WHERE setting_key=?",
+                            ("allow_loaded_quotation_qty_change",),
+                        )
+                        _row = _cur.fetchone(); _conn.close()
+                        if _row and str(_row[0]) == "0":
+                            msg = "Quantities on loaded quotations are locked system-wide (see Maintenance settings)."
+                    except Exception:
+                        pass
         try:
             from utils.toast import show_toast
-            show_toast(self, "Pharmacy line items are locked — only a pharmacist can modify them.",
-                       duration_ms=3000, kind="warn")
+            show_toast(self, msg, duration_ms=3500, kind="warn")
         except Exception:
             pass
         QApplication.beep()
@@ -8045,6 +8233,7 @@ class POSView(QWidget):
 
             maint_btn.addItem("Users",              _sd("ManageUsersDialog"))
             maint_btn.addItem("Category Visibility", lambda: CategoryVisibilityDialog(self).exec())
+            maint_btn.addItem("Maintenance Settings", lambda: MaintenanceDialog(self.parent_window or self).exec())
             maint_btn.addSeparator()
             maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
             maint_btn.addItem("POS Rules",          _sd("POSRulesDialog"))
@@ -8638,7 +8827,7 @@ class POSView(QWidget):
     def _open_inline_search(self, row, col):
         # Pharmacy lock: cashiers cannot replace/edit the product on a pharmacy row
         if self._is_pharmacy_row_locked(row):
-            self._notify_pharmacy_locked()
+            self._notify_pharmacy_locked(row)
             return
 
         self._close_inline_search()
@@ -9744,7 +9933,7 @@ class POSView(QWidget):
             return
         # Pharmacy lock: cashiers cannot modify qty/discount on pharmacy rows
         if self._active_col in (3, 4) and self._is_pharmacy_row_locked(self._active_row):
-            self._notify_pharmacy_locked()
+            self._notify_pharmacy_locked(self._active_row)
             return
         # #23 — block discount entry if not permitted
         if self._active_col == 4 and not self._check_permission(
@@ -9768,7 +9957,7 @@ class POSView(QWidget):
     def _numpad_clear(self):
         # Pharmacy lock: cashiers cannot clear qty/discount on pharmacy rows
         if self._active_col in (3, 4) and self._is_pharmacy_row_locked(self._active_row):
-            self._notify_pharmacy_locked()
+            self._notify_pharmacy_locked(self._active_row)
             return
         self._numpad_buffer = ""
         if self._active_row >= 0 and self._active_col >= 0:
@@ -9794,7 +9983,7 @@ class POSView(QWidget):
 
         # Pharmacy lock: cashiers cannot delete pharmacy rows
         if self._is_pharmacy_row_locked(row):
-            self._notify_pharmacy_locked()
+            self._notify_pharmacy_locked(row)
             return
 
         # 1. Clear the typing buffer so new typing doesn't include old character data
@@ -9887,7 +10076,7 @@ class POSView(QWidget):
 
         # Pharmacy lock: cashiers cannot change qty on pharmacy rows
         if self._is_pharmacy_row_locked(row):
-            self._notify_pharmacy_locked()
+            self._notify_pharmacy_locked(row)
             return
 
         name_item = self.invoice_table.item(row, 1)
@@ -12551,6 +12740,7 @@ class MainWindow(QMainWindow):
             ("Customers",         _sd_action("CustomerDialog")),
             ("Users",             _sd_action("ManageUsersDialog")),
             ("Category Visibility", lambda: CategoryVisibilityDialog(self).exec()),
+            ("Maintenance Settings", lambda: MaintenanceDialog(self).exec()),
             (None, None),
             ("Company Defaults",  self._open_company_defaults),
             ("POS Rules",         _sd_action("POSRulesDialog")),

@@ -853,7 +853,11 @@ class QuotationDialog(QDialog):
     #     dlg.exec()
 
     def _reprint_labels(self):
-        """Reprint all pharmacy ZPL labels for the selected quotation, inline."""
+        """Reprint pharmacy ZPL labels for the selected quotation.
+
+        Shows a selection dialog so the user can choose to reprint all labels
+        or pick a single item label to reprint.
+        """
         if not self.current_quotation:
             return
         qid = getattr(self.current_quotation, "local_id", None)
@@ -896,9 +900,76 @@ class QuotationDialog(QDialog):
             )
             return
 
+        # ── Label Selection Dialog ────────────────────────────────────────────
+        sel_dlg = QDialog(self)
+        sel_dlg.setWindowTitle("Select Labels to Reprint")
+        sel_dlg.setMinimumWidth(420)
+        sel_dlg.setWindowFlags(sel_dlg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        sel_lay = QVBoxLayout(sel_dlg)
+        sel_lay.setSpacing(10)
+        sel_lay.setContentsMargins(16, 16, 16, 12)
+
+        hdr_lbl = QLabel("Choose which label(s) to reprint:")
+        hdr_lbl.setStyleSheet("font-weight:bold; font-size:13px;")
+        sel_lay.addWidget(hdr_lbl)
+
+        from PySide6.QtWidgets import QListWidget, QListWidgetItem, QAbstractItemView
+        lw = QListWidget()
+        lw.setSelectionMode(QAbstractItemView.SingleSelection)
+        lw.setStyleSheet(
+            "QListWidget { border:1px solid #c8d5e3; border-radius:4px; font-size:12px; }"
+            "QListWidget::item { padding:6px 10px; }"
+            "QListWidget::item:selected { background:#1a5fb4; color:#fff; }"
+        )
+
+        # First entry = "All Labels"
+        all_item = QListWidgetItem("\u2605  All Labels  (%d item%s)" % (len(labels), "s" if len(labels) != 1 else ""))
+        all_item.setData(Qt.UserRole, None)          # None = print all
+        lw.addItem(all_item)
+
+        for lbl in labels:
+            pname  = lbl.get("product_name", "(Unknown)")
+            batch  = lbl.get("batch_no", "")
+            qty    = lbl.get("qty", 0)
+            suffix = f"  |  Batch: {batch}" if batch else ""
+            display = f"{pname}  (Qty: {qty:.4g}){suffix}"
+            li = QListWidgetItem(display)
+            li.setData(Qt.UserRole, lbl)
+            lw.addItem(li)
+
+        lw.setCurrentRow(0)
+        sel_lay.addWidget(lw)
+
+        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedHeight(32)
+        cancel_btn.clicked.connect(sel_dlg.reject)
+        print_btn = QPushButton("\u2192  Print Selected")
+        print_btn.setFixedHeight(32)
+        print_btn.setStyleSheet(
+            "QPushButton { background:#1a5fb4; color:#fff; border:none; border-radius:4px; font-weight:bold; }"
+            "QPushButton:hover { background:#1248a0; }"
+        )
+        print_btn.clicked.connect(sel_dlg.accept)
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(print_btn)
+        sel_lay.addLayout(btn_row)
+
+        if sel_dlg.exec() != QDialog.Accepted:
+            return
+
+        selected_item = lw.currentItem()
+        if not selected_item:
+            return
+
+        chosen_lbl = selected_item.data(Qt.UserRole)   # None = all, dict = single
+        to_print = labels if chosen_lbl is None else [chosen_lbl]
+        # ─────────────────────────────────────────────────────────────────────
+
         printed = 0
         failed  = 0
-        for lbl in labels:
+        for lbl in to_print:
             expiry = lbl.get("expiry_date")
             zpl = _build_zpl_label(
                 product_name    = lbl.get("product_name", ""),

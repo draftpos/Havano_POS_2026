@@ -9,10 +9,11 @@ from PySide6.QtWidgets import (
 )
 import shutil
 import os
+import qtawesome as qta
 from models.advance_settings import AdvanceSettings
-from PySide6.QtCore import Qt, QTimer, QDate, Slot
+from PySide6.QtCore import Qt, QTimer, QDate, Slot, QPropertyAnimation, QEasingCurve, Property as _Prop
 # from PySide6.QtGui import QAction, QColor, QFont
-from PySide6.QtGui import QAction, QColor, QFont, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QPixmap, QPainter, QLinearGradient, QRadialGradient
 from pathlib import Path
 try:
     from views.dialogs.day_shift_dialog import DayShiftDialog
@@ -106,7 +107,7 @@ TAB_COLORS = [
     "#f5f5f5", "#e8c4b8", "#c8c4d8", "#d8e8c4", "#f0e8d0",
     "#d0e4ec", "#e8e8d8", "#f0e8c4", "#e8d8f0", "#f8e8e8",
 ]
-
+from views.dialogs.quotation_dialog import show_quotation_dialog
 # =============================================================================
 # GLOBAL STYLESHEET
 # =============================================================================
@@ -167,6 +168,124 @@ QComboBox QAbstractItemView {{
     selection-background-color: {ACCENT}; selection-color: {WHITE};
 }}
 """
+from services.quotation_sync_service import start_quotation_sync_thread
+
+# =============================================================================
+# CATEGORY VISIBILITY SETTINGS  (app_data/category_settings.json)
+# Stores a list of category names that are hidden on this branch's POS.
+# =============================================================================
+import json as _json_mod
+
+_CAT_SETTINGS_FILE = Path("app_data/category_settings.json")
+
+
+# =============================================================================
+# ToggleSwitch — pill toggle (same as company defaults)
+# =============================================================================
+
+class _TogglePill(QWidget):
+    def __init__(self, size=20, parent=None):
+        super().__init__(parent)
+        self._size     = size
+        self._checked  = False
+        self._knob_pos = 0.0
+        self.setFixedSize(int(2.2 * size), size)
+        self.setCursor(Qt.PointingHandCursor)
+        self._anim = QPropertyAnimation(self, b"knob_pos", self)
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.InOutCubic)
+
+    def _get_knob_pos(self): return self._knob_pos
+    def _set_knob_pos(self, v):
+        self._knob_pos = v; self.update()
+    knob_pos = _Prop(float, _get_knob_pos, _set_knob_pos)
+
+    def isChecked(self): return self._checked
+    def setChecked(self, value: bool, animated=False):
+        self._checked = bool(value)
+        target = 1.0 if self._checked else 0.0
+        if animated:
+            self._anim.stop()
+            self._anim.setStartValue(self._knob_pos)
+            self._anim.setEndValue(target)
+            self._anim.start()
+        else:
+            self._knob_pos = target; self.update()
+    def mousePressEvent(self, _ev):
+        self.setChecked(not self._checked, animated=True)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        s = self._size; w = self.width(); h = self.height(); r = h / 2
+        t = self._knob_pos
+        if t < 0.01:
+            p.setBrush(QColor("#d7d7d7")); p.setPen(Qt.NoPen)
+            p.drawRoundedRect(0, 0, w, h, r, r)
+        else:
+            grad = QLinearGradient(0, 0, w, 0)
+            grad.setColorAt(0, QColor("#f19af3")); grad.setColorAt(1, QColor("#f099b5"))
+            p.setBrush(QColor("#d7d7d7")); p.setPen(Qt.NoPen)
+            p.drawRoundedRect(0, 0, w, h, r, r)
+            if t > 0.99:
+                p.setBrush(grad); p.drawRoundedRect(0, 0, w, h, r, r)
+            else:
+                p.setOpacity(t); p.setBrush(grad)
+                p.drawRoundedRect(0, 0, w, h, r, r); p.setOpacity(1.0)
+        knob_d = 0.8*s; knob_r = knob_d/2
+        off_x = 0.1*s; on_x = 1.3*s
+        knob_x = off_x + self._knob_pos*(on_x - off_x); knob_y = 0.1*s
+        cx = knob_x+knob_r; cy = knob_y+knob_r
+        shadow = QRadialGradient(cx, cy+4, knob_r*1.1)
+        shadow.setColorAt(0, QColor(0,0,0,55)); shadow.setColorAt(0.6, QColor(0,0,0,30))
+        shadow.setColorAt(1, QColor(0,0,0,0))
+        p.setBrush(shadow); p.setPen(Qt.NoPen)
+        p.drawEllipse(int(knob_x-knob_r*0.15), int(knob_y+knob_r*0.5),
+                      int(knob_d*1.3), int(knob_d*0.9))
+        kg = QLinearGradient(cx, knob_y, cx, knob_y+knob_d)
+        kg.setColorAt(0, QColor("#dedede")); kg.setColorAt(1, QColor("#ffffff"))
+        p.setBrush(kg); p.setPen(Qt.NoPen)
+        p.drawEllipse(int(knob_x), int(knob_y), int(knob_d), int(knob_d))
+        p.end()
+
+class _ToggleSwitch(QWidget):
+    """Pill toggle + label. API: isChecked() / setChecked(bool)."""
+    def __init__(self, label: str, size: int = 18, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(12)
+        self._pill = _TogglePill(size=size, parent=self)
+        layout.addWidget(self._pill)
+        self._lbl = QLabel(label)
+        self._lbl.setStyleSheet(f"font-size:13px; font-weight:600; color:{DARK_TEXT}; background:transparent;")
+        layout.addWidget(self._lbl)
+        layout.addStretch()
+
+    def isChecked(self) -> bool: return self._pill.isChecked()
+    def setChecked(self, value: bool): self._pill.setChecked(value, animated=False)
+
+def load_disabled_categories() -> list:
+    """Return list of category names that are switched OFF for this branch."""
+    try:
+        if _CAT_SETTINGS_FILE.exists():
+            data = _json_mod.loads(_CAT_SETTINGS_FILE.read_text(encoding="utf-8"))
+            return data.get("disabled_categories", [])
+    except Exception:
+        pass
+    return []
+
+
+def save_disabled_categories(disabled: list) -> None:
+    """Persist the list of disabled category names to disk."""
+    try:
+        _CAT_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CAT_SETTINGS_FILE.write_text(
+            _json_mod.dumps({"disabled_categories": disabled}, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as _e:
+        import logging as _log
+        _log.getLogger("main_window").warning("Could not save category settings: %s", _e)
 
 
 # =============================================================================
@@ -428,7 +547,10 @@ class UomPickerDialog(QDialog):
         """)
         self.selected_uom   = None
         self.selected_price = None
+        self._uom_buttons: list[tuple[QPushButton, str, float]] = []
+        self._active_idx = 0
         self._build(product_name, uom_prices)
+        self._refresh_active_highlight()
 
     def _build(self, product_name: str, uom_prices: list[dict]):
         root = QVBoxLayout(self)
@@ -505,6 +627,7 @@ class UomPickerDialog(QDialog):
                 }}
             """)
             btn.clicked.connect(lambda _, u=uom, pr=price: self._pick(u, pr))
+            self._uom_buttons.append((btn, uom, price))
             root.addWidget(btn)
             if i < len(uom_prices) - 1:
                 root.addSpacing(8)
@@ -512,7 +635,8 @@ class UomPickerDialog(QDialog):
         root.addSpacing(14)
 
         # ── Cancel ────────────────────────────────────────────────────
-        cancel = QPushButton("✕  Cancel")
+        cancel = QPushButton("Cancel")
+        cancel.setIcon(qta.icon("fa5s.times"))
         cancel.setFixedHeight(46)
         cancel.setCursor(Qt.PointingHandCursor)
         cancel.setFocusPolicy(Qt.NoFocus)
@@ -537,6 +661,60 @@ class UomPickerDialog(QDialog):
         self.selected_uom   = uom
         self.selected_price = price
         self.accept()
+
+    # ── Keyboard navigation ──────────────────────────────────────────────
+    def _refresh_active_highlight(self):
+        """Apply a bright border to the active button, neutral to the rest.
+        Buttons have Qt.NoFocus, so we style manually instead of relying on focus."""
+        for i, (btn, _u, _p) in enumerate(self._uom_buttons):
+            if i == self._active_idx:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {ACCENT};
+                        border: 2px solid {NAVY};
+                        border-radius: 10px;
+                    }}
+                    QPushButton QLabel {{ color: white; }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {LIGHT};
+                        border: 2px solid {BORDER};
+                        border-radius: 10px;
+                    }}
+                    QPushButton:hover {{
+                        background: {ACCENT};
+                        border-color: {ACCENT};
+                    }}
+                    QPushButton:hover QLabel {{ color: white; }}
+                    QPushButton:pressed {{
+                        background: {NAVY};
+                        border-color: {NAVY};
+                    }}
+                """)
+
+    def keyPressEvent(self, event):
+        k = event.key()
+        n = len(self._uom_buttons)
+        if n == 0:
+            return super().keyPressEvent(event)
+        if k == Qt.Key_Up:
+            self._active_idx = (self._active_idx - 1) % n
+            self._refresh_active_highlight()
+            return
+        if k == Qt.Key_Down:
+            self._active_idx = (self._active_idx + 1) % n
+            self._refresh_active_highlight()
+            return
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            _btn, uom, price = self._uom_buttons[self._active_idx]
+            self._pick(uom, price)
+            return
+        if k == Qt.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(event)
 
 
 class ProductSearchDialog(QDialog):
@@ -704,7 +882,6 @@ class ProductSearchDialog(QDialog):
         if item:
             self.selected_product = item.data(Qt.UserRole)
             self.accept()
-
 # =============================================================================
 # CUSTOMER SEARCH POPUP — Updated with Sync, Quick-Add & Database Linking
 # =============================================================================
@@ -778,9 +955,13 @@ class CustomerSearchPopup(QDialog):
         lay.addLayout(sr)
 
         # --- Customer Table ---
-        self._tbl = QTableWidget(0, 6)
-        self._tbl.setHorizontalHeaderLabels(["Name", "Type", "Phone", "City", "Laybye Bal", "Total Due"])
-        
+        # Price List column shows the customer's `default_price_list` —
+        # this is what governs pricing on the POS after selection.
+        self._tbl = QTableWidget(0, 7)
+        self._tbl.setHorizontalHeaderLabels([
+            "Name", "Type", "Phone", "City", "Price List", "Laybye Bal", "Total Due",
+        ])
+
         # TABLE STYLING: Fixes the 'White on White' selection issue
         self._tbl.setStyleSheet(f"""
             QTableWidget {{
@@ -803,9 +984,11 @@ class CustomerSearchPopup(QDialog):
         """)
 
         hh = self._tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Stretch) 
-        
-        widths = {1: 80, 2: 110, 3: 100, 4: 110, 5: 110}
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+
+        # Column order:  0 Name  1 Type  2 Phone  3 City
+        #                4 Price List  5 Laybye  6 Total Due
+        widths = {1: 80, 2: 110, 3: 100, 4: 140, 5: 110, 6: 110}
         for col, width in widths.items():
             hh.setSectionResizeMode(col, QHeaderView.Fixed)
             self._tbl.setColumnWidth(col, width)
@@ -845,9 +1028,7 @@ class CustomerSearchPopup(QDialog):
             self._status_lbl.setText(f"Error: {e}")
             self._sync_btn.setEnabled(True)
             return
-    
-    
-    
+
         self._status_lbl.setText(f"Connecting to {_site}...")
         
         try:
@@ -879,7 +1060,13 @@ class CustomerSearchPopup(QDialog):
         try:
             from views.dialogs.customer_dialog import QuickAddCustomerDialog
             dlg = QuickAddCustomerDialog(self)
-            dlg.customer_created.connect(lambda _: self._load_all())
+            
+            # This handles making the new customer selected automatically
+            def _handle_new_customer(cust_dict):
+                self.selected_customer = cust_dict
+                self.accept() # Close the popup immediately with this customer selected
+
+            dlg.customer_created.connect(_handle_new_customer)
             dlg.exec()
         except ImportError:
             QMessageBox.warning(self, "Error", "Customer dialog module not found.")
@@ -921,21 +1108,30 @@ class CustomerSearchPopup(QDialog):
             self._tbl.setItem(r, 2, create_item(c.get("custom_telephone_number", "")))
             self._tbl.setItem(r, 3, create_item(c.get("custom_city", "")))
 
-            # Laybye Balance (Column 4)
+            # Price List (Column 4) — customer's default_price_list. Greyed
+            # out when unset so cashiers notice the gap (sales will be
+            # blocked for these customers).
+            pl_name = (c.get("price_list_name") or "").strip()
+            it_pl = create_item(pl_name or "—")
+            if not pl_name:
+                it_pl.setForeground(QColor(MUTED))
+            self._tbl.setItem(r, 4, it_pl)
+
+            # Laybye Balance (Column 5)
             l_bal = float(c.get("laybye_balance") or 0.0)
             it_l = QTableWidgetItem(f"{l_bal:,.2f}")
             it_l.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             # Readable Blue
             it_l.setForeground(QColor("#0044cc")) if l_bal > 0 else it_l.setForeground(QColor(DARK_TEXT))
-            self._tbl.setItem(r, 4, it_l)
+            self._tbl.setItem(r, 5, it_l)
 
-            # Outstanding / Total Due (Column 5)
+            # Outstanding / Total Due (Column 6)
             o_bal = float(c.get("outstanding_amount") or 0.0)
             it_o = QTableWidgetItem(f"{o_bal:,.2f}")
             it_o.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             # High Contrast Red
             it_o.setForeground(QColor("#cc0000")) if o_bal > 0 else it_o.setForeground(QColor(DARK_TEXT))
-            self._tbl.setItem(r, 5, it_o)
+            self._tbl.setItem(r, 6, it_o)
 
             # Store the dictionary in the first item
             self._tbl.item(r, 0).setData(Qt.UserRole, c)
@@ -950,8 +1146,6 @@ class CustomerSearchPopup(QDialog):
         self.selected_customer = self._tbl.item(row, 0).data(Qt.UserRole)
         self.accept()
 
-    # WALK-IN FUNCTION REMOVED FROM HERE
-
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_F10:
             self._quick_add_customer()
@@ -964,6 +1158,169 @@ class CustomerSearchPopup(QDialog):
     def showEvent(self, e):
         super().showEvent(e)
         self._search.setFocus()
+        
+        
+# =============================================================================
+# CATEGORY VISIBILITY — Reusable widget + Standalone dialog
+# =============================================================================
+
+class _CategoryVisibilityWidget(QWidget):
+    """
+    Self-contained widget that shows all DB categories as checkboxes.
+    Ticked = visible on the POS grid. Unticked = hidden on this branch.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"background:{WHITE};")
+        self._checks: dict = {}   # cat_name → QCheckBox
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setSpacing(16)
+        lay.setContentsMargins(30, 15, 30, 25)
+
+        # ── Header ────────────────────────────────────────────────────
+        header_lay = QHBoxLayout()
+        title = QLabel("Category Visibility")
+        title.setStyleSheet(f"font-size:20px; font-weight:bold; color:{NAVY};")
+        
+        save_btn = navy_btn("Save Settings", height=34, color=SUCCESS, hover=SUCCESS_H)
+        save_btn.clicked.connect(self._save)
+        
+        header_lay.addWidget(title)
+        header_lay.addStretch()
+        header_lay.addWidget(save_btn)
+        lay.addLayout(header_lay)
+        
+        lay.addWidget(hr())
+
+        info = QLabel(
+            "Manage category visibility for this branch. "
+            "Unticked categories will be hidden from the POS screen."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(
+            f"color:{MUTED}; font-size:12px; background:{LIGHT};"
+            f" border:1px solid {BORDER}; border-radius:6px; padding:10px 14px;"
+        )
+        lay.addWidget(info)
+
+        # ── Bulk Actions ──────────────────────────────────────────────
+        sel_row = QHBoxLayout()
+        sel_all = QPushButton("Select All")
+        hide_all = QPushButton("Clear All")
+        
+        for btn in [sel_all, hide_all]:
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{ 
+                    border:none; color:{NAVY}; font-size:12px; font-weight:bold; background:transparent; 
+                }}
+                QPushButton:hover {{ color:{ACCENT}; }}
+            """)
+            
+        sel_all.clicked.connect(lambda: [c.setChecked(True) for c in self._checks.values()])
+        hide_all.clicked.connect(lambda: [c.setChecked(False) for c in self._checks.values()])
+        
+        sel_row.addWidget(sel_all)
+        sel_row.addSpacing(15)
+        sel_row.addWidget(hide_all)
+        sel_row.addStretch()
+        lay.addLayout(sel_row)
+
+        # ── Scrollable checkbox list ──────────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{ 
+                border:1px solid {BORDER}; border-radius:8px; background:{WHITE}; 
+            }}
+        """)
+
+        chk_container = QWidget()
+        chk_container.setStyleSheet(f"background:{WHITE};")
+        chk_lay = QVBoxLayout(chk_container)
+        chk_lay.setSpacing(4)
+        chk_lay.setContentsMargins(15, 15, 15, 15)
+
+        all_cats = []
+        try:
+            from models.product import get_categories
+            all_cats = get_categories()
+        except: pass
+
+        disabled_now = set(load_disabled_categories())
+
+        if not all_cats:
+            no_lbl = QLabel("No categories found.")
+            no_lbl.setStyleSheet(f"color:{MUTED}; font-size:13px;")
+            chk_lay.addWidget(no_lbl)
+        else:
+            for cat in sorted(all_cats, key=str.lower):
+                chk = _ToggleSwitch(cat)
+                chk.setChecked(cat not in disabled_now)
+                chk_lay.addWidget(chk)
+                self._checks[cat] = chk
+
+        chk_lay.addStretch()
+        scroll.setWidget(chk_container)
+        lay.addWidget(scroll, 1)
+
+    def _save(self):
+        disabled = [name for name, chk in self._checks.items() if not chk.isChecked()]
+        save_disabled_categories(disabled)
+        QMessageBox.information(
+            self, "Saved",
+            "Visibility updated.\n\nRestart the POS screen to apply changes."
+        )
+
+
+class CategoryVisibilityDialog(QDialog):
+    """Standalone dialog — with Close on top."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Category Visibility")
+        self.setMinimumSize(540, 600)
+        self.setModal(True)
+        # Use Frameless or specific flags if you want a fully custom top bar
+        self.setStyleSheet(f"QDialog {{ background-color:{WHITE}; border:1px solid {BORDER}; }}")
+        
+        main_lay = QVBoxLayout(self)
+        main_lay.setContentsMargins(0, 0, 0, 0)
+        main_lay.setSpacing(0)
+
+        # ── Custom Top Bar ───────────────────────────────────────────
+        top_bar = QWidget()
+        top_bar.setFixedHeight(50)
+        top_bar.setStyleSheet(f"background:{LIGHT}; border-bottom:1px solid {BORDER};")
+        top_lay = QHBoxLayout(top_bar)
+        top_lay.setContentsMargins(20, 0, 15, 0)
+
+        sys_label = QLabel("POS Maintenance")
+        sys_label.setStyleSheet(f"color:{MUTED}; font-weight:bold; font-size:11px; text-transform:uppercase;")
+        
+        close_btn = QPushButton("✕") # Large X icon
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton { 
+                border:none; border-radius:16px; font-size:18px; color:#888; font-weight:bold;
+            }
+            QPushButton:hover { background:#ff4d4d; color:white; }
+        """)
+        close_btn.clicked.connect(self.accept)
+
+        top_lay.addWidget(sys_label)
+        top_lay.addStretch()
+        top_lay.addWidget(close_btn)
+        
+        main_lay.addWidget(top_bar)
+
+        # ── The Widget Content ──────────────────────────────────────
+        self.content = _CategoryVisibilityWidget(self)
+        main_lay.addWidget(self.content)
 # =============================================================================
 # _InlineSettingsDialog  —  fallback
 # =============================================================================
@@ -1000,14 +1357,15 @@ class _InlineSettingsDialog(QDialog):
         self._stack.setStyleSheet(f"background:{OFF_WHITE};")
 
         pages = [
-            ("⚙  General",        self._page_general()),
-            ("🏢  Companies",      CompanyDialog(self)),
-            ("👥  Customer Groups",CustomerGroupDialog(self)),
-            ("🏭  Warehouses",     WarehouseDialog(self)),
-            ("💰  Cost Centers",   CostCenterDialog(self)),
-            ("🏷  Price Lists",    PriceListDialog(self)),
-            ("👤  Customers",      CustomerDialog(self)),
-            ("🔑  Users",          ManageUsersDialog(self, current_user=self.user)),
+            ("General",              self._page_general()),
+            ("Companies",            CompanyDialog(self)),
+            ("Customer Groups",      CustomerGroupDialog(self)),
+            ("Warehouses",           WarehouseDialog(self)),
+            ("Cost Centers",         CostCenterDialog(self)),
+            ("Price Lists",          PriceListDialog(self)),
+            ("Customers",            CustomerDialog(self)),
+            ("Users",                ManageUsersDialog(self, current_user=self.user)),
+            ("Category Visibility",  self._page_category_visibility()),
         ]
 
         self._nav_btns = []
@@ -1106,7 +1464,7 @@ class _InlineSettingsDialog(QDialog):
         lay.addSpacing(20)
 
         tip = QLabel(
-            "💡  Use the sidebar to manage Companies, Customers, Warehouses, "
+            "Use the sidebar to manage Companies, Customers, Warehouses, "
             "Cost Centers, Price Lists and Users.\n"
             "Changes take effect immediately."
         )
@@ -1120,73 +1478,22 @@ class _InlineSettingsDialog(QDialog):
         return w
 
     # =================================================================
-    # POS RULES PAGE  (#3 zero-price  #4 zero-stock  #7 pricing rules)
+    # CATEGORY VISIBILITY PAGE  (embedded in _InlineSettingsDialog)
     # =================================================================
-    def _page_pos_rules(self) -> QWidget:
-        w = QWidget(); w.setStyleSheet(f"background:{WHITE};")
+    def _page_category_visibility(self) -> QWidget:
+        """Embed the standalone CategoryVisibilityWidget inside the settings sidebar."""
+        w = QWidget()
+        w.setStyleSheet(f"background:{WHITE};")
         lay = QVBoxLayout(w)
-        lay.setSpacing(0); lay.setContentsMargins(36, 28, 36, 28)
-
-        title = QLabel("POS Business Rules")
-        title.setStyleSheet(
-            f"font-size:18px; font-weight:bold; color:{NAVY}; background:transparent;"
-        )
-        lay.addWidget(title); lay.addWidget(hr()); lay.addSpacing(16)
-
-        self._rules_checks = {}
-
-        def _rule_row(key, label, desc, default=False):
-            rw = QWidget()
-            rw.setStyleSheet(
-                f"background:{OFF_WHITE}; border:1px solid {BORDER}; border-radius:8px;"
-            )
-            rl = QHBoxLayout(rw); rl.setContentsMargins(16, 12, 16, 12); rl.setSpacing(14)
-            txt = QVBoxLayout(); txt.setSpacing(2)
-            lbl = QLabel(label)
-            lbl.setStyleSheet(
-                f"font-size:13px; font-weight:bold; color:{NAVY}; background:transparent;"
-            )
-            dlbl = QLabel(desc)
-            dlbl.setStyleSheet(f"font-size:11px; color:{MUTED}; background:transparent;")
-            dlbl.setWordWrap(True)
-            txt.addWidget(lbl); txt.addWidget(dlbl)
-            chk = QCheckBox()
-            chk.setFixedSize(44, 24)
-            chk.setStyleSheet(f"""
-                QCheckBox::indicator {{ width:40px; height:20px; border-radius:10px; }}
-                QCheckBox::indicator:unchecked {{ background:{BORDER}; border:none; }}
-                QCheckBox::indicator:checked   {{ background:{SUCCESS}; border:none; }}
-            """)
-            try:
-                from database.db import get_connection
-                conn = get_connection(); cur = conn.cursor()
-                cur.execute(
-                    "SELECT setting_value FROM pos_settings WHERE setting_key=?", (key,))
-                row = cur.fetchone(); conn.close()
-                chk.setChecked(bool(int(row[0])) if row else default)
-            except Exception:
-                chk.setChecked(default)
-            rl.addLayout(txt, 1); rl.addWidget(chk)
-            self._rules_checks[key] = chk
-            lay.addWidget(rw); lay.addSpacing(10)
-
-        _rule_row("block_zero_price",  "Block Zero-Price Sales",
-                  "Prevent adding items with a $0.00 selling price to the invoice.",
-                  default=True)
-        _rule_row("block_zero_stock",  "Block Zero / Negative Stock Sales",
-                  "Show 'Insufficient Stock' popup and refuse to add items with no stock on hand.",
-                  default=False)
-        _rule_row("use_pricing_rules", "Apply Pricing Rules",
-                  "Automatically apply discounts from pricing rules when adding items.",
-                  default=False)
-
-        lay.addSpacing(20)
-        save_btn = navy_btn("💾  Save Rules", height=40, color=SUCCESS, hover=SUCCESS_H)
-        save_btn.setFixedWidth(160)
-        save_btn.clicked.connect(self._save_pos_rules)
-        lay.addWidget(save_btn)
-        lay.addStretch()
+        lay.setSpacing(0)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(_CategoryVisibilityWidget(w))
         return w
+
+    # =================================================================
+    # POS BUSINESS RULES (Simple & Clean)
+    # =================================================================
+    # _page_pos_rules
 
     def _save_pos_rules(self):
         try:
@@ -1266,7 +1573,8 @@ class _InlineSettingsDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
-        ok_btn  = navy_btn("✓  Set Qty", height=40, color=SUCCESS, hover=SUCCESS_H)
+        ok_btn  = navy_btn("Set Qty", height=40, color=SUCCESS, hover=SUCCESS_H)
+        ok_btn.setIcon(qta.icon("fa5s.check", color="white"))
         cxl_btn = navy_btn("Cancel",     height=40, color=NAVY_2,  hover=NAVY_3)
         ok_btn.clicked.connect(self._confirm)
         cxl_btn.clicked.connect(self.reject)
@@ -1707,7 +2015,7 @@ class CustomerDialog(QDialog):
         hl.addWidget(QLabel("Customers",
             styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
         hl.addStretch()
-        self._mode_badge = QLabel("  ➕  ADD MODE  ")
+        self._mode_badge = QLabel("  ADD MODE  ")
         self._mode_badge.setStyleSheet(f"""
             background:{SUCCESS}; color:{WHITE}; border-radius:10px;
             font-size:11px; font-weight:bold; padding:2px 10px;
@@ -1905,7 +2213,8 @@ class CustomerDialog(QDialog):
         _set_combo(self._f_pl,    c.get("default_price_list_id"))
 
         # Update UI chrome
-        self._save_btn.setText("💾  Save Changes")
+        self._save_btn.setText("Save Changes")
+        self._save_btn.setIcon(qta.icon("fa5s.save", color="white"))
         self._save_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color:{ACCENT}; color:{WHITE}; border:none;
@@ -1914,7 +2223,7 @@ class CustomerDialog(QDialog):
             QPushButton:hover   {{ background-color:{ACCENT_H}; }}
             QPushButton:pressed {{ background-color:{NAVY_3}; }}
         """)
-        self._mode_badge.setText("  ✏️  EDIT MODE  ")
+        self._mode_badge.setText("  EDIT MODE  ")
         self._mode_badge.setStyleSheet(f"""
             background:{ACCENT}; color:{WHITE}; border-radius:10px;
             font-size:11px; font-weight:bold; padding:2px 10px;
@@ -1937,7 +2246,7 @@ class CustomerDialog(QDialog):
             QPushButton:hover   {{ background-color:{SUCCESS_H}; }}
             QPushButton:pressed {{ background-color:{NAVY_3}; }}
         """)
-        self._mode_badge.setText("  ➕  ADD MODE  ")
+        self._mode_badge.setText("  ADD MODE  ")
         self._mode_badge.setStyleSheet(f"""
             background:{SUCCESS}; color:{WHITE}; border-radius:10px;
             font-size:11px; font-weight:bold; padding:2px 10px;
@@ -2213,53 +2522,7 @@ class HoldRecallDialog(QDialog):
         btn_row.addStretch(); btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
-class PrintingManager(QDialog):
-    def __init__(self, sale_id, parent=None):
-        super().__init__(parent)
-        self.sale_id = sale_id
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
-        self.setModal(True)
-        self.setFixedSize(300, 150)
-        
-        # Style to match your UI
-        self.setStyleSheet(f"background-color: white; border: 2px solid #2c3e50; border-radius: 10px;")
-        
-        layout = QVBoxLayout(self)
-        self.icon_label = QLabel()
-        self.icon_label.setPixmap(qta.icon("fa5s.spinner", color="#3498db").pixmap(40, 40))
-        self.icon_label.setAlignment(Qt.AlignCenter)
-        
-        self.text_label = QLabel("Initializing...")
-        self.text_label.setAlignment(Qt.AlignCenter)
-        self.text_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
-        
-        layout.addWidget(self.icon_label)
-        layout.addWidget(self.text_label)
 
-    def process(self, fiscal_enabled):
-        """Returns the updated sale data after waiting."""
-        self.show()
-        updated_sale = None
-        
-        if fiscal_enabled:
-            self.text_label.setText("Waiting for Fiscalization...")
-            start_time = time.time()
-            while time.time() - start_time < 6: # 6 second timeout
-                QApplication.processEvents()
-                try:
-                    from models.sale import get_sale_by_id
-                    refreshed = get_sale_by_id(self.sale_id)
-                    if refreshed and refreshed.get("fiscal_qr_code"):
-                        updated_sale = refreshed
-                        break
-                except: pass
-                time.sleep(0.3)
-        
-        self.text_label.setText("Sending to Printer...")
-        QApplication.processEvents()
-        time.sleep(0.5) # Short pause for visual feedback
-        self.close()
-        return updated_sale
 # =============================================================================
 # MANAGE USERS DIALOG
 # =============================================================================
@@ -2293,14 +2556,16 @@ class ManageUsersDialog(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(58)
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(24, 0, 20, 0); hl.setSpacing(12)
-        icon_lbl = QLabel("👥"); icon_lbl.setStyleSheet("font-size:22px; background:transparent;")
+        icon_lbl = QLabel(); icon_lbl.setPixmap(qta.icon("fa5s.users", color="white").pixmap(22, 22))
+        icon_lbl.setStyleSheet("background:transparent;")
         title_lbl = QLabel("Manage Users")
         title_lbl.setStyleSheet(f"font-size:18px; font-weight:bold; color:{WHITE}; background:transparent;")
         sub_lbl = QLabel("Add · Edit · Delete · Assign roles, PINs & permissions")
         sub_lbl.setStyleSheet(f"font-size:11px; color:{MID}; background:transparent;")
         hl.addWidget(icon_lbl); hl.addWidget(title_lbl); hl.addSpacing(8)
         hl.addWidget(sub_lbl); hl.addStretch()
-        close_x = QPushButton("✕"); close_x.setFixedSize(34, 34)
+        close_x = QPushButton(); close_x.setIcon(qta.icon("fa5s.times", color="white"))
+        close_x.setFixedSize(34, 34)
         close_x.setCursor(Qt.PointingHandCursor)
         close_x.setStyleSheet(f"""
             QPushButton {{ background:rgba(255,255,255,0.12); color:{WHITE};
@@ -2328,7 +2593,8 @@ class ManageUsersDialog(QDialog):
         lbl_all = QLabel("All Users")
         lbl_all.setStyleSheet(f"font-size:14px; font-weight:bold; color:{NAVY}; background:transparent;")
         tl.addWidget(lbl_all); tl.addStretch()
-        self._del_btn = QPushButton("🗑  Delete User")
+        self._del_btn = QPushButton("Delete User")
+        self._del_btn.setIcon(qta.icon("fa5s.trash", color="white"))
         self._del_btn.setFixedHeight(32); self._del_btn.setCursor(Qt.PointingHandCursor)
         self._del_btn.setEnabled(False)
         self._del_btn.setStyleSheet(f"""
@@ -2499,7 +2765,8 @@ class ManageUsersDialog(QDialog):
             }}
             QLineEdit:focus {{ border:2px solid {ACCENT}; background:{WHITE}; }}
         """)
-        eye_btn = QPushButton("👁"); eye_btn.setFixedSize(36, 36)
+        eye_btn = QPushButton(); eye_btn.setIcon(qta.icon("fa5s.eye"))
+        eye_btn.setFixedSize(36, 36)
         eye_btn.setCursor(Qt.PointingHandCursor); eye_btn.setCheckable(True)
         eye_btn.setStyleSheet(f"""
             QPushButton {{ background:{OFF_WHITE}; border:1px solid {BORDER};
@@ -2652,7 +2919,8 @@ class ManageUsersDialog(QDialog):
         """)
         self._clear_btn.clicked.connect(self._clear_form)
 
-        self._save_btn = QPushButton("💾  Save User")
+        self._save_btn = QPushButton("Save User")
+        self._save_btn.setIcon(qta.icon("fa5s.save", color="white"))
         self._save_btn.setFixedHeight(38); self._save_btn.setCursor(Qt.PointingHandCursor)
         self._save_btn.setStyleSheet(f"""
             QPushButton {{ background:{SUCCESS}; color:{WHITE};
@@ -2688,7 +2956,8 @@ class ManageUsersDialog(QDialog):
             email_disp = u.get("email") or u.get("frappe_user") or ""
             role   = u.get("role", "cashier")
             pin    = u.get("pin") or "—"
-            src    = "☁ Cloud" if u.get("synced_from_frappe") else "Local"
+            is_cloud = bool(u.get("synced_from_frappe"))
+            src    = "Cloud" if is_cloud else "Local"
             active = u.get("active", True)
 
             # cols: Name, Email, Role, PIN, Source
@@ -2705,6 +2974,8 @@ class ManageUsersDialog(QDialog):
                     it.setForeground(QColor(ACCENT if role == "admin" else MUTED))
                     it.setFont(__import__("PySide6.QtGui", fromlist=["QFont"]).QFont(
                         "Segoe UI", 11, 75 if role == "admin" else 50))
+                if c == 4 and is_cloud:
+                    it.setIcon(qta.icon("fa5s.cloud"))
                 if not active:
                     it.setForeground(QColor(BORDER))
                 it.setData(Qt.UserRole, u)
@@ -3290,10 +3561,10 @@ class AdminDashboard(QWidget):
             }}
             QTabBar::tab:hover {{ background:{BORDER}; }}
         """)
-        self._tabs.addTab(self._build_overview_tab(),  "📈  Overview")
-        self._tabs.addTab(self._build_stock_tab(),     "📦  Stock on Hand")
-        self._tabs.addTab(self._build_top_items_tab(), "🏆  Top Items")
-        self._tabs.addTab(self._build_actions_tab(),   "⚙  Actions")
+        self._tabs.addTab(self._build_overview_tab(),  "  Overview")
+        self._tabs.addTab(self._build_stock_tab(),     "  Stock on Hand")
+        self._tabs.addTab(self._build_top_items_tab(), "  Top Items")
+        self._tabs.addTab(self._build_actions_tab(),   "  Actions")
         root.addWidget(self._tabs, 1)
 
     # =========================================================================
@@ -3339,10 +3610,10 @@ class AdminDashboard(QWidget):
         self._kpi = {}
 
         for key, label, icon, color in [
-            ("sales", "Total Sales", "💰", ACCENT),
-            ("expenses", "Expenses", "📉", DANGER),
-            ("profit", "Gross Profit", "📈", SUCCESS),
-            ("exp_profit", "Expected Profit", "🎯", AMBER),
+            ("sales", "Total Sales", "fa5s.money-bill", ACCENT),
+            ("expenses", "Expenses", "fa5s.chart-line", DANGER),
+            ("profit", "Gross Profit", "fa5s.chart-line", SUCCESS),
+            ("exp_profit", "Expected Profit", "fa5s.bullseye", AMBER),
         ]:
             card, val_lbl = self._kpi_card(label, icon, "$0.00", color)
             self._kpi[key] = val_lbl
@@ -3354,9 +3625,9 @@ class AdminDashboard(QWidget):
         row.setSpacing(14)
 
         for key, label, icon, color in [
-            ("stock_cost", "Stock @ Cost", "🏭", NAVY),
-            ("stock_sell", "Stock @ Selling", "🏷", ACCENT_H),
-            ("potential", "Potential Profit", "💎", SUCCESS),
+            ("stock_cost", "Stock @ Cost", "fa5s.industry", NAVY),
+            ("stock_sell", "Stock @ Selling", "fa5s.tag", ACCENT_H),
+            ("potential", "Potential Profit", "fa5s.gem", SUCCESS),
         ]:
             card, val_lbl = self._kpi_card(label, icon, "$0.00", color)
             self._kpi[key] = val_lbl
@@ -3375,15 +3646,16 @@ class AdminDashboard(QWidget):
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 10, 16, 10)
         cl.setSpacing(3)
-        
+
         top = QHBoxLayout()
         lbl = QLabel(label)
         lbl.setStyleSheet(
             f"color:{MUTED}; font-size:11px; background:transparent; "
             "font-weight:bold; letter-spacing:0.5px;"
         )
-        ico = QLabel(icon)
-        ico.setStyleSheet(f"font-size:18px; background:transparent;")
+        ico = QLabel()
+        ico.setPixmap(qta.icon(icon, color=color).pixmap(18, 18))
+        ico.setStyleSheet("background:transparent;")
         top.addWidget(lbl, 1)
         top.addWidget(ico)
         
@@ -3444,7 +3716,7 @@ class AdminDashboard(QWidget):
         # Search row
         srch_row = QHBoxLayout()
         srch = QLineEdit()
-        srch.setPlaceholderText("🔍  Filter by product name or part number…")
+        srch.setPlaceholderText("Filter by product name or part number…")
         srch.setFixedHeight(34)
         srch.setStyleSheet(f"""
             QLineEdit {{ background:{WHITE}; color:{DARK_TEXT};
@@ -3456,7 +3728,8 @@ class AdminDashboard(QWidget):
         self._stock_search = srch
         srch_row.addWidget(srch, 1)
 
-        export_btn = navy_btn("📥  Export CSV", height=34, color=NAVY_2, hover=NAVY_3)
+        export_btn = navy_btn("Export CSV", height=34, color=NAVY_2, hover=NAVY_3)
+        export_btn.setIcon(qta.icon("fa5s.download", color="white"))
         export_btn.clicked.connect(self._export_stock_csv)
         srch_row.addWidget(export_btn)
         lay.addLayout(srch_row)
@@ -3626,7 +3899,7 @@ class AdminDashboard(QWidget):
 
         # Left: Top 10 Profitable
         left = QVBoxLayout()
-        left.addWidget(self._section_label("🏆  Top 10 Most Profitable Items"))
+        left.addWidget(self._section_label("Top 10 Most Profitable Items"))
 
         self._tbl_profitable = QTableWidget(0, 4)
         self._tbl_profitable.setHorizontalHeaderLabels(
@@ -3647,7 +3920,7 @@ class AdminDashboard(QWidget):
 
         # Right: Most Sold
         right = QVBoxLayout()
-        right.addWidget(self._section_label("📊  Most Sold Items"))
+        right.addWidget(self._section_label("Most Sold Items"))
 
         self._tbl_most_sold = QTableWidget(0, 3)
         self._tbl_most_sold.setHorizontalHeaderLabels(
@@ -3726,17 +3999,17 @@ class AdminDashboard(QWidget):
         cl.setSpacing(8)
 
         actions = [
-            ("👥  Sync Users", self._open_user_sync, NAVY_3),
-            ("📦  Stock File", self._open_stock, NAVY),
-            ("📜  Sales History", self._open_sales_history, NAVY_3),
-            ("📅  Day Shift", self._open_day_shift, NAVY_2),
-            ("🏢  Companies", lambda: self._open_settings_at(1), MUTED),
-            ("👥  Customer Groups", lambda: self._open_settings_at(2), MUTED),
-            ("🏭  Warehouses", lambda: self._open_settings_at(3), MUTED),
-            ("💰  Cost Centers", lambda: self._open_settings_at(4), MUTED),
-            ("🏷  Price Lists", lambda: self._open_settings_at(5), MUTED),
-            ("👤  Customers", lambda: self._open_settings_at(6), MUTED),
-            ("🔄  Refresh Dashboard", self._load_data, SUCCESS),
+            (" Sync Users", self._open_user_sync, NAVY_3),
+            ("  Stock File", self._open_stock, NAVY),
+            ("  Sales History", self._open_sales_history, NAVY_3),
+            ("  Day Shift", self._open_day_shift, NAVY_2),
+            ("  Companies", lambda: self._open_settings_at(1), MUTED),
+            ("  Customer Groups", lambda: self._open_settings_at(2), MUTED),
+            ("  Warehouses", lambda: self._open_settings_at(3), MUTED),
+            ("  Cost Centers", lambda: self._open_settings_at(4), MUTED),
+            ("  Price Lists", lambda: self._open_settings_at(5), MUTED),
+            ("  Customers", lambda: self._open_settings_at(6), MUTED),
+            ("  Refresh Dashboard", self._load_data, SUCCESS),
         ]
         for label, handler, color in actions:
             btn = QPushButton(label)
@@ -3921,11 +4194,13 @@ class AdminDashboard(QWidget):
 
         self._tbl_profitable.setRowCount(0)
         top_p = sorted(profitable.items(), key=lambda x: x[1]["profit"], reverse=True)[:10]
+        medal_colors = {0: "#d4af37", 1: "#c0c0c0", 2: "#cd7f32"}
         for i, (name, d) in enumerate(top_p):
             r = self._tbl_profitable.rowCount()
             self._tbl_profitable.insertRow(r)
+            first_col_text = f" {name}" if i < 3 else f"{i+1}. {name}"
             vals = [
-                f"{'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {name}",
+                first_col_text,
                 f"{d['qty']:.0f}",
                 f"{d['margin']:.1f}%",
                 f"${d['profit']:,.2f}",
@@ -3939,6 +4214,8 @@ class AdminDashboard(QWidget):
             for ci, (val, aln) in enumerate(zip(vals, aligns)):
                 it = QTableWidgetItem(val)
                 it.setTextAlignment(aln)
+                if ci == 0 and i < 3:
+                    it.setIcon(qta.icon("fa5s.medal", color=medal_colors[i]))
                 if ci == 3:
                     it.setForeground(QColor(SUCCESS if d["profit"] >= 0 else DANGER))
                 self._tbl_profitable.setItem(r, ci, it)
@@ -3949,8 +4226,9 @@ class AdminDashboard(QWidget):
         for i, (name, d) in enumerate(top_s):
             r = self._tbl_most_sold.rowCount()
             self._tbl_most_sold.insertRow(r)
+            first_col_text = f" {name}" if i < 3 else f"{i+1}. {name}"
             vals = [
-                f"{'🏅' if i < 3 else f'{i+1}.'} {name}",
+                first_col_text,
                 f"{d['qty']:.0f}",
                 f"${d['revenue']:,.2f}",
             ]
@@ -3962,6 +4240,8 @@ class AdminDashboard(QWidget):
             for ci, (val, aln) in enumerate(zip(vals, aligns)):
                 it = QTableWidgetItem(val)
                 it.setTextAlignment(aln)
+                if ci == 0 and i < 3:
+                    it.setIcon(qta.icon("fa5s.medal", color="#777"))
                 if ci == 2:
                     it.setForeground(QColor(ACCENT))
                 self._tbl_most_sold.setItem(r, ci, it)
@@ -3988,7 +4268,7 @@ class AdminDashboard(QWidget):
                 ("user", lambda v: str(v)),
                 ("method", lambda v: str(v)),
                 ("total", lambda v: f"${float(v or 0):.2f}"),
-                ("synced", lambda v: "✓" if v else "—"),
+                ("synced", lambda v: "" if v else "—"),
             ]):
                 raw = s.get(key, "") or s.get("number", "") or ""
                 text = fmt(raw)
@@ -3999,6 +4279,8 @@ class AdminDashboard(QWidget):
                 if key == "total":
                     item.setForeground(QColor(ACCENT))
                 elif key == "synced":
+                    if s.get("synced"):
+                        item.setIcon(qta.icon("fa5s.check", color=SUCCESS))
                     item.setForeground(QColor(SUCCESS if s.get("synced") else MUTED))
                 self.sales_table.setItem(r, c, item)
             self.sales_table.setRowHeight(r, 34)
@@ -4016,9 +4298,14 @@ class AdminDashboard(QWidget):
             low = []
 
         if not low:
-            lbl = QLabel("✓  All stock levels OK")
+            row_w = QWidget(); row_w.setStyleSheet("background: transparent;")
+            rh = QHBoxLayout(row_w); rh.setContentsMargins(0, 0, 0, 0); rh.setSpacing(6)
+            ic = QLabel(); ic.setPixmap(qta.icon("fa5s.check", color=SUCCESS).pixmap(14, 14))
+            ic.setStyleSheet("background:transparent;")
+            lbl = QLabel("All stock levels OK")
             lbl.setStyleSheet(f"color:{SUCCESS}; font-size:12px; background:transparent;")
-            self._stock_alert_layout.addWidget(lbl)
+            rh.addWidget(ic); rh.addWidget(lbl); rh.addStretch()
+            self._stock_alert_layout.addWidget(row_w)
         else:
             for p in low[:12]:
                 row_w = QWidget()
@@ -4062,8 +4349,9 @@ class AdminDashboard(QWidget):
             SalesListDialog(self).exec()
         else:
             coming_soon(self, "Sales History")
-
+    
     def _open_day_shift(self):
+        from views.dialogs.shift_reconciliation_dialog import ShiftReconciliationDialog
         cashier_id = self.user.get("id") if self.user else None
         dlg = ShiftReconciliationDialog(self, cashier_id=cashier_id)
         if dlg.exec() == QDialog.Accepted:
@@ -4077,6 +4365,7 @@ class AdminDashboard(QWidget):
             dlg.exec()
         else:
             coming_soon(self, "Settings — add views/dialogs/settings_dialog.py")
+            
 class OptionsDialog(QDialog):
     """
     Clean, minimal options panel for cashiers.
@@ -4088,7 +4377,7 @@ class OptionsDialog(QDialog):
         super().__init__(parent)
         self._pos = pos_view
         self.setWindowTitle("Options")
-        self.setFixedSize(360, 280)
+        self.setFixedSize(380, 420)  # Sized for the full button list + sync status line
         self.setModal(True)
         self.setWindowFlags(
             self.windowFlags()
@@ -4116,7 +4405,7 @@ class OptionsDialog(QDialog):
         title.setStyleSheet(
             f"font-size:15px; font-weight:bold; color:{WHITE}; background:transparent;"
         )
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton(); close_btn.setIcon(qta.icon("fa5s.times", color="white"))
         close_btn.setFixedSize(28, 28)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"""
@@ -4162,10 +4451,41 @@ class OptionsDialog(QDialog):
 
         bl.addWidget(_row("Create Credit Note  (Return)",
                           self._do_credit_note, AMBER, ORANGE))
-        bl.addWidget(_row("Save / Print Quotation",
-                          self._do_save_quotation, NAVY_3, NAVY_2))
+        # Pharmacy: relabel "Save / Print Quotation" → "Dispense" for Pharmacist users
+        self._save_quote_btn = _row("Save / Print Quotation",
+                          self._do_save_quotation, NAVY_3, NAVY_2)
+        try:
+            from utils.roles import is_pharmacist as _is_pharm
+            _user = getattr(self._pos, "user", None) if self._pos else None
+            if _is_pharm(_user):
+                self._save_quote_btn.setText("Dispense")
+                try:
+                    # Prefer prescription-bottle-alt; fall back silently on missing glyph
+                    self._save_quote_btn.setIcon(qta.icon("fa5s.prescription-bottle-alt", color="white"))
+                except Exception:
+                    try:
+                        self._save_quote_btn.setIcon(qta.icon("fa5s.pills", color="white"))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        bl.addWidget(self._save_quote_btn)
+        bl.addWidget(_row("Manage Quotations",
+                          self._do_manage_quotations, NAVY, NAVY_2))
         bl.addWidget(_row("Reprint Invoice",
                           self._do_reprint, NAVY, NAVY_2))
+        self._sync_products_btn = _row("Sync Products from Server",
+                                       self._do_sync_products, ACCENT, ACCENT_H)
+        bl.addWidget(self._sync_products_btn)
+
+        # Inline status line for the sync action
+        from PySide6.QtWidgets import QLabel as _QL
+        self._sync_status_lbl = _QL("")
+        self._sync_status_lbl.setStyleSheet(
+            f"font-size:11px; color:{MUTED}; background:transparent; padding:0 4px;"
+        )
+        self._sync_status_lbl.setWordWrap(True)
+        bl.addWidget(self._sync_status_lbl)
 
         bl.addStretch()
         root.addWidget(body, 1)
@@ -4175,6 +4495,11 @@ class OptionsDialog(QDialog):
         self.accept()
         if self._pos:
             self._pos._save_quotation()
+
+    def _do_manage_quotations(self):
+        self.accept()
+        if self._pos:
+            self._pos._open_quotation_manager()
 
     def _do_credit_note(self):
         self.accept()
@@ -4188,12 +4513,315 @@ class OptionsDialog(QDialog):
         if self._pos:
             self._pos._reprint_by_invoice_no()
 
-
     def _do_pos_rules(self):
         self.accept()
         POSRulesDialog(self.parent()).exec()
 
+    # =========================================================================
+    # PRODUCT SYNC — one-shot pull from Frappe
+    # =========================================================================
+    def _do_sync_products(self):
+        """Fire a one-shot product sync in the background. Keeps the dialog
+        open so the cashier sees the status line; disables the button while
+        running so double-taps don't stack requests."""
+        from PySide6.QtCore import QThread, Signal as _Sig, QObject as _QObj
+
+        class _ProductSyncJob(_QObj):
+            done   = _Sig(dict)
+            failed = _Sig(str)
+
+            def run(self):
+                try:
+                    from services.credentials import get_credentials
+                    key, secret = get_credentials()
+                    if not key or not secret:
+                        self.failed.emit("No credentials — log in once so the sync can authenticate.")
+                        return
+                    from services.product_sync_windows_service import sync_products_smart
+                    res = sync_products_smart(key, secret) or {}
+                    self.done.emit(res)
+                except Exception as e:
+                    self.failed.emit(str(e))
+
+        self._sync_products_btn.setEnabled(False)
+        self._sync_status_lbl.setStyleSheet(
+            f"font-size:11px; color:{MUTED}; background:transparent; padding:0 4px;"
+        )
+        self._sync_status_lbl.setText("Syncing products from server…")
+
+        self._sync_thread = QThread(self)
+        self._sync_job    = _ProductSyncJob()
+        self._sync_job.moveToThread(self._sync_thread)
+        self._sync_thread.started.connect(self._sync_job.run)
+        self._sync_job.done.connect(self._on_sync_products_done)
+        self._sync_job.failed.connect(self._on_sync_products_failed)
+        self._sync_job.done.connect(self._sync_thread.quit)
+        self._sync_job.failed.connect(self._sync_thread.quit)
+        self._sync_thread.finished.connect(self._sync_job.deleteLater)
+        self._sync_thread.finished.connect(self._sync_thread.deleteLater)
+        self._sync_thread.start()
+
+    def _on_sync_products_done(self, res: dict):
+        # Refresh the POS product grid so newly-synced items appear without a
+        # restart. _reload_current_category preserves the active category/page.
+        try:
+            if self._pos and hasattr(self._pos, "_reload_current_category"):
+                self._pos._reload_current_category()
+        except Exception as e:
+            print(f"[OptionsDialog] product grid refresh failed: {e}")
+
+        # Surface the sync summary on the parent status bar (dialog is about
+        # to close so writing to the inline status line would be invisible).
+        try:
+            inserted = res.get("inserted", 0)
+            updated  = res.get("updated", 0)
+            total    = res.get("total_api", 0)
+            errors   = res.get("errors", 0)
+            msg = f"Sync done — {inserted} new, {updated} updated (of {total})"
+            if errors:
+                msg += f", {errors} error(s)"
+            pw = getattr(self._pos, "parent_window", None)
+            if pw and hasattr(pw, "_set_status"):
+                pw._set_status(msg)
+            else:
+                print(f"[OptionsDialog] {msg}")
+        except Exception:
+            pass
+
+        self.accept()
+
+    def _on_sync_products_failed(self, msg: str):
+        if hasattr(self, "_sync_products_btn"):
+            self._sync_products_btn.setEnabled(True)
+        if hasattr(self, "_sync_status_lbl"):
+            self._sync_status_lbl.setStyleSheet(
+                f"font-size:11px; color:{DANGER}; background:transparent; padding:0 4px; font-weight:bold;"
+            )
+            self._sync_status_lbl.setText(f"Failed: {msg[:120]}")
 # =============================================================================
+# =============================================================================
+# MAINTENANCE DIALOG  — Printer Setup / operational toggles
+# Replaces the old "Printer Setup → coming soon" in the Maintenance menu.
+# =============================================================================
+class MaintenanceDialog(QDialog):
+    """
+    Maintenance settings accessible from Maintenance → Printer Setup.
+
+    Toggles
+    ───────
+    • print_batch_on_receipt
+        ON  → batch number + expiry date are printed beneath each pharmacy
+              line item on the customer receipt (default behaviour).
+        OFF → batch / expiry lines are suppressed on the receipt.
+
+    • allow_loaded_quotation_qty_change
+        ON  → cashiers may freely edit the Qty of pharmacy items that were
+              loaded from a quotation into the POS cart.
+        OFF → those rows stay locked (default — only pharmacists can touch them).
+    """
+
+    _RULES = [
+        (
+            "print_batch_on_receipt",
+            "PRINT BATCH NUMBERS ON RECEIPT",
+            "Print batch number and expiry date under each pharmacy\n"
+            "item on the customer receipt.",
+        ),
+        (
+            "allow_loaded_quotation_qty_change",
+            "ALLOW QTY CHANGE ON LOADED QUOTATION",
+            "Let cashiers edit the quantity of pharmacy items after\n"
+            "a quotation has been loaded into the POS cart.",
+        ),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._toggles: dict = {}
+        self.setWindowTitle("Printer Setup & Maintenance")
+        self.setFixedSize(520, 280)
+        self.setModal(True)
+        self.setWindowFlags(
+            Qt.Dialog | Qt.FramelessWindowHint
+        )
+        self.setStyleSheet(
+            f"QDialog {{ background:{WHITE}; border:1px solid {NAVY}; }}"
+        )
+        self._build()
+        self._load()
+
+    # ── UI ───────────────────────────────────────────────────────────────────
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Header bar
+        header = QWidget()
+        header.setFixedHeight(52)
+        header.setStyleSheet(f"background:{NAVY}; border-bottom:1px solid {NAVY_2};")
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(18, 0, 12, 0)
+
+        icon_lbl = QLabel()
+        try:
+            import qtawesome as qta
+            icon_lbl.setPixmap(
+                qta.icon("fa5s.print", color="white").pixmap(18, 18)
+            )
+        except Exception:
+            pass
+        title_lbl = QLabel("PRINTER SETUP & MAINTENANCE")
+        title_lbl.setStyleSheet(
+            "font-size:11px; font-weight:bold; color:#ffffff;"
+            " letter-spacing:1.5px; background:transparent;"
+        )
+
+        self._save_btn = QPushButton("SAVE")
+        self._save_btn.setFixedSize(82, 30)
+        self._save_btn.setStyleSheet(
+            "QPushButton { background:#10b981; color:white; border-radius:4px;"
+            "  font-weight:bold; font-size:10px; border:none; }"
+            "QPushButton:hover { background:#059669; }"
+            "QPushButton:disabled { background:transparent; color:#10b981;"
+            "  border:1px solid #10b981; }"
+        )
+        self._save_btn.clicked.connect(self._save)
+
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(30, 30)
+        close_btn.setStyleSheet(
+            "QPushButton { background:transparent; color:#ffffff; border:none;"
+            "  font-size:14px; }"
+            "QPushButton:hover { background:#c0392b; border-radius:4px; }"
+        )
+        close_btn.clicked.connect(self.reject)
+
+        hl.addWidget(icon_lbl)
+        hl.addSpacing(8)
+        hl.addWidget(title_lbl)
+        hl.addStretch()
+        hl.addWidget(self._save_btn)
+        hl.addSpacing(6)
+        hl.addWidget(close_btn)
+        root.addWidget(header)
+
+        # Body
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(28, 8, 28, 12)
+        bl.setSpacing(0)
+
+        for key, lbl, desc in self._RULES:
+            bl.addWidget(self._rule_row(key, lbl, desc))
+
+        bl.addStretch()
+        root.addWidget(body)
+
+    def _rule_row(self, key: str, label: str, desc: str) -> QWidget:
+        from PySide6.QtWidgets import QFrame
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 10, 0, 10)
+
+        row = QHBoxLayout()
+        txt = QVBoxLayout(); txt.setSpacing(2)
+
+        title_lbl = QLabel(label)
+        title_lbl.setStyleSheet(
+            f"color:{DARK_TEXT}; font-size:11px; font-weight:bold;"
+        )
+        sub_lbl = QLabel(desc)
+        sub_lbl.setStyleSheet(f"color:#64748b; font-size:10px;")
+        sub_lbl.setWordWrap(True)
+
+        txt.addWidget(title_lbl)
+        txt.addWidget(sub_lbl)
+
+        # Reuse the ToggleSwitch from settings_dialog if available, else QCheckBox
+        try:
+            from views.dialogs.settings_dialog import SlidingToggle
+            tog = SlidingToggle()
+        except Exception:
+            from PySide6.QtWidgets import QCheckBox
+            tog = QCheckBox()
+
+        self._toggles[key] = tog
+
+        row.addLayout(txt, 1)
+        row.addSpacing(16)
+        row.addWidget(tog, 0, Qt.AlignVCenter)
+        layout.addLayout(row)
+
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background:{BORDER}; border:none;")
+        layout.addWidget(sep)
+        return container
+
+    # ── Persistence ──────────────────────────────────────────────────────────
+    def _load(self):
+        defaults = {
+            "print_batch_on_receipt":              True,
+            "allow_loaded_quotation_qty_change":   False,
+        }
+        for key, tog in self._toggles.items():
+            val = defaults.get(key, False)
+            tog.setChecked(val)
+            if hasattr(tog, "position"):
+                tog.position = 1.0 if val else 0.0
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_key, setting_value FROM pos_settings")
+            for k, v in cur.fetchall():
+                if k in self._toggles:
+                    checked = str(v) == "1"
+                    self._toggles[k].setChecked(checked)
+                    if hasattr(self._toggles[k], "position"):
+                        self._toggles[k].position = 1.0 if checked else 0.0
+            conn.close()
+        except Exception:
+            pass
+
+    def _save(self):
+        try:
+            self._save_btn.setEnabled(False)
+            self._save_btn.setText("SAVING…")
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            for key, tog in self._toggles.items():
+                val = "1" if tog.isChecked() else "0"
+                cur.execute(
+                    """
+                    MERGE pos_settings AS t
+                    USING (SELECT ? AS k, ? AS v) AS s ON t.setting_key = s.k
+                    WHEN MATCHED     THEN UPDATE SET setting_value = s.v
+                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
+                                          VALUES (s.k, s.v);
+                    """,
+                    (key, val),
+                )
+            conn.commit(); conn.close()
+            self._save_btn.setText("✓ SAVED")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1600, self._reset_btn)
+        except Exception as e:
+            self._save_btn.setEnabled(True)
+            self._save_btn.setText("SAVE")
+            QMessageBox.warning(self, "Error", f"Failed to save:\n{e}")
+
+    def _reset_btn(self):
+        self._save_btn.setEnabled(True)
+        self._save_btn.setText("SAVE")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.reject()
+        else:
+            super().keyPressEvent(event)
+
+
 # POS RULES DIALOG  —  standalone, accessible from Options menu & Maintenance
 # =============================================================================
 class POSRulesDialog(QDialog):
@@ -4222,10 +4850,10 @@ class POSRulesDialog(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(52)
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(24, 0, 24, 0)
-        t = QLabel("🛡  POS Business Rules")
+        t = QLabel("POS Business Rules")
         t.setStyleSheet(f"font-size:16px; font-weight:bold; color:{WHITE}; background:transparent;")
         hl.addWidget(t); hl.addStretch()
-        close_x = QPushButton("✕")
+        close_x = QPushButton(); close_x.setIcon(qta.icon("fa5s.times", color="white"))
         close_x.setFixedSize(30, 30); close_x.setCursor(Qt.PointingHandCursor)
         close_x.setStyleSheet(
             f"QPushButton {{ background:{DANGER}; color:{WHITE}; border:none;"
@@ -4245,11 +4873,11 @@ class POSRulesDialog(QDialog):
         bl.addWidget(sec)
 
         rules = [
-            ("block_zero_price",  "🚫  Block Zero-Price Sales",
+            ("block_zero_price",  "Block Zero-Price Sales",
              "Prevent adding items with $0.00 price to the invoice.", True),
-            ("block_zero_stock",  "📦  Block Zero-Stock Sales",
+            ("block_zero_stock",  "Block Zero-Stock Sales",
              "Show 'Insufficient Stock' popup when item has no stock.", False),
-            ("use_pricing_rules", "💸  Apply Pricing Rules",
+            ("use_pricing_rules", "Apply Pricing Rules",
              "Auto-apply discount rules when adding items.", False),
         ]
         for key, label, desc, default in rules:
@@ -4261,7 +4889,7 @@ class POSRulesDialog(QDialog):
         bl.addWidget(sep); bl.addSpacing(8)
 
         note = QLabel(
-            "💡  Per-user permissions (Allow Discounts, Reprint, Credit Notes, Receipt)\n"
+            "Per-user permissions (Allow Discounts, Reprint, Credit Notes, Receipt)\n"
             "    are configured in  Maintenance → Users → edit a user."
         )
         note.setWordWrap(True)
@@ -4271,7 +4899,8 @@ class POSRulesDialog(QDialog):
         bl.addWidget(note)
         bl.addStretch()
 
-        save_btn = navy_btn("💾  Save Rules", height=42, color=SUCCESS, hover=SUCCESS_H)
+        save_btn = navy_btn("Save Rules", height=42, color=SUCCESS, hover=SUCCESS_H)
+        save_btn.setIcon(qta.icon("fa5s.save", color="white"))
         save_btn.clicked.connect(self._save)
         bl.addWidget(save_btn)
 
@@ -4374,13 +5003,18 @@ class UnsyncedPopup(QDialog):
     kind = "SI"  → opens on the Sales Invoices tab
     kind = "CN"  → opens on the Credit Notes tab
     kind = "SO"  → opens on the Sales Orders tab
+    kind = "BUNDLE" → opens on the Bundles tab
     kind = ""    → opens on whichever tab has errors (smart)
     """
 
+    
     _TAB_META = {
-        "SI": ("📄  Sales Invoices",  DANGER, DANGER_H),
-        "CN": ("📋  Credit Notes",    AMBER,  ORANGE),
-        "SO": ("🏷  Sales Orders",    AMBER,  ORANGE),
+        "SI":   ("  Sales Invoices",   DANGER,  DANGER_H),
+        "CN":   ("  Credit Notes",     AMBER,   ORANGE),
+        "SO":   ("  Sales Orders",     AMBER,   ORANGE),
+        "PAY":  ("  Payment Entries",  ACCENT,  ACCENT_H),
+        "BUNDLE": ("  Bundles",          ACCENT,  ACCENT_H),
+        "CUST": ("  Customers",        NAVY_3,  NAVY_2),
     }
 
     def __init__(self, kind: str = "", parent=None):
@@ -4406,13 +5040,14 @@ class UnsyncedPopup(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(54)
         hdr.setStyleSheet(f"background:{NAVY};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
-        t = QLabel("⚠  Unsynced Items")
+        t = QLabel("Unsynced Items")
         t.setStyleSheet(
             f"font-size:15px; font-weight:bold; color:{WHITE}; background:transparent;")
         self._hdr_count = QLabel("")
         self._hdr_count.setStyleSheet(
             f"color:{MID}; font-size:12px; background:transparent;")
-        close_x = QPushButton("✕  Close")
+        close_x = QPushButton("Close")
+        close_x.setIcon(qta.icon("fa5s.times", color="white"))
         close_x.setFixedSize(92, 32); close_x.setCursor(Qt.PointingHandCursor)
         close_x.setStyleSheet(f"""
             QPushButton {{ background:{DANGER};color:{WHITE};border:none;
@@ -4449,10 +5084,7 @@ class UnsyncedPopup(QDialog):
 
         # Admin hint
         hint = QLabel(
-            "⚠️  <b>Items not syncing?</b>  Contact your system administrator.  "
-            "<b>Common causes:</b>  Stock Reservation not enabled  ·  "
-            "Item not set as sales item  ·  Missing Warehouse / Cash account  ·  "
-            "Server unreachable"
+            "Check above for any errors and just copy and send to admin "
         )
         hint.setWordWrap(True)
         hint.setTextFormat(Qt.RichText)
@@ -4508,7 +5140,8 @@ class UnsyncedPopup(QDialog):
         # Copy button + retry button
         foot = QHBoxLayout(); foot.setSpacing(10)
 
-        copy_btn = QPushButton("📋  Copy Selected Error")
+        copy_btn = QPushButton("Copy Selected Error")
+        copy_btn.setIcon(qta.icon("fa5s.clipboard", color="white"))
         copy_btn.setFixedHeight(34); copy_btn.setCursor(Qt.PointingHandCursor)
         copy_btn.setStyleSheet(f"""
             QPushButton {{ background:{NAVY_2};color:{WHITE};border:none;
@@ -4517,7 +5150,8 @@ class UnsyncedPopup(QDialog):
         """)
         copy_btn.clicked.connect(lambda _=False, k=kind: self._copy_error(k))
 
-        refresh_btn = QPushButton("↻  Refresh")
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         refresh_btn.setFixedHeight(34); refresh_btn.setCursor(Qt.PointingHandCursor)
         refresh_btn.setStyleSheet(f"""
             QPushButton {{ background:{NAVY_2};color:{WHITE};border:none;
@@ -4526,7 +5160,8 @@ class UnsyncedPopup(QDialog):
         """)
         refresh_btn.clicked.connect(lambda _=False, k=kind: self._load_tab(k))
 
-        retry_btn = QPushButton("🔄  Retry Sync Now")
+        retry_btn = QPushButton("Retry Sync Now")
+        retry_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         retry_btn.setFixedHeight(34); retry_btn.setCursor(Qt.PointingHandCursor)
         retry_btn.setStyleSheet(f"""
             QPushButton {{ background:{ACCENT};color:{WHITE};border:none;
@@ -4591,79 +5226,279 @@ class UnsyncedPopup(QDialog):
             # Raw error — red, full text in tooltip too
             err_item = _cell(raw_error or "—", DANGER if raw_error else MUTED)
             if raw_error:
-                err_item.setToolTip(raw_error)   # full text on hover
+                err_item.setToolTip(str(raw_error))   # full text on hover
             tbl.setItem(r, 3, err_item)
 
         return n
 
     def _fetch_rows(self, kind: str):
-        """Returns list of (ref, customer, amount_str, raw_error_str)."""
+        """
+        Returns list of (ref, customer, amount_str, raw_error_str).
+        Every query mirrors the badge SQL so popup count == badge count.
+        Raw error_msg is pulled verbatim from sync_errors table — no cleaning,
+        no truncation.  Falls back to "Pending" only when no error row exists.
+        """
         rows = []
-
-        # ── Primary: sync_errors table ────────────────────────────────────────
         try:
-            from services.sync_errors_service import get_unresolved
-            for e in get_unresolved(kind):
-                rows.append((
-                    e.get("doc_ref")   or "—",
-                    e.get("customer")  or "—",
-                    f"${float(e.get('amount', 0)):.2f}",
-                    # raw_error: prefer raw_message, fall back to error_msg
-                    e.get("raw_message") or e.get("error_msg") or "—",
-                ))
-            if rows:
-                return rows
+            from database.db import get_connection
+
+            def _get_raw_errors(conn, doc_type_code: str) -> dict:
+                """
+                Returns {doc_ref: error_msg} for all unresolved rows of
+                this doc_type.  Verbatim — newest row wins per ref.
+                """
+                errors = {}
+                try:
+                    cur2 = conn.cursor()
+                    cur2.execute(
+                        """
+                        SELECT doc_ref, error_msg
+                        FROM   sync_errors
+                        WHERE  doc_type = ?
+                          AND  resolved = 0
+                        ORDER  BY id DESC
+                        """,
+                        (doc_type_code,),
+                    )
+                    for doc_ref, error_msg in cur2.fetchall():
+                        if doc_ref not in errors:
+                            errors[doc_ref] = error_msg or ""
+                except Exception:
+                    pass
+                return errors
+
+            def _match_error(error_map: dict, key: str) -> str:
+                """Exact match first, then substring fallback."""
+                if not key:
+                    return ""
+                if key in error_map:
+                    return str(error_map[key])
+                key_str = str(key).lower()
+                for k, v in error_map.items():
+                    if k is not None:
+                        k_str = str(k).lower()
+                        if k_str in key_str or key_str in k_str:
+                            return str(v)
+                return ""
+
+            if kind == "SI":
+                try:
+                    conn = get_connection()
+                    # collect errors under both code variants services may use
+                    error_map = _get_raw_errors(conn, "SI")
+                    for k, v in _get_raw_errors(conn, "sales_invoice").items():
+                        error_map.setdefault(k, v)
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT invoice_no, customer_name, total, method
+                        FROM   sales
+                        WHERE  synced = 0 OR synced IS NULL
+                        ORDER  BY id DESC
+                    """)
+                    for inv, cust, amt, meth in cur.fetchall():
+                        inv_key = inv or ""
+                        raw_err = _match_error(error_map, inv_key)
+                        display_err = (
+                            raw_err if raw_err
+                            else f"Pending — not yet attempted  (method: {meth or 'unknown'})"
+                        )
+                        rows.append((
+                            inv_key or "—",
+                            cust or "Walk-in",
+                            f"${float(amt or 0):.2f}",
+                            display_err,
+                        ))
+                    conn.close()
+                except Exception as e:
+                    rows.append(("—", "—", "—", f"DB error: {e}"))
+
+            elif kind == "CN":
+                try:
+                    conn = get_connection()
+                    error_map = _get_raw_errors(conn, "CN")
+                    for k, v in _get_raw_errors(conn, "credit_note").items():
+                        error_map.setdefault(k, v)
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT cn_number, customer_name, total, cn_status
+                        FROM   credit_notes
+                        WHERE  cn_status IN ('ready','pending_sync')
+                        ORDER  BY id DESC
+                    """)
+                    for cn_no, cust, amt, status in cur.fetchall():
+                        cn_key = cn_no or ""
+                        raw_err = _match_error(error_map, cn_key)
+                        display_err = (
+                            raw_err if raw_err
+                            else f"Pending — status: {status or 'ready'}"
+                        )
+                        rows.append((
+                            cn_key or "—",
+                            cust or "—",
+                            f"${float(amt or 0):.2f}",
+                            display_err,
+                        ))
+                    conn.close()
+                except Exception as e:
+                    rows.append(("—", "—", "—", f"DB error: {e}"))
+            
+            elif kind == "SO":
+                try:
+                    conn = get_connection()
+                    error_map = _get_raw_errors(conn, "SO")
+                    for k, v in _get_raw_errors(conn, "sales_order").items():
+                        error_map.setdefault(k, v)
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT order_no, customer_name, total
+                        FROM   sales_order
+                        WHERE  synced = 0 OR synced IS NULL
+                        ORDER  BY id DESC
+                    """)
+                    for ono, cust, amt in cur.fetchall():
+                        so_key = ono or ""
+                        raw_err = _match_error(error_map, so_key)
+                        display_err = (
+                            raw_err if raw_err
+                            else "Pending — not yet attempted"
+                        )
+                        rows.append((
+                            so_key or "—",
+                            cust or "—",
+                            f"${float(amt or 0):.2f}",
+                            display_err,
+                        ))
+                    conn.close()
+                except Exception as e:
+                    rows.append(("—", "—", "—", f"DB error: {e}"))
+
+            elif kind == "PAY":
+                try:
+                    conn = get_connection()
+                    error_map = _get_raw_errors(conn, "PAY")
+                    for k, v in _get_raw_errors(conn, "PE").items():
+                        error_map.setdefault(k, v)
+                    for k, v in _get_raw_errors(conn, "payment_entry").items():
+                        error_map.setdefault(k, v)
+                    
+                    cur = conn.cursor()
+                    # Show ALL unsynced payment entries — including sale-linked ones.
+                    # Currency column included so ZiG/ZWD entries are clearly labelled.
+                    cur.execute("""
+                        SELECT reference_no, party_name, paid_amount, currency, last_error, sync_attempts FROM (
+                            SELECT pe.reference_no, pe.party_name, pe.paid_amount,
+                                   pe.currency, ISNULL(pe.sync_error, pe.last_error) as last_error, pe.sync_attempts, pe.id
+                            FROM   payment_entries pe
+                            WHERE  (pe.synced = 0 OR pe.synced IS NULL)
+                            
+                            UNION ALL
+                            
+                            SELECT le.order_no as reference_no, le.customer_name as party_name, le.deposit_amount as paid_amount,
+                                   le.deposit_currency as currency, ISNULL(le.sync_error, le.error_message) as last_error, le.sync_attempts, le.id
+                            FROM   laybye_payment_entries le
+                            WHERE  le.status != 'synced'
+
+                            UNION ALL
+
+                            SELECT cp.reference as reference_no, c.customer_name as party_name, cp.amount as paid_amount,
+                                   cp.currency, cp.sync_error as last_error, cp.sync_attempts, cp.id
+                            FROM   customer_payments cp
+                            LEFT JOIN customers c ON cp.customer_id = c.id
+                            WHERE  (cp.synced = 0 OR cp.synced IS NULL)
+                        ) as combined
+                        ORDER BY id DESC
+                    """)
+                    for ref, cust, amt, curr, db_err, attempts in cur.fetchall():
+                        pay_key = ref or ""
+                        raw_err = (db_err or "").strip() or _match_error(error_map, pay_key)
+                        att = attempts or 0
+                        if att >= 60:
+                            attempt_str = f" (Max retries reached — click Retry to reset)"
+                        elif att > 0:
+                            attempt_str = f" (Attempt {att}/60)"
+                        else:
+                            attempt_str = ""
+                        display_err = (
+                            f"{raw_err}{attempt_str}" if raw_err
+                            else "Pending — not yet attempted"
+                        )
+                        curr_display = (curr or "USD").upper()
+                        rows.append((
+                            pay_key or "—",
+                            cust or "Walk-in",
+                            f"{curr_display}  {float(amt or 0):,.2f}",
+                            display_err,
+                        ))
+                    conn.close()
+                except Exception as e:
+                    rows.append(("—", "—", "—", f"DB error: {e}"))
+
+            elif kind == "CUST":
+                try:
+                    conn = get_connection()
+                    error_map = _get_raw_errors(conn, "CUST")
+                    for k, v in _get_raw_errors(conn, "customer").items():
+                        error_map.setdefault(k, v)
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT id, customer_name, custom_telephone_number
+                        FROM   customers
+                        WHERE  frappe_synced = 0 OR frappe_synced IS NULL
+                        ORDER  BY id DESC
+                    """)
+                    for cid, cname, phone in cur.fetchall():
+                        cust_key = f"CUST-{cid}"
+                        raw_err = (
+                            _match_error(error_map, cust_key)
+                            or _match_error(error_map, str(cid))
+                            or (_match_error(error_map, cname) if cname else "")
+                        )
+                        display_err = (
+                            raw_err if raw_err
+                            else "Not yet synced to server"
+                        )
+                        rows.append((
+                            cust_key,
+                            cname or "—",
+                            phone or "—",
+                            display_err,
+                        ))
+                    conn.close()
+                except Exception as e:
+                    rows.append(("—", "—", "—", f"DB error: {e}"))
+
+            elif kind == "BUNDLE":
+                try:
+                    conn = get_connection()
+                    error_map = _get_raw_errors(conn, "BUNDLE")
+                    for k, v in _get_raw_errors(conn, "bundle").items():
+                        error_map.setdefault(k, v)
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT id, name, description
+                        FROM   product_bundles
+                        WHERE  sync_status = 'pending' OR sync_status = 'failed'
+                        ORDER  BY id DESC
+                    """)
+                    for bid, bname, bdesc in cur.fetchall():
+                        bundle_key = bname or str(bid)
+                        raw_err = _match_error(error_map, bundle_key)
+                        display_err = (
+                            raw_err if raw_err
+                            else "Pending push to server"
+                        )
+                        rows.append((
+                            f"BNDL-{bid}",
+                            bname or "—",
+                            "Bundle",
+                            display_err,
+                        ))
+                    conn.close()
+                except Exception as e:
+                    rows.append(("—", "—", "—", f"DB error: {e}"))
+
         except Exception:
             pass
-
-        # ── Fallback: list unsynced docs (no error detail yet) ────────────────
-        if kind == "SI":
-            try:
-                from models.sale import get_all_sales
-                for s in get_all_sales():
-                    if s.get("synced"):
-                        continue
-                    rows.append((
-                        s.get("invoice_no") or f"#{s.get('id', '')}",
-                        s.get("customer_name") or "Walk-in",
-                        f"${float(s.get('total', 0)):.2f}",
-                        "Pending — no error detail yet",
-                    ))
-            except Exception as e:
-                rows.append(("—", "—", "—", f"DB error: {e}"))
-
-        elif kind == "CN":
-            try:
-                from database.db import get_connection
-                conn = get_connection(); cur = conn.cursor()
-                cur.execute("""
-                    SELECT cn_number, customer_name, total
-                    FROM   credit_notes
-                    WHERE  cn_status IN ('ready','pending_sync')
-                    ORDER  BY id DESC
-                """)
-                for cn_no, cust, amt in cur.fetchall():
-                    rows.append((
-                        cn_no or "—", cust or "—",
-                        f"${float(amt or 0):.2f}",
-                        "Pending — no error detail yet",
-                    ))
-                conn.close()
-            except Exception as e:
-                rows.append(("—", "—", "—", f"DB error: {e}"))
-
-        elif kind == "SO":
-            try:
-                from models.sales_order import get_unsynced_orders
-                for o in get_unsynced_orders():
-                    rows.append((
-                        o.get("order_no") or f"#{o.get('id', '')}",
-                        o.get("customer_name") or "—",
-                        f"${float(o.get('total', 0)):.2f}",
-                        "Pending — no error detail yet",
-                    ))
-            except Exception as e:
-                rows.append(("—", "—", "—", f"DB error: {e}"))
 
         return rows
 
@@ -4714,6 +5549,15 @@ class UnsyncedPopup(QDialog):
 
         if text:
             QApplication.clipboard().setText(text)
+            # Show confirmation tooltip so cashier knows copy worked
+            try:
+                from PySide6.QtWidgets import QToolTip
+                from PySide6.QtGui import QCursor
+                tbl = self._tables.get(kind)
+                if tbl:
+                    QToolTip.showText(QCursor.pos(), "Copied to clipboard!", tbl, tbl.rect(), 2000)
+            except Exception:
+                pass
 
     # ── Retry ─────────────────────────────────────────────────────────────────
     def _on_retry(self, kind: str, btn: QPushButton):
@@ -4723,6 +5567,61 @@ class UnsyncedPopup(QDialog):
 
         def _do():
             try:
+                from database.db import get_connection
+                conn = get_connection()
+
+                # ── STEP 1: Release all stale locks for this kind ──────────────
+                try:
+                    if kind == "PAY":
+                        # Reset stuck 'syncing' laybye entries → retry
+                        conn.execute("""
+                            UPDATE laybye_payment_entries
+                            SET status = 'retry'
+                            WHERE status = 'syncing'
+                              OR  status = 'failed'
+                        """)
+                        # Reset stuck standard payment entries
+                        conn.execute("""
+                            UPDATE payment_entries
+                            SET synced = 0, syncing = 0
+                            WHERE (synced = 0 OR synced IS NULL)
+                              AND syncing = 1
+                        """)
+                        # Reset stuck customer payments (dialog)
+                        conn.execute("""
+                            UPDATE customer_payments
+                            SET syncing = 0, sync_attempts = 0
+                            WHERE (synced = 0 OR synced IS NULL)
+                              AND syncing = 1
+                        """)
+                        conn.commit()
+                    elif kind == "SI":
+                        conn.execute("UPDATE sales SET syncing = 0 WHERE syncing = 1")
+                        conn.commit()
+                    elif kind == "CN":
+                        conn.execute("UPDATE credit_notes SET syncing = 0 WHERE syncing = 1")
+                        conn.commit()
+                    elif kind == "SO":
+                        conn.execute("""
+                            UPDATE sales_order
+                            SET synced = 0
+                            WHERE synced = 2
+                        """)
+                        conn.commit()
+                    elif kind == "BUNDLE":
+                        conn.execute("""
+                            UPDATE product_bundles
+                            SET sync_status = 'pending'
+                            WHERE sync_status = 'failed'
+                        """)
+                        conn.commit()
+                except Exception as lock_e:
+                    print(f"[retry] Lock reset error for {kind}: {lock_e}")
+                finally:
+                    try: conn.close()
+                    except: pass
+
+                # ── STEP 2: Trigger the sync service ──────────────────────────
                 if kind == "SI":
                     try:
                         from services.pos_upload_service import push_unsynced_sales
@@ -4732,12 +5631,30 @@ class UnsyncedPopup(QDialog):
                         push_unsynced_invoices()
                 elif kind == "CN":
                     from services.credit_note_sync_service import push_unsynced_credit_notes
-                    push_unsynced_credit_notes()
+                    push_unsynced_credit_notes(force=True)
                 elif kind == "SO":
                     from services.sales_order_upload_service import push_unsynced_orders
                     push_unsynced_orders()
-            except Exception:
-                pass
+                elif kind == "PAY":
+                    try:
+                        from services.payment_entry_sync_service import push_unsynced_payment_entries
+                        push_unsynced_payment_entries()
+                    except Exception as e:
+                        print(f"[retry] standard PE sync error: {e}")
+                    try:
+                        from services.laybye_payment_entry_service import sync_laybye_payment_entries
+                        sync_laybye_payment_entries(force=True)
+                    except Exception as e:
+                        print(f"[retry] laybye PE sync error: {e}")
+                elif kind == "CUST":
+                    from services.customer_sync_service import push_unsynced_customers
+                    push_unsynced_customers()
+                elif kind == "BUNDLE":
+                    from services.bundle_sync_service import sync_pending_bundles
+                    sync_pending_bundles()
+            except Exception as e:
+                print(f"[retry] _on_retry error for kind={kind}: {e}")
+
             from PySide6.QtCore import QMetaObject, Qt as _Qt2
             QMetaObject.invokeMethod(self, "_after_retry", _Qt2.QueuedConnection)
 
@@ -4754,14 +5671,2464 @@ class UnsyncedPopup(QDialog):
                 for child in tab.findChildren(QPushButton):
                     if "Retry" in child.text() or "Retrying" in child.text():
                         child.setEnabled(True)
-                        child.setText("🔄  Retry Sync Now")
+                        child.setText("Retry Sync Now")
+                        child.setIcon(qta.icon("fa5s.sync-alt", color="white"))
+from PySide6.QtCore import QThread, Signal as _Signal
 
-# =============================================================================
-# CASHIER POS VIEW
-# =============================================================================
+class _BadgeWorker(QThread):
+    done = _Signal(int, int, int, int, int, int, int)   # si, cn, so, pay, cust, bundle, fiscal
+
+    def run(self):
+        si = cn = so = pay = cust = bundle = fiscal = 0
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+
+            # SI — unsynced sales invoices
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM sales "
+                    "WHERE synced = 0 OR synced IS NULL"
+                )
+                si = int(cur.fetchone()[0] or 0)
+                
+                # FISCAL — pending/failed fiscalization (for Z badge)
+                cur.execute(
+                    "SELECT COUNT(*) FROM sales "
+                    "WHERE fiscal_status IN ('pending', 'failed')"
+                )
+                fiscal = int(cur.fetchone()[0] or 0)
+            except Exception: pass
+
+            # CN — Credit Notes
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM credit_notes "
+                    "WHERE cn_status IN ('ready', 'pending_sync')"
+                )
+                cn = int(cur.fetchone()[0] or 0)
+            except Exception: pass
+
+            # SO — Sales Orders / Laybyes
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM sales_order "
+                    "WHERE synced = 0 OR synced IS NULL"
+                )
+                so = int(cur.fetchone()[0] or 0)
+            except Exception: pass
+
+            try:
+                cur.execute("""
+                        SELECT SUM(c) FROM (
+                            SELECT COUNT(*) as c FROM payment_entries pe 
+                            WHERE (pe.synced = 0 OR pe.synced IS NULL)
+                            UNION ALL
+                            SELECT COUNT(*) as c FROM laybye_payment_entries le
+                            WHERE le.status != 'synced'
+                            UNION ALL
+                            SELECT COUNT(*) as c FROM customer_payments cp
+                            WHERE (cp.synced = 0 OR cp.synced IS NULL)
+                        ) as combined
+                """)
+                pay = int(cur.fetchone()[0] or 0)
+            except Exception: pass
+
+            # CUST — locally-created customers not yet pushed
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM customers "
+                    "WHERE frappe_synced = 0 OR frappe_synced IS NULL"
+                )
+                cust = int(cur.fetchone()[0] or 0)
+            except Exception: pass
+
+            # BUNDLE - pending/failed bundles
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM product_bundles "
+                    "WHERE sync_status IN ('pending', 'failed')"
+                )
+                bundle = int(cur.fetchone()[0] or 0)
+            except Exception: pass
+
+            conn.close()
+        except Exception:
+            pass
+
+        self.done.emit(si, cn, so, pay, cust, bundle, fiscal)
 class POSView(QWidget):
     MAX_ROWS = 999   # safety ceiling — table grows elastically
 
+    def _ensure_rows(self, needed: int):
+        """Grow the table in blocks of 20 so there are at least `needed` rows."""
+        current = self.invoice_table.rowCount()
+        if needed <= current:
+            return
+        new_count = min(self.MAX_ROWS, ((needed + 19) // 20) * 20)
+        self.invoice_table.setRowCount(new_count)
+        for r in range(current, new_count):
+            self.invoice_table.setRowHeight(r, 20)
+            self._init_row(r)
+    def _do_nav_sync_products(self):
+    
+        dlg = OptionsDialog(self, pos_view=self)
+        dlg._do_sync_products()
+
+    def _on_laybye(self):
+        """
+        Simple UI Switcher: 
+        Changes the PAY F5 button to a DEPOSIT button without breaking header styles.
+        """
+        # Ensure references exist to prevent crashes
+        if not hasattr(self, 'laybye_btn') or not hasattr(self, 'btn_pay'):
+            return
+
+        if self.laybye_btn.isChecked():
+            # ── Permission check — mirrors discount PIN flow exactly ───────────
+            from PySide6.QtWidgets import QInputDialog, QLineEdit
+            from models.user import authenticate_by_pin
+
+            current_user = (getattr(self, 'user', None)
+                            or (getattr(self.parent_window, 'user', {})
+                                if self.parent_window else {}))
+
+            if not current_user.get('allow_laybye', True):
+                pin, ok = QInputDialog.getText(
+                    self, "Authorization",
+                    "Manager PIN required for Laybye:",
+                    QLineEdit.Password
+                )
+                if not ok or not pin:
+                    self.laybye_btn.setChecked(False)
+                    return
+                manager = authenticate_by_pin(pin)
+                if not manager or manager.get("role") != "admin":
+                    QMessageBox.critical(self, "Access Denied", "Invalid Manager PIN.")
+                    self.laybye_btn.setChecked(False)
+                    return
+
+            # 1. Clear cart if needed
+            if self._collect_invoice_items():
+                res = QMessageBox.question(
+                    self, "Clear Cart", "Clear cart for new Laybye?", 
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if res == QMessageBox.Yes:
+                    self._new_sale(confirm=False)
+
+            # 2. Force customer selection IMMEDIATELY - no confirmation popup
+            from views.dialogs.laybye_confirm_dialog import _is_walk_in
+            
+            # If no customer selected OR it's walk-in, open picker immediately
+            if not self._selected_customer or _is_walk_in(self._selected_customer):
+                # Open customer picker directly - no warning message
+                dlg = CustomerSearchPopup(self)
+                if dlg.exec() == QDialog.Accepted and dlg.selected_customer:
+                    # Single entry point keeps nav-bar btn + inline label +
+                    # price list + grid re-price all in sync.
+                    self._apply_selected_customer(dlg.selected_customer)
+                else:
+                    # User cancelled - turn off laybye mode
+                    self.laybye_btn.setChecked(False)
+                    return
+
+            # 3. Change Main Action Button to Deposit
+            self.btn_pay.setText("DEPOSIT (F5)")
+            self.btn_pay.setStyleSheet(
+                f"background-color: #e67e22; color: {WHITE}; font-weight: bold; "
+                f"border-radius: 6px; font-size: 17px;"
+            )
+            
+            if self.parent_window:
+                self.parent_window._set_status("MODE: Laybye Active")
+        
+        else:
+            # Reset Main Action Button (pharmacy-aware: PAY / FINALIZE QUOTE / DISPENSE)
+            self._refresh_pay_button_label()
+            self.btn_pay.setStyleSheet(
+                f"background-color: {SUCCESS}; color: {WHITE}; font-weight: bold; "
+                f"border-radius: 6px; font-size: 17px;"
+            )
+            
+            if self.parent_window:
+                self.parent_window._set_status("MODE: Standard Sale")
+
+    def _execute_laybye_transaction(self):
+        """
+        Full Laybye flow logic separated for clean execution.
+        Called by _open_payment if Laybye mode is active.
+        DIRECT FLOW: Skips any confirmation dialogs.
+        """
+        if not _HAS_LAYBYE:
+            QMessageBox.warning(self, "Not Available", 
+                                "Laybye dialogs could not be loaded.\n"
+                                "Ensure laybye_payment_dialog.py exists.")
+            return
+
+        # ── 1. Collect cart ──────────────────────────────────────────────────
+        cart_items = self._collect_invoice_items()
+        if not cart_items:
+            QMessageBox.information(self, "Empty Cart", "Add items to the cart first.")
+            return
+
+        try:
+            cart_total = float(self._lbl_total.text() or "0")
+        except ValueError:
+            cart_total = sum(float(it.get("total", 0)) for it in cart_items)
+
+        if cart_total <= 0:
+            QMessageBox.information(self, "Zero Total", "Cart total is zero.")
+            return
+
+        # ── 2. CUSTOMER SELECTION - Already selected in _on_laybye, but verify ──
+        from views.dialogs.laybye_confirm_dialog import _is_walk_in
+        
+        # If somehow customer is still missing, open picker directly
+        if not self._selected_customer or _is_walk_in(self._selected_customer):
+            dlg = CustomerSearchPopup(self)
+            if dlg.exec() != QDialog.Accepted or not dlg.selected_customer:
+                return
+            self._apply_selected_customer(dlg.selected_customer)
+
+        confirmed_customer = self._selected_customer
+
+        # ── 3. Deposit dialog (Direct jump to payment) ────────────────────────
+        from views.dialogs.laybye_payment_dialog import LaybyePaymentDialog
+        deposit_dlg = LaybyePaymentDialog(
+            parent=self, 
+            total=cart_total, 
+            customer=confirmed_customer,
+            cashier_id=self.cashier_id if hasattr(self, 'cashier_id') else None,
+            cashier_name=self.cashier_name if hasattr(self, 'cashier_name') else "",
+            subtotal=self.subtotal if hasattr(self, 'subtotal') else None,
+            total_vat=self.total_vat if hasattr(self, 'total_vat') else 0,
+            shift_id=self.shift_id if hasattr(self, 'shift_id') else None,
+            items=cart_items,
+        )
+        if deposit_dlg.exec() != QDialog.Accepted:
+            return
+
+        deposit_amount = deposit_dlg.deposit_amount
+        deposit_method = deposit_dlg.deposit_method
+        deposit_splits = deposit_dlg.deposit_splits  # This is the dict with full details
+        company_name   = deposit_dlg.accepted_company_name
+        delivery_date  = deposit_dlg.delivery_date
+        order_type     = deposit_dlg.order_type
+
+        print(f"[Laybye] Deposit amount: {deposit_amount}")
+        print(f"[Laybye] Deposit splits (full): {deposit_splits}")
+        print(f"[Laybye] Number of splits: {len(deposit_splits) if deposit_splits else 0}")
+
+        # ✅ Convert splits to simple {method: usd_amount} format for the service
+        simple_splits = {}
+        if deposit_splits:
+            for method, data in deposit_splits.items():
+                # If data is a dict with 'usd' key, use that
+                if isinstance(data, dict) and 'usd' in data:
+                    simple_splits[method] = data['usd']
+                # If data is already a number, use it directly
+                elif isinstance(data, (int, float)):
+                    simple_splits[method] = float(data)
+                else:
+                    simple_splits[method] = float(data) if data else 0.0
+        
+        print(f"[Laybye] Simple splits for service: {simple_splits}")
+
+        # ── 4. Save Sales Order ─────────────────────────────────────────────
+        try:
+            from models.sales_order import create_sales_order as _create_sales_order
+        except ImportError:
+            QMessageBox.critical(self, "DB Error", "models/sales_order.py not found.")
+            return
+
+        so_items = [{
+            "item_code": it.get("part_no", ""), 
+            "item_name": it.get("product_name", ""),
+            "qty": it.get("qty", 1), 
+            "rate": it.get("price", 0.0), 
+            "amount": it.get("total", 0.0)
+        } for it in cart_items]
+
+        try:
+            order_id = _create_sales_order(
+                cart_items=so_items, 
+                total=cart_total, 
+                deposit_amount=deposit_amount,
+                deposit_method=deposit_method, 
+                deposit_splits=deposit_splits,  # Pass the full splits with details
+                customer=confirmed_customer,
+                company=company_name, 
+                delivery_date=delivery_date, 
+                order_type=order_type,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+
+
+
+        # ── 6. Print receipt ────────────────────────────────────────────────
+        if _HAS_SO_PRINT:
+            try:
+                from services.sales_order_print import print_laybye_deposit as _print_laybye_deposit
+                _print_laybye_deposit(order_id)
+            except Exception as e:
+                print(f"[Laybye] Print error: {e}")
+
+        # ── 7. Feedback & UI Reset ──────────────────────────────────────────
+        self._refresh_unsynced_badge()
+        self._new_sale(confirm=False)
+        
+        # Turn off the toggle in the header
+        if hasattr(self, 'laybye_btn'):
+            self.laybye_btn.setChecked(False)
+            self._on_laybye() 
+
+        if self.parent_window:
+            self.parent_window._set_status(f"Laybye #{order_id} Saved Successfully")
+    def _refresh_pay_button_label(self):
+        # Pharmacists always dispense (Quote workflow, no payment). Everyone
+        # else follows the explicit cart-mode toggle. Checking is_pharmacist
+        # live on every call — not relying on the potentially-stale
+        # _cart_mode — means the label is always correct for the current
+        # session regardless of init-time timing.
+        if not hasattr(self, "btn_pay") or self.btn_pay is None:
+            return
+        _user = getattr(self, "user", None)
+        _role = (_user or {}).get("role") if isinstance(_user, dict) else None
+        _is_p = False
+        try:
+            from utils.roles import is_pharmacist
+            _is_p = bool(is_pharmacist(_user))
+        except Exception as _re:
+            print(f"[POSView] is_pharmacist import failed: {_re}", flush=True)
+
+        if _is_p:
+            # Lock pharmacists into Quote mode so _open_payment reroutes too
+            self._cart_mode = "quote"
+            self.btn_pay.setText("DISPENSE")
+        elif getattr(self, "_cart_mode", "sales") == "quote":
+            self.btn_pay.setText("FINALIZE QUOTE")
+        else:
+            self.btn_pay.setText("PAY  F5")
+        print(f"[POSView] PAY label refresh: mode={getattr(self, '_cart_mode', '?')!r} "
+              f"role={_role!r} is_pharmacist={_is_p} → {self.btn_pay.text()!r}",
+              flush=True)
+
+    def _on_quote_mode_toggle(self, checked: bool):
+        # Flip cart mode and repaint the PAY button. Behavior switch happens
+        # at click time inside _open_payment (which reads _cart_mode).
+        self._cart_mode = "quote" if checked else "sales"
+        self._refresh_pay_button_label()
+        if getattr(self, "parent_window", None):
+            try:
+                self.parent_window._set_status(
+                    f"MODE: {'Quote' if checked else 'Sales'}"
+                )
+            except Exception:
+                pass
+
+    def _open_payment(self):
+        """
+        Opens the payment dialog and processes the sale.
+        Redirects to Laybye flow if toggled ON.
+        In pharmacy mode, reroutes to save+print quotation (the "Dispense"
+        path for pharmacists, "Finalize Quote" for everyone else).
+        """
+        # ── 0. SHIFT GUARD ─────────────────────────────────────────────────────────────
+        if not self._require_active_shift():
+            return
+
+        # ── 0a. QUOTE MODE REROUTE ────────────────────────────────────────────
+        # Pharmacists always dispense (never finalize a sale). Other users
+        # follow the explicit Quote-Mode toggle. Live is_pharmacist check so
+        # this is immune to _cart_mode drift.
+        _reroute = False
+        try:
+            from utils.roles import is_pharmacist
+            if is_pharmacist(getattr(self, "user", None)):
+                _reroute = True
+        except Exception:
+            pass
+        if not _reroute and getattr(self, "_cart_mode", "sales") == "quote":
+            _reroute = True
+        if _reroute:
+            self._save_quotation()
+            return
+
+        # ── 0b. REDIRECTION LOGIC (Laybye Check) ─────────────────────────────
+        # If the laybye switcher is toggled ON, execute the Laybye flow instead
+        if hasattr(self, 'laybye_btn') and self.laybye_btn.isChecked():
+            # This calls the full Laybye Flow (Confirmation -> Deposit -> Save)
+            self._execute_laybye_transaction()
+            return
+
+        # ── 1. PERMISSION & VALIDATION ──────────────────────────────────────
+        if not self._check_permission("allow_receipt", "Process Payment / Print Receipt"):
+            return
+            
+        try:
+            total = float(self._lbl_total.text() or "0")
+        except ValueError:
+            total = 0.0
+            
+        if total <= 0:
+            QMessageBox.warning(self, "Empty Invoice", "Add items before payment.")
+            return
+
+        # ── 2. CUSTOMER REQUIREMENT ─────────────────────────────────────────
+        # Ensure the default customer is loaded if none selected yet.
+        self._ensure_default_customer()
+        # If still none is selected, open the customer picker now.
+        if not self._selected_customer:
+            QMessageBox.information(
+                self, "Select Customer",
+                "Please select a customer before processing payment."
+            )
+            _picker = CustomerSearchPopup(self)
+            if _picker.exec() != QDialog.Accepted or not _picker.selected_customer:
+                return  # cashier cancelled
+            # Central setter — keeps nav btn + inline label + price list +
+            # grid re-price + cart-clear prompt all consistent.
+            self._apply_selected_customer(_picker.selected_customer)
+
+        # ── 3. COLLECT INVOICE ITEMS ─────────────────────────────────────────
+        items = self._collect_invoice_items()
+        
+        if not items or len(items) == 0:
+            QMessageBox.warning(self, "No Items", "No items in the invoice to save.")
+            return
+        
+        print(f"[POSView] Collected {len(items)} items from invoice table")
+        for idx, it in enumerate(items):
+            print(f"   Item {idx+1}: {it.get('product_name')} - qty: {it.get('qty')} - total: {it.get('total')}")
+        
+        # Calculate subtotal and VAT
+        subtotal = 0.0
+        total_vat = 0.0
+        for it in items:
+            subtotal += it.get("total", 0)
+            total_vat += it.get("tax_amount", 0)
+        
+        # Get cashier info
+        cashier_id = self.user.get("id") if isinstance(self.user, dict) else None
+        cashier_name = self.user.get("username", "") if isinstance(self.user, dict) else ""
+        
+        # Get active shift ID
+        from models.shift import get_active_shift
+        active_shift = get_active_shift()
+        shift_id = active_shift.get("id") if active_shift else None
+        discount_amount = getattr(self, "current_discount_percent", 0.0)
+        
+        # ── 4. OPEN PAYMENT DIALOG WITH ITEMS ──────────────────────────────────
+        if _HAS_PAYMENT_DIALOG:
+            dlg = _ExternalPaymentDialog(
+                self,
+                total=total,
+                customer=self._selected_customer,
+                items=items,  # PASS THE ITEMS!
+                cashier_id=cashier_id,
+                cashier_name=cashier_name,
+                subtotal=subtotal,
+                total_vat=total_vat,
+                discount_amount=discount_amount,
+                shift_id=shift_id,
+            )
+        else:
+            dlg = PaymentDialog(
+                self,
+                total=total,
+                customer=self._selected_customer,
+                items=items,  # PASS THE ITEMS!
+                cashier_id=cashier_id,
+                cashier_name=cashier_name,
+                subtotal=subtotal,
+                total_vat=total_vat,
+                discount_amount=discount_amount,
+                shift_id=shift_id,
+            )
+
+        if dlg.exec() == QDialog.Accepted:
+            # ✅ EXTRACT DATA FROM THE DIALOG (sale already created inside PaymentDialog)
+            if hasattr(dlg, "accepted_tendered"):
+                tendered       = dlg.accepted_tendered
+                method         = dlg.accepted_method
+                change_out     = getattr(dlg, "accepted_change", max(tendered - total, 0.0))
+                final_customer = getattr(dlg, "accepted_customer", self._selected_customer)
+                sale_id_result = getattr(dlg, "accepted_sale_id", None)
+                sale           = getattr(dlg, "accepted_sale", None)  # ✅ USE THE SALE FROM DIALOG
+                splits         = getattr(dlg, "accepted_splits", [])
+                has_on_account = getattr(dlg, "accepted_is_credit", False)
+                
+                print(f"[POSView] Sale already created in PaymentDialog with ID: {sale_id_result}")
+                
+                # ✅ CRITICAL: DO NOT CREATE SALE AGAIN - IT ALREADY EXISTS!
+                # The sale was already created in PaymentDialog._save()
+                # We just need to handle UI updates and any post-sale actions
+                
+                if sale is None and sale_id_result is not None:
+                    # If we have sale ID but not the full sale object, fetch it
+                    try:
+                        from models.sale import get_sale_by_id
+                        sale = get_sale_by_id(sale_id_result)
+                        print(f"[POSView] Fetched sale {sale_id_result} from database")
+                    except Exception as e:
+                        print(f"[POSView] Error fetching sale: {e}")
+                
+                cust_name    = final_customer.get("customer_name", "Walk-in") if final_customer else "Walk-in"
+                cust_contact = final_customer.get("custom_telephone_number", "") if final_customer else ""
+                company_name = getattr(dlg, "accepted_company_name", "")
+
+                # ── Work out real vs On Account amounts ─────────────────────────
+                real_splits   = [sp for sp in splits if not sp.get("on_account")]
+                oa_splits     = [sp for sp in splits if sp.get("on_account")]
+                real_paid_usd = sum(sp.get("base_value", sp.get("amount", 0)) for sp in real_splits) if real_splits else (
+                    0.0 if has_on_account else tendered
+                )
+                oa_amount      = round(sum(sp.get("base_value", sp.get("amount", 0)) for sp in oa_splits), 4)
+
+                # ── 5. POST-SALE ACTIONS (Payment entries already created in PaymentDialog) ──
+                # NOTE: Payment entries are already created in PaymentDialog._save()
+                # We don't need to create them again here!
+                
+                print(f"[POSView] Sale #{sale.get('invoice_no', 'N/A') if sale else 'N/A'} completed")
+                print(f"[POSView] Total: ${total:.2f} | Paid: ${tendered:.2f} | Change: ${change_out:.2f}")
+                print(f"[POSView] Payment method: {method}")
+                print(f"[POSView] On Account: {has_on_account}")
+                print(f"[POSView] Splits: {len(splits)}")
+
+                # ── 6. UI FEEDBACK & CLEANUP ──────────────────────────────────
+                if sale:
+                    self._update_prev_txn_display(
+                        paid=tendered, change=change_out,
+                        invoice_no=sale.get("invoice_no", "")
+                    )
+                    
+                    # ── FISCALIZATION WAIT (SMART LOADER) ──
+                    try:
+                        from services.fiscalization_service import get_fiscalization_service
+                        fs = get_fiscalization_service()
+                        if fs and fs.is_fiscalization_enabled() and not sale.get("fiscal_qr_code"):
+                            wait_dlg = FiscalWaitDialog(self, sale_id=sale.get("id"))
+                            wait_dlg.exec()
+                            if wait_dlg.success and wait_dlg.refreshed_sale:
+                                sale.update(wait_dlg.refreshed_sale)
+                            
+                            # ── PRINT AFTER WAIT (Ensures 6s wait is respected) ──
+                            try:
+                                from services.printing_service import PrintingService
+                                from models.sale import _get_active_printers
+                                _ps = PrintingService()
+                                _printers = _get_active_printers() or [None]
+                                for _pname in _printers:
+                                    _ps.print_invoice_receipt(sale, printer_name=_pname)
+                            except Exception as e:
+                                print(f"[Print] Error after wait: {e}")
+                        else:
+                            # ── PRINT IMMEDIATELY (if fiscalization is off or already has QR) ──
+                            try:
+                                from services.printing_service import PrintingService
+                                from models.sale import _get_active_printers
+                                _ps = PrintingService()
+                                _printers = _get_active_printers() or [None]
+                                for _pname in _printers:
+                                    _ps.print_invoice_receipt(sale, printer_name=_pname)
+                            except Exception as e:
+                                print(f"[Print] Direct Error: {e}")
+                    except Exception as e:
+                        print(f"[FiscalWait] Error showing dialog: {e}")
+
+
+
+                    if self.parent_window:
+                        status = f"Sale #{sale.get('number', '')} saved — ${total:.2f} ({method})"
+                        if cust_name and cust_name != "Walk-in":
+                            status += f" — {cust_name}"
+                        if has_on_account:
+                            status += "  [On Account]"
+                        self.parent_window._set_status(status)
+                    self._refresh_unsynced_badge()
+                else:
+                    print(f"[POSView] WARNING: No sale object available after payment dialog")
+                    QMessageBox.warning(self, "Sale Error", 
+                        "The sale was processed but could not be retrieved. Please check the database.")
+                    return
+
+            else:
+                # Fallback for older payment dialog that doesn't have accepted_sale
+                print(f"[POSView] Using fallback - payment dialog didn't provide sale object")
+                try:
+                    tendered = float(dlg._amt.text() or "0")
+                except (ValueError, AttributeError):
+                    tendered = total
+                method         = getattr(dlg, "_method", "CASH")
+                change_out     = max(tendered - total, 0.0)
+                final_customer = self._selected_customer
+                sale_id_result = None
+                splits         = []
+                has_on_account = False
+                
+                # Fallback: Create sale here only if not already created
+                from models.sale import create_sale
+                from services.payment_entry_service import create_payment_entry
+                
+                discount_pct = getattr(self, "current_discount_percent", 0.0)
+                discount_amt = round(subtotal * (discount_pct / 100.0), 4) if discount_pct > 0 else 0.0
+                cust_name = final_customer.get("customer_name", "Walk-in") if final_customer else "Walk-in"
+                cust_contact = final_customer.get("custom_telephone_number", "") if final_customer else ""
+                company_name = ""
+                
+                sale = create_sale(
+                    items=items,
+                    total=total,
+                    tendered=tendered,
+                    method=method,
+                    cashier_id=cashier_id,
+                    cashier_name=cashier_name,
+                    customer_name=cust_name,
+                    customer_contact=cust_contact,
+                    company_name=company_name,
+                    change_amount=change_out,
+                    discount_percent=discount_pct,
+                    discount_amount=discount_amt,
+                    is_on_account=False,
+                    skip_stock=False,
+                    skip_print=True,  # SKIP AUTO-PRINT TO SHOW LOADER
+                    shift_id=shift_id,
+                )
+                
+                create_payment_entry(sale)
+
+                # ── FISCALIZATION WAIT (SMART LOADER) ──
+                try:
+                    from services.fiscalization_service import get_fiscalization_service
+                    fs = get_fiscalization_service()
+                    if fs and fs.is_fiscalization_enabled() and not sale.get("fiscal_qr_code"):
+                        wait_dlg = FiscalWaitDialog(self, sale_id=sale.get("id"))
+                        wait_dlg.exec()
+                        if wait_dlg.success and wait_dlg.refreshed_sale:
+                            sale.update(wait_dlg.refreshed_sale)
+                except Exception as e:
+                    print(f"[FiscalWait] Fallback Error: {e}")
+
+                # ── MANUAL PRINT ──
+                try:
+                    from services.printing_service import PrintingService
+                    from models.sale import _get_active_printers
+                    _ps = PrintingService()
+                    _printers = _get_active_printers() or [None]
+                    for _pname in _printers:
+                        _ps.print_invoice_receipt(sale, printer_name=_pname)
+                except Exception as e:
+                    print(f"[Print] Fallback Error: {e}")
+                
+                self._update_prev_txn_display(
+                    paid=tendered, change=change_out,
+                    invoice_no=sale.get("invoice_no", "")
+                )
+                if self.parent_window:
+                    status = f"Sale #{sale.get('number', '')} saved — ${total:.2f} ({method})"
+                    if cust_name and cust_name != "Walk-in":
+                        status += f" — {cust_name}"
+                    self.parent_window._set_status(status)
+                self._refresh_unsynced_badge()
+
+            # Clear invoice for next customer
+            self._new_sale(confirm=False)
+            
+        else:
+            # Dialog was cancelled or rejected
+            print(f"[POSView] Payment dialog cancelled")
+            pass
+
+    def __init__(self, parent_window=None, user=None):
+        super().__init__()
+        self.parent_window  = parent_window
+        self.user           = user or {"username": "cashier", "role": "cashier"}
+        self._active_row    = -1
+        self._active_col    = -1
+        self._numpad_buffer = ""
+        self._block_signals = False
+        self._cat_page        = 0
+        self._last_filled_row = -1
+        self._selected_customer: dict | None = None
+
+        # ── Previous transaction info ─────────────────────────────────────────
+        # Shown in the footer bar so the cashier always sees the last sale
+        self._prev_paid:   float = 0.0
+        self._prev_change: float = 0.0
+        self._prev_invoice: str  = ""
+
+        # Product grid pagination state
+        self._product_page     = 0
+        self._current_products = []
+
+        # Inline search state
+        self._inline_edit   = None
+        self._inline_popup  = None
+        self._inline_row    = -1
+        self._inline_col    = -1
+        self._return_mode = False
+        self._return_cn   = None
+        self.current_discount_percent = 0.0   # ← Discount state
+        self._quotation_mode = False           # ← Quotation mode flag
+
+        # Active price list for the current customer — resolved from the
+        # customer's default_price_list_id at selection time. Used by the
+        # price-lookup helper when adding items to the cart. None means
+        # "no price list configured" → any item lookup returns 0 and the
+        # cashier can't add to cart. (Matches Android behaviour.)
+        self._active_price_list: str | None = None
+
+        self._build_ui()
+        QTimer.singleShot(0, self._ensure_default_customer)
+
+        # Enable global Up/Down → cart navigation. Installing POSView as an
+        # event filter on QApplication lets us catch Up/Down from any focused
+        # child (product grid buttons, category buttons, etc.) and route them
+        # to the cart table. Text inputs still keep their own behaviour —
+        # see the Up/Down branch at the top of eventFilter().
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
+                self._global_cart_nav_ready = True
+        except Exception as _e:
+            print(f"[POSView] global cart nav install failed: {_e}")
+
+    # =========================================================================
+    # QUOTATION MANAGEMENT METHODS
+    # =========================================================================
+    
+    def _open_quotation_manager(self):
+        """Open quotation management dialog."""
+        try:
+            from views.dialogs.quotation_dialog import QuotationDialog
+            dlg = QuotationDialog(self)
+            dlg.quotation_converted.connect(self._add_quotation_to_cart)
+            dlg.exec()
+        except ImportError as e:
+            QMessageBox.warning(self, "Error", f"Could not open Quotation Manager:\n{e}")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Unexpected error:\n{e}")
+    def _open_bundle_dialog(self):
+        from views.dialogs.bundle_dialog import BundleDialog
+        dlg = BundleDialog(self)
+        dlg.exec()
+    
+    
+    
+    def _add_quotation_to_cart(self, data):
+        """Add quotation items to cart."""
+        cart_items = data.get("cart_items", [])
+        customer = data.get("customer", "")
+        quotation_name = data.get("quotation_name", "")
+
+        # Loading a quotation converts it into an active sale — exit any active
+        # Quote mode so the PAY button finalises a sale instead of saving back
+        # into the quotation.
+        if getattr(self, "_quotation_mode", False):
+            self._quotation_mode = False
+            try:
+                if hasattr(self, "quote_btn") and hasattr(self.quote_btn, "setChecked"):
+                    self.quote_btn.setChecked(False)
+            except Exception:
+                pass
+
+        # Check if cart has items
+        if self._collect_invoice_items():
+            reply = QMessageBox.question(self, "Clear Cart",
+                f"Load quotation {quotation_name}? This will clear the current cart.",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+            self._new_sale(confirm=False)
+        
+        # Add items to cart — write directly into each empty row so the exact
+        # quotation qty is preserved (bypasses the +1 duplicate logic in
+        # _add_product_to_invoice which would reset every line to qty=1).
+        for item in cart_items:
+            qty = item.get("qty", 1)
+            try:
+                qty = float(qty)
+                if qty <= 0:
+                    qty = 1.0
+            except (TypeError, ValueError):
+                qty = 1.0
+
+            name       = item.get("product_name", "")
+            price      = item.get("price", 0)
+            part_no    = item.get("part_no", "")
+            product_id = item.get("product_id", None)
+            discount   = item.get("discount", 0)
+
+            # Resolve tax display from product record
+            tax_display = ""
+            if product_id:
+                try:
+                    from models.product import get_product_by_id
+                    prod = get_product_by_id(product_id)
+                    if prod:
+                        tax_rate = prod.get("tax_rate", 0.0)
+                        tax_display = f"VAT {tax_rate}%" if tax_rate > 0 else "ZERO RATED"
+                except Exception:
+                    pass
+            if not tax_display and part_no:
+                try:
+                    from database.db import get_connection
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT tax_rate, tax_type FROM products WHERE part_no = ?",
+                        (part_no,)
+                    )
+                    row = cursor.fetchone()
+                    conn.close()
+                    if row:
+                        tax_rate = float(row[0] or 0)
+                        tax_display = f"VAT {tax_rate}%" if tax_rate > 0 else "ZERO RATED"
+                except Exception:
+                    pass
+
+            r = self._find_next_empty_row()
+            self._ensure_rows(r + 1)
+            self._block_signals = True
+            self._init_row(
+                r,
+                part_no=part_no,
+                details=name,
+                qty=f"{qty:.4g}",
+                amount=f"{price:.2f}",
+                disc=f"{discount:.2f}",
+                tax=tax_display
+            )
+            row_item = self.invoice_table.item(r, 0)
+            if row_item:
+                row_item.setData(Qt.UserRole, product_id)
+                # Pharmacy: restore dosage/batch metadata on loaded quotation rows
+                if item.get("is_pharmacy"):
+                    row_item.setData(self.PHARMACY_META_ROLE, {
+                        "is_pharmacy": True,
+                        "dosage":      item.get("dosage"),
+                        "batch_no":    item.get("batch_no"),
+                        "expiry_date": item.get("expiry_date"),
+                        "product_id":  product_id,
+                    })
+                    try:
+                        row_item.setIcon(qta.icon("fa5s.prescription-bottle-alt",
+                                                  color="#6a1b9a"))
+                    except Exception:
+                        pass
+            self._block_signals = False
+            self._recalc_row(r)
+            self._last_filled_row = r
+
+        self._recalc_totals()
+
+        # Set customer if provided — route through the central setter so
+        # the grid reprices and the inline label stays in sync.
+        if customer:
+            try:
+                from models.customer import search_customers
+                customers = search_customers(customer)
+                if customers:
+                    self._apply_selected_customer(customers[0])
+            except Exception as e:
+                print(f"Error setting customer: {e}")
+        
+        if self.parent_window:
+            self.parent_window._set_status(f"Loaded quotation: {len(cart_items)} items")
+        
+        QMessageBox.information(self, "Success", 
+            f"Quotation {quotation_name} loaded with {len(cart_items)} item(s).")
+    # =========================================================================
+    # REST OF YOUR EXISTING POSView METHODS BELOW
+    # =========================================================================
+    # (Keep all your existing methods like _build_ui, _build_nav, _build_left_panel,
+    #  _build_invoice_table, _init_row, _find_next_empty_row, _highlight_active_row,
+    #  _recalc_row, _recalc_totals, _on_item_changed, _open_inline_search,
+    #  _inline_refresh_popup, _inline_on_text_changed, _inline_on_enter,
+    #  _inline_on_item_clicked, _inline_commit_query, _inline_commit_product,
+    #  _fill_row_from_product, _close_inline_search, eventFilter,
+    #  _on_cell_clicked, _on_cell_double_clicked, _on_product_btn_clicked,
+    #  _pick_product_uom_and_price, _resolve_price_for_product, _get_price_rows_for_list,
+    #  _is_template_product, _pick_variant, _check_permission, _warn_popup,
+    #  _require_active_shift, _get_pos_rule, _apply_pricing_rules,
+    #  _add_product_to_invoice, _build_invoice_footer, _update_prev_txn_display,
+    #  _build_right_panel, _build_numpad, _numpad_press, _numpad_clear,
+    #  _numpad_del_line, _numpad_enter, _open_qty_popup, _build_bottom_grid,
+    #  _on_grid_resize, _render_product_page_debounced, _cat_scroll,
+    #  _refresh_cat_tabs, _cat_tab_style, _on_category_tap, _load_category_products,
+    #  _grid_turn_page, _render_product_page, _apply_btn_image,
+    #  _product_btn_context_menu, _set_product_image, _remove_product_image,
+    #  _reload_current_category, _open_day_shift, _open_shift_chooser,
+    #  _refresh_shift_pill, _open_stock_file, _open_settings, _select_customer,
+    #  _open_sales_list, _collect_invoice_items, _save_sale, _print_receipt,
+    #  _print_receipt_for_sale, _reprint_by_invoice_no, _open_payment,
+    #  _open_customer_payment_entry, _open_hold_recall, _reset_customer_btn,
+    #  _refresh_customer_btn, _ensure_default_customer, _refresh_unsynced_badge,
+    #  _open_credit_note_dialog, _load_credit_note_into_table, _exit_return_mode,
+    #  _process_return, _print_credit_note_receipt, _new_sale, _on_discount_clicked,
+    #  _quick_tender, _on_laybye, _execute_laybye_transaction, _on_quotation,
+    #  _save_quotation, _send_quotation_to_printer, etc.)
+    # =========================================================================
+    def _clear_cart(self):
+        """Clear all items from the cart/invoice table"""
+        # Clear the table
+        self.invoice_table.setRowCount(0)
+        self._ensure_rows(1)  # Reset with 1 empty row
+        self._last_filled_row = -1
+        
+        # Reset totals
+        if hasattr(self, '_lbl_total'):
+            self._lbl_total.setText("0.00")
+        if hasattr(self, '_lbl_subtotal'):
+            self._lbl_subtotal.setText("0.00")
+        if hasattr(self, '_lbl_vat'):
+            self._lbl_vat.setText("0.00")
+        if hasattr(self, '_lbl_discount'):
+            self._lbl_discount.setText("0.00")
+        
+        # Reset discount
+        self.current_discount_percent = 0.0
+        
+        # Clear any selected items
+        self._active_row = -1
+        self._active_col = -1
+        
+        print("[POS] Cart cleared")
+
+    def _send_quotation_to_printer(self, text: str):
+        """Send quotation text to printer - COMMENTED OUT FOR NOW"""
+        # TODO: Fix printing service issue
+        # The error was: 'str' object has no attribute 'companyName'
+        # This needs to be fixed in the printing service
+        
+        print("[Quotation] Printing skipped - printing service needs fix")
+        print(f"[Quotation] Would have printed:\n{text}")
+        
+        """
+        # ORIGINAL PRINTING CODE - COMMENTED OUT
+        try:
+            from services.printing_service import printing_service
+            
+            # Get company defaults for header
+            from models.company_defaults import get_defaults
+            company = get_defaults()
+            
+            # Build header with company info
+            header = []
+            company_name = company.get("company_name", "HAVANO POS")
+            header.append("=" * 40)
+            header.append(f"{company_name:^40}")
+            header.append("=" * 40)
+            
+            # Add company address if available
+            if company.get("address_1"):
+                header.append(company.get("address_1"))
+            if company.get("address_2"):
+                header.append(company.get("address_2"))
+            if company.get("phone"):
+                header.append(f"Tel: {company.get('phone')}")
+            if company.get("email"):
+                header.append(f"Email: {company.get('email')}")
+            if company.get("tin_number"):
+                header.append(f"TIN: {company.get('tin_number')}")
+            header.append("-" * 40)
+            
+            # Combine header with quotation text
+            full_text = "\n".join(header) + "\n" + text
+            
+            # Print to configured printer
+            from models.hardware_settings import get_hardware_settings
+            settings = get_hardware_settings()
+            printer_name = settings.get("main_printer", "")
+            
+            if printer_name and printer_name != "(None)":
+                success = printing_service.print_text(full_text, printer_name=printer_name)
+                if success:
+                    print("[Quotation] ✅ Printed successfully")
+                else:
+                    print("[Quotation] ❌ Print failed")
+            else:
+                print("[Quotation] No printer configured")
+                
+        except Exception as e:
+            print(f"[Quotation] ❌ Printing failed: {e}")
+            import traceback
+            traceback.print_exc()
+        """
+
+    def _save_quotation(self):
+        """Save and print the current cart as a Quotation."""
+        items = self._collect_invoice_items()
+        if not items:
+            QMessageBox.information(self, "Empty Cart", "Add items before saving a Quotation.")
+            return
+        if not self._selected_customer:
+            QMessageBox.information(self, "No Customer", "Please select a customer first.")
+            return
+        
+        try:
+            total = float(self._lbl_total.text() or "0")
+        except ValueError:
+            total = sum(float(i.get("total", 0)) for i in items)
+
+        cname = self._selected_customer.get("customer_name", "")
+        from PySide6.QtCore import QDateTime, QDate
+        now = QDateTime.currentDateTime().toString("dd/MM/yyyy  hh:mm")
+
+        # Cashier / discount rules info
+        current_user = (getattr(self, 'user', None)
+                        or (getattr(self.parent_window, 'user', {}) if self.parent_window else {}))
+        cashier_name = current_user.get("full_name") or current_user.get("username", "")
+        allow_disc   = current_user.get("allow_discount", False)
+        max_disc_pct = current_user.get("max_discount_percent", 0) or 0
+        expiry_str   = current_user.get("discount_expiry_date", "") or ""
+        disc_expired = False
+        expiry_display = ""
+        if expiry_str:
+            try:
+                ed = QDate.fromString(expiry_str, "yyyy-MM-dd")
+                if not ed.isValid():
+                    ed = QDate.fromString(expiry_str, "dd/MM/yyyy")
+                if ed.isValid():
+                    expiry_display = ed.toString("dd/MM/yyyy")
+                    if QDate.currentDate() > ed:
+                        disc_expired = True
+            except Exception:
+                pass
+
+        # =========================================================================
+        # SAVE TO DATABASE
+        # =========================================================================
+        from datetime import date
+        from models.quotation import Quotation, QuotationItem, save_quotation, get_all_quotations
+        
+        # Generate quotation number
+        current_year = date.today().year
+        existing = get_all_quotations()
+        existing_names = [q.name for q in existing]
+        
+        qtn_num = 1
+        while True:
+            qtn_name = f"SAL-QTN-{current_year}-{qtn_num:05d}"
+            if qtn_name not in existing_names:
+                break
+            qtn_num += 1
+        
+        # Create quotation items with proper None handling
+        quotation_items = []
+        for it in items:
+            # Handle None values - convert to 0 if needed
+            qty = it.get("qty")
+            if qty is None:
+                qty = 1.0
+            else:
+                qty = float(qty)
+            
+            price = it.get("price")
+            if price is None:
+                price = 0.0
+            else:
+                price = float(price)
+            
+            amount = it.get("total")
+            if amount is None:
+                amount = qty * price
+            else:
+                amount = float(amount)
+            
+            discount = it.get("discount")
+            if discount is None:
+                discount = 0.0
+            else:
+                discount = float(discount)
+            
+            part_no = it.get("part_no")
+            if part_no is None:
+                part_no = ""
+            else:
+                part_no = str(part_no)
+            
+            product_name = it.get("product_name")
+            if product_name is None:
+                product_name = ""
+            else:
+                product_name = str(product_name)
+            
+            uom = it.get("uom")
+            if uom is None:
+                uom = "Nos"
+            else:
+                uom = str(uom)
+            
+            # Calculate discounted rate if discount applied
+            if discount > 0:
+                discounted_rate = price * (1 - discount / 100)
+            else:
+                discounted_rate = price
+            
+            quotation_items.append(QuotationItem(
+                item_code=part_no,
+                item_name=product_name,
+                description=product_name,
+                qty=qty,
+                rate=discounted_rate,
+                amount=amount,
+                uom=uom,
+                part_no=part_no,
+                # Pharmacy fields — propagate dosage/batch from row metadata
+                is_pharmacy=bool(it.get("is_pharmacy", False)),
+                dosage=it.get("dosage"),
+                batch_no=it.get("batch_no"),
+                expiry_date=it.get("expiry_date"),
+            ))
+        
+        # Resolve a stable cashier_name for this quote so the pharmacy label
+        # preview later can show the original creator even if a different
+        # user opens the quote.
+        _user_ctx = (getattr(self, 'user', None) or
+                     (getattr(self.parent_window, 'user', {}) if self.parent_window else {}) or
+                     {})
+        quote_cashier_name = (
+            _user_ctx.get("username")
+            or _user_ctx.get("full_name")
+            or "Unknown"
+        )
+
+        # Create quotation object
+        quotation = Quotation(
+            name=qtn_name,
+            transaction_date=date.today().isoformat(),
+            grand_total=total,
+            docstatus=0,  # Draft
+            company=self._selected_customer.get("company_name", "APK Test"),
+            status="Draft",
+            customer=cname,
+            items=quotation_items,
+            valid_till=None,
+            reference_number=None,
+            synced=False,  # ← NOT SYNCED YET - local only
+            cashier_name=quote_cashier_name,
+        )
+        
+        # Save to database
+        try:
+            local_id = save_quotation(quotation)
+            if local_id:
+                print(f"[Quotation] ✅ Saved to database: {qtn_name} (ID: {local_id}, synced=False)")
+                
+                # =========================================================================
+                # TRIGGER IMMEDIATE SYNC TO FRAPPE (with retry)
+                # =========================================================================
+                import threading
+                from services.quotation_sync_service import sync_quotation_on_create
+                
+                # Start sync in background thread so it doesn't block UI
+                def do_sync():
+                    success = sync_quotation_on_create(local_id, max_retries=3)
+                    if success:
+                        print(f"[Quotation] ✅ {qtn_name} synced to Frappe")
+                    else:
+                        print(f"[Quotation] ⚠️ {qtn_name} will be synced later by background worker")
+                
+                threading.Thread(target=do_sync, daemon=True).start()
+                
+            else:
+                print(f"[Quotation] ⚠️ Failed to save to database")
+                QMessageBox.warning(self, "Save Error", "Failed to save quotation to database.")
+                return
+        except Exception as e:
+            print(f"[Quotation] ❌ Error saving: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Save Error", f"Could not save quotation:\n{str(e)}")
+            return
+
+        # =========================================================================
+        # BUILD PRINT TEXT
+        # =========================================================================
+        W = 40
+        lines = ["=" * W,
+                 f"QUOTATION",
+                 "=" * W,
+                 f"  QTN No:     {qtn_name}",
+                 f"  Date:       {now}",
+                 f"  Customer:   {cname}",
+                 f"  Cashier:    {cashier_name}",
+                 f"  Status:     DRAFT",
+                 "-" * W]
+        
+        for it in items:
+            name = str(it.get("product_name", ""))[:24]
+            qty = it.get("qty")
+            if qty is None:
+                qty = 1.0
+            else:
+                qty = float(qty)
+            
+            price = it.get("price")
+            if price is None:
+                price = 0.0
+            else:
+                price = float(price)
+            
+            disc = it.get("discount")
+            if disc is None:
+                disc = 0.0
+            else:
+                disc = float(disc)
+            
+            line_tot = it.get("total")
+            if line_tot is None:
+                line_tot = qty * price
+            else:
+                line_tot = float(line_tot)
+            
+            qty_str = f"{int(qty)}" if qty == int(qty) else f"{qty:.2f}"
+            lines.append(f"{name:<24} {qty_str:>3}x ${price:.2f}")
+            if disc > 0:
+                disc_amt = qty * price * (disc / 100.0)
+                lines.append(f"  Disc {disc:.0f}%            -${disc_amt:.2f}")
+            lines.append(f"  {'─'*20}  ${line_tot:.2f}")
+
+        lines += ["-" * W, f"  TOTAL:             ${total:.2f}", "=" * W]
+
+        # Discount Rules Section
+        lines.append("  DISCOUNT AUTHORISATION")
+        lines.append("-" * W)
+        if not allow_disc:
+            lines.append("  Discount: NOT PERMITTED for this cashier")
+        elif disc_expired:
+            lines.append(f"  Discount: EXPIRED ({expiry_display})")
+            lines.append("  (Manager PIN required to override)")
+        else:
+            lines.append(f"  Cashier:  {cashier_name}")
+            lines.append(f"  Allowed:  Up to {max_disc_pct}%")
+            if expiry_display:
+                lines.append(f"  Valid to: {expiry_display}")
+            else:
+                lines.append("  Valid to: No expiry set")
+
+        lines += ["=" * W, "  This quotation is valid for 30 days.",
+                 f"  ID: {local_id} | Synced: No",
+                 "=" * W]
+
+        # =========================================================================
+        # SHOW PREVIEW DIALOG
+        # =========================================================================
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Quotation Saved")
+        dlg.setMinimumSize(450, 580)
+        dlg.setStyleSheet(f"QDialog {{ background:{WHITE}; }}")
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+        
+        txt = QTextEdit()
+        txt.setReadOnly(True)
+        txt.setFont(__import__("PySide6.QtGui", fromlist=["QFont"]).QFont("Courier New", 10))
+        txt.setPlainText("\n".join(lines))
+        txt.setStyleSheet(f"QTextEdit {{ background:{WHITE}; color:{DARK_TEXT}; border:1px solid {BORDER}; border-radius:4px; }}")
+        lay.addWidget(txt, 1)
+        
+        br = QHBoxLayout()
+        br.setSpacing(8)
+        
+        print_btn = QPushButton("Print")
+        print_btn.setFixedHeight(36)
+        print_btn.setCursor(Qt.PointingHandCursor)
+        print_btn.setStyleSheet(f"QPushButton {{ background:{SUCCESS}; color:{WHITE}; border:none; border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }} QPushButton:hover {{ background:{SUCCESS_H}; }}")
+        
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(36)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"QPushButton {{ background:{NAVY}; color:{WHITE}; border:none; border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }} QPushButton:hover {{ background:{NAVY_2}; }}")
+        
+        # Print fires services.quotation_print directly and closes the preview
+        # silently — no "Printing is temporarily disabled" popup, no final
+        # "Success" dialog. Any failure is surfaced on the parent status bar.
+        def _do_print_and_close():
+            try:
+                from services.quotation_print import print_quotation
+                ok = print_quotation({"name": qtn_name, "local_id": local_id})
+            except Exception as _pe:
+                ok = False
+                print(f"[Quotation] print_quotation raised: {_pe}")
+            if self.parent_window and hasattr(self.parent_window, "_set_status"):
+                self.parent_window._set_status(
+                    f"Quotation {qtn_name} sent to printer."
+                    if ok else
+                    f"Quotation {qtn_name} saved; print failed — check printer."
+                )
+            dlg.accept()
+
+        print_btn.clicked.connect(_do_print_and_close)
+        close_btn.clicked.connect(dlg.accept)
+
+        br.addStretch()
+        br.addWidget(print_btn)
+        br.addWidget(close_btn)
+        lay.addLayout(br)
+
+        dlg.exec()
+
+        # Clear cart + fully exit quotation mode (both flags + navbar pill +
+        # PAY button label). No "Success" popup — status bar already carries
+        # the print result.
+        self._clear_cart()
+        self._quotation_mode = False
+        self._cart_mode = "sales"
+        if hasattr(self, '_quotation_mode_btn'):
+            self._quotation_mode_btn.setChecked(False)
+        if hasattr(self, 'quote_mode_btn') and self.quote_mode_btn is not None:
+            try:
+                self.quote_mode_btn.blockSignals(True)
+                self.quote_mode_btn.setChecked(False)
+                self.quote_mode_btn.blockSignals(False)
+            except Exception:
+                pass
+        try:
+            self._refresh_pay_button_label()
+        except Exception:
+            pass
+
+    # =========================================================================
+    # NAV BAR
+    # =========================================================================
+    def _build_nav(self):
+        bar = QWidget()
+        bar.setFixedHeight(48)
+        bar.setStyleSheet(f"background-color: {WHITE}; border-bottom: 2px solid {BORDER};")
+
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(6)
+
+        # ── Brand + Logo ──────────────────────────────────────────────────────
+        logo = QLabel("Havano POS System")
+        logo.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {NAVY}; background: transparent;")
+        layout.addWidget(logo)
+        layout.addSpacing(12)
+
+        # ── Uniform nav button spec ──
+        NAV_H  = 30
+        NAV_FS = 11   
+        NAV_R  = 4    
+        NAV_PX = 12   
+
+        def _nav_style(bg, hov, extra=""):
+            return (
+                f"QPushButton {{ background-color:{bg}; color:{WHITE}; border:none; "
+                f"border-radius:{NAV_R}px; font-size:{NAV_FS}px; font-weight:bold; "
+                f"padding:0 {NAV_PX}px; {extra}}} "
+                f"QPushButton:hover {{ background-color:{hov}; }} "
+                f"QPushButton:pressed {{ background-color:{NAVY_3}; color:{WHITE}; }}"
+            )
+
+        # ── Helper: uniform nav button ────────────────────────────────────────
+        def _nb(text, handler, color=NAVY_2, hov=NAVY_3, min_w=None):
+            b = QPushButton(text)
+            b.setFixedHeight(NAV_H)
+            b.setCursor(Qt.PointingHandCursor)
+            if min_w:
+                b.setMinimumWidth(min_w)
+            b.setStyleSheet(_nav_style(color, hov))
+            b.clicked.connect(handler)
+            return b
+
+        # ── Sales button ──────────────────────────────────────────────────────
+        sales_menu_btn = HoverMenuButton("Sales ▾", color=ACCENT, hov=ACCENT_H, height=NAV_H)
+        sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
+        sales_menu_btn.addSeparator()
+        sales_menu_btn.addItem("Payments", self._open_customer_payment_entry)
+        sales_menu_btn.addSeparator()
+        sales_menu_btn.addItem("Reprint Shift Reconciliation", self._open_shift_reprint)
+        layout.addWidget(sales_menu_btn)
+
+        # ── Admin Check ───────────────────────────────────────────────────────
+        is_admin_user = False
+        try:
+            from models.user import is_admin
+            if self.user and is_admin(self.user):
+                is_admin_user = True
+        except Exception:
+            pass
+
+        # ── Inventory button (admin only) ─────────────────────────────────────
+        if is_admin_user:
+            inv_menu_btn = HoverMenuButton("Inventory ▾", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+            inv_menu_btn.addItem("Stock on Hand",   self._open_inventory_dashboard)
+            layout.addWidget(inv_menu_btn)
+
+        # ── Maintenance button (admin only) ───────────────────────────────────
+        if is_admin_user:
+            maint_btn = HoverMenuButton("Maintenance ▾", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+
+            def _sd(cls_name, *args, **kwargs):
+                def _handler():
+                    try:
+                        import importlib
+                        sd = importlib.import_module("views.dialogs.settings_dialog")
+                        cls = getattr(sd, cls_name)
+                        p = self.parent_window or self
+                        if cls_name == "ManageUsersDialog":
+                            cls(p, current_user=self.user).exec()
+                        else:
+                            cls(p).exec()
+                    except Exception as e:
+                        QMessageBox.warning(self, "Error", f"Could not open {cls_name}:\n{e}")
+                return _handler
+
+            maint_btn.addItem("Users",              _sd("ManageUsersDialog"))
+            maint_btn.addItem("Category Visibility", lambda: CategoryVisibilityDialog(self).exec())
+            maint_btn.addSeparator()
+            maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
+            maint_btn.addItem("POS Rules",          _sd("POSRulesDialog"))
+            maint_btn.addItem("Hardware Settings",  _sd("HardwareDialog"))
+            maint_btn.addItem("Payment Modes",      self._open_payment_modes_dialog)
+            maint_btn.addItem("Advanced Printing",  self._open_adv_printing_nav)
+            maint_btn.addSeparator()
+            maint_btn.addItem("Sync Queue",         self._open_sales_list)
+            maint_btn.addItem("Stock File",         self._open_stock_file)
+            maint_btn.addSeparator()
+            maint_btn.addItem("Tax Settings",       lambda: coming_soon(self, "Tax Settings"))
+            maint_btn.addItem("Printer Setup",      lambda: MaintenanceDialog(self.parent_window or self).exec())
+            maint_btn.addItem("Backup",             lambda: coming_soon(self, "Backup"))
+            layout.addWidget(maint_btn)
+            layout.addSpacing(10)
+
+        # ── Customer selector ─────────────────────────────────────────────────
+        self._cust_btn = QPushButton("Customer")
+        self._cust_btn.setIcon(qta.icon("fa5s.user", color="white"))
+        self._cust_btn.setFixedHeight(NAV_H)
+        self._cust_btn.setMaximumWidth(170)
+        self._cust_btn.setCursor(Qt.PointingHandCursor)
+        self._cust_btn.setStyleSheet(_nav_style(NAVY_2, NAVY_3))
+        self._cust_btn.clicked.connect(self._select_customer)
+        layout.addWidget(self._cust_btn)
+        layout.addSpacing(4)
+
+        # ── Sync Badges ───────────────────────────────────────────────────────
+        def _make_badge(label, tip, handler, color=NAVY_2, hover=NAVY_3):
+            b = QPushButton(label)
+            b.setFixedHeight(NAV_H)
+            b.setMinimumWidth(50)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(_nav_style(color, hover))
+            b.setToolTip(tip)
+            b.clicked.connect(handler)
+            return b
+
+        # ── Q-badge (sync errors) ─────────────────────────────────────────────
+        self._q_badge = _make_badge("Q : 0", "All records synced", lambda: UnsyncedPopup("", self).exec())
+        self._q_badge.setStyleSheet(_nav_style(SUCCESS, SUCCESS_H))
+        layout.addWidget(self._q_badge)
+        layout.addSpacing(2)
+
+        # ── Z-badge (fiscalization errors) ────────────────────────────────────
+        self._z_badge = _make_badge("Z : 0", "All sales fiscalized", lambda: self._show_unfiscalized_popup(), color=NAVY_2, hover=NAVY_3)
+        self._z_badge.setStyleSheet(_nav_style(SUCCESS, SUCCESS_H))
+        layout.addWidget(self._z_badge)
+        layout.addSpacing(2)
+
+        # Keep hidden references for backward compatibility
+        self._all_synced_badge = self._q_badge
+        self._si_badge = self._q_badge
+        self._cn_badge = self._q_badge
+        self._so_badge = self._q_badge
+
+        # ── Cart Mode (Sales vs Quote) — default by role ──────────────────────
+        # Pharmacists default to Quote; everyone else to Sales. Toggleable.
+        _cart_mode_user = getattr(self, "user", None)
+        _is_p = False
+        try:
+            from utils.roles import is_pharmacist as _is_pharm
+            _is_p = bool(_is_pharm(_cart_mode_user))
+        except Exception as _cmerr:
+            print(f"[POSView] cart_mode init — is_pharmacist import failed: {_cmerr}", flush=True)
+        _role_at_init = (
+            _cart_mode_user.get("role")
+            if isinstance(_cart_mode_user, dict) else None
+        )
+        _keys_at_init = (
+            list(_cart_mode_user.keys())
+            if isinstance(_cart_mode_user, dict) else None
+        )
+        print(
+            f"[POSView] cart_mode init: user_type={type(_cart_mode_user).__name__} "
+            f"role={_role_at_init!r} keys={_keys_at_init} is_pharmacist={_is_p}",
+            flush=True,
+        )
+        self._cart_mode = "quote" if _is_p else "sales"
+
+        self.quote_mode_btn = QPushButton("Quote Mode")
+        self.quote_mode_btn.setCheckable(True)
+        self.quote_mode_btn.setChecked(self._cart_mode == "quote")
+        self.quote_mode_btn.setFixedHeight(NAV_H)
+        self.quote_mode_btn.setMinimumWidth(120)
+        self.quote_mode_btn.setCursor(Qt.PointingHandCursor)
+        self.quote_mode_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {NAVY_3}; color: {WHITE}; border: none;
+                border-radius: {NAV_R}px; font-size: {NAV_FS}px; font-weight: bold;
+                text-align: center; padding: 0px 5px; outline: none;
+            }}
+            QPushButton:hover   {{ background-color: {NAVY_2}; }}
+            QPushButton:checked {{ background-color: #7c3aed; }}
+            QPushButton:checked:hover {{ background-color: #9333ea; }}
+        """)
+        self.quote_mode_btn.setToolTip(
+            "Toggle Quote Mode — the finalize button saves the cart as a "
+            "quotation instead of opening the payment flow."
+        )
+        self.quote_mode_btn.toggled.connect(self._on_quote_mode_toggle)
+        layout.addWidget(self.quote_mode_btn)
+        layout.addSpacing(4)
+        
+        
+
+        # ── Laybye Switcher ───────────────────────────────────────────────────
+        self.laybye_btn = QPushButton("Laybye")
+        self.laybye_btn.setCheckable(True)
+        self.laybye_btn.setFixedHeight(NAV_H)
+        self.laybye_btn.setMinimumWidth(110)
+        self.laybye_btn.setCursor(Qt.PointingHandCursor)
+
+        self.laybye_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {AMBER};
+                color: {WHITE};
+                border: none;
+                border-radius: {NAV_R}px;
+                font-size: {NAV_FS}px;
+                font-weight: bold;
+                text-align: center;
+                padding: 0px 5px;
+                outline: none;
+            }}
+            QPushButton:hover {{
+                background-color: {ORANGE};
+            }}
+            QPushButton:pressed {{
+                background-color: {NAVY_3};
+                color: {WHITE};
+            }}
+            QPushButton:checked {{
+                background-color: {AMBER};
+            }}
+            QPushButton:checked:hover {{
+                background-color: {ORANGE};
+            }}
+        """)
+
+        self.laybye_btn.setToolTip("Toggle Laybye Mode")
+        self.laybye_btn.clicked.connect(self._on_laybye)
+        layout.addWidget(self.laybye_btn)
+        layout.addSpacing(4)
+
+        # ── Payments button ───────────────────────────────────────────────────
+        layout.addWidget(_nb("Payments", self._open_customer_payment_entry, color=ACCENT, hov=ACCENT_H))
+        layout.addSpacing(4)
+        
+        # ── Quotation button ──────────────────────────────────────────────────
+        quote_btn = _nb("Quote", self._on_quotation, color=NAVY_3, hov=NAVY_2)
+        quote_btn.setToolTip("Create a Quotation")
+        layout.addWidget(quote_btn)
+        layout.addSpacing(4)
+        
+        # ── Options dropdown (replaces right-panel Options button) ───────────────
+        options_menu_btn = HoverMenuButton("Options ▾", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        options_menu_btn.addItem("Create Credit Note  (Return)", self._open_credit_note_dialog)
+        options_menu_btn.addItem("Save / Print Quotation",       self._save_quotation)
+        options_menu_btn.addItem("Manage Quotations",            self._open_quotation_manager)
+        options_menu_btn.addItem("Reprint Invoice",              self._reprint_by_invoice_no)
+        options_menu_btn.addSeparator()
+        options_menu_btn.addItem("Sync Products from Server",    self._do_nav_sync_products)
+        layout.addWidget(options_menu_btn)
+        layout.addSpacing(4)
+        
+        
+
+        # ── Return mode indicator ─────────────────────────────────────────────
+        self._return_btn = _nb("↩   Return", self._process_return, color=DANGER, hov=DANGER_H)
+        self._return_btn.setVisible(False)
+        layout.addWidget(self._return_btn)
+        layout.addSpacing(4)
+
+        # Refresh Sync Badges
+        QTimer.singleShot(500, self._refresh_unsynced_badge)
+        self._unsynced_timer = QTimer(self)
+        self._unsynced_timer.setInterval(10000)
+        self._unsynced_timer.timeout.connect(self._refresh_unsynced_badge)
+        self._unsynced_timer.start()
+
+        layout.addStretch(1)
+
+        # ── Dashboard button (admin only) ─────────────────────────────────────
+        if is_admin_user:
+            dash_btn = _nb("Dashboard", self.parent_window.switch_to_dashboard if self.parent_window else lambda: None, color=ACCENT, hov=ACCENT_H)
+            layout.addWidget(dash_btn)
+            layout.addSpacing(4)
+
+        # ── Logout ────────────────────────────────────────────────────────────
+        logout = QPushButton("Logout")
+        logout.setFixedHeight(NAV_H)
+        logout.setCursor(Qt.PointingHandCursor)
+        logout.setStyleSheet(_nav_style(DANGER, DANGER_H))
+        if self.parent_window:
+            logout.clicked.connect(self.parent_window._logout)
+        layout.addWidget(logout)
+
+        return bar
+    
+    def _show_unfiscalized_popup(self):
+        """Show popup with unfiscalized sales"""
+        try:
+            from views.dialogs.unfiscalized_dialog import UnfiscalizedDialog
+            UnfiscalizedDialog(self).exec()
+        except ImportError:
+            QMessageBox.information(self, "Unfiscalized Sales", 
+                "Check your database for sales with fiscal_status = 'pending' or 'failed'")
+    
+    def _refresh_unsynced_badge(self):
+        """Kick off a background thread to fetch counts — never blocks the UI."""
+        if getattr(self, "_badge_worker_running", False):
+            return
+        self._badge_worker_running = True
+
+        self._current_badge_worker = _BadgeWorker(self)
+
+        def _on_done(si, cn, so, pay, cust, bundle, fiscal):
+            self._badge_worker_running = False
+            self._apply_badge_counts(si, cn, so, pay, cust, bundle, fiscal)
+            try:
+                self._current_badge_worker.deleteLater()
+                self._current_badge_worker = None
+            except Exception:
+                pass
+
+        self._current_badge_worker.done.connect(_on_done)
+        self._current_badge_worker.start()
+
+    def _apply_badge_counts(self, si_count, cn_count, so_count, pay_count, cust_count, bundle_count, fiscal_count):
+        """Update the Q-badge and Z-badge UI"""
+        # ── Update Q-badge (sync errors) ────────────────────────────────────────
+        if hasattr(self, "_q_badge"):
+            total_sync = si_count + cn_count + so_count + pay_count + cust_count + bundle_count
+            btn = self._q_badge
+
+            if total_sync == 0:
+                btn.setText("Q : 0")
+                btn.setToolTip("All records synced — click for details")
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {SUCCESS}; color: {WHITE}; border: none;
+                        border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 6px;
+                    }}
+                    QPushButton:hover {{ background-color: {SUCCESS_H}; }}
+                """)
+            else:
+                bg, hov = (AMBER, ORANGE) if total_sync < 5 else (DANGER, DANGER_H)
+                suffix = f"{total_sync} !" if total_sync >= 5 else str(total_sync)
+                btn.setText(f"Q : {suffix}")
+                btn.setToolTip(
+                    f"{total_sync} unsynced record(s)\n"
+                    f"  SI={si_count}  CN={cn_count}  SO={so_count}\n"
+                    f"  PAY={pay_count}  CUST={cust_count}  BNDL={bundle_count}"
+                )
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {bg}; color: {WHITE}; border: none;
+                        border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 6px;
+                    }}
+                    QPushButton:hover {{ background-color: {hov}; }}
+                """)
+
+        # ── Update Z-badge (fiscalization errors) ───────────────────────────────
+        if hasattr(self, "_z_badge"):
+            z_btn = self._z_badge
+
+            if fiscal_count == 0:
+                z_btn.setText("Z : 0")
+                z_btn.setToolTip("All sales fiscalized — click for details")
+                z_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {SUCCESS}; color: {WHITE}; border: none;
+                        border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 6px;
+                    }}
+                    QPushButton:hover {{ background-color: {SUCCESS_H}; }}
+                """)
+            else:
+                bg, hov = (AMBER, ORANGE) if fiscal_count < 5 else (DANGER, DANGER_H)
+                suffix = f"{fiscal_count} !" if fiscal_count >= 5 else str(fiscal_count)
+                z_btn.setText(f"Z : {suffix}")
+                z_btn.setToolTip(
+                    f"{fiscal_count} sale(s) pending fiscalization\n"
+                    f"Click to view and retry failed fiscalizations"
+                )
+                z_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {bg}; color: {WHITE}; border: none;
+                        border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 6px;
+                    }}
+                    QPushButton:hover {{ background-color: {hov}; }}
+                """)
+    # Pharmacy user-role key used on invoice_table cells (Qt.UserRole is already
+    # used for product_id on col 0, so we stamp pharmacy meta on +1)
+    PHARMACY_META_ROLE = Qt.UserRole + 1
+
+    def _is_pharmacy_product_lookup(self, product_id, part_no: str) -> bool:
+        """Fetch is_pharmacy_product from DB; returns False if unresolved."""
+        try:
+            if product_id:
+                from models.product import get_product_by_id
+                prod = get_product_by_id(int(product_id))
+                if prod:
+                    return bool(prod.get("is_pharmacy_product", False))
+            if part_no:
+                from database.db import get_connection
+                conn = get_connection(); cur = conn.cursor()
+                cur.execute(
+                    "SELECT COALESCE(is_pharmacy_product, 0) FROM products WHERE part_no = ?",
+                    (part_no,),
+                )
+                row = cur.fetchone(); conn.close()
+                if row:
+                    return bool(row[0])
+        except Exception as e:
+            print(f"[Pharmacy] is_pharmacy_product lookup failed: {e}")
+        return False
+
+    def _prompt_dosage_and_batch(self, product_id) -> dict:
+        """Pharmacy: modal dialog that captures dosage AND batch together.
+        Returns {'dosage': str|None, 'batch_no': str|None, 'expiry_date': str|None}.
+        Skipping returns all-None; no-batches path still allows the dosage
+        to be captured and the cart add to proceed.
+
+        Uses QDialog (not Qt.Popup) so the QComboBox drop-down lists inside
+        are actually clickable — Qt.Popup-flagged windows auto-close as soon
+        as their focus is stolen by a child popup, which made the dosage
+        search combobox effectively dead."""
+        try:
+            from models.dosage import list_dosages
+            dosages = list_dosages() or []
+        except Exception as e:
+            print(f"[Pharmacy] list_dosages failed: {e}")
+            dosages = []
+
+        try:
+            from models.product import get_batches_for_product
+            batches = get_batches_for_product(int(product_id)) if product_id else []
+        except Exception as e:
+            print(f"[Pharmacy] get_batches_for_product failed: {e}")
+            batches = []
+
+        # Sort batches by expiry ascending so the soonest-to-expire comes first
+        # (becomes the default-selected combobox item for FIFO dispensing).
+        def _exp_key(b):
+            e = b.get("expiry_date") or ""
+            return (e == "", str(e))  # empties last
+        batches = sorted(batches, key=_exp_key)
+
+        print(f"[Pharmacy] dosage_and_batch: {len(dosages)} dosage(s), "
+              f"{len(batches)} batch(es) for product_id={product_id}", flush=True)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Dispense Item — Dosage & Batch")
+        dlg.setModal(True)
+        dlg.setMinimumSize(560, 420)
+        dlg.setStyleSheet(f"""
+            QDialog {{ background: {WHITE}; }}
+            QLabel  {{ color: {NAVY}; background: transparent; }}
+            QComboBox, QLineEdit {{
+                background: {WHITE}; color: {NAVY};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: 4px 8px; font-size: 13px; min-height: 28px;
+            }}
+            QComboBox:focus, QLineEdit:focus {{ border: 1px solid {ACCENT}; }}
+        """)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
+
+        title = QLabel("Dispense Item — Dosage & Batch")
+        title.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {NAVY};")
+        lay.addWidget(title)
+
+        # --- Dosage section ---
+        dosage_hdr = QLabel("Dosage")
+        dosage_hdr.setStyleSheet(
+            f"font-size: 12px; font-weight: bold; color: {NAVY}; margin-top: 6px;")
+        lay.addWidget(dosage_hdr)
+
+        lay.addWidget(QLabel("Search saved dosage (type code or description):"))
+        cbo = QComboBox(dlg)
+        cbo.setEditable(True)
+        cbo.setInsertPolicy(QComboBox.NoInsert)
+        cbo.addItem("— none —", "")
+        for d in dosages:
+            desc = getattr(d, "description", "") or ""
+            code = getattr(d, "code", "") or ""
+            label = f"{code} — {desc}" if desc else code
+            cbo.addItem(label, code)
+        # Contains-mode case-insensitive completer for substring search
+        try:
+            _cmp = cbo.completer()
+            if _cmp is not None:
+                from PySide6.QtWidgets import QCompleter as _QCmp
+                _cmp.setCompletionMode(_QCmp.PopupCompletion)
+                _cmp.setFilterMode(Qt.MatchContains)
+                _cmp.setCaseSensitivity(Qt.CaseInsensitive)
+        except Exception:
+            pass
+        lay.addWidget(cbo)
+
+        lay.addWidget(QLabel("Or quick dosage (not saved):"))
+        edit = QLineEdit(dlg)
+        edit.setPlaceholderText("e.g. 1 tab TID x 5d")
+        lay.addWidget(edit)
+
+        # Track which dosage input the user touched last
+        state = {"last": "combo"}
+        edit.textEdited.connect(lambda _t: state.update({"last": "edit"}))
+        cbo.activated.connect(lambda _i: state.update({"last": "combo"}))
+
+        # --- Batch section ---
+        batch_hdr = QLabel("Batch & Expiry")
+        batch_hdr.setStyleSheet(
+            f"font-size: 12px; font-weight: bold; color: {NAVY}; margin-top: 8px;")
+        lay.addWidget(batch_hdr)
+
+        batch_cbo = QComboBox(dlg)
+        if not batches:
+            batch_cbo.addItem("— no batches registered —", None)
+            batch_cbo.setEnabled(False)
+        else:
+            batch_cbo.setEditable(True)
+            batch_cbo.setInsertPolicy(QComboBox.NoInsert)
+            for b in batches:
+                bn  = b.get("batch_no") or "(no batch no)"
+                exp = b.get("expiry_date") or "?"
+                qty = b.get("qty", 0)
+                label = f"{bn}  —  expires {exp}   |   qty: {qty}"
+                batch_cbo.addItem(label, b)
+            # FIFO default: select the earliest-expiring batch (index 0 after sort)
+            batch_cbo.setCurrentIndex(0)
+            # Contains-filter completer so users can type batch number or date
+            try:
+                _bcmp = batch_cbo.completer()
+                if _bcmp is not None:
+                    from PySide6.QtWidgets import QCompleter as _QCmp
+                    _bcmp.setCompletionMode(_QCmp.PopupCompletion)
+                    _bcmp.setFilterMode(Qt.MatchContains)
+                    _bcmp.setCaseSensitivity(Qt.CaseInsensitive)
+            except Exception:
+                pass
+        lay.addWidget(batch_cbo)
+
+        lay.addStretch()
+
+        # --- Buttons ---
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        use_btn  = navy_btn("Use",  height=34, color=SUCCESS, hover=SUCCESS_H)
+        skip_btn = navy_btn("Skip", height=34, color=NAVY_2,  hover=NAVY_3)
+        btn_row.addStretch(); btn_row.addWidget(skip_btn); btn_row.addWidget(use_btn)
+        lay.addLayout(btn_row)
+
+        result = {"dosage": None, "batch_no": None, "expiry_date": None}
+        def _use():
+            if state["last"] == "edit" and edit.text().strip():
+                result["dosage"] = edit.text().strip()
+            else:
+                result["dosage"] = cbo.currentData() or None
+            b = batch_cbo.currentData()
+            if b:
+                result["batch_no"] = b.get("batch_no") or None
+                result["expiry_date"] = b.get("expiry_date")
+            dlg.accept()
+        def _skip():
+            dlg.reject()
+        use_btn.clicked.connect(_use)
+        skip_btn.clicked.connect(_skip)
+
+        dlg.exec()
+
+        return {
+            "dosage":      result["dosage"],
+            "batch_no":    result["batch_no"],
+            "expiry_date": result["expiry_date"],
+        }
+
+    def _is_pharmacy_row_locked(self, row: int) -> bool:
+        # Cashiers cannot modify or delete rows stamped as pharmacy line items,
+        # UNLESS the 'allow_loaded_quotation_qty_change' maintenance setting is
+        # enabled — in which case the lock is lifted for qty/price columns on
+        # quotation-loaded rows.
+        if row is None or row < 0:
+            return False
+        col0 = self.invoice_table.item(row, 0)
+        if not col0 or not col0.data(self.PHARMACY_META_ROLE):
+            return False
+
+        # Check maintenance override setting (default: OFF → keep locked)
+        try:
+            from database.db import get_connection as _gc
+            _conn = _gc(); _cur = _conn.cursor()
+            _cur.execute(
+                "SELECT setting_value FROM pos_settings WHERE setting_key=?",
+                ("allow_loaded_quotation_qty_change",),
+            )
+            _row = _cur.fetchone(); _conn.close()
+            if _row and str(_row[0]) == "1":
+                return False   # Setting says: allow qty changes → not locked
+        except Exception:
+            pass
+
+        try:
+            from utils.roles import is_pharmacist
+            return not is_pharmacist(getattr(self, "user", None))
+        except Exception:
+            return False
+
+    def _notify_pharmacy_locked(self):
+        try:
+            from utils.toast import show_toast
+            show_toast(self, "Pharmacy line items are locked — only a pharmacist can modify them.",
+                       duration_ms=3000, kind="warn")
+        except Exception:
+            pass
+        QApplication.beep()
+
+    def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None, uom=""):
+        # ── Always close any open inline search before we touch the table ─────
+        self._close_inline_search()
+
+        # ── #0 Require a running shift ───────────────────────────────────────────
+        if not self._require_active_shift():
+            return
+
+        # ── Pharmacy gate + dosage/batch capture ─────────────────────────────────
+        pharmacy_meta = None
+        if self._is_pharmacy_product_lookup(product_id, part_no):
+            from utils.roles import is_pharmacist as _is_pharm
+            if not _is_pharm(self.user):
+                try:
+                    QApplication.beep()
+                except Exception:
+                    pass
+                try:
+                    from utils.toast import show_toast
+                    show_toast(
+                        self,
+                        "Only pharmacists can add pharmacy products — "
+                        "ask a pharmacist to create a quote.",
+                        duration_ms=3500, kind="warn",
+                    )
+                except Exception:
+                    pass
+                print(f"[Pharmacy] Blocked add — user is not pharmacist: {name}")
+                return
+            # Pharmacist — single merged popup captures dosage + batch together
+            combined = self._prompt_dosage_and_batch(product_id)
+            pharmacy_meta = {
+                "is_pharmacy": True,
+                "dosage":      combined.get("dosage"),
+                "batch_no":    combined.get("batch_no"),
+                "expiry_date": combined.get("expiry_date"),
+                "product_id":  product_id,
+            }
+
+        # ── #3 Block zero-price ───────────────────────────────────────────────
+        if price <= 0 and self._get_pos_rule("block_zero_price", default=True):
+            self._warn_popup(
+                "Zero Price Blocked",
+                f"<b>{name}</b> has no selling price set.<br>"
+                "Update the price in the server and re-sync, or disable the "
+                "'Block Zero-Price Sales' rule in Maintenance → POS Rules.",
+                icon=QMessageBox.Warning,
+            )
+            return
+
+        # ── #4 Block zero/negative stock ─────────────────────────────────────
+        if self._get_pos_rule("block_zero_stock", default=True):
+            item_stock = stock
+            if item_stock is None and product_id:
+                try:
+                    from models.product import get_product_by_id
+                    p = get_product_by_id(product_id)
+                    item_stock = float(p.get("stock", 1)) if p else 1
+                except Exception:
+                    item_stock = 1
+            if item_stock is not None and item_stock <= 0:
+                self._warn_popup(
+                    "Insufficient Stock",
+                    f"<b>{name}</b> is out of stock.<br>"
+                    "Cannot add this item to the invoice.<br><br>"
+                    "Disable 'Block Zero/Negative Stock Sales' in "
+                    "Maintenance → POS Rules to override.",
+                    icon=QMessageBox.Warning,
+                )
+                return
+
+        # ── #7 Apply Frappe pricing rules ─────────────────────────────────────
+        if self._get_pos_rule("use_pricing_rules", default=True):
+            price = self._apply_pricing_rules(product_id, part_no, price)
+        
+        # ── GET TAX INFORMATION FROM PRODUCT ───────────────────────────────────
+        tax_rate = 0.0
+        tax_type = "ZERO RATED"
+        tax_display = ""
+        
+        if product_id:
+            try:
+                from models.product import get_product_by_id
+                prod = get_product_by_id(product_id)
+                if prod:
+                    tax_rate = prod.get("tax_rate", 0.0)
+                    tax_type = prod.get("tax_type", "ZERO RATED")
+                    if tax_rate > 0:
+                        tax_display = f"VAT {tax_rate}%"
+                    else:
+                        tax_display = "ZERO RATED"
+                    print(f"[AddProduct] {name} - Tax Rate: {tax_rate}%, Type: {tax_type}")
+            except Exception as e:
+                print(f"[AddProduct] Error getting tax: {e}")
+        
+        # If no tax info from product, try by part_no
+        if tax_rate == 0 and part_no:
+            try:
+                from database.db import get_connection
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT tax_rate, tax_type FROM products WHERE part_no = ?", (part_no,))
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    tax_rate = float(row[0] or 0)
+                    tax_type = str(row[1] or "ZERO RATED")
+                    if tax_rate > 0:
+                        tax_display = f"VAT {tax_rate}%"
+                    else:
+                        tax_display = "ZERO RATED"
+            except Exception as e:
+                print(f"[AddProduct] Error getting tax from part_no: {e}")
+        
+        for r in range(self.invoice_table.rowCount()):
+            try:
+                row_name   = self.invoice_table.item(r, 1).text().strip()
+                row_amount = self.invoice_table.item(r, 2).text().strip()
+                row_qty    = self.invoice_table.item(r, 3).text().strip()
+            except AttributeError:
+                continue
+            if not row_name:
+                continue
+            row_pid = self.invoice_table.item(r, 0).data(Qt.UserRole) if self.invoice_table.item(r, 0) else None
+            # Must match BOTH product_id AND price — different UOMs have same id but different price
+            match = (row_pid and row_pid == product_id and row_amount == f"{price:.2f}") or \
+                    (not product_id and row_name == name and row_amount == f"{price:.2f}")
+            if match:
+                try:
+                    current_qty = float(row_qty or "0")
+                except ValueError:
+                    current_qty = 0.0
+                new_qty = current_qty + 1
+
+                # ── Collect this row's data so we can move it ─────────────────
+                def _cell_text(row, col):
+                    it = self.invoice_table.item(row, col)
+                    return it.text() if it else ""
+                def _cell_data(row, col):
+                    it = self.invoice_table.item(row, col)
+                    return it.data(Qt.UserRole) if it else None
+
+                saved_part_no    = _cell_text(r, self.COL_PART_NO)
+                saved_pid        = _cell_data(r, self.COL_PART_NO)
+                saved_name       = _cell_text(r, self.COL_NAME)
+                saved_price      = _cell_text(r, self.COL_PRICE)
+                saved_uom        = _cell_text(r, self.COL_UOM)
+                saved_disc       = _cell_text(r, self.COL_DISC)
+                # Use existing tax or new tax display
+                existing_tax = _cell_text(r, self.COL_TAX)
+                saved_tax = existing_tax if existing_tax else tax_display
+
+                # ── Remove this row and compact upward ────────────────────────
+                self._block_signals = True
+                self._init_row(r)
+                # Shift all filled rows above the gap down by one
+                for shift in range(r, self.invoice_table.rowCount() - 1):
+                    try:
+                        next_name = self.invoice_table.item(shift + 1, 1).text().strip()
+                    except AttributeError:
+                        next_name = ""
+                    if not next_name:
+                        break
+                    # copy shift+1 → shift
+                    for col in range(self.INVOICE_COL_COUNT):
+                        src = self.invoice_table.item(shift + 1, col)
+                        dst = self.invoice_table.item(shift, col)
+                        if src and dst:
+                            dst.setText(src.text())
+                            dst.setTextAlignment(src.textAlignment())
+                            dst.setData(Qt.UserRole, src.data(Qt.UserRole))
+                    # clear the row we just copied from
+                    self._init_row(shift + 1)
+                self._block_signals = False
+
+                # ── Find last filled row after compaction ─────────────────────
+                last_filled = -1
+                for scan in range(self.invoice_table.rowCount()):
+                    try:
+                        if self.invoice_table.item(scan, 1).text().strip():
+                            last_filled = scan
+                    except AttributeError:
+                        pass
+
+                dest = last_filled + 1
+                self._ensure_rows(dest + 1)
+
+                # ── Write to destination row with tax info ─────────────────────
+                self._block_signals = True
+                self._init_row(dest, part_no=saved_part_no, details=saved_name,
+                               qty=f"{new_qty:.4g}", amount=saved_price,
+                               uom=saved_uom,
+                               disc=saved_disc or "0.00", tax=saved_tax)
+                item0 = self.invoice_table.item(dest, 0)
+                if item0:
+                    item0.setData(Qt.UserRole, saved_pid)
+                    # Pharmacy meta survives row compaction: re-stamp if we had it
+                    if pharmacy_meta:
+                        item0.setData(self.PHARMACY_META_ROLE, pharmacy_meta)
+                        try:
+                            item0.setIcon(qta.icon("fa5s.prescription-bottle-alt",
+                                                   color="#6a1b9a"))
+                        except Exception:
+                            pass
+                qty_item = self.invoice_table.item(dest, 3)
+                if qty_item:
+                    qty_item.setTextAlignment(Qt.AlignCenter)
+                self._block_signals = False
+
+                self._recalc_row(dest)
+                self._recalc_totals()
+                self._active_row      = dest
+                self._active_col      = 3
+                self._last_filled_row = dest
+                self._numpad_buffer   = ""
+                self.invoice_table.setCurrentCell(dest, 3)
+                self.invoice_table.scrollToItem(
+                    self.invoice_table.item(dest, 3),
+                    QAbstractItemView.PositionAtBottom
+                )
+                self._highlight_active_row(dest)
+                self.invoice_table.setFocus()
+                if self.parent_window:
+                    self.parent_window._set_status(f"{name}  ×{new_qty:.4g}  @ ${price:.2f}")
+                # Move to next empty row and reopen inline search
+                next_r = self._find_next_empty_row()
+                if next_r != dest:
+                    self._active_row = next_r
+                    self._active_col = 0
+                    self.invoice_table.setCurrentCell(next_r, 0)
+                    self._highlight_active_row(next_r)
+                    QTimer.singleShot(120, lambda r=next_r: self._open_inline_search(r, 0))
+                return
+
+        # ── New row with tax info ─────────────────────────────────────────────
+        r = self._find_next_empty_row()
+        self._block_signals = True
+        # Fall back to the product's stock UOM when the caller didn't pass one.
+        # Callers going through `_pick_product_uom_and_price` always set `uom`;
+        # only legacy direct invocations (e.g. from pharmacy auto-dispense)
+        # may leave it blank.
+        _row_uom = uom
+        if not _row_uom and product_id:
+            try:
+                from models.product import get_product_by_id
+                _p = get_product_by_id(product_id)
+                if _p:
+                    _row_uom = str(_p.get("uom") or "").strip()
+            except Exception:
+                _row_uom = ""
+        # Pharmacy: surface the dosage on the cart so the cashier can see
+        # what was captured in the dispense popup — appended to the details
+        # cell as "<name>  ·  <dosage>". Full metadata still lives in
+        # PHARMACY_META_ROLE so save_sale keeps its fields intact.
+        _display_name = name
+        if pharmacy_meta and pharmacy_meta.get("dosage"):
+            _display_name = f"{name}  ·  {str(pharmacy_meta['dosage']).strip()}"
+
+        self._init_row(r, part_no=part_no, details=_display_name, qty="1",
+                       amount=f"{price:.2f}",
+                       uom=_row_uom,
+                       disc="0.00", tax=tax_display)
+        item = self.invoice_table.item(r, self.COL_PART_NO)
+        if item:
+            item.setData(Qt.UserRole, product_id)
+            # Pharmacy: stamp the row with dosage/batch metadata for save path + Phase 7
+            if pharmacy_meta:
+                item.setData(self.PHARMACY_META_ROLE, pharmacy_meta)
+                try:
+                    item.setIcon(qta.icon("fa5s.prescription-bottle-alt",
+                                          color="#6a1b9a"))
+                except Exception:
+                    pass
+        self._block_signals = False
+        self._recalc_row(r)
+        self._last_filled_row = r
+        self._numpad_buffer   = ""
+        self._highlight_active_row(r)
+        self.invoice_table.scrollToItem(
+            self.invoice_table.item(r, 1),
+            QAbstractItemView.PositionAtBottom
+        )
+        self.invoice_table.setFocus()
+        if self.parent_window:
+            self.parent_window._set_status(f"Added: {name} @ ${price:.2f} (Tax: {tax_display})")
+        # Move cursor to the NEXT empty row and reopen inline search.
+        next_r = self._find_next_empty_row()
+        self._active_row = next_r
+        self._active_col = 0
+        self.invoice_table.setCurrentCell(next_r, 0)
+        self._highlight_active_row(next_r)
+        QTimer.singleShot(120, lambda r=next_r: self._open_inline_search(r, 0))
+        
+    def _collect_invoice_items(self) -> list[dict]:
+        """Collect items from the invoice table with tax information"""
+        items = []
+        import re
+        
+        for r in range(self.invoice_table.rowCount()):
+            try:
+                qty = float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
+            except (ValueError, AttributeError):
+                qty = 0.0
+            if qty <= 0:
+                continue
+            try:
+                part_no      = self.invoice_table.item(r, self.COL_PART_NO).text()
+                # Name cell may be decorated with " · <dosage>" for pharmacy rows;
+                # keep product_name canonical so sale_items / Frappe see the raw name.
+                _name_cell   = self.invoice_table.item(r, self.COL_NAME).text()
+                product_name = _name_cell.split("  ·  ", 1)[0].strip()
+                price        = float(self.invoice_table.item(r, self.COL_PRICE).text() or "0")
+                disc         = float((self.invoice_table.item(r, self.COL_DISC).text() or "0").replace('%', '').strip())
+                tax_text     = self.invoice_table.item(r, self.COL_TAX).text() or ""
+                total        = float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
+                product_id   = self.invoice_table.item(r, self.COL_PART_NO).data(Qt.UserRole)
+                _uom_item    = self.invoice_table.item(r, self.COL_UOM)
+                uom_cell     = _uom_item.text().strip() if _uom_item else ""
+                
+                # Parse tax rate from tax column
+                tax_rate = 0.0
+                tax_type = "ZERO RATED"
+                
+                # Try to extract numeric rate from tax column (e.g., "15.5", "15.5%", "VAT 15.5%")
+                numbers = re.findall(r'(\d+\.?\d*)', tax_text)
+                if numbers:
+                    tax_rate = float(numbers[0])
+                    if tax_rate > 0:
+                        tax_type = "VAT"
+                else:
+                    # Check text-based tax types
+                    if "VAT" in tax_text.upper():
+                        tax_rate = 15.5  # Default VAT rate
+                        tax_type = "VAT"
+                    elif "ZERO" in tax_text.upper():
+                        tax_rate = 0.0
+                        tax_type = "ZERO RATED"
+                    elif "EXEMPT" in tax_text.upper():
+                        tax_rate = 0.0
+                        tax_type = "EXEMPT"
+                
+                # If still no tax rate, try to get from product database
+                if tax_rate == 0.0 and product_id:
+                    try:
+                        from models.product import get_product_by_id
+                        prod = get_product_by_id(product_id)
+                        if prod:
+                            tax_rate = prod.get("tax_rate", 0.0)
+                            tax_type = prod.get("tax_type", "ZERO RATED")
+                            print(f"[Tax] Product {product_name} has tax_rate={tax_rate} from DB")
+                    except Exception as e:
+                        print(f"[Tax] Error getting product tax: {e}")
+                
+                print(f"[Tax] Item: {product_name} - Rate: {tax_rate}% - Type: {tax_type}")
+                
+            except (ValueError, AttributeError) as e:
+                print(f"[Tax] Error collecting item: {e}")
+                continue
+            
+            # Pharmacy meta (if stamped by _add_product_to_invoice)
+            pharm = None
+            try:
+                cell0 = self.invoice_table.item(r, 0)
+                if cell0:
+                    pharm = cell0.data(self.PHARMACY_META_ROLE)
+            except Exception:
+                pharm = None
+
+            # UOM: prefer the cart cell (reflects the user's UOM-picker choice);
+            # fall back to the product row so legacy adds still carry the stock UOM.
+            uom_val = uom_cell
+            if not uom_val and product_id:
+                try:
+                    from models.product import get_product_by_id
+                    _p = get_product_by_id(product_id)
+                    if _p:
+                        uom_val = str(_p.get("uom") or "").strip()
+                except Exception as _e:
+                    print(f"[UOM] Could not resolve uom for product_id={product_id}: {_e}")
+
+            items.append({
+                "part_no": part_no,
+                "product_name": product_name,
+                "qty": qty,
+                "price": price,
+                "discount": disc,
+                "tax": tax_text,
+                "total": total,
+                "product_id": product_id,
+                "tax_rate": tax_rate,      # ADD THIS - numeric rate
+                "tax_type": tax_type,      # ADD THIS - text type
+                "tax_amount": total * (tax_rate / 100) if tax_rate > 0 else 0,
+                # Unit of measure — populated for both sale & quotation paths.
+                # Empty string when unresolvable (legacy product rows).
+                "uom":         uom_val,
+                # Pharmacy round-trip fields (None if not a pharmacy row)
+                "is_pharmacy": bool(pharm.get("is_pharmacy")) if pharm else False,
+                "dosage":      pharm.get("dosage") if pharm else None,
+                "batch_no":    pharm.get("batch_no") if pharm else None,
+                "expiry_date": pharm.get("expiry_date") if pharm else None,
+            })
+
+        print(f"[Tax] Total items collected: {len(items)}")
+        return items
+
+    def _save_sale(self):
+        items = self._collect_invoice_items()
+        if not items:
+            QMessageBox.warning(self, "Empty Invoice", "Add items before saving.")
+            return
+        try:
+            total = float(self._lbl_total.text() or "0")
+        except ValueError:
+            total = 0.0
+        try:
+            from models.sale import create_sale
+            from models.shift import get_active_shift
+            
+            cashier_id   = self.user.get("id") if isinstance(self.user, dict) else None
+            cashier_name = self.user.get("username", "") if isinstance(self.user, dict) else ""
+            
+            # Get active shift ID
+            active_shift = get_active_shift()
+            shift_id = active_shift.get("id") if active_shift else None
+            
+            # Calculate subtotal and total VAT
+            subtotal = sum(item.get("total", 0) for item in items)
+            total_vat = sum(item.get("tax_amount", 0) for item in items)
+            discount_pct = getattr(self, "current_discount_percent", 0.0)
+            discount_amt = subtotal * (discount_pct / 100.0) if discount_pct > 0 else 0.0
+            
+            sale = create_sale(
+                items=items,
+                total=total,
+                tendered=total,
+                method="CASH",
+                cashier_id=cashier_id,
+                cashier_name=cashier_name,
+                customer_name=self._selected_customer.get("customer_name", "") if self._selected_customer else "",
+                customer_contact=self._selected_customer.get("custom_telephone_number", "") if self._selected_customer else "",
+                change_amount=0.0,
+                discount_percent=discount_pct,
+                discount_amount=discount_amt,
+                subtotal=subtotal,
+                total_vat=total_vat,
+                shift_id=shift_id,
+            )
+            self._update_prev_txn_display(paid=total, change=0.0, invoice_no=sale.get("invoice_no", ""))
+            if self.parent_window:
+                self.parent_window._set_status(f"Sale #{sale['number']} saved — ${total:.2f}")
+            # ── Increment offline sync counter ──────────────────────────────
+            try:
+                from services.printing_service import printing_service as _ps
+                _ps.get_next_sync_number()
+            except Exception:
+                pass
+            # ── Badge refresh: immediately after DB write, before UI reset ──
+            self._refresh_unsynced_badge()
+            self._new_sale(confirm=False)
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", _friendly_db_error(e))
+        
+    
+    # =========================================================================
+    # OPEN SHIFT REPRINT DIALOG
+    # =========================================================================
+    def _open_shift_reprint(self):
+        """Open the shift reconciliation reprint dialog."""
+        try:
+            from views.dialogs.shift_reprint_dialog import show_shift_reprint
+            show_shift_reprint(self)
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Error", f"Could not open reprint dialog: {str(e)}")
+
+        # ── Previous transaction info ─────────────────────────────────────────
+        # Shown in the footer bar so the cashier always sees the last sale
+        self._prev_paid:   float = 0.0
+        self._prev_change: float = 0.0
+        self._prev_invoice: str  = ""
+
+        # Product grid pagination state
+        self._product_page     = 0
+        self._current_products = []
+
+        # Inline search state
+        self._inline_edit   = None
+        self._inline_popup  = None
+        self._inline_row    = -1
+        self._inline_col    = -1
+        self._return_mode = False
+        self._return_cn   = None
+        self.current_discount_percent = 0.0   # ← Discount state
+        self._quotation_mode = False           # ← Quotation mode flag
+        self._build_ui()
+
+    # =========================================================================
+    # ROOT LAYOUT
+    # =========================================================================
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(0)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        layout.addWidget(self._build_nav())
+
+        body = QHBoxLayout()
+        body.setSpacing(0)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.addWidget(self._build_left_panel(), 1)
+        body.addWidget(hr(horizontal=False))
+        body.addWidget(self._build_right_panel())
+        layout.addLayout(body, 3)   # invoice area ~3/7 of page
+
+        layout.addWidget(hr())
+        layout.addWidget(self._build_bottom_grid(), 4)   # product grid gets ~4/7 of page
+
+    
+   
     def _ensure_rows(self, needed: int):
         """Grow the table in blocks of 20 so there are at least `needed` rows."""
         current = self.invoice_table.rowCount()
@@ -4805,6 +8172,7 @@ class POSView(QWidget):
         self.current_discount_percent = 0.0   # ← Discount state (Change 1)
         self._quotation_mode = False           # ← Quotation mode flag
         self._build_ui()
+        QTimer.singleShot(0, self._ensure_default_customer)
 
     # =========================================================================
     # ROOT LAYOUT
@@ -4831,42 +8199,25 @@ class POSView(QWidget):
     # NAV BAR
     # =========================================================================
     def _build_nav(self):
-        bar = QWidget(); bar.setFixedHeight(48)
+        bar = QWidget()
+        bar.setFixedHeight(48)
         bar.setStyleSheet(f"background-color: {WHITE}; border-bottom: 2px solid {BORDER};")
 
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(10, 0, 10, 0)
         layout.setSpacing(6)
 
-        # ── Brand + date ───────────────────────────────────────────────────────
-        logo = QLabel("POS")
+        # ── Brand + Logo ──────────────────────────────────────────────────────
+        logo = QLabel("Havano POS System")
         logo.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {NAVY}; background: transparent;")
-        # date_lbl = QLabel(QDate.currentDate().toString("dd/MM/yyyy"))
-        # date_lbl.setStyleSheet(f"font-size: 12px; color: {NAVY}; background: transparent;")
         layout.addWidget(logo)
-        layout.addSpacing(4)
-        # layout.addWidget(date_lbl)
         layout.addSpacing(12)
 
-        # ── Shift status pill + SHIFT button (right after logo) ───────────────
-        # Shows "🟢 Shift #N" when a shift is running, or "⚫ No Shift" when not.
-        # Clicking opens ShiftChooserDialog.
-        _shift_active = False
-        _shift_label  = "⚫  No Shift"
-        try:
-            from models.shift import get_active_shift as _gas
-            _s = _gas()
-            if _s:
-                _shift_active = True
-                _shift_label  = f"🟢  Shift #{_s.get('shift_number', '')}"
-        except Exception:
-            pass
-
-        # ── Uniform nav button spec: h=30, font=11px bold, radius=4px, padding=0 12px ──
+        # ── Uniform nav button spec ──
         NAV_H  = 30
-        NAV_FS = 11   # font-size px
-        NAV_R  = 4    # border-radius px
-        NAV_PX = 12   # horizontal padding px
+        NAV_FS = 11   
+        NAV_R  = 4    
+        NAV_PX = 12   
 
         def _nav_style(bg, hov, extra=""):
             return (
@@ -4876,19 +8227,6 @@ class POSView(QWidget):
                 f"QPushButton:hover {{ background-color:{hov}; }} "
                 f"QPushButton:pressed {{ background-color:{NAVY_3}; color:{WHITE}; }}"
             )
-
-        self._shift_pill = QPushButton(_shift_label)
-        self._shift_pill.setFixedHeight(NAV_H)
-        self._shift_pill.setCursor(Qt.PointingHandCursor)
-        _pill_bg  = SUCCESS   if _shift_active else MUTED
-        _pill_hov = SUCCESS_H if _shift_active else NAVY_2
-        self._shift_pill.setStyleSheet(_nav_style(_pill_bg, _pill_hov, f"min-width:90px; border-radius:15px;"))
-        self._shift_pill.setToolTip(
-            "Click to start a shift" if not _shift_active
-            else "Shift is running — click to view details")
-        self._shift_pill.clicked.connect(self._open_shift_chooser)
-        layout.addWidget(self._shift_pill)
-        layout.addSpacing(6)
 
         # ── Helper: uniform nav button ────────────────────────────────────────
         def _nb(text, handler, color=NAVY_2, hov=NAVY_3, min_w=None):
@@ -4901,14 +8239,18 @@ class POSView(QWidget):
             b.clicked.connect(handler)
             return b
 
-        # ── Sales button (always visible) ─────────────────────────────────────
+        # ── Sales button ──────────────────────────────────────────────────────
         sales_menu_btn = HoverMenuButton("Sales ▾", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Payments", self._open_customer_payment_entry)
+        sales_menu_btn.addSeparator()
+        sales_menu_btn.addItem("Reprint Shift Reconciliation", self._open_shift_reprint)
         layout.addWidget(sales_menu_btn)
+        
 
-        # ── Check if user is admin for admin-only buttons ─────────────────────
+        # ── Admin Check ───────────────────────────────────────────────────────
         is_admin_user = False
         try:
             from models.user import is_admin
@@ -4920,18 +8262,14 @@ class POSView(QWidget):
         # ── Inventory button (admin only) ─────────────────────────────────────
         if is_admin_user:
             inv_menu_btn = HoverMenuButton("Inventory ▾", color=NAVY_2, hov=NAVY_3, height=NAV_H)
-            inv_menu_btn.addItem("Stock on Hand",  self._open_inventory_dashboard)
-            #inv_menu_btn.addItem("Inventory List", self._open_inventory_list_nav)
-            #inv_menu_btn.addItem("Item Groups",    self._open_item_groups_nav)
+            inv_menu_btn.addItem("Stock on Hand",   self._open_inventory_dashboard)
             layout.addWidget(inv_menu_btn)
 
         # ── Maintenance button (admin only) ───────────────────────────────────
         if is_admin_user:
             maint_btn = HoverMenuButton("Maintenance ▾", color=NAVY_2, hov=NAVY_3, height=NAV_H)
 
-            # ── Items that live in settings_dialog.py ──────────────────────
             def _sd(cls_name, *args, **kwargs):
-                """Open a class from settings_dialog, passing parent_window as parent."""
                 def _handler():
                     try:
                         import importlib
@@ -4946,42 +8284,36 @@ class POSView(QWidget):
                         QMessageBox.warning(self, "Error", f"Could not open {cls_name}:\n{e}")
                 return _handler
 
-           # maint_btn.addItem("Companies",         _sd("CompanyDialog"))
-           # maint_btn.addItem("Customer Groups",   _sd("CustomerGroupDialog"))
-           # maint_btn.addItem("Warehouses",        _sd("WarehouseDialog"))
-           # maint_btn.addItem("Cost Centers",      _sd("CostCenterDialog"))
-           # maint_btn.addItem("Price Lists",       _sd("PriceListDialog"))
-           # maint_btn.addItem("Customers",         _sd("CustomerDialog"))
-            maint_btn.addItem("Users",             _sd("ManageUsersDialog"))
+            maint_btn.addItem("Users",              _sd("ManageUsersDialog"))
+            maint_btn.addItem("Category Visibility", lambda: CategoryVisibilityDialog(self).exec())
             maint_btn.addSeparator()
-            maint_btn.addItem("Company Defaults",  self._open_company_defaults_nav)
-            maint_btn.addItem("POS Rules",         _sd("POSRulesDialog"))
-            maint_btn.addItem("Hardware Settings", _sd("HardwareDialog"))
-            maint_btn.addItem("Advanced Printing", self._open_adv_printing_nav)
+            maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
+            maint_btn.addItem("POS Rules",          _sd("POSRulesDialog"))
+            maint_btn.addItem("Hardware Settings",  _sd("HardwareDialog"))
+            maint_btn.addItem("Payment Modes",      self._open_payment_modes_dialog)
+            maint_btn.addItem("Advanced Printing",  self._open_adv_printing_nav)
             maint_btn.addSeparator()
-
-            # ── Items NOT in settings_dialog — stay in main_window ─────────
-           # maint_btn.addItem("Day Shift",         self._open_day_shift)
-            maint_btn.addItem("Sync Queue",        self._open_sales_list)
-            maint_btn.addItem("Stock File",        self._open_stock_file)
+            maint_btn.addItem("Sync Queue",         self._open_sales_list)
+            maint_btn.addItem("Stock File",         self._open_stock_file)
             maint_btn.addSeparator()
-            #maint_btn.addItem("Products",          lambda: coming_soon(self, "Products"))
-            maint_btn.addItem("Tax Settings",      lambda: coming_soon(self, "Tax Settings"))
-            maint_btn.addItem("Printer Setup",     lambda: coming_soon(self, "Printer Setup"))
-            maint_btn.addItem("Backup",            lambda: coming_soon(self, "Backup"))
+            maint_btn.addItem("Tax Settings",       lambda: coming_soon(self, "Tax Settings"))
+            maint_btn.addItem("Printer Setup",      lambda: MaintenanceDialog(self.parent_window or self).exec())
+            maint_btn.addItem("Backup",             lambda: coming_soon(self, "Backup"))
             layout.addWidget(maint_btn)
             layout.addSpacing(10)
 
-        # ── Customer selector (always visible) ────────────────────────────────
-        self._cust_btn = QPushButton("👤  Customer")
+        # ── Customer selector ─────────────────────────────────────────────────
+        self._cust_btn = QPushButton("Customer")
+        self._cust_btn.setIcon(qta.icon("fa5s.user", color="white"))
         self._cust_btn.setFixedHeight(NAV_H)
         self._cust_btn.setMaximumWidth(170)
         self._cust_btn.setCursor(Qt.PointingHandCursor)
         self._cust_btn.setStyleSheet(_nav_style(NAVY_2, NAVY_3))
         self._cust_btn.clicked.connect(self._select_customer)
-        layout.addWidget(self._cust_btn); layout.addSpacing(4)
+        layout.addWidget(self._cust_btn)
+        layout.addSpacing(4)
 
-        # ── Three sync badges (SI / CN / SO) — each opens a filtered error popup ──
+        # ── Sync Badges ───────────────────────────────────────────────────────
         def _make_badge(label, tip, handler):
             b = QPushButton(label)
             b.setFixedHeight(NAV_H)
@@ -4992,76 +8324,128 @@ class POSView(QWidget):
             b.clicked.connect(handler)
             return b
 
-        # Unified "all synced" badge — shown when SI + CN + SO counts are all 0
-        self._all_synced_badge = _make_badge(
-            "✓ All Synced",
-            "All records synced to server",
-            lambda: None)
-        self._all_synced_badge.setStyleSheet(_nav_style(SUCCESS, SUCCESS_H))
-        layout.addWidget(self._all_synced_badge)
+        # ── Single unified Q-badge (replaces SI / CN / SO individual badges) ──
+        self._q_badge = _make_badge("Q : 0", "All records synced", lambda: UnsyncedPopup("", self).exec())
+        self._q_badge.setStyleSheet(_nav_style(SUCCESS, SUCCESS_H))
+        layout.addWidget(self._q_badge)
         layout.addSpacing(2)
 
-        # Individual error badges — hidden until their count > 0
-        self._si_badge = _make_badge(
-            "SI —",
-            "Unsynced Sales Invoices — click to view errors",
-            lambda: UnsyncedPopup("SI", self).exec())
-        self._cn_badge = _make_badge(
-            "CN —",
-            "Unsynced Credit Notes — click to view errors",
-            lambda: UnsyncedPopup("CN", self).exec())
-        self._so_badge = _make_badge(
-            "SO —",
-            "Unsynced Sales Orders (Laybyes) — click to view errors",
-            lambda: UnsyncedPopup("SO", self).exec())
-
-        for _sb in (self._si_badge, self._cn_badge, self._so_badge):
-            _sb.setVisible(False)   # hidden by default; shown only when count > 0
-            layout.addWidget(_sb)
-            layout.addSpacing(2)
+        # ── Z-badge (fiscalization errors) ────────────────────────────────────
+        self._z_badge = _make_badge("Z : 0", "All sales fiscalized", lambda: self._show_unfiscalized_popup())
+        self._z_badge.setStyleSheet(_nav_style(SUCCESS, SUCCESS_H))
+        layout.addWidget(self._z_badge)
         layout.addSpacing(2)
 
-        # ── Laybye button (always visible) ────────────────────────────────────
-        laybye_btn = _nb("🏷  Laybye", self._on_laybye, color=AMBER, hov=ORANGE)
-        laybye_btn.setToolTip("Save cart as a Laybye (Sales Order)")
-        layout.addWidget(laybye_btn); layout.addSpacing(4)
+        # Keep hidden references so legacy code that calls setVisible() on the
+        # old badges doesn't crash at runtime.
+        self._all_synced_badge = self._q_badge   # backward compat alias
+        self._si_badge = self._q_badge
+        self._cn_badge = self._q_badge
+        self._so_badge = self._q_badge
 
-        # ── Payments button (always visible) ──────────────────────────────────
-        layout.addWidget(_nb("💳  Payments", self._open_customer_payment_entry, color=ACCENT, hov=ACCENT_H))
+        # ── Laybye Switcher ───────────────────────────────────────────────────
+        self.laybye_btn = QPushButton("Laybye")
+        self.laybye_btn.setCheckable(True)
+        self.laybye_btn.setFixedHeight(NAV_H)
+        self.laybye_btn.setMinimumWidth(110)
+        self.laybye_btn.setCursor(Qt.PointingHandCursor)
+
+        self.laybye_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {AMBER}; 
+                color: {WHITE}; 
+                border: none;
+                border-radius: {NAV_R}px; 
+                font-size: {NAV_FS}px; 
+                font-weight: bold;
+                text-align: center;
+                padding: 0px 5px; 
+                outline: none;
+            }}
+            QPushButton:hover {{ 
+                background-color: {ORANGE}; 
+            }}
+            /* Matches the standard nav button behavior for the click action */
+            QPushButton:pressed {{ 
+                background-color: {NAVY_3}; 
+                color: {WHITE};
+            }}
+            /* Ensures that once 'Checked', it returns to the AMBER color scheme */
+            QPushButton:checked {{ 
+                background-color: {AMBER}; 
+            }}
+            QPushButton:checked:hover {{ 
+                background-color: {ORANGE}; 
+            }}
+        """)
+
+        self.laybye_btn.setToolTip("Toggle Laybye Mode")
+        self.laybye_btn.clicked.connect(self._on_laybye)
+        layout.addWidget(self.laybye_btn)
         layout.addSpacing(4)
 
-        # ── Quotation button (always visible) ─────────────────────────────────
-        quote_btn = _nb("📄  Quote", self._on_quotation, color=NAVY_3, hov=NAVY_2)
-        quote_btn.setToolTip("Create a Quotation (clears cart; select customer first)")
-        layout.addWidget(quote_btn); layout.addSpacing(4)
+        # ── Payments button ───────────────────────────────────────────────────
+        layout.addWidget(_nb("Payments", self._open_customer_payment_entry, color=ACCENT, hov=ACCENT_H))
+        layout.addSpacing(4)
+        
 
-        # ── Return mode indicator (hidden unless in CN flow) ──────────────────
-        self._return_btn = _nb("↩  Return", self._process_return, color=DANGER, hov=DANGER_H)
-        self._return_btn.setToolTip("Confirm return (credit note loaded)")
+        # ── Quotation button ──────────────────────────────────────────────────
+        quote_btn = _nb("Quote", self._on_quotation, color=NAVY_3, hov=NAVY_2)
+        quote_btn.setToolTip("Create a Quotation")
+        layout.addWidget(quote_btn)
+        layout.addSpacing(4)
+        
+        
+        
+        
+# ── Options dropdown ──────────────────────────────────────────────────────
+        options_menu_btn = HoverMenuButton("Options ▾", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        options_menu_btn.addItem("Create Credit Note  (Return)", self._open_credit_note_dialog)
+        # options_menu_btn.addItem("Save / Print Quotation",       self._save_quotation)
+        options_menu_btn.addItem("Save / Print Quotation", self._save_quotation)
+
+        
+        # options_menu_btn.addItem("Manage Quotations",            self._open_quotation_manager)
+        # options_menu_btn.addItem("Reprint Invoice",              self._reprint_by_invoice_no)
+        options_menu_btn.addSeparator(),
+        
+        options_menu_btn.addItem("Sync Products from Server",    self._do_nav_sync_products)
+        layout.addWidget(options_menu_btn)
+        layout.addSpacing(4)
+        
+
+        # ── Return mode indicator ─────────────────────────────────────────────
+        self._return_btn = _nb("↩   Return", self._process_return, color=DANGER, hov=DANGER_H)
         self._return_btn.setVisible(False)
-        layout.addWidget(self._return_btn); layout.addSpacing(4)
+        layout.addWidget(self._return_btn)
+        layout.addSpacing(4)
 
-        # Refresh queue badge on startup and every 5 s
-        QTimer.singleShot(500, self._refresh_unsynced_badge)
-        self._unsynced_timer = QTimer(self)
-        self._unsynced_timer.setInterval(5000)
-        self._unsynced_timer.timeout.connect(self._refresh_unsynced_badge)
-        self._unsynced_timer.start()
+        # Refresh Sync Badges — timer is already started in the first _build_nav;
+        # do NOT create a second one here or counts will double.
+        if not getattr(self, "_unsynced_timer", None):
+            QTimer.singleShot(500, self._refresh_unsynced_badge)
+            self._unsynced_timer = QTimer(self)
+            self._unsynced_timer.setInterval(3000)
+            self._unsynced_timer.timeout.connect(self._refresh_unsynced_badge)
+            self._unsynced_timer.start()
 
         layout.addStretch(1)
 
-        # ── Dashboard button (admin only, right side) ──────────────────────────
+        # ── Dashboard button (admin only) ─────────────────────────────────────
         if is_admin_user:
             dash_btn = _nb("Dashboard", self.parent_window.switch_to_dashboard if self.parent_window else lambda: None, color=ACCENT, hov=ACCENT_H)
-            layout.addWidget(dash_btn); layout.addSpacing(4)
+            layout.addWidget(dash_btn)
+            layout.addSpacing(4)
 
-        # ── Logout (always visible) ────────────────────────────────────────────
+        # ── Logout ────────────────────────────────────────────────────────────
         logout = QPushButton("Logout")
-        logout.setFixedHeight(NAV_H); logout.setCursor(Qt.PointingHandCursor)
+        logout.setFixedHeight(NAV_H)
+        logout.setCursor(Qt.PointingHandCursor)
         logout.setStyleSheet(_nav_style(DANGER, DANGER_H))
         if self.parent_window:
             logout.clicked.connect(self.parent_window._logout)
         layout.addWidget(logout)
+
         return bar
     
     def _show_options_menu(self):
@@ -5105,16 +8489,16 @@ class POSView(QWidget):
             coming_soon(self, "Item Groups")
 
     def _open_company_defaults_nav(self):
-        """Open company defaults from nav-bar hover menu."""
+        """Open company defaults from nav-bar hover menu — full screen."""
         try:
             from views.pages.company_defaults_page import CompanyDefaultsPage
             dlg = QDialog(self.parent_window or self)
             dlg.setWindowTitle("Company Defaults")
-            dlg.setMinimumSize(1000, 700)
             dlg.setStyleSheet(f"QDialog {{ background: {OFF_WHITE}; }}")
             lay = QVBoxLayout(dlg)
             lay.setContentsMargins(0, 0, 0, 0)
             lay.addWidget(CompanyDefaultsPage())
+            dlg.setWindowState(Qt.WindowMaximized)
             dlg.exec()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open Company Defaults:\n{e}")
@@ -5141,26 +8525,194 @@ class POSView(QWidget):
         panel.setMinimumHeight(290)
         layout = QVBoxLayout(panel)
         layout.setSpacing(0); layout.setContentsMargins(0, 0, 0, 0)
+        # Inline customer search strip (applies in all modes; pharmacy or not)
+        layout.addWidget(self._build_customer_search_strip())
         layout.addWidget(self._build_invoice_table(), 1)
         layout.addWidget(self._build_invoice_footer())
         return panel
 
+    # =========================================================================
+    # INLINE CUSTOMER SEARCH STRIP (pharmacy phase — GLOBAL, not pharmacy-only)
+    # =========================================================================
+    def _build_customer_search_strip(self) -> QWidget:
+        """Inline customer search row above the cart — attach/replace active customer."""
+        wrap = QWidget()
+        wrap.setFixedHeight(46)
+        wrap.setStyleSheet(f"background: {OFF_WHITE}; border-bottom: 1px solid {BORDER};")
+        lay = QHBoxLayout(wrap)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(6)
+
+        # Leading icon
+        icon_lbl = QLabel()
+        try:
+            icon_lbl.setPixmap(qta.icon("fa5s.user", color=NAVY).pixmap(14, 14))
+        except Exception:
+            icon_lbl.setText("👤")
+        icon_lbl.setStyleSheet("background: transparent;")
+        lay.addWidget(icon_lbl)
+
+        # Search input
+        self._cust_search_edit = QLineEdit()
+        self._cust_search_edit.setPlaceholderText("Search customer by name or phone...")
+        self._cust_search_edit.setClearButtonEnabled(True)
+        try:
+            self._cust_search_edit.addAction(
+                qta.icon("fa5s.search", color=MUTED),
+                QLineEdit.LeadingPosition,
+            )
+        except Exception:
+            pass
+        self._cust_search_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background: {WHITE}; color: {DARK_TEXT};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: 4px 8px; font-size: 12px;
+            }}
+            QLineEdit:focus {{ border: 1.5px solid {ACCENT}; }}
+        """)
+        self._cust_search_edit.textEdited.connect(self._on_cust_search_edited)
+        self._cust_search_edit.returnPressed.connect(self._on_cust_search_enter)
+        lay.addWidget(self._cust_search_edit, 1)
+
+        # Completer (dropdown suggestions) — updated on textEdited
+        self._cust_completer = QCompleter([], self._cust_search_edit)
+        self._cust_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._cust_completer.setFilterMode(Qt.MatchContains)
+        self._cust_completer.activated.connect(self._on_cust_completer_activated)
+        self._cust_search_edit.setCompleter(self._cust_completer)
+        self._cust_completer_cache: dict[str, dict] = {}
+
+        # "+" Add-new button
+        add_btn = QPushButton()
+        try:
+            add_btn.setIcon(qta.icon("fa5s.plus", color="white"))
+        except Exception:
+            add_btn.setText("+")
+        add_btn.setFixedSize(32, 30)
+        add_btn.setCursor(Qt.PointingHandCursor)
+        add_btn.setToolTip("Add new customer")
+        add_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ACCENT}; color: {WHITE}; border: none;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{ background: {ACCENT_H}; }}
+        """)
+        add_btn.clicked.connect(self._inline_add_new_customer)
+        lay.addWidget(add_btn)
+
+        # Selected customer label
+        self._cust_inline_label = QLabel("No customer")
+        self._cust_inline_label.setStyleSheet(
+            f"color: {MUTED}; font-size: 11px; background: transparent; padding: 0 6px;"
+        )
+        self._cust_inline_label.setMinimumWidth(160)
+        self._cust_inline_label.setMaximumWidth(260)
+        lay.addWidget(self._cust_inline_label)
+
+        return wrap
+
+    def _on_cust_search_edited(self, text: str):
+        """Update completer suggestions as user types (name or phone)."""
+        query = (text or "").strip()
+        if len(query) < 2:
+            return
+        try:
+            from models.customer import search_customers
+            results = search_customers(query) or []
+        except Exception as e:
+            print(f"[CustSearch] search error: {e}")
+            results = []
+        labels = []
+        cache: dict[str, dict] = {}
+        for c in results[:25]:
+            nm = c.get("customer_name", "") or ""
+            ph = c.get("custom_telephone_number", "") or ""
+            label = f"{nm}  —  {ph}" if ph else nm
+            labels.append(label)
+            cache[label] = c
+        self._cust_completer_cache = cache
+        # Rebuild completer model
+        from PySide6.QtCore import QStringListModel
+        self._cust_completer.setModel(QStringListModel(labels))
+
+    def _on_cust_completer_activated(self, label: str):
+        """Pick a suggested customer — attach as active customer."""
+        cust = self._cust_completer_cache.get(label)
+        if not cust:
+            return
+        self._attach_inline_customer(cust)
+
+    def _on_cust_search_enter(self):
+        """Enter with no selection — pick the top match if available."""
+        text = (self._cust_search_edit.text() or "").strip()
+        if not text:
+            return
+        # Prefer an exact match in cache, else the first entry
+        exact = next((v for k, v in self._cust_completer_cache.items() if k.lower() == text.lower()), None)
+        if exact:
+            self._attach_inline_customer(exact)
+            return
+        if self._cust_completer_cache:
+            first = next(iter(self._cust_completer_cache.values()))
+            self._attach_inline_customer(first)
+
+    def _attach_inline_customer(self, cust: dict):
+        """
+        Called when the cashier picks a customer via the inline search
+        completer. Delegates to `_apply_selected_customer` so the
+        nav-bar button, inline label, cart-clear prompt, status bar, AND
+        the product-grid re-price all happen in one place. Keeping this
+        alias so legacy callers (QuickAddCustomerDialog signal etc.)
+        don't have to change.
+        """
+        self._apply_selected_customer(cust)
+
+    def _inline_add_new_customer(self):
+        """Open the existing QuickAddCustomerDialog and auto-attach on success."""
+        try:
+            from views.dialogs.customer_dialog import QuickAddCustomerDialog
+        except Exception as e:
+            QMessageBox.warning(self, "Error",
+                                f"Customer dialog not available:\n{e}")
+            return
+        dlg = QuickAddCustomerDialog(self)
+        try:
+            dlg.customer_created.connect(self._attach_inline_customer)
+        except Exception:
+            pass
+        dlg.exec()
+
     # ── Invoice table ─────────────────────────────────────────────────────────
+    # Column indices — change here only, every lookup uses these constants.
+    # UOM sits next to Qty, between Qty and Disc.
+    COL_PART_NO  = 0
+    COL_NAME     = 1
+    COL_PRICE    = 2
+    COL_QTY      = 3
+    COL_UOM      = 4
+    COL_DISC     = 5
+    COL_TAX      = 6
+    COL_TOTAL    = 7
+    INVOICE_COL_COUNT = 8
+
     # ── Invoice column labels — edit here to rename ──────────────────────────
-    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "Disc", "TAX", "Total $"]
+    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "UOM", "Disc", "TAX", "Total $"]
 
     def _build_invoice_table(self):
         self.invoice_table = QTableWidget()
-        self.invoice_table.setColumnCount(7)
+        self.invoice_table.setColumnCount(self.INVOICE_COL_COUNT)
         self.invoice_table.setHorizontalHeaderLabels(self.INVOICE_COL_LABELS)
         hh = self.invoice_table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(0, 95)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(2, 90)
-        hh.setSectionResizeMode(3, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(3, 90)
-        hh.setSectionResizeMode(4, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(4, 65)
-        hh.setSectionResizeMode(5, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(5, 45)
-        hh.setSectionResizeMode(6, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(6, 90)
+        hh.setSectionResizeMode(self.COL_PART_NO, QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_PART_NO, 95)
+        hh.setSectionResizeMode(self.COL_NAME,    QHeaderView.Stretch)
+        hh.setSectionResizeMode(self.COL_PRICE,   QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_PRICE, 90)
+        hh.setSectionResizeMode(self.COL_QTY,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_QTY, 90)
+        hh.setSectionResizeMode(self.COL_UOM,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_UOM, 60)
+        hh.setSectionResizeMode(self.COL_DISC,    QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_DISC, 65)
+        hh.setSectionResizeMode(self.COL_TAX,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_TAX, 45)
+        hh.setSectionResizeMode(self.COL_TOTAL,   QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_TOTAL, 90)
 
         self.invoice_table.verticalHeader().setVisible(False)
         self.invoice_table.setAlternatingRowColors(False)
@@ -5205,14 +8757,15 @@ class POSView(QWidget):
         return self.invoice_table
 
     def _init_row(self, r, part_no="", details="", qty="",
-                  amount="", disc="", tax="", total=""):
-        vals = [part_no, details, amount, qty, disc, tax, total]
+                  amount="", uom="", disc="", tax="", total=""):
+        # vals order must match COL_* constants (Part, Name, Price, Qty, UOM, Disc, TAX, Total)
+        vals = [part_no, details, amount, qty, uom, disc, tax, total]
         for c, val in enumerate(vals):
             item = QTableWidgetItem(str(val))
-            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if c == 1 else Qt.AlignCenter)
-            if c in (2, 6):
+            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if c == self.COL_NAME else Qt.AlignCenter)
+            if c in (self.COL_PRICE, self.COL_TOTAL):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                item.setForeground(QColor(ACCENT) if c == 6 else QColor(NAVY))
+                item.setForeground(QColor(ACCENT) if c == self.COL_TOTAL else QColor(NAVY))
             else:
                 item.setForeground(QColor(NAVY))
             self.invoice_table.setItem(r, c, item)
@@ -5239,34 +8792,34 @@ class POSView(QWidget):
 
         for r in range(self.invoice_table.rowCount()):
             is_active = (r == row)
-            for c in range(7):
+            for c in range(self.INVOICE_COL_COUNT):
                 item = self.invoice_table.item(r, c)
                 if not item:
                     continue
                 if is_active:
                     item.setBackground(ACTIVE_BG)
-                    item.setForeground(ACTIVE_FG if c != 6 else QColor(ACCENT))
+                    item.setForeground(ACTIVE_FG if c != self.COL_TOTAL else QColor(ACCENT))
                 else:
                     bg = FILLED_BG if r % 2 == 0 else ALT_BG
                     item.setBackground(bg)
-                    item.setForeground(FILLED_FG if c != 6 else QColor(ACCENT))
+                    item.setForeground(FILLED_FG if c != self.COL_TOTAL else QColor(ACCENT))
 
     # ── Calculation engine ────────────────────────────────────────────────────
     def _recalc_row(self, r):
         if self._block_signals:
             return
         try:
-            amount      = float(self.invoice_table.item(r, 2).text() or "0")
-            qty         = float(self.invoice_table.item(r, 3).text() or "0")
-            disc_amount = float((self.invoice_table.item(r, 4).text() or "0").replace('%', '').strip())
+            amount      = float(self.invoice_table.item(r, self.COL_PRICE).text() or "0")
+            qty         = float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
+            disc_amount = float((self.invoice_table.item(r, self.COL_DISC).text() or "0").replace('%', '').strip())
             total       = max(qty * amount - disc_amount, 0.0)
         except (ValueError, AttributeError):
             total = 0.0
         self._block_signals = True
-        item = self.invoice_table.item(r, 6)
+        item = self.invoice_table.item(r, self.COL_TOTAL)
         if item:
             # Only show a value when the row has an actual product entry
-            details = self.invoice_table.item(r, 1)
+            details = self.invoice_table.item(r, self.COL_NAME)
             has_product = bool(details and details.text().strip())
             item.setText(f"{total:.2f}" if has_product else "")
             item.setForeground(QColor(ACCENT))
@@ -5278,8 +8831,8 @@ class POSView(QWidget):
         qty_total = 0.0
         for r in range(self.invoice_table.rowCount()):
             try:
-                subtotal  += float(self.invoice_table.item(r, 6).text() or "0")
-                qty_total += float(self.invoice_table.item(r, 3).text() or "0")
+                subtotal  += float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
+                qty_total += float(self.invoice_table.item(r, self.COL_QTY).text() or "0")
             except (ValueError, AttributeError):
                 pass
 
@@ -5324,6 +8877,11 @@ class POSView(QWidget):
     # INLINE CELL SEARCH
     # =========================================================================
     def _open_inline_search(self, row, col):
+        # Pharmacy lock: cashiers cannot replace/edit the product on a pharmacy row
+        if self._is_pharmacy_row_locked(row):
+            self._notify_pharmacy_locked()
+            return
+
         self._close_inline_search()
 
         self._inline_row = row
@@ -5481,15 +9039,16 @@ class POSView(QWidget):
             if matches: product = matches[0]
 
         if product:
-            result = self._maybe_pick_uom(product)
-            if result is None:
-                return   # user cancelled UOM picker
-            uom, price = result
+            picked = self._pick_product_uom_and_price(product)
+            if picked is None:
+                return   # cancelled / blocked
+            product, uom, price = picked
             self._add_product_to_invoice(
                 name=product["name"],
                 price=price,
                 part_no=product.get("part_no", ""),
                 product_id=product.get("id"),
+                uom=uom,
             )
         else:
             # #31 — show popup then reopen search on the same row
@@ -5525,16 +9084,17 @@ class POSView(QWidget):
         self._close_inline_search()
         if not product:
             return
-        result = self._maybe_pick_uom(product)
-        if result is None:
-            return   # user cancelled UOM picker
-        uom, price = result
+        picked = self._pick_product_uom_and_price(product)
+        if picked is None:
+            return   # cancelled / blocked
+        product, uom, price = picked
         self._add_product_to_invoice(
             name=product["name"],
             price=price,
             part_no=product.get("part_no", ""),
             product_id=product.get("id"),
             stock=product.get("stock"),
+            uom=uom,
         )
 
     def _fill_row_from_product(self, row, product):
@@ -5542,14 +9102,16 @@ class POSView(QWidget):
         NOT already on the invoice (called from _add_product_to_invoice new-row path)."""
         self._block_signals = True
         self._init_row(row, part_no=product["part_no"], details=product["name"],
-                       qty="1", amount=f"{product['price']:.2f}", disc="0.00", tax="")
-        item0 = self.invoice_table.item(row, 0)
+                       qty="1", amount=f"{product['price']:.2f}",
+                       uom=(product.get("uom") or ""),
+                       disc="0.00", tax="")
+        item0 = self.invoice_table.item(row, self.COL_PART_NO)
         if item0: item0.setData(Qt.UserRole, product.get("id"))
         self._block_signals = False
         self._recalc_row(row)
-        self.invoice_table.setCurrentCell(row, 3)
+        self.invoice_table.setCurrentCell(row, self.COL_QTY)
         self._active_row      = row
-        self._active_col      = 3
+        self._active_col      = self.COL_QTY
         self._last_filled_row = row
         self._numpad_buffer   = ""
         self._highlight_active_row(row)
@@ -5573,6 +9135,41 @@ class POSView(QWidget):
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
+
+        # ── Global Up/Down → cart navigation ─────────────────────────────────
+        # When the cashier is on the POS screen but focus is on a button / the
+        # product grid / anywhere that isn't a text input, Up/Down should move
+        # through the cart rows. The per-widget branches below still own the
+        # specific behaviours (inline-search popup, table's own edit triggers).
+        if event.type() == QEvent.KeyPress and getattr(self, "_global_cart_nav_ready", False):
+            _k = event.key()
+            if _k in (Qt.Key_Up, Qt.Key_Down):
+                from PySide6.QtWidgets import QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox
+                fw = QApplication.focusWidget()
+                # Skip if the invoice_table or inline search already handle Up/Down
+                # (their own branches below fire with the correct context).
+                if fw is self.invoice_table or fw is getattr(self, "_inline_edit", None):
+                    pass  # fall through to specific branches
+                elif isinstance(fw, (QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox)):
+                    pass  # let text inputs handle Up/Down themselves
+                elif hasattr(self, "invoice_table") and self.invoice_table is not None:
+                    delta = -1 if _k == Qt.Key_Up else 1
+                    cur_r = getattr(self, "_active_row", 0)
+                    cur_r = cur_r if cur_r >= 0 else 0
+                    target = max(0, min(cur_r + delta, self.invoice_table.rowCount() - 1))
+                    self._active_row = target
+                    col = getattr(self, "_active_col", self.COL_PART_NO)
+                    col = col if col >= 0 else self.COL_PART_NO
+                    self.invoice_table.setCurrentCell(target, col)
+                    self._highlight_active_row(target)
+                    try:
+                        self.invoice_table.scrollToItem(
+                            self.invoice_table.item(target, col),
+                            QAbstractItemView.EnsureVisible)
+                    except Exception:
+                        pass
+                    self.invoice_table.setFocus()
+                    return True
 
         # ── inline search edit ────────────────────────────────────────────────
         if obj is self._inline_edit and event.type() == QEvent.KeyPress:
@@ -5607,7 +9204,9 @@ class POSView(QWidget):
                 self._numpad_enter()
                 return True
 
-            # #36 Up arrow — move to row above
+            # #36 Up arrow — move to row above.
+            # Inline search only re-opens when the destination row is empty —
+            # navigating across filled rows shouldn't spawn a search popup.
             if key == Qt.Key_Up:
                 self._close_inline_search()
                 target = max(0, self._active_row - 1)
@@ -5617,11 +9216,13 @@ class POSView(QWidget):
                 self.invoice_table.scrollToItem(
                     self.invoice_table.item(target, self._active_col),
                     QAbstractItemView.EnsureVisible)
-                if self._active_col in (0, 1):
-                    self._open_inline_search(target, self._active_col)
+                if self._active_col in (self.COL_PART_NO, self.COL_NAME):
+                    _n = self.invoice_table.item(target, self.COL_NAME)
+                    if not (_n and _n.text().strip()):
+                        self._open_inline_search(target, self._active_col)
                 return True
 
-            # #36 Down arrow — move to row below
+            # #36 Down arrow — move to row below. Same skip-on-filled rule.
             if key == Qt.Key_Down:
                 self._close_inline_search()
                 target = min(self._active_row + 1, self.invoice_table.rowCount() - 1)
@@ -5631,14 +9232,16 @@ class POSView(QWidget):
                 self.invoice_table.scrollToItem(
                     self.invoice_table.item(target, self._active_col),
                     QAbstractItemView.EnsureVisible)
-                if self._active_col in (0, 1):
-                    self._open_inline_search(target, self._active_col)
+                if self._active_col in (self.COL_PART_NO, self.COL_NAME):
+                    _n = self.invoice_table.item(target, self.COL_NAME)
+                    if not (_n and _n.text().strip()):
+                        self._open_inline_search(target, self._active_col)
                 return True
 
             # #36 Tab — cycle Code→Qty→Disc, wrap to next/prev row
             if key == Qt.Key_Tab:
                 self._close_inline_search()
-                _TAB = [0, 3, 4]
+                _TAB = [self.COL_PART_NO, self.COL_QTY, self.COL_DISC]
                 reverse = bool(mods & Qt.ShiftModifier)
                 if reverse:
                     _TAB = list(reversed(_TAB))
@@ -5665,8 +9268,11 @@ class POSView(QWidget):
             if key == Qt.Key_F2:        self._save_sale();        return True
             if key == Qt.Key_F3:        self._print_receipt();    return True
             if key == Qt.Key_F4:        self._on_discount_clicked(); return True
+            # To this:
+            if key == Qt.Key_F6: self._open_quotation_manager(); return True
             if key == Qt.Key_F5:        self._open_payment();     return True
             if key == Qt.Key_F7:        self._open_sales_list();  return True
+            if key == Qt.Key_Q:         UnsyncedPopup("PAY", self).exec(); return True
             if key == Qt.Key_Escape:
                 self._close_inline_search(); self._numpad_clear(); return True
             if key == Qt.Key_Backspace:
@@ -5695,11 +9301,21 @@ class POSView(QWidget):
         self._active_row    = row
         self._active_col    = col
         self._numpad_buffer = ""
-        if col == 5:
+        if col == self.COL_TAX:
             item = self.invoice_table.item(row, col)
             if item: item.setText("" if item.text() == "T" else "T")
-        elif col in (0, 1):
-            self._open_inline_search(row, col)
+        elif col in (self.COL_PART_NO, self.COL_NAME):
+            # Open inline search ONLY on empty rows. Clicking an existing
+            # cart line should just move the active row (so Up/Down arrow
+            # navigation keeps working) — the search popup stole focus before.
+            name_item = self.invoice_table.item(row, self.COL_NAME)
+            is_filled = bool(name_item and name_item.text().strip())
+            if is_filled:
+                self._close_inline_search()
+                self._highlight_active_row(row)
+                self.invoice_table.setFocus()
+            else:
+                self._open_inline_search(row, col)
         else:
             # Clicking price/qty/disc cols — close search, ready for keyboard/numpad
             self._close_inline_search()
@@ -5713,92 +9329,226 @@ class POSView(QWidget):
         query = part_item.text().strip() if part_item else ""
         dlg = ProductSearchDialog(self, initial_query=query)
         if dlg.exec() == QDialog.Accepted and dlg.selected_product:
-            p = dlg.selected_product
-            result = self._maybe_pick_uom(p)
-            if result is None:
-                return   # user cancelled UOM picker
-            uom, price = result
+            picked = self._pick_product_uom_and_price(dlg.selected_product)
+            if picked is None:
+                return   # cancelled / blocked
+            p, uom, price = picked
             self._block_signals = True
             self._init_row(row, part_no=p["part_no"], details=p["name"],
-                           qty="1", amount=f"{price:.2f}", disc="0.00", tax="")
-            item0 = self.invoice_table.item(row, 0)
+                           qty="1", amount=f"{price:.2f}",
+                           uom=(uom or ""),
+                           disc="0.00", tax="")
+            item0 = self.invoice_table.item(row, self.COL_PART_NO)
             if item0: item0.setData(Qt.UserRole, p.get("id"))
             self._block_signals = False
             self._recalc_row(row)
-            self.invoice_table.setCurrentCell(row, 3)
-            self._active_row = row; self._active_col = 3; self._numpad_buffer = ""
+            self.invoice_table.setCurrentCell(row, self.COL_QTY)
+            self._active_row = row; self._active_col = self.COL_QTY; self._numpad_buffer = ""
 
     def _on_product_btn_clicked(self, product: dict):
-        """Called when a product tile button is clicked — shows UOM picker if needed."""
-        # Immediately close any open inline editor so the overlay doesn't
-        # intercept the touch event or eat the next tap.
+        """Product tile tapped — debounce, then route through the shared
+        template/variant/uom/price pipeline."""
         self._close_inline_search()
-        # Small guard: ignore double-fire within 200 ms (touch long-press)
+
         import time as _time
-        now = _time.monotonic()
-        last = getattr(self, '_last_grid_tap', 0)
+        now  = _time.monotonic()
+        last = getattr(self, "_last_grid_tap", 0)
         if now - last < 0.20:
             return
         self._last_grid_tap = now
 
-        result = self._maybe_pick_uom(product)
-        if result is None:
+        picked = self._pick_product_uom_and_price(product)
+        if picked is None:
             return
-        uom, price = result
-        self._add_product_to_invoice(
-                name=product.get("name", ""),
-                price=price,
-                part_no=product.get("part_no", ""),
-                product_id=product.get("id"),
-                stock=product.get("stock"),
-            )
+        product, uom, price = picked
 
-    def _get_uom_prices(self, part_no: str) -> list[dict]:
-        """Returns list of {uom, price} for a product from product_uom_prices table."""
+        self._add_product_to_invoice(
+            name       = product.get("name", ""),
+            price      = price,
+            part_no    = product.get("part_no", ""),
+            product_id = product.get("id"),
+            stock      = product.get("stock"),
+            uom        = uom,
+        )
+
+    def _pick_product_uom_and_price(
+        self, product: dict,
+    ) -> tuple[dict, str, float] | None:
+        """
+        Shared pre-add pipeline used by every "add this product to cart"
+        path (grid tile tap, inline search commit, double-click cell
+        picker, barcode lookup, etc.).
+
+        Steps:
+          1. If the tapped product is a *template*, open the variant
+             picker and swap in the selected variant.
+          2. Resolve a (uom, price) pair against the active customer's
+             price list. `_resolve_price_for_product` opens
+             `UomPickerDialog` when the item has more than one UOM row
+             in that price list — so multi-UOM items still get the
+             picker, just read from `item_prices` instead of the legacy
+             `product_uom_prices` table.
+          3. Returns (product_actually_used, uom, price), or None if the
+             cashier cancelled or anything was rejected (no customer /
+             no price list / zero-priced item — each case shows its own
+             explainer before returning None).
+        """
+        if not product:
+            return None
+
+        if self._is_template_product(product):
+            product = self._pick_variant(product) or {}
+            if not product:
+                return None  # user cancelled the variant picker
+
+        picked = self._resolve_price_for_product(product)
+        if picked is None:
+            return None
+        uom, price = picked
+        return (product, uom, price)
+
+    # -----------------------------------------------------------------------
+    # Price-list resolution (task 1e)
+    # -----------------------------------------------------------------------
+
+    def _get_active_price_list(self) -> str | None:
+        """Active customer's price list name (e.g. 'Standard Selling')."""
+        cust = self._selected_customer or {}
+        name = (cust.get("price_list_name") or "").strip()
+        return name or None
+
+    def _get_price_rows_for_list(self, part_no: str, price_list: str) -> list[dict]:
+        """
+        All (uom, price) rows for an item under the given price list, from the
+        `item_prices` cache populated by product sync.
+        """
         try:
             from database.db import get_connection
-            conn = get_connection(); cur = conn.cursor()
-            cur.execute(
-                "SELECT uom, price FROM product_uom_prices WHERE part_no=? ORDER BY price",
-                (part_no,)
-            )
+            conn = get_connection()
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT uom, price FROM item_prices
+                WHERE  part_no = ? AND price_list = ? AND price_type = 'selling'
+                ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
+            """, (part_no, price_list))
             rows = cur.fetchall(); conn.close()
-            return [{"uom": r[0], "price": float(r[1])} for r in rows]
-        except Exception:
+            return [{"uom": r[0], "price": float(r[1] or 0)} for r in rows]
+        except Exception as e:
+            print(f"[pos] _get_price_rows_for_list failed ({part_no}/{price_list}): {e}")
             return []
 
-    def _maybe_pick_uom(self, product: dict) -> tuple[str, float] | None:
+    def _resolve_price_for_product(self, product: dict) -> tuple[str, float] | None:
         """
-        If product has multiple UOM prices, show picker dialog.
-        Returns (uom, price) tuple — never returns None for no-data case.
-        Returns None only if user explicitly cancels the picker.
+        Returns (uom, price) or None.
+
+        None means "don't add to cart" — we've already shown an explanation to
+        the cashier (no customer / no price list / item not priced / zero).
         """
-        part_no    = product.get("part_no", "")
-        base_price = float(product.get("price", 0))
-        base_uom   = str(product.get("uom", "Nos") or "Nos")
+        part_no  = product.get("part_no", "")
+        base_uom = str(product.get("uom", "Nos") or "Nos")
+        name     = product.get("name", part_no)
 
-        uom_prices = self._get_uom_prices(part_no)
+        if not self._selected_customer:
+            self._warn_popup(
+                "No customer selected",
+                f"Pick a customer before adding <b>{name}</b> — the price "
+                f"depends on the customer's price list.",
+            )
+            return None
 
-        # No UOM table data or table doesn't exist yet —
-        # fall through silently with base price, no popup
-        if not uom_prices:
-            return (base_uom, base_price)
+        price_list = self._get_active_price_list()
+        if not price_list:
+            self._warn_popup(
+                "No price list",
+                f"The current customer has no default price list. "
+                f"<b>{name}</b> can't be sold until one is assigned.",
+            )
+            return None
 
-        # Single UOM — no dialog needed, use it directly
-        if len(uom_prices) == 1:
-            return (uom_prices[0]["uom"], uom_prices[0]["price"])
+        rows = self._get_price_rows_for_list(part_no, price_list)
+        if not rows:
+            # [BUNDLE-PRICE] Fallback to bundle component total if no parent price list entry
+            try:
+                from models.product_bundle import get_all_bundles_with_items
+                b_defs = get_all_bundles_with_items()
+                if part_no in b_defs:
+                    # Calculate total using components' prices in this list
+                    from models.item_price import get_prices_map
+                    pm = get_prices_map(price_list)
+                    
+                    bundle_total = 0.0
+                    for b_item in b_defs[part_no]:
+                        i_code = (b_item.get("item_code") or "").upper().strip()
+                        i_qty  = float(b_item.get("quantity") or 0)
+                        i_rate = float(b_item.get("rate") or 0)
+                        if i_rate <= 0:
+                            i_rate = float(pm.get(i_code, 0) or 0)
+                        bundle_total += (i_qty * i_rate)
+                    
+                    if bundle_total > 0:
+                        rows = [{"uom": base_uom, "price": bundle_total}]
+            except Exception: pass
 
-        # Multiple UOMs — show picker so cashier chooses pack size
-        dlg = UomPickerDialog(
-            product_name=product.get("name", ""),
-            uom_prices=uom_prices,
-            parent=self,
-        )
-        if dlg.exec() == QDialog.Accepted and dlg.selected_uom:
-            return (dlg.selected_uom, dlg.selected_price)
+        if not rows:
+            self._warn_popup(
+                "Item not priced",
+                f"<b>{name}</b> has no price in the <b>{price_list}</b> "
+                f"price list. Add a rate on the server and re-sync.",
+            )
+            return None
 
-        # Cancelled — still add with base price rather than blocking
-        return (base_uom, base_price)
+        # Single UOM → use it directly.
+        if len(rows) == 1:
+            picked = rows[0]
+        else:
+            dlg = UomPickerDialog(
+                product_name=name,
+                uom_prices=rows,
+                parent=self,
+            )
+            if dlg.exec() != QDialog.Accepted or not dlg.selected_uom:
+                return None
+            picked = {"uom": dlg.selected_uom, "price": dlg.selected_price}
+
+        if float(picked["price"] or 0) <= 0:
+            self._warn_popup(
+                "Zero-priced item",
+                f"<b>{name}</b> is priced at 0 in <b>{price_list}</b>. "
+                f"The POS won't sell zero-priced items — update the price "
+                f"on the server and re-sync.",
+            )
+            return None
+
+        return (picked.get("uom") or base_uom, float(picked["price"]))
+
+    # -----------------------------------------------------------------------
+    # Variants (task 3c) — picker placeholder wired in the dialog step
+    # -----------------------------------------------------------------------
+
+    def _is_template_product(self, product: dict) -> bool:
+        """True for items flagged as variant templates by the sync."""
+        return bool(product.get("is_template") or product.get("has_variants"))
+
+    def _pick_variant(self, template: dict) -> dict | None:
+        """
+        Open the variant picker (built in task 3c). Import kept local so a
+        missing module doesn't break POS startup.
+        """
+        try:
+            from views.dialogs.variant_picker_dialog import VariantPickerDialog
+        except Exception as e:
+            print(f"[pos] variant picker unavailable: {e}")
+            self._warn_popup(
+                "Variants not available",
+                "This item has variants but the picker dialog is not "
+                "installed yet. Please update the POS.",
+            )
+            return None
+
+        dlg = VariantPickerDialog(template=template, parent=self)
+        if dlg.exec() != QDialog.Accepted or not dlg.selected_variant:
+            return None
+        return dlg.selected_variant
 
     # =========================================================================
     # PERMISSION CHECK HELPER  (#23)
@@ -5868,9 +9618,55 @@ class POSView(QWidget):
         ))
 
     # =========================================================================
+    # =========================================================================
+    # SHIFT GUARD  — called before any transaction action
+    # =========================================================================
+    def _prompt_open_shift_if_missing(self):
+        """Called once after MainWindow is shown. If no shift is active, goes
+        straight into the open-shift flow so the cashier can start selling
+        without chasing down a button. No-op when a shift is already open."""
+        try:
+            from models.shift import get_active_shift
+            if get_active_shift():
+                return
+        except Exception:
+            return
+        try:
+            self._open_shift_chooser()
+        except Exception as e:
+            print(f"[MainWindow] auto-prompt open-shift failed: {e}")
+
+    def _require_active_shift(self) -> bool:
+        """
+        Returns True immediately when a shift is running (zero UI overhead).
+        If no shift is active, opens the shift chooser directly — the old
+        intermediate "No Shift Running" modal was one click of pure friction
+        before every POS session. The caller still aborts (returns False)
+        after the chooser closes; the next user action triggers a re-check.
+        """
+        try:
+            from models.shift import get_active_shift
+            if get_active_shift():
+                return True
+        except Exception:
+            return True   # can't check → fail open, don't block
+
+        # No active shift — jump straight into the chooser/open-shift dialog.
+        try:
+            self._open_shift_chooser()
+        except Exception as e:
+            print(f"[_require_active_shift] open-shift launch failed: {e}")
+        # Re-check: if user completed opening a shift inside the chooser,
+        # let the caller proceed instead of bouncing them out.
+        try:
+            from models.shift import get_active_shift
+            return bool(get_active_shift())
+        except Exception:
+            return False
+
     # POS RULES HELPERS  (#3 #4 #7)
     # =========================================================================
-    def _get_pos_rule(self, key: str, default: bool = False) -> bool:
+    def _get_pos_rule(self, key: str, default: bool = True) -> bool:
         """Read a single toggle from pos_settings table. Fast; falls back to default."""
         try:
             from database.db import get_connection
@@ -5892,560 +9688,9 @@ class POSView(QWidget):
         except Exception:
             pass
         return price
-    # def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None):
-    #     # ── Check for Active Shift First ─────────────────────────────────────
-    #     from models.shift import get_active_shift
-    #     if not get_active_shift():
-    #         self._warn_popup(
-    #             "No Active Shift",
-    #             "<b>A cashier cannot sell without an active shift.</b><br><br>"
-    #             "Please go to the Shift page to start a shift before adding items.",
-    #             icon=QMessageBox.Warning
-    #         )
-    #         return
 
-    #     # ── Always close any open inline search before we touch the table ─────
-    #     self._close_inline_search()
-
-    #     # ── #3 Block zero-price ───────────────────────────────────────────────
-    #     if price <= 0 and self._get_pos_rule("block_zero_price", default=True):
-    #         self._warn_popup(
-    #             "Zero Price Blocked",
-    #             f"<b>{name}</b> has no selling price set.<br>"
-    #             "Update the price in the server and re-sync, or disable the "
-    #             "'Block Zero-Price Sales' rule in Maintenance → POS Rules.",
-    #             icon=QMessageBox.Warning,
-    #         )
-    #         return
-
-    #     # ── #4 Block zero/negative stock ─────────────────────────────────────
-    #     if self._get_pos_rule("block_zero_stock", default=False):
-    #         # stock may be passed in; if not, look it up
-    #         item_stock = stock
-    #         if item_stock is None and product_id:
-    #             try:
-    #                 from models.product import get_product_by_id
-    #                 p = get_product_by_id(product_id)
-    #                 item_stock = float(p.get("stock", 1)) if p else 1
-    #             except Exception:
-    #                 item_stock = 1
-    #         if item_stock is not None and item_stock <= 0:
-    #             self._warn_popup(
-    #                 "Insufficient Stock",
-    #                 f"<b>{name}</b> is out of stock.<br>"
-    #                 "Cannot add this item to the invoice.<br><br>"
-    #                 "Disable 'Block Zero/Negative Stock Sales' in "
-    #                 "Maintenance → POS Rules to override.",
-    #                 icon=QMessageBox.Warning,
-    #             )
-    #             return
-
-    #     # ── #7 Apply Frappe pricing rules ─────────────────────────────────────
-    #     if self._get_pos_rule("use_pricing_rules", default=False):
-    #         price = self._apply_pricing_rules(product_id, part_no, price)
-
-    #     for r in range(self.invoice_table.rowCount()):
-    #         try:
-    #             row_name   = self.invoice_table.item(r, 1).text().strip()
-    #             row_amount = self.invoice_table.item(r, 2).text().strip()
-    #             row_qty    = self.invoice_table.item(r, 3).text().strip()
-    #         except AttributeError:
-    #             continue
-    #         if not row_name:
-    #             continue
-
-    #         row_pid = self.invoice_table.item(r, 0).data(Qt.UserRole) if self.invoice_table.item(r, 0) else None
-    #         # Must match BOTH product_id AND price — different UOMs have same id but different price
-    #         match = (row_pid and row_pid == product_id and row_amount == f"{price:.2f}") or \
-    #                 (not product_id and row_name == name and row_amount == f"{price:.2f}")
-
-    #         if match:
-    #             try:
-    #                 current_qty = float(row_qty or "0")
-    #             except ValueError:
-    #                 current_qty = 0.0
-    #             new_qty = current_qty + 1
-
-    #             # ── Collect this row's data so we can move it ─────────────────
-    #             def _cell_text(row, col):
-    #                 it = self.invoice_table.item(row, col)
-    #                 return it.text() if it else ""
-    #             def _cell_data(row, col):
-    #                 it = self.invoice_table.item(row, col)
-    #                 return it.data(Qt.UserRole) if it else None
-
-    #             saved_part_no    = _cell_text(r, 0)
-    #             saved_pid        = _cell_data(r, 0)
-    #             saved_name       = _cell_text(r, 1)
-    #             saved_price      = _cell_text(r, 2)
-    #             saved_disc       = _cell_text(r, 4)
-    #             saved_tax        = _cell_text(r, 5)
-
-    #             # ── Remove this row and compact upward ────────────────────────
-    #             self._block_signals = True
-    #             self._init_row(r)
-    #             # Shift all filled rows above the gap down by one
-    #             for shift in range(r, self.invoice_table.rowCount() - 1):
-    #                 try:
-    #                     next_name = self.invoice_table.item(shift + 1, 1).text().strip()
-    #                 except AttributeError:
-    #                     next_name = ""
-    #                 if not next_name:
-    #                     break
-    #                 # copy shift+1 → shift
-    #                 for col in range(7):
-    #                     src = self.invoice_table.item(shift + 1, col)
-    #                     dst = self.invoice_table.item(shift, col)
-    #                     if src and dst:
-    #                         dst.setText(src.text())
-    #                         dst.setTextAlignment(src.textAlignment())
-    #                         dst.setData(Qt.UserRole, src.data(Qt.UserRole))
-    #                 # clear the row we just copied from
-    #                 self._init_row(shift + 1)
-    #             self._block_signals = False
-
-    #             # ── Find last filled row after compaction ─────────────────────
-    #             last_filled = -1
-    #             for scan in range(self.invoice_table.rowCount()):
-    #                 try:
-    #                     if self.invoice_table.item(scan, 1).text().strip():
-    #                         last_filled = scan
-    #                 except AttributeError:
-    #                     pass
-
-    #             dest = last_filled + 1
-    #             self._ensure_rows(dest + 1)
-
-    #             # ── Write to destination row ──────────────────────────────────
-    #             self._block_signals = True
-    #             self._init_row(dest, part_no=saved_part_no, details=saved_name,
-    #                            qty=f"{new_qty:.4g}", amount=saved_price,
-    #                            disc=saved_disc or "0.00", tax=saved_tax)
-    #             item0 = self.invoice_table.item(dest, 0)
-    #             if item0:
-    #                 item0.setData(Qt.UserRole, saved_pid)
-    #             qty_item = self.invoice_table.item(dest, 3)
-    #             if qty_item:
-    #                 qty_item.setTextAlignment(Qt.AlignCenter)
-    #             self._block_signals = False
-
-    #             self._recalc_row(dest)
-    #             self._recalc_totals()
-    #             self._active_row      = dest
-    #             self._active_col      = 3
-    #             self._last_filled_row = dest
-    #             self._numpad_buffer   = ""
-    #             self.invoice_table.setCurrentCell(dest, 3)
-    #             self.invoice_table.scrollToItem(
-    #                 self.invoice_table.item(dest, 3),
-    #                 QAbstractItemView.PositionAtBottom
-    #             )
-    #             self._highlight_active_row(dest)
-    #             self.invoice_table.setFocus()
-    #             if self.parent_window:
-    #                 self.parent_window._set_status(f"{name}  ×{new_qty:.4g}  @ ${price:.2f}")
-                
-    #             # Move to next empty row and reopen inline search
-    #             next_r = self._find_next_empty_row()
-    #             if next_r != dest:
-    #                 self._active_row = next_r
-    #                 self._active_col = 0
-    #                 self.invoice_table.setCurrentCell(next_r, 0)
-    #                 self._highlight_active_row(next_r)
-    #                 QTimer.singleShot(120, lambda r=next_r: self._open_inline_search(r, 0))
-    #             return
-
-    #     # ── New row ───────────────────────────────────────────────────────────
-    #     r = self._find_next_empty_row()
-    #     self._block_signals = True
-    #     self._init_row(r, part_no=part_no, details=name, qty="1",
-    #                    amount=f"{price:.2f}", disc="0.00", tax="")
-    #     item = self.invoice_table.item(r, 0)
-    #     if item: item.setData(Qt.UserRole, product_id)
-    #     self._block_signals = False
-    #     self._recalc_row(r)
-    #     self._last_filled_row = r
-    #     self._numpad_buffer   = ""
-    #     self._highlight_active_row(r)
-    #     self.invoice_table.scrollToItem(
-    #         self.invoice_table.item(r, 1),
-    #         QAbstractItemView.PositionAtBottom
-    #     )
-    #     self.invoice_table.setFocus()
-    #     if self.parent_window:
-    #         self.parent_window._set_status(f"Added: {name} @ ${price:.2f}")
-        
-    #     # Move cursor to the NEXT empty row and reopen inline search.
-    #     next_r = self._find_next_empty_row()
-    #     self._active_row = next_r
-    #     self._active_col = 0
-    #     self.invoice_table.setCurrentCell(next_r, 0)
-    #     self._highlight_active_row(next_r)
-    #     QTimer.singleShot(120, lambda r=next_r: self._open_inline_search(r, 0))
-    # def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None):
-    #     # ── Always close any open inline search before we touch the table ─────
-    #     self._close_inline_search()
-
-    #     # ── #3 Block zero-price ───────────────────────────────────────────────
-    #     if price <= 0 and self._get_pos_rule("block_zero_price", default=True):
-    #         self._warn_popup(
-    #             "Zero Price Blocked",
-    #             f"<b>{name}</b> has no selling price set.<br>"
-    #             "Update the price in the server and re-sync, or disable the "
-    #             "'Block Zero-Price Sales' rule in Maintenance → POS Rules.",
-    #             icon=QMessageBox.Warning,
-    #         )
-    #         return
-
-    #     # ── #4 Block zero/negative stock ─────────────────────────────────────
-    #     if self._get_pos_rule("block_zero_stock", default=False):
-    #         # stock may be passed in; if not, look it up
-    #         item_stock = stock
-    #         if item_stock is None and product_id:
-    #             try:
-    #                 from models.product import get_product_by_id
-    #                 p = get_product_by_id(product_id)
-    #                 item_stock = float(p.get("stock", 1)) if p else 1
-    #             except Exception:
-    #                 item_stock = 1
-    #         if item_stock is not None and item_stock <= 0:
-    #             self._warn_popup(
-    #                 "Insufficient Stock",
-    #                 f"<b>{name}</b> is out of stock.<br>"
-    #                 "Cannot add this item to the invoice.<br><br>"
-    #                 "Disable 'Block Zero/Negative Stock Sales' in "
-    #                 "Maintenance → POS Rules to override.",
-    #                 icon=QMessageBox.Warning,
-    #             )
-    #             return
-
-    #     # ── #7 Apply Frappe pricing rules ─────────────────────────────────────
-    #     if self._get_pos_rule("use_pricing_rules", default=False):
-    #         price = self._apply_pricing_rules(product_id, part_no, price)
-    #     for r in range(self.invoice_table.rowCount()):
-    #         try:
-    #             row_name   = self.invoice_table.item(r, 1).text().strip()
-    #             row_amount = self.invoice_table.item(r, 2).text().strip()
-    #             row_qty    = self.invoice_table.item(r, 3).text().strip()
-    #         except AttributeError:
-    #             continue
-    #         if not row_name:
-    #             continue
-    #         row_pid = self.invoice_table.item(r, 0).data(Qt.UserRole) if self.invoice_table.item(r, 0) else None
-    #         # Must match BOTH product_id AND price — different UOMs have same id but different price
-    #         match = (row_pid and row_pid == product_id and row_amount == f"{price:.2f}") or \
-    #                 (not product_id and row_name == name and row_amount == f"{price:.2f}")
-    #         if match:
-    #             try:
-    #                 current_qty = float(row_qty or "0")
-    #             except ValueError:
-    #                 current_qty = 0.0
-    #             new_qty = current_qty + 1
-
-    #             # ── Collect this row's data so we can move it ─────────────────
-    #             def _cell_text(row, col):
-    #                 it = self.invoice_table.item(row, col)
-    #                 return it.text() if it else ""
-    #             def _cell_data(row, col):
-    #                 it = self.invoice_table.item(row, col)
-    #                 return it.data(Qt.UserRole) if it else None
-
-    #             saved_part_no    = _cell_text(r, 0)
-    #             saved_pid        = _cell_data(r, 0)
-    #             saved_name       = _cell_text(r, 1)
-    #             saved_price      = _cell_text(r, 2)
-    #             saved_disc       = _cell_text(r, 4)
-    #             saved_tax        = _cell_text(r, 5)
-
-    #             # ── Remove this row and compact upward ────────────────────────
-    #             self._block_signals = True
-    #             self._init_row(r)
-    #             # Shift all filled rows above the gap down by one
-    #             for shift in range(r, self.invoice_table.rowCount() - 1):
-    #                 try:
-    #                     next_name = self.invoice_table.item(shift + 1, 1).text().strip()
-    #                 except AttributeError:
-    #                     next_name = ""
-    #                 if not next_name:
-    #                     break
-    #                 # copy shift+1 → shift
-    #                 for col in range(7):
-    #                     src = self.invoice_table.item(shift + 1, col)
-    #                     dst = self.invoice_table.item(shift, col)
-    #                     if src and dst:
-    #                         dst.setText(src.text())
-    #                         dst.setTextAlignment(src.textAlignment())
-    #                         dst.setData(Qt.UserRole, src.data(Qt.UserRole))
-    #                 # clear the row we just copied from
-    #                 self._init_row(shift + 1)
-    #             self._block_signals = False
-
-    #             # ── Find last filled row after compaction ─────────────────────
-    #             last_filled = -1
-    #             for scan in range(self.invoice_table.rowCount()):
-    #                 try:
-    #                     if self.invoice_table.item(scan, 1).text().strip():
-    #                         last_filled = scan
-    #                 except AttributeError:
-    #                     pass
-
-    #             dest = last_filled + 1
-    #             self._ensure_rows(dest + 1)
-
-    #             # ── Write to destination row ──────────────────────────────────
-    #             self._block_signals = True
-    #             self._init_row(dest, part_no=saved_part_no, details=saved_name,
-    #                            qty=f"{new_qty:.4g}", amount=saved_price,
-    #                            disc=saved_disc or "0.00", tax=saved_tax)
-    #             item0 = self.invoice_table.item(dest, 0)
-    #             if item0:
-    #                 item0.setData(Qt.UserRole, saved_pid)
-    #             qty_item = self.invoice_table.item(dest, 3)
-    #             if qty_item:
-    #                 qty_item.setTextAlignment(Qt.AlignCenter)
-    #             self._block_signals = False
-
-    #             self._recalc_row(dest)
-    #             self._recalc_totals()
-    #             self._active_row      = dest
-    #             self._active_col      = 3
-    #             self._last_filled_row = dest
-    #             self._numpad_buffer   = ""
-    #             self.invoice_table.setCurrentCell(dest, 3)
-    #             self.invoice_table.scrollToItem(
-    #                 self.invoice_table.item(dest, 3),
-    #                 QAbstractItemView.PositionAtBottom
-    #             )
-    #             self._highlight_active_row(dest)
-    #             self.invoice_table.setFocus()
-    #             if self.parent_window:
-    #                 self.parent_window._set_status(f"{name}  ×{new_qty:.4g}  @ ${price:.2f}")
-    #             # Move to next empty row and reopen inline search
-    #             next_r = self._find_next_empty_row()
-    #             if next_r != dest:
-    #                 self._active_row = next_r
-    #                 self._active_col = 0
-    #                 self.invoice_table.setCurrentCell(next_r, 0)
-    #                 self._highlight_active_row(next_r)
-    #                 QTimer.singleShot(120, lambda r=next_r: self._open_inline_search(r, 0))
-    #             return
-
-    #     # ── New row ───────────────────────────────────────────────────────────
-    #     r = self._find_next_empty_row()
-    #     self._block_signals = True
-    #     self._init_row(r, part_no=part_no, details=name, qty="1",
-    #                    amount=f"{price:.2f}", disc="0.00", tax="")
-    #     item = self.invoice_table.item(r, 0)
-    #     if item: item.setData(Qt.UserRole, product_id)
-    #     self._block_signals = False
-    #     self._recalc_row(r)
-    #     self._last_filled_row = r
-    #     self._numpad_buffer   = ""
-    #     self._highlight_active_row(r)
-    #     self.invoice_table.scrollToItem(
-    #         self.invoice_table.item(r, 1),
-    #         QAbstractItemView.PositionAtBottom
-    #     )
-    #     self.invoice_table.setFocus()
-    #     if self.parent_window:
-    #         self.parent_window._set_status(f"Added: {name} @ ${price:.2f}")
-    #     # Move cursor to the NEXT empty row and reopen inline search.
-    #     next_r = self._find_next_empty_row()
-    #     self._active_row = next_r
-    #     self._active_col = 0
-    #     self.invoice_table.setCurrentCell(next_r, 0)
-    #     self._highlight_active_row(next_r)
-    #     QTimer.singleShot(120, lambda r=next_r: self._open_inline_search(r, 0))
     
-    # # ── Invoice footer — Items | Paid | Change+InvoiceNo | TOTAL ─────────────
-    def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None):
-        # ── Mandatory Shift Check ───────────────────────────────────────────
-        from models.shift import get_active_shift
-        if not get_active_shift():
-            res = QMessageBox.warning(
-                self, 
-                "Shift Required", 
-                "<b>A cashier cannot sell without an active shift.</b><br><br>"
-                "Would you like to start a shift now?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if res == QMessageBox.Yes:
-                self._open_day_shift() # Opens the 'Start' mode of your F2 button
-            return # Exit the function so item is NOT added
-
-        # ── Always close any open inline search before we touch the table ─────
-        self._close_inline_search()
-
-        # ── #3 Block zero-price ───────────────────────────────────────────────
-        if price <= 0 and self._get_pos_rule("block_zero_price", default=True):
-            self._warn_popup(
-                "Zero Price Blocked",
-                f"<b>{name}</b> has no selling price set.<br>"
-                "Update the price in the server and re-sync, or disable the "
-                "'Block Zero-Price Sales' rule in Maintenance → POS Rules.",
-                icon=QMessageBox.Warning,
-            )
-            return
-
-        # ── #4 Block zero/negative stock ─────────────────────────────────────
-        if self._get_pos_rule("block_zero_stock", default=False):
-            # stock may be passed in; if not, look it up
-            item_stock = stock
-            if item_stock is None and product_id:
-                try:
-                    from models.product import get_product_by_id
-                    p = get_product_by_id(product_id)
-                    item_stock = float(p.get("stock", 1)) if p else 1
-                except Exception:
-                    item_stock = 1
-            if item_stock is not None and item_stock <= 0:
-                self._warn_popup(
-                    "Insufficient Stock",
-                    f"<b>{name}</b> is out of stock.<br>"
-                    "Cannot add this item to the invoice.<br><br>"
-                    "Disable 'Block Zero/Negative Stock Sales' in "
-                    "Maintenance → POS Rules to override.",
-                    icon=QMessageBox.Warning,
-                )
-                return
-
-        # ── #7 Apply Frappe pricing rules ─────────────────────────────────────
-        if self._get_pos_rule("use_pricing_rules", default=False):
-            price = self._apply_pricing_rules(product_id, part_no, price)
-
-        for r in range(self.invoice_table.rowCount()):
-            try:
-                row_name   = self.invoice_table.item(r, 1).text().strip()
-                row_amount = self.invoice_table.item(r, 2).text().strip()
-                row_qty    = self.invoice_table.item(r, 3).text().strip()
-            except AttributeError:
-                continue
-            if not row_name:
-                continue
-
-            row_pid = self.invoice_table.item(r, 0).data(Qt.UserRole) if self.invoice_table.item(r, 0) else None
-            # Must match BOTH product_id AND price
-            match = (row_pid and row_pid == product_id and row_amount == f"{price:.2f}") or \
-                    (not product_id and row_name == name and row_amount == f"{price:.2f}")
-
-            if match:
-                try:
-                    current_qty = float(row_qty or "0")
-                except ValueError:
-                    current_qty = 0.0
-                new_qty = current_qty + 1
-
-                # ── Collect this row's data so we can move it ─────────────────
-                def _cell_text(row, col):
-                    it = self.invoice_table.item(row, col)
-                    return it.text() if it else ""
-                def _cell_data(row, col):
-                    it = self.invoice_table.item(row, col)
-                    return it.data(Qt.UserRole) if it else None
-
-                saved_part_no    = _cell_text(r, 0)
-                saved_pid        = _cell_data(r, 0)
-                saved_name       = _cell_text(r, 1)
-                saved_price      = _cell_text(r, 2)
-                saved_disc       = _cell_text(r, 4)
-                saved_tax        = _cell_text(r, 5)
-
-                # ── Remove this row and compact upward ────────────────────────
-                self._block_signals = True
-                self._init_row(r)
-                for shift in range(r, self.invoice_table.rowCount() - 1):
-                    try:
-                        next_name = self.invoice_table.item(shift + 1, 1).text().strip()
-                    except AttributeError:
-                        next_name = ""
-                    if not next_name:
-                        break
-                    for col in range(7):
-                        src = self.invoice_table.item(shift + 1, col)
-                        dst = self.invoice_table.item(shift, col)
-                        if src and dst:
-                            dst.setText(src.text())
-                            dst.setTextAlignment(src.textAlignment())
-                            dst.setData(Qt.UserRole, src.data(Qt.UserRole))
-                    self._init_row(shift + 1)
-                self._block_signals = False
-
-                # ── Find last filled row after compaction ─────────────────────
-                last_filled = -1
-                for scan in range(self.invoice_table.rowCount()):
-                    try:
-                        if self.invoice_table.item(scan, 1).text().strip():
-                            last_filled = scan
-                    except AttributeError:
-                        pass
-
-                dest = last_filled + 1
-                self._ensure_rows(dest + 1)
-
-                # ── Write to destination row ──────────────────────────────────
-                self._block_signals = True
-                self._init_row(dest, part_no=saved_part_no, details=saved_name,
-                               qty=f"{new_qty:.4g}", amount=saved_price,
-                               disc=saved_disc or "0.00", tax=saved_tax)
-                item0 = self.invoice_table.item(dest, 0)
-                if item0:
-                    item0.setData(Qt.UserRole, saved_pid)
-                qty_item = self.invoice_table.item(dest, 3)
-                if qty_item:
-                    qty_item.setTextAlignment(Qt.AlignCenter)
-                self._block_signals = False
-
-                self._recalc_row(dest)
-                self._recalc_totals()
-                self._active_row      = dest
-                self._active_col      = 3
-                self._last_filled_row = dest
-                self._numpad_buffer   = ""
-                self.invoice_table.setCurrentCell(dest, 3)
-                self.invoice_table.scrollToItem(
-                    self.invoice_table.item(dest, 3),
-                    QAbstractItemView.PositionAtBottom
-                )
-                self._highlight_active_row(dest)
-                self.invoice_table.setFocus()
-                if self.parent_window:
-                    self.parent_window._set_status(f"{name}  ×{new_qty:.4g}  @ ${price:.2f}")
-                
-                next_r = self._find_next_empty_row()
-                if next_r != dest:
-                    self._active_row = next_r
-                    self._active_col = 0
-                    self.invoice_table.setCurrentCell(next_r, 0)
-                    self._highlight_active_row(next_r)
-                    QTimer.singleShot(120, lambda r=next_r: self._open_inline_search(r, 0))
-                return
-
-        # ── New row ───────────────────────────────────────────────────────────
-        r = self._find_next_empty_row()
-        self._block_signals = True
-        self._init_row(r, part_no=part_no, details=name, qty="1",
-                       amount=f"{price:.2f}", disc="0.00", tax="")
-        item = self.invoice_table.item(r, 0)
-        if item: item.setData(Qt.UserRole, product_id)
-        self._block_signals = False
-        self._recalc_row(r)
-        self._last_filled_row = r
-        self._numpad_buffer   = ""
-        self._highlight_active_row(r)
-        self.invoice_table.scrollToItem(
-            self.invoice_table.item(r, 1),
-            QAbstractItemView.PositionAtBottom
-        )
-        self.invoice_table.setFocus()
-        if self.parent_window:
-            self.parent_window._set_status(f"Added: {name} @ ${price:.2f}")
-        
-        next_r = self._find_next_empty_row()
-        self._active_row = next_r
-        self._active_col = 0
-        self.invoice_table.setCurrentCell(next_r, 0)
-        self._highlight_active_row(next_r)
-        QTimer.singleShot(120, lambda r=next_r: self._open_inline_search(r, 0))
+    # ── Invoice footer — Items | Paid | Change+InvoiceNo | TOTAL ─────────────
     def _build_invoice_footer(self):
         bar = QWidget(); bar.setFixedHeight(42)
         bar.setStyleSheet(f"background-color: #f0e8d0; border-top: 2px solid {BORDER};")
@@ -6528,6 +9773,12 @@ class POSView(QWidget):
     # =========================================================================
     # RIGHT PANEL
     # =========================================================================
+    # =========================================================================
+    # RIGHT PANEL
+    # =========================================================================
+    # =========================================================================
+    # RIGHT PANEL
+    # =========================================================================
     def _build_right_panel(self):
         panel = QWidget()
         panel.setFixedWidth(500)
@@ -6536,7 +9787,7 @@ class POSView(QWidget):
         layout.setSpacing(4)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # --- Top Row: Shift & Options (Requirement 4, 2 & 3) ---
+        # --- Top Row: Utility Buttons ---
         top_row = QHBoxLayout()
         top_row.setSpacing(4)
 
@@ -6556,26 +9807,63 @@ class POSView(QWidget):
             b.clicked.connect(handler)
             return b
 
-        # Requirement 4: Close Shift at top left
-        top_row.addWidget(_top_btn("CLOSE\nSHIFT (F2)", ORANGE,    AMBER,     self._open_day_shift))
-        top_row.addWidget(_top_btn("Reprint\nF3",        NAVY,      NAVY_2,    self._reprint_by_invoice_no))
-        top_row.addWidget(_top_btn("Discount\nF4 (%)",   "#e67e22", "#d35400", self._on_discount_clicked))
-        top_row.addWidget(_top_btn("Hold/\nRecall",      NAVY_2,    NAVY_3,    self._open_hold_recall))
+        # ── DYNAMIC SHIFT LOGIC ──────────────────────────────────────────────
+        from models.shift import get_active_shift
+
+        def _refresh_shift_button():
+            active_shift = None
+            try:
+                active_shift = get_active_shift()
+            except:
+                pass
+
+            if active_shift:
+                label = f"CLOSE\nSHIFT #{active_shift.get('shift_number', '')}"
+                bg    = ORANGE
+                hov   = AMBER
+            else:
+                label = "START\nSHIFT (F2)"
+                bg    = SUCCESS
+                hov   = SUCCESS_H
+
+            self.btn_shift_action.setText(label)
+            self.btn_shift_action.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {bg}; color: {WHITE}; border: none;
+                    border-radius: 6px; font-size: 11px; font-weight: bold;
+                }}
+                QPushButton:hover   {{ background-color: {hov}; }}
+                QPushButton:pressed {{ background-color: {NAVY_3}; }}
+            """)
+
+        def handle_shift():
+            active_shift = None
+            try:
+                active_shift = get_active_shift()
+            except:
+                pass
+
+            if active_shift:
+                self._open_day_shift()       # Trigger Reconcile/Close
+            else:
+                self._open_shift_chooser()   # Trigger Start
+            
+            _refresh_shift_button()          # Instantly update state
+
+        # Initialize the button with dummy values; _refresh_shift_button sets the real ones
+        self.btn_shift_action = _top_btn("", SUCCESS, SUCCESS_H, handle_shift)
+        top_row.addWidget(self.btn_shift_action)
+        _refresh_shift_button() 
+        # ─────────────────────────────────────────────────────────────────────
+
+        top_row.addWidget(_top_btn("Reprint\nF3", NAVY, NAVY_2, self._reprint_by_invoice_no))
+        top_row.addWidget(_top_btn("Discount\nF4 (%)", "#e67e22", "#d35400", self._on_discount_clicked))
+        top_row.addWidget(_top_btn("Hold/\nRecall", NAVY_2, NAVY_3, self._open_hold_recall))
 
         # Options Button
-        opt_btn = QPushButton("Options\n▼")
-        opt_btn.setFixedHeight(52)
-        opt_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        opt_btn.setCursor(Qt.PointingHandCursor)
-        opt_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {NAVY_3}; color: {WHITE}; border: none;
-                border-radius: 6px; font-size: 11px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background-color: {NAVY_2}; }}
-        """)
-        opt_btn.clicked.connect(self._show_options_menu)
-        top_row.addWidget(opt_btn)
+        # REPLACE with this:
+        qtn_btn = _top_btn("Quotation\nF6", NAVY_3, NAVY_2, self._open_quotation_manager)
+        top_row.addWidget(qtn_btn)
 
         layout.addLayout(top_row)
 
@@ -6586,39 +9874,42 @@ class POSView(QWidget):
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(4)
 
+        # 1. New Transaction
         new_txn_btn = QPushButton("New\nTransaction")
         new_txn_btn.setFixedHeight(52)
-        new_txn_btn.setFixedWidth(120)
+        new_txn_btn.setFixedWidth(110)
         new_txn_btn.setCursor(Qt.PointingHandCursor)
         new_txn_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {NAVY_2}; color: {WHITE}; border: none;
-                border-radius: 6px; font-size: 11px; font-weight: bold;
+                border-radius: 6px; font-size: 10px; font-weight: bold;
             }}
             QPushButton:hover   {{ background-color: {NAVY_3}; }}
-            QPushButton:pressed {{ background-color: {NAVY};   }}
+            QPushButton:pressed {{ background-color: {NAVY}; }}
         """)
         new_txn_btn.clicked.connect(lambda: self._new_sale(confirm=False))
         bottom_row.addWidget(new_txn_btn)
 
-        pay_btn = QPushButton("PAY  F5")
-        pay_btn.setFixedHeight(52)
-        pay_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        pay_btn.setCursor(Qt.PointingHandCursor)
-        pay_btn.setStyleSheet(f"""
+        # 2. PAY Button
+        self.btn_pay = QPushButton("PAY  F5")
+        self.btn_pay.setFixedHeight(52)
+        self.btn_pay.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_pay.setCursor(Qt.PointingHandCursor)
+        self.btn_pay.setStyleSheet(f"""
             QPushButton {{
                 background-color: {SUCCESS}; color: {WHITE}; border: none;
                 border-radius: 6px; font-size: 17px; font-weight: bold; letter-spacing: 1px;
             }}
             QPushButton:hover   {{ background-color: {SUCCESS_H}; }}
-            QPushButton:pressed {{ background-color: {NAVY_3};    }}
+            QPushButton:pressed {{ background-color: {NAVY_3}; }}
         """)
-        pay_btn.clicked.connect(self._open_payment)
-        bottom_row.addWidget(pay_btn)
+        self.btn_pay.clicked.connect(self._open_payment)
+        # Pharmacy-aware label: PAY → FINALIZE QUOTE / DISPENSE when pharmacy mode on
+        self._refresh_pay_button_label()
+        bottom_row.addWidget(self.btn_pay)
 
         layout.addLayout(bottom_row)
         return panel
-   
 
     def _build_numpad(self):
         card = QWidget()
@@ -6626,7 +9917,7 @@ class POSView(QWidget):
         grid = QGridLayout(card); grid.setSpacing(5); grid.setContentsMargins(6, 6, 6, 6)
 
         rows_def = [
-            [("7","digit"),("8","digit"),("9","digit"),("−","op"),   ("X","clear")      ],
+            [("7","digit"),("8","digit"),("9","digit"),("-","op"),   ("X","clear")      ],
             [("4","digit"),("5","digit"),("6","digit"),("×","op"),   ("Del\nLine","del")],
             [("1","digit"),("2","digit"),("3","digit")                                  ],
             [("0","digit"),(".","digit"),("%","op")                                     ],
@@ -6638,8 +9929,26 @@ class POSView(QWidget):
                 b = numpad_btn(ch, kind)
                 if ch in "0123456789.":
                     b.clicked.connect(lambda _, c=ch: self._numpad_press(c))
-                elif ch == "−":
-                    b.clicked.connect(lambda: self._numpad_press("-"))
+                
+                elif ch == "-":
+                    b.clicked.connect(self._open_bundle_dialog)
+                    b.setText("mix")
+                    b.setStyleSheet(f"""
+        QPushButton {{
+            background-color: #e67e22; color: {WHITE};
+            border: 1px solid {BORDER}; border-radius: 6px;
+            font-size: 11px; font-weight: bold;
+        }}
+        QPushButton:hover   {{ background-color: #d35400; }}
+        QPushButton:pressed {{ background-color: {NAVY_3}; color: {WHITE}; }}
+    """)
+        
+                    
+    # Change button to open Bundle Dialog instead of minus sign
+    
+    
+    
+        
                 elif ch == "×":
                     b.clicked.connect(self._open_qty_popup)
                 elif ch == "X":
@@ -6674,6 +9983,10 @@ class POSView(QWidget):
             self.invoice_table.setCurrentCell(r, 3)
         if self._active_col in (2, 5, 6):
             return
+        # Pharmacy lock: cashiers cannot modify qty/discount on pharmacy rows
+        if self._active_col in (3, 4) and self._is_pharmacy_row_locked(self._active_row):
+            self._notify_pharmacy_locked()
+            return
         # #23 — block discount entry if not permitted
         if self._active_col == 4 and not self._check_permission(
                 "allow_discount", "Apply Discounts"):
@@ -6694,6 +10007,10 @@ class POSView(QWidget):
             self._recalc_row(self._active_row)
 
     def _numpad_clear(self):
+        # Pharmacy lock: cashiers cannot clear qty/discount on pharmacy rows
+        if self._active_col in (3, 4) and self._is_pharmacy_row_locked(self._active_row):
+            self._notify_pharmacy_locked()
+            return
         self._numpad_buffer = ""
         if self._active_row >= 0 and self._active_col >= 0:
             self._block_signals = True
@@ -6705,19 +10022,24 @@ class POSView(QWidget):
 
     def _numpad_del_line(self):
         """
-        Requirement 8: Clears the row, resets the input buffer, 
+        Requirement 8: Clears the row, resets the input buffer,
         and jumps the cursor back to the LAST column (Total $)
         to signal the line is empty and deleted.
         """
         row = self.invoice_table.currentRow()
         if row < 0:
             row = self._last_filled_row
-            
-        if row < 0: 
+
+        if row < 0:
+            return
+
+        # Pharmacy lock: cashiers cannot delete pharmacy rows
+        if self._is_pharmacy_row_locked(row):
+            self._notify_pharmacy_locked()
             return
 
         # 1. Clear the typing buffer so new typing doesn't include old character data
-        self._numpad_buffer = "" 
+        self._numpad_buffer = ""
 
         self._block_signals = True
         # 2. Wipe every cell in the row and clear hidden UserRole data (product IDs)
@@ -6739,7 +10061,7 @@ class POSView(QWidget):
                 break
                 
             # Copy data from the row below to the current row
-            for col in range(7):
+            for col in range(self.INVOICE_COL_COUNT):
                 src = self.invoice_table.item(shift + 1, col)
                 dst = self.invoice_table.item(shift, col)
                 if src and dst:
@@ -6770,6 +10092,7 @@ class POSView(QWidget):
         # Provide status feedback in the main window status bar
         if self.parent_window:
             self.parent_window._set_status("Line deleted — ready for next item.")
+
     def _numpad_enter(self):
         """#6 Enter always advances to next cart line.
         Cols 0/1/2 (Code/Details/Price) → land on Qty.
@@ -6802,6 +10125,11 @@ class POSView(QWidget):
         if row < 0: row = self._active_row
         if row < 0: row = self.invoice_table.currentRow()
         if row < 0: return
+
+        # Pharmacy lock: cashiers cannot change qty on pharmacy rows
+        if self._is_pharmacy_row_locked(row):
+            self._notify_pharmacy_locked()
+            return
 
         name_item = self.invoice_table.item(row, 1)
         product_name = name_item.text().strip() if name_item else ""
@@ -6844,6 +10172,11 @@ class POSView(QWidget):
             self._category_names = get_categories()
         except Exception:
             self._category_names = []
+
+        # Filter out categories that have been disabled in Settings → Category Visibility
+        _disabled = load_disabled_categories()
+        if _disabled:
+            self._category_names = [c for c in self._category_names if c not in _disabled]
 
         # Always ensure "All" tab exists — products synced from server have no category
         if "All" not in self._category_names:
@@ -7008,24 +10341,106 @@ class POSView(QWidget):
         self._load_category_products(idx, name)
 
     def _load_category_products(self, idx, name):
-        # Load ALL products for this category into memory
+        """
+        Load products for a category, overlay the active customer's
+        price-list prices, and stash variant metadata for tap-time lookup.
+        """
         try:
             from models.product import get_products_by_category, get_all_products
             if name == "All":
                 db_products = get_all_products()
+                _disabled = load_disabled_categories()
+                if _disabled:
+                    db_products = [p for p in db_products if p.get("category") not in _disabled]
+                
             else:
                 db_products = get_products_by_category(name)
                 # If a category is empty, fall back to everything
                 if not db_products:
+                    _disabled = load_disabled_categories()
                     db_products = get_all_products()
+                    if _disabled:
+                        db_products = [p for p in db_products if p.get("category") not in _disabled]
+                         
 
-            self._current_products = [
-                (p["name"], p["part_no"], p["price"], p["id"], p.get("image_path", ""))
-                for p in db_products
-            ]
+            # ── Overlay price-list prices ────────────────────────────────
+            # Price comes *only* from the active customer's price list.
+            # No fallback to products.price — the rule is: no price list
+            # (or no rate in that list for this item) → show 0. Cart add
+            # will also refuse zero-priced items. Matches the Android
+            # client minus its "try Standard Selling" fallback (which the
+            # user explicitly rejected — no silent price substitutions).
+            active_list = self._get_active_price_list()
+            price_map: dict[str, float] = {}
+            if active_list:
+                try:
+                    from models.item_price import get_prices_map
+                    price_map = get_prices_map(active_list)
+                except Exception as e:
+                    print(f"[grid] price map load failed ({active_list}): {e}")
+                    price_map = {}
+            else:
+                print("[grid] ⚠ no active price list — grid will show 0.00 "
+                      "everywhere (cart add will block)")
+
+            # ── Build tuple list + per-part meta map for tap handler ─────
+            tuples:  list[tuple] = []
+            meta:    dict[str, dict] = {}
+            hidden_no_price = 0
+
+            # Load bundle definitions for dynamic price-list-aware calculation
+            bundle_defs = {}
+            try:
+                from models.product_bundle import get_all_bundles_with_items
+                bundle_defs = get_all_bundles_with_items()
+            except Exception: pass
+
+            for p in db_products:
+                part_no = (p.get("part_no") or "").upper()
+                # Single source of truth: price_map[part_no] or 0. No
+                # fallback to products.price under any condition.
+                price = float(price_map.get(part_no, 0) or 0)
+
+                # [BUNDLE-PRICE] If price is 0, calculate it from components
+                is_bundle = part_no in bundle_defs
+                if price <= 0 and is_bundle:
+                    bundle_total = 0.0
+                    for b_item in bundle_defs[part_no]:
+                        item_code = (b_item.get("item_code") or "").upper().strip()
+                        qty       = float(b_item.get("quantity") or 0)
+                        # Use bundle rate if set (>0), otherwise component's price list price
+                        rate      = float(b_item.get("rate") or 0)
+                        if rate <= 0:
+                            rate = float(price_map.get(item_code, 0) or 0)
+                        
+                        bundle_total += (qty * rate)
+                    price = bundle_total
+
+                tuples.append((
+                    p["name"], p["part_no"], price, p["id"],
+                    p.get("image_path", ""),
+                ))
+                meta[part_no] = {
+                    "is_template":  bool(p.get("is_template")),
+                    "has_variants": bool(p.get("has_variants")),
+                    "variant_of":   p.get("variant_of"),
+                    "attributes":   p.get("attributes") or "",
+                    "uom":          p.get("uom") or "Nos",
+                    "stock":        p.get("stock"),
+                    "is_bundle":    is_bundle, # Stash for cart expanded logic later
+                }
+                if active_list and price <= 0 and not p.get("is_template"):
+                    hidden_no_price += 1
+
+            self._current_products    = tuples
+            self._product_meta_by_pn  = meta
+            if hidden_no_price:
+                print(f"[grid] {hidden_no_price} item(s) show 0 — no rate in "
+                      f"price list '{active_list}'")
         except Exception as e:
             print(f"[grid] Error loading products: {e}")
-            self._current_products = []
+            self._current_products   = []
+            self._product_meta_by_pn = {}
 
         # Always reset to first page when switching categories
         self._product_page = 0
@@ -7114,8 +10529,23 @@ class POSView(QWidget):
                                          icon_size=cell_h if any_image else 0,
                                          has_any_image=any_image)
                     btn.setStyleSheet(BTN_STYLE)
+                    # Pull variant metadata stashed by _load_category_products
+                    # so the tap handler knows if this is a template tile.
+                    _pn_key = (part_no or "").upper()
+                    _meta   = (getattr(self, "_product_meta_by_pn", {}) or {}).get(_pn_key, {})
                     btn.clicked.connect(
-                        lambda _, prod=dict(name=pname,price=price,part_no=part_no,id=product_id): self._on_product_btn_clicked(prod)
+                        lambda _, prod=dict(
+                            name         = pname,
+                            price        = price,
+                            part_no      = part_no,
+                            id           = product_id,
+                            uom          = _meta.get("uom") or "Nos",
+                            stock        = _meta.get("stock"),
+                            is_template  = _meta.get("is_template", False),
+                            has_variants = _meta.get("has_variants", False),
+                            variant_of   = _meta.get("variant_of"),
+                            attributes   = _meta.get("attributes") or "",
+                        ): self._on_product_btn_clicked(prod)
                     )
                     btn.setContextMenuPolicy(Qt.CustomContextMenu)
                     btn.customContextMenuRequested.connect(
@@ -7187,8 +10617,8 @@ class POSView(QWidget):
             QMenu::item:selected   {{ background-color: {ACCENT}; color: {WHITE}; }}
             QMenu::separator       {{ height: 1px; background: {BORDER}; margin: 4px 10px; }}
         """)
-        act_set    = menu.addAction("🖼  Set Image…")
-        act_remove = menu.addAction("🗑  Remove Image")
+        act_set    = menu.addAction(qta.icon("fa5s.image"), "Set Image…")
+        act_remove = menu.addAction(qta.icon("fa5s.trash"), "Remove Image")
         act_remove.setEnabled(bool(current_image))
         chosen = menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
         if chosen == act_set:
@@ -7223,44 +10653,18 @@ class POSView(QWidget):
         idx  = getattr(self, "_active_cat_idx", 0)
         name = self._category_names[idx] if idx < len(self._category_names) else "All"
         self._load_category_products(idx, name)
+
     # =========================================================================
     # DIALOG OPENERS
     # =========================================================================
-    # def _open_day_shift(self):
-    #     """Close Shift — opens reconciliation dialog, logs out on confirm."""
-    #     cashier_id = self.user.get("id") if isinstance(self.user, dict) else None
-    #     dlg = ShiftReconciliationDialog(self, cashier_id=cashier_id)
-    #     if dlg.exec() == QDialog.Accepted:
-    #         if self.parent_window:
-    #             self.parent_window._logout()
     def _open_day_shift(self):
-        """Single entry point for Shift Management (F2)"""
-        from models.shift import get_active_shift
-        active_shift = get_active_shift()
-        
+        """Close Shift — opens reconciliation dialog, logs out on confirm."""
+        from views.dialogs.shift_reconciliation_dialog import ShiftReconciliationDialog
         cashier_id = self.user.get("id") if isinstance(self.user, dict) else None
-
-        # --- MODE 1: START SHIFT (If no session is running) ---
-        if not active_shift:
-            # We use the DayShiftDialog (or ShiftChooserDialog) to start
-            dlg = DayShiftDialog(self, user=self.user)
-            if dlg.exec() == QDialog.Accepted:
-                self._set_status("Shift started successfully.")
-                self._refresh_shift_pill() # Update the green icon in nav if you use it
-
-        # --- MODE 2: FINISH SHIFT (If a session is already active) ---
-        else:
-            # We use the Reconciliation dialog to close and logout
-            # This is the logic you mentioned earlier
-            from views.dialogs.day_shift_dialog import ShiftReconciliationDialog
-            dlg = ShiftReconciliationDialog(self, cashier_id=cashier_id)
-            
-            if dlg.exec() == QDialog.Accepted:
-                # After finishing shift, log the user out
-                if self.parent_window:
-                    self.parent_window._logout()
-                else:
-                    self._logout()
+        dlg = ShiftReconciliationDialog(self, cashier_id=cashier_id)
+        if dlg.exec() == QDialog.Accepted:
+            if self.parent_window:
+                self.parent_window._logout()
 
     def _open_shift_chooser(self):
         """Nav-bar SHIFT pill → opens ShiftChooserDialog."""
@@ -7273,40 +10677,6 @@ class POSView(QWidget):
         # Refresh pill after dialog closes
         self._refresh_shift_pill()
 
-    # def _refresh_shift_pill(self):
-    #     """Update the shift status pill in the nav bar."""
-    #     if not hasattr(self, "_shift_pill"):
-    #         return
-    #     try:
-    #         from models.shift import get_active_shift
-    #         s = get_active_shift()
-    #         if s:
-    #             self._shift_pill.setText(f"🟢  Shift #{s.get('shift_number', '')}")
-    #             self._shift_pill.setStyleSheet(f"""
-    #                 QPushButton {{
-    #                     background-color:{SUCCESS}; color:{WHITE}; border:none;
-    #                     border-radius:15px; font-size:11px; font-weight:bold;
-    #                     padding:0 12px; min-width:90px;
-    #                 }}
-    #                 QPushButton:hover {{ background-color:{SUCCESS_H}; }}
-    #                 QPushButton:pressed {{ background-color:{NAVY_3}; color:{WHITE}; }}
-    #             """)
-    #             self._shift_pill.setToolTip("Shift is running — click to view details")
-    #         else:
-    #             self._shift_pill.setText("⚫  No Shift")
-    #             self._shift_pill.setStyleSheet(f"""
-    #                 QPushButton {{
-    #                     background-color:{MUTED}; color:{WHITE}; border:none;
-    #                     border-radius:15px; font-size:11px; font-weight:bold;
-    #                     padding:0 12px; min-width:90px;
-    #                 }}
-    #                 QPushButton:hover {{ background-color:{NAVY_2}; }}
-    #                 QPushButton:pressed {{ background-color:{NAVY_3}; color:{WHITE}; }}
-    #             """)
-    #             self._shift_pill.setToolTip("Click to start a shift")
-    #     except Exception:
-    #         pass
-    
     def _refresh_shift_pill(self):
         """Update the shift status pill in the nav bar."""
         if not hasattr(self, "_shift_pill"):
@@ -7314,35 +10684,35 @@ class POSView(QWidget):
         try:
             from models.shift import get_active_shift
             s = get_active_shift()
-            
             if s:
-                # Green state: Shift is currently active
-                self._shift_pill.setText(f"🟢  Shift #{s.get('shift_number', '')} Running")
+                self._shift_pill.setText(f"Shift #{s.get('shift_number', '')}")
+                self._shift_pill.setIcon(qta.icon("fa5s.circle", color="#2ecc71"))
                 self._shift_pill.setStyleSheet(f"""
                     QPushButton {{
                         background-color:{SUCCESS}; color:{WHITE}; border:none;
                         border-radius:15px; font-size:11px; font-weight:bold;
-                        padding:0 12px; min-width:110px;
+                        padding:0 12px; min-width:90px;
                     }}
                     QPushButton:hover {{ background-color:{SUCCESS_H}; }}
                     QPushButton:pressed {{ background-color:{NAVY_3}; color:{WHITE}; }}
                 """)
-                self._shift_pill.setToolTip("Shift is active — click to view or finish shift")
+                self._shift_pill.setToolTip("Shift is running — click to view details")
             else:
-                # Muted state: No active shift
-                self._shift_pill.setText("⚫  Start Shift")
+                self._shift_pill.setText("No Shift")
+                self._shift_pill.setIcon(qta.icon("fa5s.circle", color="#333333"))
                 self._shift_pill.setStyleSheet(f"""
                     QPushButton {{
                         background-color:{MUTED}; color:{WHITE}; border:none;
                         border-radius:15px; font-size:11px; font-weight:bold;
-                        padding:0 12px; min-width:110px;
+                        padding:0 12px; min-width:90px;
                     }}
                     QPushButton:hover {{ background-color:{NAVY_2}; }}
                     QPushButton:pressed {{ background-color:{NAVY_3}; color:{WHITE}; }}
                 """)
-                self._shift_pill.setToolTip("No active shift — click to start a new shift")
+                self._shift_pill.setToolTip("Click to start a shift")
         except Exception:
             pass
+
     def _open_stock_file(self):
         if _HAS_STOCK: StockFileDialog(self).exec()
         else: coming_soon(self, "Stock File — add views/dialogs/stock_file_dialog.py")
@@ -7359,24 +10729,17 @@ class POSView(QWidget):
         dlg.exec()
 
     def _select_customer(self):
+        """Nav-bar Customer button → full picker dialog."""
         dlg = CustomerSearchPopup(self)
-        if dlg.exec() == QDialog.Accepted:
-            self._selected_customer = dlg.selected_customer
-            if self._selected_customer:
-                name = self._selected_customer.get("customer_name", "")
-                self._cust_btn.setText(f"👤  {name[:22]}")
-                self._cust_btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {ACCENT}; color: {WHITE};
-                        border: none; border-radius: 3px;
-                        font-size: 11px; font-weight: bold; padding: 0 8px;
-                    }}
-                    QPushButton:hover {{ background-color: {ACCENT_H}; }}
-                """)
-                if self.parent_window:
-                    self.parent_window._set_status(f"Customer: {name}")
-            else:
-                self._reset_customer_btn()
+        if dlg.exec() != QDialog.Accepted:
+            return
+        picked = dlg.selected_customer
+        if picked:
+            # Central setter keeps nav btn + inline label + price list +
+            # grid re-price + cart-clear prompt all consistent.
+            self._apply_selected_customer(picked)
+        else:
+            self._reset_customer_btn()
 
     def _open_sales_list(self):
         if _HAS_SALES_LIST:
@@ -7385,65 +10748,27 @@ class POSView(QWidget):
         else:
             coming_soon(self, "Sales List — add views/dialogs/sales_list_dialog.py")
 
-    def _collect_invoice_items(self) -> list[dict]:
-        items = []
-        for r in range(self.invoice_table.rowCount()):
-            try:
-                qty = float(self.invoice_table.item(r, 3).text() or "0")
-            except (ValueError, AttributeError):
-                qty = 0.0
-            if qty <= 0:
-                continue
-            try:
-                part_no      = self.invoice_table.item(r, 0).text()
-                product_name = self.invoice_table.item(r, 1).text()
-                price        = float(self.invoice_table.item(r, 2).text() or "0")
-                disc         = float((self.invoice_table.item(r, 4).text() or "0").replace('%', '').strip())
-                tax          = self.invoice_table.item(r, 5).text()
-                total        = float(self.invoice_table.item(r, 6).text() or "0")
-                product_id   = self.invoice_table.item(r, 0).data(Qt.UserRole)
-            except (ValueError, AttributeError):
-                continue
-            items.append({
-                "part_no": part_no, "product_name": product_name,
-                "qty": qty, "price": price, "discount": disc,
-                "tax": tax, "total": total, "product_id": product_id,
-            })
-        return items
-
-    def _save_sale(self):
-        items = self._collect_invoice_items()
-        if not items:
-            QMessageBox.warning(self, "Empty Invoice", "Add items before saving."); return
+    def _open_sales_order_list(self):
+        """Open the Sales Orders list (laybyes + any pulled SO from Frappe).
+        Cashiers can convert fully-paid orders into invoices here."""
         try:
-            total = float(self._lbl_total.text() or "0")
-        except ValueError:
-            total = 0.0
-        try:
-            from models.sale import create_sale
-            cashier_id   = self.user.get("id")          if isinstance(self.user, dict) else None
-            cashier_name = self.user.get("username", "") if isinstance(self.user, dict) else ""
-            sale = create_sale(
-                items=items, total=total, tendered=total,
-                method="CASH", cashier_id=cashier_id, cashier_name=cashier_name,
-                customer_name=self._selected_customer.get("customer_name","") if self._selected_customer else "",
-                customer_contact=self._selected_customer.get("custom_telephone_number","") if self._selected_customer else "",
-                change_amount=0.0,
-            )
-            self._update_prev_txn_display(paid=total, change=0.0, invoice_no=sale.get("invoice_no",""))
-            if self.parent_window:
-                self.parent_window._set_status(f"Sale #{sale['number']} saved — ${total:.2f}")
-            # ── Increment offline sync counter ──────────────────────────────
-            try:
-                from services.printing_service import printing_service as _ps
-                _ps.get_next_sync_number()
-            except Exception:
-                pass
-            # ── Badge refresh: immediately after DB write, before UI reset ──
-            self._refresh_unsynced_badge()
-            self._new_sale(confirm=False)
+            from views.dialogs.sales_order_list_dialog import SalesOrderListDialog
+            dlg = SalesOrderListDialog(self, user=getattr(self, "user", None))
+            dlg.exec()
         except Exception as e:
-            QMessageBox.warning(self, "Save Error", _friendly_db_error(e))
+            QMessageBox.warning(self, "Sales Orders",
+                f"Could not open Sales Orders list:\n{e}")
+
+    def _open_payment_modes_dialog(self):
+        """Maintenance → Payment Modes. Reorder MOPs, set exchange rates."""
+        try:
+            from views.dialogs.payment_modes_dialog import PaymentModesDialog
+            PaymentModesDialog(self).exec()
+        except Exception as e:
+            QMessageBox.warning(self, "Payment Modes",
+                f"Could not open Payment Modes dialog:\n{e}")
+    
+    
 
     def _print_receipt(self):
         items = self._collect_invoice_items()
@@ -7556,6 +10881,7 @@ class POSView(QWidget):
             receipt = ReceiptData(
                 doc_type        = "receipt",
                 receiptType     = sale.get("receipt_type", "Invoice"),
+                companyLogoPath = co.get("logo_path", ""),
                 companyName     = co.get("company_name", ""),
                 companyAddress  = co.get("address_1", ""),
                 companyAddressLine1 = co.get("address_2", ""),
@@ -7578,6 +10904,7 @@ class POSView(QWidget):
                 discAmt         = float(sale.get("discount_amount", 0)),
                 paymentMode     = sale.get("method", "CASH"),
                 currency        = sale.get("currency", "USD"),
+                receiptHeader   = co.get("receipt_header", ""),
                 footer          = co.get("footer_text", "Thank you for your purchase!"),
             )
 
@@ -7628,179 +10955,48 @@ class POSView(QWidget):
         dlg = ReprintDialog(self)
         dlg.exec()
 
-    def _open_payment(self):
-        if not self._check_permission("allow_receipt", "Process Payment / Print Receipt"):
-            return
-        try:
-            total = float(self._lbl_total.text() or "0")
-        except ValueError:
-            total = 0.0
-            
-        if total <= 0:
-            QMessageBox.warning(self, "Empty Invoice", "Add items before payment.")
-            return
+   
 
-        # -- Require a customer before payment --
-        # If none is selected, open the customer picker now.
-        # Payment only proceeds once a customer is chosen.
-        if not self._selected_customer:
-            QMessageBox.information(
-                self, "Select Customer",
-                "Please select a customer before processing payment."
-            )
-            _picker = CustomerSearchPopup(self)
-            if _picker.exec() != QDialog.Accepted or not _picker.selected_customer:
-                return  # cashier cancelled
-            self._selected_customer = _picker.selected_customer
-            _name = self._selected_customer.get("customer_name", "")
-            self._cust_btn.setText(f"👤  {_name[:22]}")
-            self._cust_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {ACCENT}; color: {WHITE};
-                    border: none; border-radius: 3px;
-                    font-size: 11px; font-weight: bold; padding: 0 8px;
-                }}
-                QPushButton:hover {{ background-color: {ACCENT_H}; }}
-            """)
-            if self.parent_window:
-                self.parent_window._set_status(f"Customer: {_name}")
-        # ------------------------------------------------------------------
-
-        # Pass the full database dictionary of the selected customer
-        # This allows the PaymentDialog to access customer IDs, group settings, or credit limits
-        if _HAS_PAYMENT_DIALOG:
-            dlg = _ExternalPaymentDialog(self, total=total, customer=self._selected_customer)
-        else:
-            dlg = PaymentDialog(self, total=total, customer=self._selected_customer)
-
-        if dlg.exec() == QDialog.Accepted:
-            items = self._collect_invoice_items()
-            
-            # Extract data from the Dialog results
-            if hasattr(dlg, "accepted_tendered"):
-                tendered       = dlg.accepted_tendered
-                method         = dlg.accepted_method
-                change_out     = getattr(dlg, "accepted_change", max(tendered - total, 0.0))
-                # The dialog may have updated the customer (e.g., via a quick-add or picker)
-                final_customer = getattr(dlg, "accepted_customer", self._selected_customer)
-            else:
-                try:
-                    tendered = float(dlg._amt.text() or "0")
-                except (ValueError, AttributeError):
-                    tendered = total
-                method         = getattr(dlg, "_method", "CASH")
-                change_out     = max(tendered - total, 0.0)
-                final_customer = self._selected_customer
-
-            # Extract customer details from the database object
-            cust_name    = final_customer.get("customer_name", "Walk-in") if final_customer else "Walk-in"
-            cust_contact = final_customer.get("custom_telephone_number", "") if final_customer else ""
-            company_name = getattr(dlg, "accepted_company_name", "")
-
-            try:
-                from models.sale import create_sale
-                
-                # Get current logged-in user context
-                cashier_id   = self.user.get("id") if isinstance(self.user, dict) else None
-                cashier_name = self.user.get("username", "") if isinstance(self.user, dict) else ""
-
-                # Capture transaction-level discount BEFORE create_sale so it's persisted
-                discount_pct = getattr(self, "current_discount_percent", 0.0)
-                try:
-                    subtotal_raw = sum(
-                        float(self.invoice_table.item(r, 6).text() or "0")
-                        for r in range(self.invoice_table.rowCount())
-                    )
-                except Exception:
-                    subtotal_raw = total
-                discount_amt = round(subtotal_raw * (discount_pct / 100.0), 4)
-
-                # Save the sale to SQL Server
-                sale = create_sale(
-                    items=items, 
-                    total=total, 
-                    tendered=tendered,
-                    method=method, 
-                    cashier_id=cashier_id, 
-                    cashier_name=cashier_name,
-                    customer_name=cust_name, 
-                    customer_contact=cust_contact,
-                    company_name=company_name,
-                    change_amount=change_out,
-                    discount_percent=discount_pct,
-                    discount_amount=discount_amt,
-                )
-                
-                # ── Store local payment entry for Frappe sync ──────────
-                # #6: Do NOT create a payment entry for credit/account sales —
-                # those are settled later via a separate payment entry.
-                try:
-                    _credit_methods = {"credit", "account", "on account", "on-account"}
-                    if str(method).lower().strip() not in _credit_methods:
-                        from services.payment_entry_service import create_payment_entry
-                        create_payment_entry(sale)
-                    else:
-                        import logging as _lg
-                        _lg.getLogger("POSView").info(
-                            "Skipped payment entry for credit/account sale %s.", sale.get("invoice_no", "")
-                        )
-                except Exception as _pe_err:
-                    log.warning("Could not create local payment entry: %s", _pe_err)
-
-                # ── Update UI Feedback ─────────────
-                self._update_prev_txn_display(
-                    paid=tendered, change=change_out,
-                    invoice_no=sale.get("invoice_no", "")
-                )
-                
-                if self.parent_window:
-                    status = f"Sale #{sale['number']} saved — ${total:.2f} ({method})"
-                    if cust_name and cust_name != "Walk-in": 
-                        status += f" — {cust_name}"
-                    self.parent_window._set_status(status)
-
-                # ── Increment offline sync counter ──────────────────────────
-                try:
-                    from services.printing_service import printing_service as _ps
-                    _ps.get_next_sync_number()
-                except Exception:
-                    pass
-                # ── Badge refresh: immediately after DB write, before UI reset ──
-                self._refresh_unsynced_badge()
-
-            except Exception as e:
-                # _friendly_db_error is your helper in main_window.py
-                QMessageBox.warning(self, "Save Error", _friendly_db_error(e))
-                return
-
-            # Clear invoice for next customer
-            self._new_sale(confirm=False)
     def _open_customer_payment_entry(self):
-        """Open the customer payment entry dialog.
-        If no customer is selected on POS, open customer search first then proceed."""
+        """
+        Open the customer payment entry dialog.
+        Logic mirrored exactly from _on_laybye: 
+        1. ALWAYS force customer selection (picker opens immediately).
+        2. Update UI button styling and text (Success Green).
+        3. Open Payment Dialog.
+        """
+        # 1. Force customer selection every time (mirrored from Lay-by flow)
+        dlg_search = CustomerSearchPopup(self)
+        if dlg_search.exec() != QDialog.Accepted or not dlg_search.selected_customer:
+            QMessageBox.information(self, "Customer Required", 
+                                    "Please select a customer before recording a payment.")
+            return
+        
+        # Central setter — keeps nav btn / inline label / price list /
+        # grid re-price / cart-clear prompt all consistent.
+        self._apply_selected_customer(dlg_search.selected_customer)
+
+        # 2. Proceed to Payment Entry
         customer = self._selected_customer
-
-        if not customer:
-            # No customer on invoice — open search so cashier picks one first
-            dlg_search = CustomerSearchPopup(self)
-            if dlg_search.exec() != QDialog.Accepted or not dlg_search.selected_customer:
-                return   # cashier cancelled
-            customer = dlg_search.selected_customer
-
+        
+        
         dlg = CustomerPaymentDialog(self, customer=customer)
         if dlg.exec() == QDialog.Accepted:
+            cname = customer.get("customer_name", "Customer")
+            status_msg = f"Payment recorded for {cname}."
+            
             if self.parent_window:
-                cname = dlg._customer.get("customer_name", "") if dlg._customer else ""
-                self.parent_window._set_status(
-                    f"Payment recorded for {cname}.")
-    
-    
+                if hasattr(self.parent_window, '_set_status'):
+                    self.parent_window._set_status(status_msg)
+                else:
+                    self.parent_window.statusBar().showMessage(status_msg, 3000)
+
     def _open_hold_recall(self):
         HoldRecallDialog(self).exec()
 
     def _reset_customer_btn(self):
         self._selected_customer = None
-        self._cust_btn.setText("👤  Customer")
+        self._cust_btn.setText("Customer")
         self._cust_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {NAVY_2}; color: {MID}; border: 1px solid {NAVY_3};
@@ -7808,12 +11004,14 @@ class POSView(QWidget):
             }}
             QPushButton:hover {{ background-color: {NAVY_3}; color: {WHITE}; }}
         """)
+        # Re-apply the default customer so the button always shows one
+        self._ensure_default_customer()
 
     def _refresh_customer_btn(self):
         """Update the customer button label without clearing the selection."""
         if self._selected_customer:
             name = self._selected_customer.get("customer_name", "")
-            self._cust_btn.setText(f"👤  {name[:22]}")
+            self._cust_btn.setText(f"{name[:22]}")
             self._cust_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {ACCENT}; color: {WHITE};
@@ -7822,8 +11020,15 @@ class POSView(QWidget):
                 }}
                 QPushButton:hover {{ background-color: {ACCENT_H}; }}
             """)
+            # Keep inline strip label in sync (if the strip has been built)
+            if hasattr(self, "_cust_inline_label") and self._cust_inline_label is not None:
+                self._cust_inline_label.setText(f"Customer: {name}")
+                self._cust_inline_label.setStyleSheet(
+                    f"color: {NAVY}; font-size: 11px; font-weight: bold; "
+                    f"background: transparent; padding: 0 6px;"
+                )
         else:
-            self._cust_btn.setText("👤  Customer")
+            self._cust_btn.setText("Customer")
             self._cust_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {NAVY_2}; color: {MID}; border: 1px solid {NAVY_3};
@@ -7831,84 +11036,291 @@ class POSView(QWidget):
                 }}
                 QPushButton:hover {{ background-color: {NAVY_3}; color: {WHITE}; }}
             """)
+            if hasattr(self, "_cust_inline_label") and self._cust_inline_label is not None:
+                self._cust_inline_label.setText("No customer")
+                self._cust_inline_label.setStyleSheet(
+                    f"color: {MUTED}; font-size: 11px; background: transparent; padding: 0 6px;"
+                )
 
-    def _refresh_unsynced_badge(self):
-        """Refresh sync badges.
-
-        When all three counts are zero   → show a single green "✓ All Synced" badge.
-        When any count is non-zero       → hide the unified badge and show only the
-                                           individual SI / CN / SO badges that have errors,
-                                           coloured amber (< 5) or red (≥ 5).
+    # =========================================================================
+    # DEFAULT CUSTOMER — auto-selected on startup / payment
+    # =========================================================================
+    def _ensure_default_customer(self):
         """
+        Pick the active customer at POS startup.
 
-        def _apply_badge(badge, count, label):
-            if not hasattr(self, badge):
-                return
-            btn = getattr(self, badge)
-            if count == 0:
-                btn.setVisible(False)
-                return
-            bg, hov = (AMBER, ORANGE) if count < 5 else (DANGER, DANGER_H)
-            suffix = f"{count}" if count < 5 else f"{count} !"
-            prefix = "⚠ " if count >= 5 else ""
-            btn.setText(f"{label} {suffix}")
-            btn.setToolTip(f"{prefix}{count} unsynced {label}(s) — click to view errors")
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {bg}; color: {WHITE}; border: none;
-                    border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 6px;
-                }}
-                QPushButton:hover {{ background-color: {hov}; }}
-            """)
-            btn.setVisible(True)
+        Priority (matches Android):
+          1. Customer whose name == login response's `default_customer`
+             (saved to company_defaults.server_default_customer by
+             services/auth_service.py — sourced from ERPNext's
+             User Permission with is_default=1).
+          2. The generic "Default" customer (created post-login by
+             models/default_customer.create_default_customer).
 
-        # SI — Sales Invoices (count from sync_errors table, fallback to models.sale)
-        si_count = 0
+        Once resolved, we also seed the active price list from the
+        customer's default_price_list_id, so pricing applies on the very
+        first cart add.
+
+        Never overwrites a selection the cashier has already made.
+        """
+        # Cashier already picked someone — don't clobber it.
+        if self._selected_customer:
+            return
+
         try:
-            from services.sync_errors_service import count_unresolved
-            si_count = count_unresolved("SI")
+            from models.customer import get_customer_by_name, get_all_customers
+        except Exception as e:
+            print(f"[pos] _ensure_default_customer import failed: {e}")
+            return
+
+        picked = self._pick_login_default_customer(get_customer_by_name)
+        if picked is None:
+            picked = self._pick_generic_default_customer(get_all_customers)
+        if picked is None:
+            return   # nothing usable — bail silently
+
+        self._apply_selected_customer(picked)
+
+    # ---- helpers used by _ensure_default_customer -------------------------
+
+    def _pick_login_default_customer(self, getter):
+        """Resolve the login-bound default customer by name. None if missing."""
+        try:
+            from models.company_defaults import get_defaults
+            name = (get_defaults() or {}).get("server_default_customer") or ""
+            name = str(name).strip()
+        except Exception:
+            name = ""
+        if not name:
+            return None
+        try:
+            cust = getter(name)
+            if cust:
+                print(f"[pos] 🎯 Login default customer resolved: {name}")
+                return cust
+            print(f"[pos] ⚠ Login default customer '{name}' not in local DB")
+        except Exception as e:
+            print(f"[pos] login-default lookup failed ({name}): {e}")
+        return None
+
+    def _pick_generic_default_customer(self, getter_all):
+        """Fallback: the generic 'Default' customer (created post-login)."""
+        try:
+            for c in (getter_all() or []):
+                if (c.get("customer_name") or "").strip().lower() == "default":
+                    return c
+        except Exception as e:
+            print(f"[pos] generic-default lookup failed: {e}")
+        return None
+
+    def _apply_selected_customer(self, cust: dict) -> bool:
+        """Single entry point for 'a customer was chosen'.
+
+        Keeps *everything* consistent after a customer change:
+          • `_selected_customer` + active price list
+          • the nav-bar Customer button (`_cust_btn`)
+          • the inline search-strip label next to the search box
+            (`_cust_inline_label`)
+          • the search input itself (cleared so the next search is fresh)
+          • the status bar
+          • re-prices the product grid against the new customer's list
+          • **clears the cart** if the customer's price list differs from
+            the currently active one and the cart has items — stale per-row
+            prices against the old list would be misleading.
+
+        Returns True when applied, False when the user cancelled a
+        cart-clear confirmation. Callers that care can branch on this to
+        undo UI state (e.g. re-tick the previous customer selection).
+        """
+        if not cust:
+            return False
+
+        new_price_list = cust.get("price_list_name") or None
+
+        # Ask before wiping a populated cart for a price-list change.
+        if not self._confirm_cart_clear_on_price_list_change(new_price_list):
+            return False
+
+        self._selected_customer = cust
+        self._active_price_list = new_price_list
+        name = cust.get("customer_name", "") or ""
+
+        print(f"[pos] 👤 customer='{name}' "
+              f"price_list='{self._active_price_list or '(none)'}'")
+
+        # Nav-bar button (also updates _cust_inline_label via _refresh_customer_btn)
+        try:
+            self._refresh_customer_btn()
         except Exception:
             pass
-        if si_count == 0:
+
+        # Inline label — _refresh_customer_btn already touches it, but we
+        # set it here too so callers that fire before the strip is built
+        # still render correctly on the next show.
+        if hasattr(self, "_cust_inline_label") and self._cust_inline_label is not None:
             try:
-                from models.sale import get_all_sales
-                si_count = sum(1 for s in get_all_sales() if not s.get("synced"))
+                self._cust_inline_label.setText(f"Customer: {name}")
+                self._cust_inline_label.setStyleSheet(
+                    f"color: {NAVY}; font-size: 11px; font-weight: bold; "
+                    f"background: transparent; padding: 0 6px;"
+                )
             except Exception:
                 pass
-        _apply_badge("_si_badge", si_count, "SI")
 
-        # CN — Credit Notes
-        cn_count = 0
-        try:
-            from database.db import get_connection
-            conn = get_connection(); cur = conn.cursor()
-            cur.execute(
-                "SELECT COUNT(*) FROM credit_notes "
-                "WHERE cn_status IN ('ready','pending_sync')")
-            row = cur.fetchone(); conn.close()
-            cn_count = int(row[0] or 0) if row else 0
-        except Exception:
-            pass
-        _apply_badge("_cn_badge", cn_count, "CN")
-
-        # SO — Sales Orders / Laybyes (errors from sync_errors, count from model)
-        so_count = 0
-        try:
-            from services.sync_errors_service import count_unresolved
-            so_count = count_unresolved("SO")
-        except Exception:
-            pass
-        if so_count == 0 and _HAS_SALES_ORDER:
+        # Clear the inline search box so the cashier can type a new query
+        # without backspacing the previous one. Block signals so textEdited
+        # doesn't fire the completer with an empty string.
+        if hasattr(self, "_cust_search_edit") and self._cust_search_edit is not None:
             try:
-                so_count = len(_get_unsynced_so())
+                self._cust_search_edit.blockSignals(True)
+                self._cust_search_edit.clear()
+                self._cust_search_edit.blockSignals(False)
             except Exception:
                 pass
-        _apply_badge("_so_badge", so_count, "SO")
 
-        # Unified badge — visible only when everything is clean
-        if hasattr(self, "_all_synced_badge"):
-            self._all_synced_badge.setVisible(
-                si_count == 0 and cn_count == 0 and so_count == 0)
+        if self.parent_window:
+            try:
+                self.parent_window._set_status(f"Customer: {name or 'Default'}")
+            except Exception:
+                pass
+
+        # Re-render the current category so prices reflect the new price list.
+        try:
+            self._reload_current_category()
+        except Exception as e:
+            print(f"[pos] grid re-price failed: {e}")
+        return True
+
+    def _confirm_cart_clear_on_price_list_change(self, new_price_list: str | None) -> bool:
+        """
+        Ask the cashier before wiping a populated cart because the incoming
+        customer's price list differs from the active one.
+
+        Returns True when it's safe to continue with the customer change:
+          • cart is empty, or
+          • price list is unchanged, or
+          • user confirmed the wipe (cart gets cleared here).
+        Returns False when the user cancels — caller should NOT change
+        customer.
+
+        Startup / first-time selection (no existing selected customer)
+        never prompts because there's nothing to lose.
+        """
+        # Startup / first pick — nothing to protect.
+        if self._selected_customer is None:
+            return True
+
+        # Same price list → no price recomputation needed, keep the cart.
+        current_pl = self._active_price_list or None
+        if (current_pl or "") == (new_price_list or ""):
+            return True
+
+        # Empty cart → safe to switch silently.
+        try:
+            if not self._collect_invoice_items():
+                return True
+        except Exception:
+            pass
+
+        answer = QMessageBox.question(
+            self,
+            "Clear cart?",
+            (
+                f"The new customer uses price list "
+                f"<b>{new_price_list or '(none)'}</b> (current: "
+                f"<b>{current_pl or '(none)'}</b>).\n\n"
+                "Cart items were priced at the previous list. They will be "
+                "cleared so new rates apply.\n\nContinue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+
+        try:
+            self._clear_cart()
+        except Exception as e:
+            print(f"[pos] cart clear on customer change failed: {e}")
+        return True
+    
+    # def _refresh_unsynced_badge(self):
+    #     """Refresh sync badges.
+
+    #     When all three counts are zero   → show a single green "✓ All Synced" badge.
+    #     When any count is non-zero       → hide the unified badge and show only the
+    #                                        individual SI / CN / SO badges that have errors,
+    #                                        coloured amber (< 5) or red (≥ 5).
+    #     """
+
+    #     def _apply_badge(badge, count, label):
+    #         if not hasattr(self, badge):
+    #             return
+    #         btn = getattr(self, badge)
+    #         if count == 0:
+    #             btn.setVisible(False)
+    #             return
+    #         bg, hov = (AMBER, ORANGE) if count < 5 else (DANGER, DANGER_H)
+    #         suffix = f"{count}" if count < 5 else f"{count} !"
+    #         prefix = "⚠ " if count >= 5 else ""
+    #         btn.setText(f"{label} {suffix}")
+    #         btn.setToolTip(f"{prefix}{count} unsynced {label}(s) — click to view errors")
+    #         btn.setStyleSheet(f"""
+    #             QPushButton {{
+    #                 background-color: {bg}; color: {WHITE}; border: none;
+    #                 border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 6px;
+    #             }}
+    #             QPushButton:hover {{ background-color: {hov}; }}
+    #         """)
+    #         btn.setVisible(True)
+
+    #     # SI — Sales Invoices (count from sync_errors table, fallback to models.sale)
+    #     si_count = 0
+    #     try:
+    #         from services.sync_errors_service import count_unresolved
+    #         si_count = count_unresolved("SI")
+    #     except Exception:
+    #         pass
+    #     if si_count == 0:
+    #         try:
+    #             from models.sale import get_all_sales
+    #             si_count = sum(1 for s in get_all_sales() if not s.get("synced"))
+    #         except Exception:
+    #             pass
+    #     _apply_badge("_si_badge", si_count, "SI")
+
+    #     # CN — Credit Notes
+    #     cn_count = 0
+    #     try:
+    #         from database.db import get_connection
+    #         conn = get_connection(); cur = conn.cursor()
+    #         cur.execute(
+    #             "SELECT COUNT(*) FROM credit_notes "
+    #             "WHERE cn_status IN ('ready','pending_sync')")
+    #         row = cur.fetchone(); conn.close()
+    #         cn_count = int(row[0] or 0) if row else 0
+    #     except Exception:
+    #         pass
+    #     _apply_badge("_cn_badge", cn_count, "CN")
+
+    #     # SO — Sales Orders / Laybyes (errors from sync_errors, count from model)
+    #     so_count = 0
+    #     try:
+    #         from services.sync_errors_service import count_unresolved
+    #         so_count = count_unresolved("SO")
+    #     except Exception:
+    #         pass
+    #     if so_count == 0 and _HAS_SALES_ORDER:
+    #         try:
+    #             so_count = len(_get_unsynced_so())
+    #         except Exception:
+    #             pass
+    #     _apply_badge("_so_badge", so_count, "SO")
+
+    #     # Unified badge — visible only when everything is clean
+    #     if hasattr(self, "_all_synced_badge"):
+    #         self._all_synced_badge.setVisible(
+    #             si_count == 0 and cn_count == 0 and so_count == 0)
 
     # =========================================================================
     # RETURN / CREDIT NOTE MODE
@@ -8010,11 +11422,11 @@ class POSView(QWidget):
             if qty <= 0:
                 continue
             try:
-                part_no  = self.invoice_table.item(r, 0).text()
-                name     = self.invoice_table.item(r, 1).text()
-                price    = float(self.invoice_table.item(r, 2).text() or "0")
-                total_ln = float(self.invoice_table.item(r, 6).text() or "0")
-                product_id = self.invoice_table.item(r, 0).data(Qt.UserRole)
+                part_no  = self.invoice_table.item(r, self.COL_PART_NO).text()
+                name     = self.invoice_table.item(r, self.COL_NAME).text()
+                price    = float(self.invoice_table.item(r, self.COL_PRICE).text() or "0")
+                total_ln = float(self.invoice_table.item(r, self.COL_TOTAL).text() or "0")
+                product_id = self.invoice_table.item(r, self.COL_PART_NO).data(Qt.UserRole)
             except (ValueError, AttributeError):
                 continue
             items.append({
@@ -8044,7 +11456,7 @@ class POSView(QWidget):
         cashier_name = self.user.get("username", "") if isinstance(self.user, dict) else ""
         try:
             from models.credit_note import create_credit_note
-            create_credit_note(
+            cn_result = create_credit_note(
                 original_sale_id=cn["id"],
                 items_to_return=items,
                 currency=cn.get("currency", "USD"),
@@ -8055,18 +11467,45 @@ class POSView(QWidget):
             QMessageBox.warning(self, "Credit Note Error", str(e))
             return
 
+        # ── Step 2: Create Refund Payment Entry (Pay to Customer) ─────────────
+        try:
+            from services.cn_payment_entry_service import create_cn_payment_entry
+            create_cn_payment_entry(cn_result)
+        except Exception as pe_err:
+            print(f"Refund creation failed (non-blocking): {pe_err}")
+
+        # ── Fiscalize synchronously so QR is ready before printing ───────────
+        fiscal_qr   = ""
+        fiscal_vc   = ""
+        try:
+            from services.fiscalization_service import get_fiscalization_service
+            _fs = get_fiscalization_service()
+            if _fs.is_fiscalization_enabled():
+                _fs.process_credit_note_fiscalization(cn_result["id"])
+                # Read the QR/VC back from DB now that it's committed
+                from models.credit_note import get_credit_note_by_id
+                _saved = get_credit_note_by_id(cn_result["id"])
+                if _saved:
+                    fiscal_qr = _saved.get("fiscal_qr_code", "") or ""
+                    fiscal_vc = _saved.get("fiscal_verification_code", "") or ""
+        except Exception as _fe:
+            print(f"[CN Print] Synchronous fiscalization failed for CN "
+                  f"{cn_result.get('cn_number', '')}: {_fe}")
+
         if self.parent_window:
             self.parent_window._set_status(
                 f"Return processed  ·  {cn.get('invoice_no', '')}  ·  ${total:.2f}")
 
         # ── Print credit note receipt ─────────────────────────────────────────
-        self._print_credit_note_receipt(cn, items, total, cashier_name)
+        self._print_credit_note_receipt(cn, items, total, cashier_name,
+                                        fiscal_qr=fiscal_qr, fiscal_vc=fiscal_vc)
 
         # ── Badge refresh: immediately after DB write, before UI reset ──
         self._refresh_unsynced_badge()
         self._new_sale(confirm=False)
 
-    def _print_credit_note_receipt(self, cn: dict, items: list, total: float, cashier_name: str):
+    def _print_credit_note_receipt(self, cn: dict, items: list, total: float, cashier_name: str,
+                                   fiscal_qr: str = "", fiscal_vc: str = ""):
         """Build a proper ReceiptData credit note and send it to printing_service."""
         import json
         from pathlib import Path
@@ -8123,6 +11562,9 @@ class POSView(QWidget):
         # Extra attributes read via getattr() in printing_service — set after construction
         receipt.originalInvoiceNo = cn.get("invoice_no", "")
         receipt.creditNoteReason  = cn.get("reason", "")
+        # Pre-resolved fiscal data — printing_service will use these directly
+        receipt.fiscal_qr_code           = fiscal_qr
+        receipt.fiscal_verification_code = fiscal_vc
 
         for it in items:
             qty   = float(it.get("qty", 0))
@@ -8140,7 +11582,7 @@ class POSView(QWidget):
         # ── Print ────────────────────────────────────────────────────────────
         ok = False
         for p in printers:
-            if printing_service.print_receipt(receipt, printer_name=p):
+            if printing_service.print_credit_note(receipt, printer_name=p):
                 ok = True
 
         if ok:
@@ -8255,7 +11697,7 @@ class POSView(QWidget):
             limit = manager.get("max_discount_percent", 100) or 100
 
         # ── 5. Read existing value to pre-fill ───────────────────────────────
-        existing = self.invoice_table.item(row, 4)
+        existing = self.invoice_table.item(row, self.COL_DISC)
         current_val = 0.0
         if existing and existing.text().strip():
             try:
@@ -8267,8 +11709,8 @@ class POSView(QWidget):
 
         # ── 6. Get line total for conversion ─────────────────────────────────
         try:
-            line_price = float(self.invoice_table.item(row, 2).text() or "0")
-            line_qty   = float(self.invoice_table.item(row, 3).text() or "1")
+            line_price = float(self.invoice_table.item(row, self.COL_PRICE).text() or "0")
+            line_qty   = float(self.invoice_table.item(row, self.COL_QTY).text() or "1")
             line_total = line_price * line_qty
         except (ValueError, AttributeError):
             line_total = 0.0
@@ -8298,7 +11740,7 @@ class POSView(QWidget):
         dlg_lay.setContentsMargins(24, 20, 24, 20)
         dlg_lay.setSpacing(12)
 
-        title_lbl = QLabel("🏷  Apply Discount")
+        title_lbl = QLabel("Apply Discount")
         title_lbl.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {NAVY};")
         dlg_lay.addWidget(title_lbl)
 
@@ -8389,14 +11831,14 @@ class POSView(QWidget):
                     entered_amt = line_total * (entered / 100.0)
                     if entered > limit:
                         hint_lbl.setText(
-                            f"❌  {entered:.1f}% exceeds your limit of <b>{limit}%</b>  "
+                            f"{entered:.1f}% exceeds your limit of <b>{limit}%</b>  "
                             f"(= ${line_total * entered / 100:.2f}).  "
                             f"Max you can give: <b>${max_allowed_amt:.2f}</b>"
                         )
                         hint_lbl.setStyleSheet(f"font-size:11px; color:{DANGER};")
                     elif entered > 0:
                         hint_lbl.setText(
-                            f"✅  {entered:.1f}% = <b>${entered_amt:.2f}</b> off  "
+                            f"{entered:.1f}% = <b>${entered_amt:.2f}</b> off  "
                             f"(limit: {limit}% = ${max_allowed_amt:.2f})"
                         )
                         hint_lbl.setStyleSheet(f"font-size:11px; color:{SUCCESS};")
@@ -8420,14 +11862,14 @@ class POSView(QWidget):
                     if line_total > 0 and limit < 100 and entered > max_allowed_amt:
                         implied = (entered / line_total) * 100
                         hint_lbl.setText(
-                            f"❌  ${entered:.2f} ({implied:.1f}%) exceeds your limit.  "
+                            f"${entered:.2f} ({implied:.1f}%) exceeds your limit.  "
                             f"Max allowed: <b>${max_allowed_amt:.2f}</b>"
                         )
                         hint_lbl.setStyleSheet(f"font-size:11px; color:{DANGER};")
                     elif entered > 0:
                         implied = (entered / line_total) * 100 if line_total > 0 else 0
                         hint_lbl.setText(
-                            f"✅  ${entered:.2f} ({implied:.1f}% off)  "
+                            f"${entered:.2f} ({implied:.1f}% off)  "
                             f"(limit: ${max_allowed_amt:.2f})"
                         )
                         hint_lbl.setStyleSheet(f"font-size:11px; color:{SUCCESS};")
@@ -8473,7 +11915,7 @@ class POSView(QWidget):
             if raw < 0 or raw > float(limit):
                 QMessageBox.warning(
                     self, "Discount Exceeds Limit",
-                    f"❌  {raw:.1f}% exceeds the maximum allowed discount of {limit}% "
+                    f"{raw:.1f}% exceeds the maximum allowed discount of {limit}% "
                     f"for cashier '{cashier_name}'.\n\n"
                     f"Please enter a value between 0% and {limit}%.\n\n"
                     f"A Manager PIN override is required to apply a higher discount."
@@ -8493,7 +11935,7 @@ class POSView(QWidget):
                     implied_pct = (disc_amount / line_total) * 100
                     QMessageBox.warning(
                         self, "Discount Exceeds Limit",
-                        f"❌  ${disc_amount:.2f} ({implied_pct:.1f}%) exceeds the maximum allowed "
+                        f"${disc_amount:.2f} ({implied_pct:.1f}%) exceeds the maximum allowed "
                         f"discount of {limit}% (${max_allowed_amt:.2f}) "
                         f"for cashier '{cashier_name}'.\n\n"
                         f"A Manager PIN override is required for a higher discount."
@@ -8513,7 +11955,7 @@ class POSView(QWidget):
         else:
             disc_item.setForeground(QColor(NAVY))
 
-        self.invoice_table.setItem(row, 4, disc_item)
+        self.invoice_table.setItem(row, self.COL_DISC, disc_item)
         self._recalc_row(row)
         self._recalc_totals()
 
@@ -8524,158 +11966,7 @@ class POSView(QWidget):
     def _quick_tender(self, _amount):
         pass  # no-op
 
-    # =========================================================================
-    # LAYBYE FLOW
-    # =========================================================================
-    def _on_laybye(self):
-        """
-        Full Laybye flow:
-          1. Always open customer picker first (even if one is already selected).
-          2. Collect cart items.
-          3. Show LaybyeConfirmDialog — forces cashier to confirm customer.
-          4. Show LaybyePaymentDialog — deposit (optional) + delivery date + order type.
-          5. Save to sales_order table locally (synced=0).
-          6. Refresh unsynced badge → sync picks it up in background.
-        """
-        if not _HAS_LAYBYE:
-            QMessageBox.warning(self, "Not Available",
-                                "Laybye dialogs could not be loaded.\n"
-                                "Ensure laybye_confirm_dialog.py and "
-                                "laybye_payment_dialog.py are in views/dialogs/.")
-            return
-
-        # ── Permission check ─────────────────────────────────────────────────
-        if not self._check_permission("allow_laybye", "Create Laybye"):
-            return
-
-        # ── 0. Cart must have items BEFORE opening customer picker ───────────
-        _early_items = self._collect_invoice_items()
-        if not _early_items:
-            QMessageBox.information(self, "Empty Cart",
-                                    "Please add products to the cart first before creating a Laybye.")
-            return
-        try:
-            _early_total = float(self._lbl_total.text() or "0")
-        except ValueError:
-            _early_total = sum(float(it.get("total", 0)) for it in _early_items)
-        if _early_total <= 0:
-            QMessageBox.information(self, "Zero Total",
-                                    "Cart total is zero — add items before saving a Laybye.")
-            return
-
-        # ── Always open customer picker ───────────────────────────────────────
-        dlg = CustomerSearchPopup(self)
-        if dlg.exec() != QDialog.Accepted or not dlg.selected_customer:
-            QMessageBox.information(self, "Customer Required",
-                                    "Please select a customer before creating a Laybye.")
-            return
-        self._selected_customer = dlg.selected_customer
-        cname = self._selected_customer.get("customer_name", "")
-        self._cust_btn.setText(f"👤  {cname[:22]}")
-        self._cust_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {SUCCESS}; color: {WHITE}; border: none;
-                border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 8px;
-            }}
-            QPushButton:hover {{ background-color: {SUCCESS_H}; }}
-        """)
-        if self.parent_window:
-            self.parent_window._set_status(f"Customer: {cname}")
-
-        # ── 1. Collect cart (already validated above) ────────────────────────
-        cart_items = _early_items
-        cart_total = _early_total
-
-        # ── 2. Confirmation + customer selection ─────────────────────────────
-        confirm_dlg = LaybyeConfirmDialog(
-            parent=self,
-            cart_items=cart_items,
-            cart_total=cart_total,
-            customer=self._selected_customer,
-        )
-        if confirm_dlg.exec() != LaybyeConfirmDialog.Accepted:
-            return
-
-        # Customer is now guaranteed to be a real named customer
-        confirmed_customer = confirm_dlg.selected_customer
-
-        # ── 3. Deposit dialog ────────────────────────────────────────────────
-        deposit_dlg = LaybyePaymentDialog(
-            parent=self,
-            total=cart_total,
-            customer=confirmed_customer,
-        )
-        if deposit_dlg.exec() != LaybyePaymentDialog.Accepted:
-            return
-
-        deposit_amount = deposit_dlg.deposit_amount
-        deposit_method = deposit_dlg.deposit_method
-        company_name   = deposit_dlg.accepted_company_name
-        delivery_date  = deposit_dlg.delivery_date
-        order_type     = deposit_dlg.order_type
-
-        # ── 4. Save Sales Order to local DB ─────────────────────────────────
-        if not _HAS_SALES_ORDER:
-            QMessageBox.critical(self, "DB Error",
-                                 "models/sales_order.py not found — cannot save Laybye.")
-            return
-
-        # Map cart item keys to what create_sales_order expects
-        so_items = []
-        for it in cart_items:
-            so_items.append({
-                "item_code":  it.get("part_no", ""),
-                "item_name":  it.get("product_name", ""),
-                "qty":        it.get("qty", 1),
-                "rate":       it.get("price", 0.0),
-                "amount":     it.get("total", 0.0),
-            })
-
-        try:
-            order_id = _create_sales_order(
-                cart_items     = so_items,
-                total          = cart_total,
-                deposit_amount = deposit_amount,
-                deposit_method = deposit_method,
-                customer       = confirmed_customer,
-                company        = company_name,
-                delivery_date  = delivery_date,
-                order_type     = order_type,
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "Save Failed",
-                                 f"Could not save Laybye:\n{_friendly_db_error(e)}")
-            return
-
-        # ── 4b. Queue deposit payment entry for sync ─────────────────────────
-        if deposit_amount and deposit_amount > 0:
-            try:
-                from services.laybye_payment_entry_service import create_laybye_payment_entry
-                create_laybye_payment_entry(_get_order_by_id(order_id))
-            except Exception as _lpe:
-                import logging as _lg
-                _lg.getLogger("Laybye").warning("Laybye payment entry skipped: %s", _lpe)
-
-        # ── 4c. Print deposit slip ────────────────────────────────────────────────────────
-        if _HAS_SO_PRINT:
-            try:
-                _print_laybye_deposit(order_id)
-            except Exception as _pe:
-                import logging as _lg
-                _lg.getLogger("Laybye").warning("Laybye print failed: %s", _pe)
-
-        # ── 5. Feedback + clear cart ─────────────────────────────────────────
-        balance   = round(cart_total - deposit_amount, 2)
-        cust_name = (confirmed_customer or {}).get("customer_name", "")
-
-        self._refresh_unsynced_badge()
-        self._new_sale(confirm=False)
-        if self.parent_window:
-            self.parent_window._set_status(
-                f"✔ Laybye #{order_id}  {cust_name}  "
-                f"Total ${cart_total:.2f}  Deposit ${deposit_amount:.2f}  "
-                f"Balance ${balance:.2f}"
-            )
+    
 
     # =========================================================================
     # QUOTATION FLOW
@@ -8712,124 +12003,38 @@ class POSView(QWidget):
             QMessageBox.information(self, "Customer Required",
                                     "Please select a customer before creating a Quotation.")
             return
-        self._selected_customer = dlg.selected_customer
-        cname = self._selected_customer.get("customer_name", "")
-        self._cust_btn.setText(f"👤  {cname[:22]}")
-        self._cust_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {SUCCESS}; color: {WHITE}; border: none;
-                border-radius: 3px; font-size: 11px; font-weight: bold; padding: 0 8px;
-            }}
-            QPushButton:hover {{ background-color: {SUCCESS_H}; }}
-        """)
+        # Route through the central setter so the grid re-prices, the
+        # inline label updates, and a cart-clear is offered if the price
+        # list differs from what was previously active.
+        self._apply_selected_customer(dlg.selected_customer)
+        cname = (dlg.selected_customer or {}).get("customer_name", "")
         if self.parent_window:
             self.parent_window._set_status(
                 f"Quotation mode — Customer: {cname}  — Add items then use Options › Save Quotation")
 
-        # ── Step 3: Set quotation mode flag and notify ────────────────────────
+        # ── Step 3: Set quotation mode flag and flip the PAY button label ────
+        # _quotation_mode is the legacy flag; _cart_mode is what
+        # _refresh_pay_button_label reads, so both get set. The Quote Mode
+        # toggle pill in the navbar is kept in sync (blockSignals prevents
+        # _on_quote_mode_toggle from firing and looping).
         self._quotation_mode = True
-        QMessageBox.information(
-            self, "Quotation Mode Active",
-            f"Quotation started for:  {cname}\n\n"
-            "Add items to the cart normally.\n"
-            "When ready, go to  Options → Save / Print Quotation."
-        )
-
-    def _save_quotation(self):
-        """Save and print the current cart as a Quotation."""
-        items = self._collect_invoice_items()
-        if not items:
-            QMessageBox.information(self, "Empty Cart", "Add items before saving a Quotation.")
-            return
-        if not self._selected_customer:
-            QMessageBox.information(self, "No Customer", "Please select a customer first.")
-            return
+        self._cart_mode = "quote"
         try:
-            total = float(self._lbl_total.text() or "0")
-        except ValueError:
-            total = sum(float(i.get("total", 0)) for i in items)
+            if hasattr(self, "quote_mode_btn") and self.quote_mode_btn is not None:
+                self.quote_mode_btn.blockSignals(True)
+                self.quote_mode_btn.setChecked(True)
+                self.quote_mode_btn.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            self._refresh_pay_button_label()
+        except Exception as _e:
+            print(f"[_on_quotation] pay button refresh failed: {_e}")
 
-        cname = self._selected_customer.get("customer_name", "")
-        from PySide6.QtCore import QDateTime, QDate
-        now = QDateTime.currentDateTime().toString("dd/MM/yyyy  hh:mm")
+        # No confirmation popup — PAY now reads "FINALIZE QUOTE" and the
+        # status bar already shows "Quotation mode — Customer: <name>".
 
-        # Cashier / discount rules info
-        current_user = (getattr(self, 'user', None)
-                        or (getattr(self.parent_window, 'user', {}) if self.parent_window else {}))
-        cashier_name = current_user.get("full_name") or current_user.get("username", "")
-        allow_disc   = current_user.get("allow_discount", False)
-        max_disc_pct = current_user.get("max_discount_percent", 0) or 0
-        expiry_str   = current_user.get("discount_expiry_date", "") or ""
-        disc_expired = False
-        expiry_display = ""
-        if expiry_str:
-            try:
-                ed = QDate.fromString(expiry_str, "yyyy-MM-dd")
-                if not ed.isValid():
-                    ed = QDate.fromString(expiry_str, "dd/MM/yyyy")
-                if ed.isValid():
-                    expiry_display = ed.toString("dd/MM/yyyy")
-                    if QDate.currentDate() > ed:
-                        disc_expired = True
-            except Exception:
-                pass
-
-        W = 40
-        lines = ["=" * W, "         HAVANO POS — QUOTATION",
-                 f"  Date:      {now}",
-                 f"  Customer:  {cname}",
-                 f"  Cashier:   {cashier_name}",
-                 "-" * W]
-        for it in items:
-            name = it["product_name"][:24]; qty = it["qty"]; price = it["price"]
-            disc = it.get("discount", 0.0); line_tot = it["total"]
-            qty_str = f"{int(qty)}" if qty == int(qty) else f"{qty:.2f}"
-            lines.append(f"{name:<24} {qty_str:>3}x ${price:.2f}")
-            if disc:
-                disc_amt = qty * price * (disc / 100.0)
-                lines.append(f"  Disc {disc:.0f}%            -${disc_amt:.2f}")
-            lines.append(f"  {'─'*20}  ${line_tot:.2f}")
-
-        lines += ["-" * W, f"  TOTAL:             ${total:.2f}", "=" * W]
-
-        # ── Discount Rules Section ────────────────────────────────────────────
-        lines.append("  DISCOUNT AUTHORISATION")
-        lines.append("-" * W)
-        if not allow_disc:
-            lines.append("  Discount: NOT PERMITTED for this cashier")
-        elif disc_expired:
-            lines.append(f"  Discount: EXPIRED ({expiry_display})")
-            lines.append("  (Manager PIN required to override)")
-        else:
-            lines.append(f"  Cashier:  {cashier_name}")
-            lines.append(f"  Allowed:  Up to {max_disc_pct}%")
-            if expiry_display:
-                lines.append(f"  Valid to: {expiry_display}")
-            else:
-                lines.append("  Valid to: No expiry set")
-
-        lines += ["=" * W, "  This quotation is valid for 30 days.", "=" * W]
-
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
-        dlg = QDialog(self); dlg.setWindowTitle("Quotation Preview"); dlg.setMinimumSize(400, 540)
-        dlg.setStyleSheet(f"QDialog {{ background:{WHITE}; }}")
-        lay = QVBoxLayout(dlg); lay.setContentsMargins(16, 16, 16, 16); lay.setSpacing(10)
-        txt = QTextEdit(); txt.setReadOnly(True)
-        txt.setFont(__import__("PySide6.QtGui", fromlist=["QFont"]).QFont("Courier New", 10))
-        txt.setPlainText("\n".join(lines))
-        txt.setStyleSheet(f"QTextEdit {{ background:{WHITE}; color:{DARK_TEXT}; border:1px solid {BORDER}; border-radius:4px; }}")
-        lay.addWidget(txt, 1)
-        br = QHBoxLayout(); br.setSpacing(8)
-        print_btn = QPushButton("Print"); print_btn.setFixedHeight(36); print_btn.setCursor(Qt.PointingHandCursor)
-        print_btn.setStyleSheet(f"QPushButton {{ background:{SUCCESS}; color:{WHITE}; border:none; border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }} QPushButton:hover {{ background:{SUCCESS_H}; }}")
-        close_btn = QPushButton("Close"); close_btn.setFixedHeight(36); close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setStyleSheet(f"QPushButton {{ background:{NAVY}; color:{WHITE}; border:none; border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }} QPushButton:hover {{ background:{NAVY_2}; }}")
-        print_btn.clicked.connect(lambda: (self._send_quotation_to_printer("\n".join(lines)), dlg.accept()))
-        close_btn.clicked.connect(dlg.accept)
-        br.addStretch(); br.addWidget(print_btn); br.addWidget(close_btn)
-        lay.addLayout(br)
-        dlg.exec()
-        self._quotation_mode = False
+    
 
     def _send_quotation_to_printer(self, text: str):
         """Send quotation text to the thermal printer."""
@@ -8860,9 +12065,11 @@ class POSView(QWidget):
                     win32print.ClosePrinter(hp)
         except Exception as e:
             QMessageBox.warning(self, "Print Error", f"Could not print quotation:\n{e}")
-
-
 # =============================================================================
+# CASHIER POS VIEW
+# 
+# =============================================================================
+ #=============================================================================
 # MAIN WINDOW
 # =============================================================================
 class MainWindow(QMainWindow):
@@ -8910,6 +12117,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Havano POS System")
         self.setMinimumSize(1280, 820)
         self.setStyleSheet(GLOBAL_STYLE)
+        
+        self.quotation_sync_thread = start_quotation_sync_thread()
 
         self._stack = QStackedWidget()
         self._pos_view = POSView(parent_window=self, user=self.user)
@@ -8932,9 +12141,14 @@ class MainWindow(QMainWindow):
         # #37 — logged-in user in footer
         _uname = self.user.get("username", "")
         _urole = self.user.get("role", "cashier")
-        _user_lbl = QLabel(f"  👤 {_uname} [{_urole.upper()}]  ")
+        _user_w = QWidget(); _user_w.setStyleSheet("background: transparent;")
+        _user_h = QHBoxLayout(_user_w); _user_h.setContentsMargins(6, 0, 6, 0); _user_h.setSpacing(4)
+        _user_ic = QLabel(); _user_ic.setPixmap(qta.icon("fa5s.user", color=MID).pixmap(12, 12))
+        _user_ic.setStyleSheet("background: transparent;")
+        _user_lbl = QLabel(f"{_uname} [{_urole.upper()}]")
         _user_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
-        self._status_bar.addPermanentWidget(_user_lbl)
+        _user_h.addWidget(_user_ic); _user_h.addWidget(_user_lbl)
+        self._status_bar.addPermanentWidget(_user_w)
 
         _sep1 = QLabel("|")
         _sep1.setStyleSheet(f"color: {NAVY_2}; background: transparent;")
@@ -8946,9 +12160,14 @@ class MainWindow(QMainWindow):
             _srv = _ghl()
         except Exception:
             _srv = "—"
-        _srv_lbl = QLabel(f"  🌐 {_srv}  ")
+        _srv_w = QWidget(); _srv_w.setStyleSheet("background: transparent;")
+        _srv_h = QHBoxLayout(_srv_w); _srv_h.setContentsMargins(6, 0, 6, 0); _srv_h.setSpacing(4)
+        _srv_ic = QLabel(); _srv_ic.setPixmap(qta.icon("fa5s.globe", color=MID).pixmap(12, 12))
+        _srv_ic.setStyleSheet("background: transparent;")
+        _srv_lbl = QLabel(f"{_srv}")
         _srv_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
-        self._status_bar.addPermanentWidget(_srv_lbl)
+        _srv_h.addWidget(_srv_ic); _srv_h.addWidget(_srv_lbl)
+        self._status_bar.addPermanentWidget(_srv_w)
 
         _sep2 = QLabel("|")
         _sep2.setStyleSheet(f"color: {NAVY_2}; background: transparent;")
@@ -8971,15 +12190,29 @@ class MainWindow(QMainWindow):
                 _sql = _d.get("db_server", "") or _d.get("server", "") or "localhost"
             except Exception:
                 _sql = "localhost"
-        _sql_lbl = QLabel(f"  🗄 {_sql}  ")
+        _sql_w = QWidget(); _sql_w.setStyleSheet("background: transparent;")
+        _sql_h = QHBoxLayout(_sql_w); _sql_h.setContentsMargins(6, 0, 6, 0); _sql_h.setSpacing(4)
+        _sql_ic = QLabel(); _sql_ic.setPixmap(qta.icon("fa5s.database", color=MID).pixmap(12, 12))
+        _sql_ic.setStyleSheet("background: transparent;")
+        _sql_lbl = QLabel(f"{_sql}")
         _sql_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
-        self._status_bar.addPermanentWidget(_sql_lbl)
+        _sql_h.addWidget(_sql_ic); _sql_h.addWidget(_sql_lbl)
+        self._status_bar.addPermanentWidget(_sql_w)
 
-        # #18 — everyone lands on POS first, always
+        # #18 — everyone lands on POS first, always.
+        # POSView picks its initial cart mode (Sales vs Quote) based on the
+        # user's role; pharmacists default to Quote, everyone else to Sales.
+        # The mode is toggleable from the POS navbar at any time.
         self._stack.setCurrentIndex(0)
 
+        # Proactively prompt for a shift right after login if none is running.
+        # Deferred via singleShot so the main window finishes painting first;
+        # the chooser then opens immediately without an intermediate popup.
+        # The method lives on POSView — MainWindow doesn't own the shift UI.
+        QTimer.singleShot(0, self._pos_view._prompt_open_shift_if_missing)
+
         # ── Background sync services ──────────────────────────────────────────
-        # Product sync (every 5 min) — keeps local product list up to date
+        # Product sync (every 15 s) — keeps local product list up to date
         try:
             from services.sync_service import SyncWorker
             from PySide6.QtCore import QThread
@@ -9010,6 +12243,15 @@ class MainWindow(QMainWindow):
             import logging
             logging.getLogger("MainWindow").warning(
                 "Payment entry sync could not start: %s", _e)
+                
+        # Customer payment sync — pushes account payments → Server
+        try:
+            from services.payment_upload_service import start_payment_sync_daemon as start_customer_payment_sync
+            self._customer_payment_sync = start_customer_payment_sync()
+        except Exception as _e:
+            import logging
+            logging.getLogger("MainWindow").warning(
+                "Customer payment sync could not start: %s", _e)
 
         # Accounts + exchange rates sync (hourly)
         try:
@@ -9019,6 +12261,16 @@ class MainWindow(QMainWindow):
             import logging
             logging.getLogger("MainWindow").warning(
                 "Accounts sync could not start: %s", _e)
+        
+        # Sales Order pull — pulls Frappe Sales Orders → local DB every 5 min
+        # so cashiers can finalise fully-paid laybyes into invoices offline.
+        try:
+            from services.sales_order_pull_service import start_sales_order_pull_daemon
+            self._sales_order_pull = start_sales_order_pull_daemon()
+        except Exception as _e:
+            import logging
+            logging.getLogger("MainWindow").warning(
+                "Sales Order pull could not start: %s", _e)
 
         # Credit note sync (every 60s) -- pushes ready CNs to server
         try:
@@ -9038,6 +12290,15 @@ class MainWindow(QMainWindow):
             logging.getLogger("MainWindow").warning(
                 "Sales Order upload service could not start: %s", _e)
 
+        # Laybye Payment Entry sync — pushes local laybye deposits → Server
+        try:
+            from services.laybye_payment_entry_service import start_laybye_pe_sync_daemon
+            self._laybye_payment_sync = start_laybye_pe_sync_daemon()
+        except Exception as _e:
+            import logging
+            logging.getLogger("MainWindow").warning(
+                "Laybye payment entry sync could not start: %s", _e)
+
         # ── Ensure sync_errors table exists ────────────────────────────────────
         try:
             from services.sync_errors_service import ensure_table as _set
@@ -9052,13 +12313,39 @@ class MainWindow(QMainWindow):
                 Qt.QueuedConnection)
         except Exception:
             pass
-
+        
+        try:
+            from services.bundle_sync_service import start_bundle_sync_daemon
+            self._bundle_sync = start_bundle_sync_daemon()
+            print("[MainWindow] Bundle sync daemon started (every 20s)")
+        except Exception as _e:
+            import logging
+            logging.getLogger("MainWindow").warning(
+                "Bundle sync service could not start: %s", _e)
+        try:
+            from services.sync_errors_service import ensure_table as _set
+            _set()
+        except Exception:
+            pass
         # ── One-shot startup sync (runs immediately in background on login) ──
         # Fires once right after MainWindow opens so products, customers,
         # users, accounts and exchange rates are all refreshed without the
         # cashier having to click anything manually.
         QTimer.singleShot(2000, self._run_startup_sync)   # 2 s delay lets the
         # UI finish rendering before the network calls start.
+
+    # =========================================================================
+    # PHARMACIST LANDING — open the Quotations list dialog right after login
+    # for users whose role == "Pharmacist".  Follows the same invocation style
+    # as _open_quotation_manager() in POSView (modal dlg.exec()).
+    # =========================================================================
+    def _open_quotations_for_pharmacist(self):
+        try:
+            from views.dialogs.quotation_dialog import QuotationDialog
+            dlg = QuotationDialog(self)
+            dlg.exec()
+        except Exception as e:
+            print(f"[main_window] Could not open Quotations for pharmacist: {e}")
 
     # =========================================================================
     # STARTUP SYNC — runs once on login, in a background thread so the UI
@@ -9146,6 +12433,160 @@ class MainWindow(QMainWindow):
         self._startup_sync_thread.start()
 
     # =========================================================================
+    # OPEN SHIFT REPRINT DIALOG
+    # =========================================================================
+    def _open_shift_reprint(self):
+        """Open the shift reconciliation reprint dialog."""
+        try:
+            from views.dialogs.shift_reprint_dialog import show_shift_reprint
+            show_shift_reprint(self)
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Error", f"Could not open reprint dialog: {str(e)}")
+
+    # =========================================================================
+    # BUILD MENUBAR
+    # =========================================================================
+    def _build_menubar(self):
+        mb = self.menuBar()
+        mb.setVisible(False)  # hidden by default, but we still build it for toggle
+
+        # ── Sales ─────────────────────────────────────────────────────────────
+        sales_menu = mb.addMenu("Sales")
+        for label, fn in [
+            ("Sales Invoice List", self._pos_view._open_sales_list),
+            ("Sales Orders",       self._pos_view._open_sales_order_list),
+            (None, None),
+            ("Payments",           self._pos_view._open_customer_payment_entry),
+            (None, None),
+            ("Reprint Shift Reconciliation", self._open_shift_reprint),
+        ]:
+            if label is None:
+                sales_menu.addSeparator()
+            else:
+                a = QAction(label, self)
+                a.triggered.connect(fn)
+                sales_menu.addAction(a)
+
+        # ── Admin / Other menus would go here ─────────────────────────────────
+        # ... rest of your menu code ...
+
+    # =========================================================================
+    # SYNC ERROR HANDLER
+    # =========================================================================
+    def _on_sync_error(self, error_msg: str):
+        """Show sync errors in the status bar."""
+        self._status_bar.showMessage(f"{error_msg}", 5000)
+    def _run_startup_sync(self):
+        """
+        Called automatically 2 seconds after MainWindow opens.
+        Runs every sync in a single background QThread so none of them
+        block the UI.  Errors are logged and silently swallowed — the
+        periodic daemons will retry on their own schedules.
+        """
+        import logging
+        log = logging.getLogger("StartupSync")
+
+        from PySide6.QtCore import QThread
+
+        class _StartupSyncWorker(QThread):
+            def run(self_inner):                          # noqa: N805
+                log.info("[startup-sync] Starting full sync on login…")
+
+                # 1. Accounts + exchange rates  (needed first: other syncs
+                #    may depend on company_currency from defaults)
+                try:
+                    from services.accounts_sync_service import sync_accounts_and_rates
+                    r = sync_accounts_and_rates()
+                    log.info("[startup-sync] Accounts: %d  Rates: %d",
+                             r.get("accounts", 0), r.get("rates", 0))
+                except Exception as exc:
+                    log.warning("[startup-sync] Accounts/rates error: %s", exc)
+
+                # 2. Products  (largest payload — run second so accounts are
+                #    already in DB if any product logic needs them)
+                try:
+                    from services.sync_service import sync_products, _read_credentials
+                    api_key, api_secret = _read_credentials()
+                    if api_key and api_secret:
+                        r = sync_products(api_key=api_key, api_secret=api_secret)
+                        log.info(
+                            "[startup-sync] Products: %d inserted, %d updated, %d skipped",
+                            r.get("products_inserted", 0),
+                            r.get("products_updated",  0),
+                            r.get("skipped", 0),
+                        )
+                    else:
+                        log.warning("[startup-sync] No credentials — product sync skipped.")
+                except Exception as exc:
+                    log.warning("[startup-sync] Products error: %s", exc)
+
+                # 3. Customers
+                try:
+                    from services.customer_sync_service import sync_customers
+                    sync_customers()
+                    log.info("[startup-sync] Customers synced.")
+                except Exception as exc:
+                    log.warning("[startup-sync] Customers error: %s", exc)
+
+                # 4. Users
+                try:
+                    from services.user_sync_service import sync_users
+                    r = sync_users()
+                    log.info(
+                        "[startup-sync] Users: %d synced, %d skipped, %d errors",
+                        r.get("synced", 0), r.get("skipped", 0), r.get("errors", 0),
+                    )
+                except Exception as exc:
+                    log.warning("[startup-sync] Users error: %s", exc)
+
+                # 5. Invoice back-matching  (links Frappe SI names to local sales)
+                try:
+                    from services.invoice_sync_services import sync_invoices_from_frappe
+                    r = sync_invoices_from_frappe()
+                    log.info(
+                        "[startup-sync] Invoices: %d matched, %d already set, %d unmatched",
+                        r.get("matched", 0), r.get("already_set", 0), r.get("unmatched", 0),
+                    )
+                except Exception as exc:
+                    log.warning("[startup-sync] Invoices error: %s", exc)
+
+                log.info("[startup-sync] ✅ All startup syncs complete.")
+
+        self._startup_sync_thread = _StartupSyncWorker(self)
+        self._startup_sync_thread.start()
+        
+        
+    def enter_laybye_mode(self):
+        """
+        Triggered by the Laybye button in the header.
+        Checks cart state and toggles the UI mode.
+        """
+        # 1. Check if the cart has items (assuming self.results or self.cart_table)
+        if self.results.rowCount() > 0:
+            confirm = QMessageBox.question(
+                self, 
+                "Switch to Laybye?", 
+                "The current cart must be cleared to start a Laybye. Proceed?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if confirm == QMessageBox.Yes:
+                self.results.setRowCount(0) # Clear the cart
+                self._update_totals()       # Refresh your total labels
+            else:
+                return # User cancelled, stay in normal mode
+
+        # 2. Update the Payment Button to 'Deposit' Mode
+        self._set_pay_button_mode(is_laybye=True)
+        
+        # 3. Visual Feedback
+        self.statusBar().showMessage("MODE: LAYBYE ACTIVE (Deposit Required)", 0)
+        self.statusBar().setStyleSheet(f"background-color: {ORANGE}; color: {WHITE};")
+    
+    # =========================================================================
     # SYNC ERROR HANDLER  (receives signals from SyncErrorBus)
     # =========================================================================
     def _on_sync_error(self, service: str, order_ref: str, message: str):
@@ -9195,8 +12636,9 @@ class MainWindow(QMainWindow):
 
         # Row 1: icon + title + close
         hrow = QHBoxLayout(); hrow.setSpacing(8)
-        icon_lbl = QLabel("❌")
-        icon_lbl.setStyleSheet("font-size:16px;")
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(qta.icon("fa5s.times-circle", color=DANGER).pixmap(16, 16))
+        icon_lbl.setStyleSheet("background:transparent;")
         _svc_map = {
             "SalesOrderUpload": "Sales Order Sync",
             "pos_upload":       "Invoice Sync",
@@ -9210,7 +12652,7 @@ class MainWindow(QMainWindow):
         title_lbl = QLabel(f"Sync Error — {svc_short}")
         title_lbl.setStyleSheet(
             f"font-size:12px; font-weight:bold; color:{WHITE};")
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton(); close_btn.setIcon(qta.icon("fa5s.times", color=MID))
         close_btn.setFixedSize(22, 22); close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet(f"""
             QPushButton {{ background:transparent;color:{MID};border:none;font-size:12px; }}
@@ -9236,7 +12678,7 @@ class MainWindow(QMainWindow):
 
         # Row 4: admin hint
         hint_lbl = QLabel(
-            "💡 Contact your administrator if this keeps happening.\n"
+            "Contact your administrator if this keeps happening.\n"
             "Check: Stock Settings → Stock Reservation,\n"
             "Company Defaults → Warehouse / Cash Account."
         )
@@ -9245,7 +12687,8 @@ class MainWindow(QMainWindow):
         tl.addWidget(hint_lbl)
 
         # Row 5: details button
-        details_btn = QPushButton(f"🔍  View unsynced {kind}s")
+        details_btn = QPushButton(f"View unsynced {kind}s")
+        details_btn.setIcon(qta.icon("fa5s.search", color="white"))
         details_btn.setFixedHeight(28); details_btn.setCursor(Qt.PointingHandCursor)
         details_btn.setStyleSheet(f"""
             QPushButton {{ background:{ACCENT};color:{WHITE};border:none;
@@ -9302,9 +12745,12 @@ class MainWindow(QMainWindow):
         sales_menu = mb.addMenu("Sales")
         for label, fn in [
             ("Sales Invoice List", self._pos_view._open_sales_list),
+            ("Sales Orders",       self._pos_view._open_sales_order_list),
             (None, None),
             ("Payments",           self._pos_view._open_customer_payment_entry),
-        ]:
+            (None, None),
+            ("Reprint Shift Reconciliation", self._open_shift_reprint),
+        ]:  
             if label is None:
                 sales_menu.addSeparator()
             else:
@@ -9345,11 +12791,12 @@ class MainWindow(QMainWindow):
             ("Price Lists",       _sd_action("PriceListDialog")),
             ("Customers",         _sd_action("CustomerDialog")),
             ("Users",             _sd_action("ManageUsersDialog")),
+            ("Category Visibility", lambda: CategoryVisibilityDialog(self).exec()),
             (None, None),
             ("Company Defaults",  self._open_company_defaults),
             ("POS Rules",         _sd_action("POSRulesDialog")),
             ("Hardware Settings", _sd_action("HardwareDialog")),
-            ("Advanced Printing", lambda: AdvanceSettingsDialog(self).exec()),
+            # ("Advanced Printing", lambda: AdvanceSettingsDialog(self).exec()),
             (None, None),
             ("Day Shift",         self._pos_view._open_day_shift),
             ("Sync Queue",        self._pos_view._open_sales_list),
@@ -9358,7 +12805,7 @@ class MainWindow(QMainWindow):
             (None, None),
             ("Products",          lambda: coming_soon(self, "Products")),
             ("Tax Settings",      lambda: coming_soon(self, "Tax Settings")),
-            ("Printer Setup",     lambda: coming_soon(self, "Printer Setup")),
+            ("Printer Setup",     lambda: MaintenanceDialog(self).exec()),
             ("Backup",            lambda: coming_soon(self, "Backup")),
         ]:
             if label is None:
@@ -9390,11 +12837,11 @@ class MainWindow(QMainWindow):
             from views.pages.company_defaults_page import CompanyDefaultsPage
             dlg = QDialog(self)
             dlg.setWindowTitle("Company Defaults")
-            dlg.setMinimumSize(1000, 700)
             dlg.setStyleSheet(f"QDialog {{ background: {OFF_WHITE}; }}")
             lay = QVBoxLayout(dlg)
             lay.setContentsMargins(0, 0, 0, 0)
             lay.addWidget(CompanyDefaultsPage())
+            dlg.setWindowState(Qt.WindowMaximized)
             dlg.exec()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open Company Defaults:\n{e}")
@@ -9429,32 +12876,59 @@ class MainWindow(QMainWindow):
             self, "Logout", "Logout and return to login screen?",
             QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            self.hide()
-            # Do NOT release the instance lock here.  The lock lives at class
-            # level for the whole process.  Releasing it would let a second
-            # EXE start before the login dialog finishes.
-            try:
-                from views.login_dialog import LoginDialog
-                dlg = LoginDialog()
-                if dlg.exec() == QDialog.Accepted:
-                    new_win = MainWindow(user=dlg.logged_in_user)
-                    new_win.show()
-                    # Keep a reference so the window is not garbage-collected.
-                    self._next_window = new_win
-                else:
-                    QApplication.quit()
-            except Exception:
-                QApplication.quit()
-            self.close()
-            
-            
-# =============================================================================
-# CUSTOMER PAYMENT ENTRY DIALOG (Requirement 3)
-# Updated with premium styled Payment Type dropdown selector
-# Just deducts from customer.laybye_balance or customer.outstanding_amount
-# =============================================================================
-class CustomerPaymentDialog(QDialog):
+            self._do_logout()
 
+    def _logout_after_shift_close(self):
+        """Shift was just reconciled — skip the "Logout?" confirmation and
+        return straight to the login screen so the next cashier can open
+        a new shift without the old one lingering."""
+        self._do_logout()
+
+    def _do_logout(self):
+        """Hide the current main window, show LoginDialog, on success launch
+        a fresh MainWindow. Shared by the user-initiated Logout button and
+        the automatic post-shift-close flow."""
+        self.hide()
+        # Do NOT release the instance lock here.  The lock lives at class
+        # level for the whole process.  Releasing it would let a second
+        # EXE start before the login dialog finishes.
+        try:
+            from views.login_dialog import LoginDialog
+            dlg = LoginDialog()
+            if dlg.exec() == QDialog.Accepted:
+                new_win = MainWindow(user=dlg.logged_in_user)
+                new_win.show()
+                # Keep a reference so the window is not garbage-collected.
+                self._next_window = new_win
+            else:
+                QApplication.quit()
+        except Exception:
+            QApplication.quit()
+        self.close()
+
+        
+# =============================================================================
+# CUSTOMER PAYMENT ENTRY DIALOG
+# Clean version - No confirmations, just save and close
+
+from PySide6.QtWidgets import (
+    QDialog, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
+    QPushButton, QLabel, QLineEdit, QFrame, QSizePolicy, QMessageBox,
+    QScrollArea, QDateEdit
+)
+from PySide6.QtCore import Qt, QLocale, QDate
+from PySide6.QtGui import QDoubleValidator
+import hashlib
+import json
+import time
+
+
+class CustomerPaymentDialog(QDialog):
+    """
+    Clean customer payment dialog using MOP structure.
+    No confirmations - saves payment and closes immediately.
+    """
+    
     _NAVY      = "#0d1f3c"
     _NAVY_2    = "#162d52"
     _NAVY_3    = "#1e3d6e"
@@ -9469,72 +12943,106 @@ class CustomerPaymentDialog(QDialog):
     _SUCCESS   = "#1a7a3c"
     _SUCCESS_H = "#1f9447"
     _DANGER    = "#b02020"
-    _AMBER     = "#c05a00"
+    _ORANGE    = "#c05a00"
 
     def __init__(self, parent=None, customer=None):
         super().__init__(parent)
-        self._customer       = customer
-        self._methods:       list[dict] = []
-        self._active_method: str        = ""
-        self._method_rows:   dict       = {}
-        self._payment_type:  str        = "outstanding"
-
-        self.setWindowTitle("Payment")
-        self.setMinimumSize(780, 520)
+        self._customer = customer
+        self._methods: list[dict] = []
+        self._active_method: str = ""
+        self._method_rows: dict = {}
+        self._payment_type: str = "outstanding"
+        self._processing_save = False
+        
+        self.setWindowTitle("Customer Payment")
+        self.setMinimumSize(860, 560)
         self.setModal(True)
         self.setWindowState(Qt.WindowMaximized)
-        self.setStyleSheet(
-            f"QDialog {{ background:{self._OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}"
-            f"QLabel   {{ background:transparent; color:{self._NAVY}; }}"
-        )
-        self._load_data()
+        
+        self._load_payment_methods()
         self._build_ui()
         self._refresh_balances()
-
-    # ── data loading ───────────────────────────────────────────────────────
-    def _load_data(self):
-        company = ""
-        try:
-            from models.company_defaults import get_defaults
-            company = (get_defaults() or {}).get("server_company", "")
-        except Exception:
-            pass
-
-        try:
-            from models.gl_account import get_all_accounts
-            all_accts = get_all_accounts()
-            accts = [a for a in all_accts if a.get("company") == company] or all_accts
-        except Exception:
-            accts = []
-
-        seen = set()
-        for a in accts:
-            curr  = (a.get("account_currency") or "USD").upper()
-            atype = (a.get("account_name") or a.get("name") or "Cash").strip()
-            key   = (atype.lower(), curr)
-            if key in seen:
-                continue
-            seen.add(key)
-            rate = 1.0
-            try:
-                from models.exchange_rate import get_rate
-                r = get_rate(curr, "USD")
-                if r:
-                    rate = float(r)
-            except Exception:
-                pass
-            self._methods.append({"label": atype, "currency": curr, "rate": rate})
-
-        if not self._methods:
-            self._methods = [
-                {"label": "Cash",       "currency": "USD", "rate": 1.0},
-                {"label": "Cash (ZIG)", "currency": "ZIG", "rate": 1.0},
-                {"label": "Card",       "currency": "USD", "rate": 1.0},
-                {"label": "Bank / EFT", "currency": "USD", "rate": 1.0},
-            ]
-
+        
         if self._methods:
             self._active_method = self._methods[0]["label"]
+            self._activate_method(self._active_method)
+
+    # =========================================================================
+    # Data Loading
+    # =========================================================================
+    
+    def _load_payment_methods(self):
+        """Load payment methods from modes_of_payment table."""
+        result = []
+        seen = set()
+        
+        try:
+            from database.db import get_connection, fetchall_dicts
+            conn = get_connection()
+            cur = conn.cursor()
+            
+            cur.execute("""
+                SELECT
+                    m.name            AS mop_name,
+                    m.gl_account      AS gl_account,
+                    m.account_currency AS currency
+                FROM modes_of_payment m
+                WHERE m.gl_account IS NOT NULL
+                  AND m.gl_account <> ''
+                  AND m.enabled = 1
+                ORDER BY m.name
+            """)
+            rows = fetchall_dicts(cur)
+            conn.close()
+            
+            for row in rows:
+                mop_name = (row.get("mop_name") or "").strip()
+                gl_account = (row.get("gl_account") or "").strip()
+                curr = (row.get("currency") or "USD").upper()
+                
+                if not mop_name or not gl_account:
+                    continue
+                
+                key = mop_name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                
+                rate = self._get_rate(curr, "USD")
+                
+                result.append({
+                    "label": mop_name,
+                    "mop_name": mop_name,
+                    "gl_account": gl_account,
+                    "currency": curr,
+                    "rate_to_usd": rate,
+                })
+                
+        except Exception as e:
+            print(f"Error loading payment methods: {e}")
+        
+        if not result:
+            result = [
+                {"label": "Cash", "mop_name": "Cash", "gl_account": "", "currency": "USD", "rate_to_usd": 1.0},
+                {"label": "Card", "mop_name": "Card", "gl_account": "", "currency": "USD", "rate_to_usd": 1.0},
+            ]
+        
+        self._methods = result
+
+    def _get_rate(self, from_currency: str, to_currency: str = "USD") -> float:
+        if from_currency.upper() == to_currency.upper():
+            return 1.0
+        try:
+            from models.exchange_rate import get_rate
+            r = get_rate(from_currency, to_currency)
+            if r:
+                return float(r)
+            inv = get_rate(to_currency, from_currency)
+            if inv and float(inv) > 0:
+                return 1.0 / float(inv)
+        except Exception:
+            pass
+        return 1.0
 
     def _refresh_balances(self):
         if not self._customer:
@@ -9544,239 +13052,153 @@ class CustomerPaymentDialog(QDialog):
             updated = get_customer_by_id(self._customer["id"])
             if updated:
                 self._customer = updated
-
+            
             outstanding = float(self._customer.get("outstanding_amount", 0))
-            laybye      = float(self._customer.get("laybye_balance", 0))
-
-            self._lbl_outstanding_bal.setText(f"${outstanding:,.2f}")
-            self._lbl_laybye_bal.setText(f"${laybye:,.2f}")
-            self._update_balance_highlights()
+            laybye = float(self._customer.get("laybye_balance", 0))
+            
+            self._lbl_outstanding_bal.setText(f"USD  {outstanding:,.2f}")
+            self._lbl_laybye_bal.setText(f"USD  {laybye:,.2f}")
+            self._update_due_amounts()
         except Exception as e:
             print(f"Error refreshing balances: {e}")
 
-    def _update_balance_highlights(self):
-        cust        = self._customer or {}
-        outstanding = float(cust.get("outstanding_amount", 0))
-        laybye      = float(cust.get("laybye_balance", 0))
-
-        # Outstanding — bold + colored when active, muted when not
-        if self._payment_type == "outstanding":
-            self._card_outstanding_title.setStyleSheet(
-                f"font-size:12px; color:{self._NAVY}; font-weight:600; background:transparent;"
-            )
-            self._lbl_outstanding_bal.setStyleSheet(
-                f"font-size:13px; font-weight:800; color:{self._NAVY}; background:transparent;"
-                f" font-family:'Courier New',monospace;"
-            )
-        else:
-            self._card_outstanding_title.setStyleSheet(
-                f"font-size:12px; color:{self._MUTED}; background:transparent;"
-            )
-            self._lbl_outstanding_bal.setStyleSheet(
-                f"font-size:13px; font-weight:500; color:{self._MUTED}; background:transparent;"
-                f" font-family:'Courier New',monospace;"
-            )
-
-        if self._payment_type == "laybye":
-            self._card_laybye_title.setStyleSheet(
-                f"font-size:12px; color:{self._NAVY}; font-weight:600; background:transparent;"
-            )
-            self._lbl_laybye_bal.setStyleSheet(
-                f"font-size:13px; font-weight:800; color:{self._NAVY}; background:transparent;"
-                f" font-family:'Courier New',monospace;"
-            )
-        else:
-            self._card_laybye_title.setStyleSheet(
-                f"font-size:12px; color:{self._MUTED}; background:transparent;"
-            )
-            self._lbl_laybye_bal.setStyleSheet(
-                f"font-size:13px; font-weight:500; color:{self._MUTED}; background:transparent;"
-                f" font-family:'Courier New',monospace;"
-            )
-
-    # ── UI ─────────────────────────────────────────────────────────────────
+    # =========================================================================
+    # UI Building
+    # =========================================================================
+    
     def _build_ui(self):
+        self.setStyleSheet(f"""
+            QDialog  {{ background:{self._OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}
+            QLabel   {{ background:transparent; color:{self._NAVY}; }}
+            QWidget  {{ background:{self._OFF_WHITE}; }}
+        """)
+        
         outer = QVBoxLayout(self)
         outer.setSpacing(0)
         outer.setContentsMargins(0, 0, 0, 0)
-
+        
         outer.addWidget(self._build_header())
         outer.addWidget(self._build_top_bar())
-
+        
         body_w = QWidget()
-        body_w.setStyleSheet(f"background:{self._OFF_WHITE};")
         body_l = QHBoxLayout(body_w)
-        body_l.setContentsMargins(24, 12, 24, 12)
+        body_l.setContentsMargins(24, 18, 24, 18)
         body_l.setSpacing(20)
         body_l.addLayout(self._build_left(), stretch=5)
-
+        
         sep = QFrame()
         sep.setFrameShape(QFrame.VLine)
         sep.setStyleSheet(f"background:{self._BORDER}; border:none;")
         sep.setFixedWidth(1)
         body_l.addWidget(sep)
-
+        
         body_l.addLayout(self._build_right(), stretch=4)
         outer.addWidget(body_w, stretch=1)
 
     def _build_header(self):
-        """Slim navy header — customer name + badge only."""
         hdr = QWidget()
         hdr.setFixedHeight(44)
         hdr.setStyleSheet(f"background:{self._NAVY};")
         hl = QHBoxLayout(hdr)
         hl.setContentsMargins(24, 0, 24, 0)
         hl.setSpacing(12)
-
+        
         name = (self._customer or {}).get("customer_name", "Unknown")
         name_lbl = QLabel(name)
-        name_lbl.setStyleSheet(
-            f"color:{self._WHITE}; font-size:14px; font-weight:700; letter-spacing:0.3px;"
-        )
+        name_lbl.setStyleSheet(f"color:{self._WHITE}; font-size:14px; font-weight:700;")
         hl.addWidget(name_lbl)
-
-        phone = (self._customer or {}).get("custom_telephone_number", "")
-        group = (self._customer or {}).get("customer_group_name", "")
-        if phone or group:
-            detail = QLabel(f"{phone}{'  ·  ' if phone and group else ''}{group}")
-            detail.setStyleSheet(
-                "color:rgba(255,255,255,0.45); font-size:11px; background:transparent;"
-            )
+        
+        phone = (self._customer or {}).get("mobile", "") or (self._customer or {}).get("custom_telephone_number", "")
+        if phone:
+            detail = QLabel(phone)
+            detail.setStyleSheet("color:rgba(255,255,255,0.45); font-size:11px;")
             hl.addWidget(detail)
-
+        
         hl.addStretch()
-
-        badge = QLabel("PAYMENT ENTRY")
+        
+        badge = QLabel("CUSTOMER PAYMENT")
         badge.setStyleSheet(
             f"background:rgba(255,255,255,0.10); color:rgba(255,255,255,0.65);"
             f" border:1px solid rgba(255,255,255,0.18); border-radius:4px;"
-            f" font-size:8px; font-weight:700; letter-spacing:1.2px; padding:3px 9px;"
+            f" font-size:8px; font-weight:700; padding:3px 9px;"
         )
         hl.addWidget(badge)
         return hdr
 
     def _build_top_bar(self):
-        """
-        Two-row bar — plain, no borders, no drama.
-          Row 1: Payment type selector (Outstanding / Laybye) + balances
-          Row 2: Date  |  Account  |  Ref
-        """
         bar = QWidget()
         bar.setFixedHeight(90)
         bar.setStyleSheet(f"background:{self._WHITE};")
         bl = QVBoxLayout(bar)
         bl.setContentsMargins(24, 10, 24, 10)
         bl.setSpacing(8)
-
-        # ── Row 1: type tabs + balances ───────────────────────────────────
+        
         row1 = QHBoxLayout()
         row1.setSpacing(0)
-
-        # Tab-style toggle — Outstanding
+        
         self._btn_outstanding = QPushButton("Outstanding")
         self._btn_outstanding.setFixedHeight(28)
         self._btn_outstanding.setCursor(Qt.PointingHandCursor)
         self._btn_outstanding.setFocusPolicy(Qt.NoFocus)
         self._btn_outstanding.clicked.connect(lambda: self._set_payment_type("outstanding"))
-
-        # Tab-style toggle — Laybye
+        
         self._btn_laybye = QPushButton("Laybye")
         self._btn_laybye.setFixedHeight(28)
         self._btn_laybye.setCursor(Qt.PointingHandCursor)
         self._btn_laybye.setFocusPolicy(Qt.NoFocus)
         self._btn_laybye.clicked.connect(lambda: self._set_payment_type("laybye"))
-
+        
         row1.addWidget(self._btn_outstanding)
         row1.addWidget(self._btn_laybye)
         row1.addSpacing(24)
-
-        # Outstanding balance — plain label pair
-        self._card_outstanding = QWidget()  # kept as attribute for compat
-        lout = QHBoxLayout(self._card_outstanding)
-        lout.setContentsMargins(0, 0, 0, 0)
-        lout.setSpacing(6)
-        self._card_outstanding_title = QLabel("Outstanding:")
-        self._card_outstanding_title.setStyleSheet(
-            f"font-size:12px; color:{self._MUTED}; background:transparent;"
-        )
-        self._lbl_outstanding_bal = QLabel("$0.00")
-        self._lbl_outstanding_bal.setStyleSheet(
-            f"font-size:13px; font-weight:700; color:{self._NAVY}; background:transparent;"
-            f" font-family:'Courier New',monospace;"
-        )
-        lout.addWidget(self._card_outstanding_title)
-        lout.addWidget(self._lbl_outstanding_bal)
-        row1.addWidget(self._card_outstanding)
+        
+        outstanding_lbl = QLabel("Outstanding:")
+        outstanding_lbl.setStyleSheet(f"font-size:12px; color:{self._MUTED};")
+        self._lbl_outstanding_bal = QLabel("USD  0.00")
+        self._lbl_outstanding_bal.setStyleSheet(f"font-size:13px; font-weight:700; color:{self._NAVY}; font-family:'Courier New',monospace;")
+        row1.addWidget(outstanding_lbl)
+        row1.addWidget(self._lbl_outstanding_bal)
         row1.addSpacing(20)
-
-        # Laybye balance — plain label pair
-        self._card_laybye = QWidget()
-        llay = QHBoxLayout(self._card_laybye)
-        llay.setContentsMargins(0, 0, 0, 0)
-        llay.setSpacing(6)
-        self._card_laybye_title = QLabel("Laybye:")
-        self._card_laybye_title.setStyleSheet(
-            f"font-size:12px; color:{self._MUTED}; background:transparent;"
-        )
-        self._lbl_laybye_bal = QLabel("$0.00")
-        self._lbl_laybye_bal.setStyleSheet(
-            f"font-size:13px; font-weight:700; color:{self._NAVY}; background:transparent;"
-            f" font-family:'Courier New',monospace;"
-        )
-        llay.addWidget(self._card_laybye_title)
-        llay.addWidget(self._lbl_laybye_bal)
-        row1.addWidget(self._card_laybye)
+        
+        laybye_lbl = QLabel("Laybye:")
+        laybye_lbl.setStyleSheet(f"font-size:12px; color:{self._MUTED};")
+        self._lbl_laybye_bal = QLabel("USD  0.00")
+        self._lbl_laybye_bal.setStyleSheet(f"font-size:13px; font-weight:700; color:{self._NAVY}; font-family:'Courier New',monospace;")
+        row1.addWidget(laybye_lbl)
+        row1.addWidget(self._lbl_laybye_bal)
         row1.addStretch()
         bl.addLayout(row1)
-
-        # ── Row 2: Date  |  Account  |  Ref ──────────────────────────────
+        
         row2 = QHBoxLayout()
         row2.setSpacing(10)
-
-        from PySide6.QtWidgets import QDateEdit, QComboBox
-        from PySide6.QtCore import QDate
-
+        
         self._date_edit = QDateEdit(QDate.currentDate())
         self._date_edit.setFixedHeight(28)
-        self._date_edit.setFixedWidth(110)
+        self._date_edit.setFixedWidth(120)
         self._date_edit.setCalendarPopup(True)
         self._date_edit.setDisplayFormat("dd/MM/yyyy")
         self._date_edit.setStyleSheet(self._input_style())
-
-        self._acct_combo = QComboBox()
-        self._acct_combo.setFixedHeight(28)
-        self._acct_combo.setFixedWidth(190)
-        for m in self._methods:
-            self._acct_combo.addItem(f"{m['label']}  ({m['currency']})", userData=m)
-        self._acct_combo.setStyleSheet(
-            f"QComboBox {{ background:{self._OFF_WHITE}; color:{self._NAVY};"
-            f" border:1px solid {self._BORDER}; border-radius:5px;"
-            f" font-size:12px; padding:0 9px; }}"
-            f"QComboBox::drop-down {{ border:none; width:16px; }}"
-            f"QComboBox QAbstractItemView {{ background:{self._WHITE}; border:1px solid {self._BORDER};"
-            f" selection-background-color:{self._ACCENT}; selection-color:{self._WHITE}; }}"
-        )
-        self._acct_combo.currentIndexChanged.connect(self._on_acct_changed)
-
+        
         self._ref_input = QLineEdit()
         self._ref_input.setFixedHeight(28)
-        self._ref_input.setFixedWidth(160)
-        self._ref_input.setPlaceholderText("Ref / Note")
+        self._ref_input.setFixedWidth(200)
+        self._ref_input.setPlaceholderText("Reference / Note")
         self._ref_input.setStyleSheet(self._input_style())
-
+        
+        row2.addWidget(QLabel("Date:"))
         row2.addWidget(self._date_edit)
-        row2.addWidget(self._acct_combo)
+        row2.addSpacing(20)
+        row2.addWidget(QLabel("Ref:"))
         row2.addWidget(self._ref_input)
         row2.addStretch()
         bl.addLayout(row2)
-
-        # apply initial tab styles
+        
         self._refresh_tab_styles()
         return bar
 
     def _input_style(self) -> str:
         return (
-            f"background:{self._OFF_WHITE}; color:{self._NAVY};"
+            f"background:{self._WHITE}; color:{self._NAVY};"
             f" border:1px solid {self._BORDER}; border-radius:5px;"
             f" font-size:12px; padding:0 9px;"
         )
@@ -9791,240 +13213,330 @@ class CustomerPaymentDialog(QDialog):
             f" border-radius:5px; font-size:12px; font-weight:500; padding:0 14px; }}"
             f"QPushButton:hover {{ color:{self._NAVY}; }}"
         )
-        self._btn_outstanding.setStyleSheet(
-            active_style if self._payment_type == "outstanding" else inactive_style
-        )
-        self._btn_laybye.setStyleSheet(
-            active_style if self._payment_type == "laybye" else inactive_style
-        )
+        self._btn_outstanding.setStyleSheet(active_style if self._payment_type == "outstanding" else inactive_style)
+        self._btn_laybye.setStyleSheet(active_style if self._payment_type == "laybye" else inactive_style)
 
     def _set_payment_type(self, ptype: str):
         self._payment_type = ptype
         self._refresh_tab_styles()
-        self._update_balance_highlights()
+        self._update_due_amounts()
 
-    # ── Left panel — payment methods ───────────────────────────────────────
     def _build_left(self):
         vbox = QVBoxLayout()
         vbox.setSpacing(6)
-
-        # Payment amount display card
+        
         amt_card = QFrame()
-        amt_card.setFixedHeight(50)
-        amt_card.setStyleSheet(
-            f"QFrame {{ background:{self._WHITE}; border:1.5px solid {self._BORDER}; border-radius:8px; }}"
-        )
+        amt_card.setFixedHeight(70)
+        amt_card.setStyleSheet(f"QFrame {{ background:{self._WHITE}; border:2px solid {self._BORDER}; border-radius:8px; }}")
         acl = QVBoxLayout(amt_card)
-        acl.setContentsMargins(16, 6, 16, 6)
-        acl.setSpacing(1)
-        cap = QLabel("AMOUNT  (USD)")
+        acl.setContentsMargins(16, 8, 16, 8)
+        acl.setSpacing(2)
+        cap = QLabel("TOTAL PAYMENT (USD)")
         cap.setAlignment(Qt.AlignCenter)
-        cap.setStyleSheet(
-            f"color:{self._MUTED}; font-size:8px; font-weight:700; letter-spacing:1.2px;"
-        )
+        cap.setStyleSheet(f"color:{self._MUTED}; font-size:9px; font-weight:700; letter-spacing:1px;")
         self._total_lbl = QLabel("0.00")
         self._total_lbl.setAlignment(Qt.AlignCenter)
-        self._total_lbl.setStyleSheet(
-            f"color:{self._NAVY}; font-size:22px; font-weight:800;"
-            f" font-family:'Courier New',monospace;"
-        )
+        self._total_lbl.setStyleSheet(f"color:{self._NAVY}; font-size:24px; font-weight:800; font-family:'Courier New',monospace;")
         acl.addWidget(cap)
         acl.addWidget(self._total_lbl)
         vbox.addWidget(amt_card)
-
-        # Column headers
+        vbox.addSpacing(8)
+        
         ch = QWidget()
-        ch.setFixedHeight(18)
+        ch.setFixedHeight(20)
         chl = QHBoxLayout(ch)
         chl.setContentsMargins(4, 0, 4, 0)
         for txt, st, al in [
-            ("METHOD",  4, Qt.AlignLeft),
-            ("CCY",     1, Qt.AlignCenter),
-            ("AMOUNT",  3, Qt.AlignRight),
+            ("MODE OF PAYMENT", 4, Qt.AlignLeft),
+            ("CCY", 1, Qt.AlignCenter),
+            ("AMOUNT", 3, Qt.AlignRight),
+            ("BALANCE DUE", 4, Qt.AlignRight),
         ]:
             lh = QLabel(txt)
-            lh.setStyleSheet(
-                f"color:{self._MUTED}; font-size:8px; font-weight:700; letter-spacing:0.8px;"
-            )
+            lh.setStyleSheet(f"color:{self._MUTED}; font-size:8px; font-weight:700; letter-spacing:0.8px;")
             lh.setAlignment(al)
             chl.addWidget(lh, st)
         vbox.addWidget(ch)
-
-        # Method rows
-        from PySide6.QtGui import QDoubleValidator
-        from PySide6.QtCore import QLocale as _QLocale
+        vbox.addSpacing(2)
+        
         validator = QDoubleValidator(0.0, 999999.99, 2)
-        validator.setLocale(_QLocale(_QLocale.English))
-
-        rows_w = QWidget()
-        rows_w.setStyleSheet("background:transparent;")
-        rows_l = QVBoxLayout(rows_w)
-        rows_l.setSpacing(3)
-        rows_l.setContentsMargins(0, 0, 0, 0)
-
-        for m in self._methods:
-            label = m["label"]
-            curr  = m["currency"]
-
-            rw = QWidget()
-            rw.setFixedHeight(34)
-            rw.setStyleSheet("background:transparent;")
-            rl = QHBoxLayout(rw)
-            rl.setContentsMargins(0, 0, 0, 0)
-            rl.setSpacing(5)
-
-            mb = QPushButton(label)
-            mb.setFixedHeight(28)
-            mb.setCursor(Qt.PointingHandCursor)
-            mb.setFocusPolicy(Qt.NoFocus)
-            mb.setStyleSheet(self._method_style(False))
-            mb.clicked.connect(lambda _, lbl=label: self._activate(lbl))
-
-            cb = QLabel(curr)
-            cb.setFixedSize(38, 28)
-            cb.setAlignment(Qt.AlignCenter)
-            cb.setStyleSheet(
-                f"background:{self._LIGHT}; color:{self._ACCENT}; border:1px solid {self._BORDER};"
-                f" border-radius:4px; font-size:9px; font-weight:700;"
-            )
-
-            ae = QLineEdit()
-            ae.setFixedHeight(28)
-            ae.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            ae.setValidator(validator)
-            ae.setStyleSheet(self._field_style(False))
-            ae.focusInEvent = lambda e, lbl=label, orig=ae.focusInEvent: (
-                self._activate(lbl, focus=False), orig(e))
-            ae.textChanged.connect(self._update_due)
-
-            rl.addWidget(mb, 4)
-            rl.addWidget(cb, 1)
-            rl.addWidget(ae, 3)
-            rows_l.addWidget(rw)
-            self._method_rows[label] = (mb, ae)
-
-        rows_l.addStretch(1)
-
-        sa = QScrollArea()
-        sa.setWidget(rows_w)
-        sa.setWidgetResizable(True)
-        sa.setFrameShape(QFrame.NoFrame)
-        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        sa.setStyleSheet("background:transparent;")
-        vbox.addWidget(sa, stretch=1)
-
+        validator.setLocale(QLocale(QLocale.English))
+        
+        for method in self._methods:
+            row_widget = self._create_method_row(method, validator)
+            vbox.addWidget(row_widget)
+        
+        vbox.addStretch(1)
         return vbox
 
-    # ── Right panel — numpad ───────────────────────────────────────────────
-    def _build_right(self):
-        vbox = QVBoxLayout()
-        vbox.setSpacing(6)
-
-        grid = QGridLayout()
-        grid.setSpacing(4)
-
-        BTN_H = 36  # compact fixed height for all numpad buttons
-
-        def _nb(text, kind="digit"):
-            btn = QPushButton(text)
-            btn.setFixedHeight(BTN_H)
-            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setFocusPolicy(Qt.NoFocus)
-            styles = {
-                "digit": (self._WHITE,  self._LIGHT,   self._NAVY),
-                "quick": (self._NAVY_3, self._NAVY_2,  self._WHITE),
-                "del":   (self._NAVY_2, self._NAVY_3,  self._WHITE),
-                "clear": ("#8c1515",    "#a81c1c",     self._WHITE),
-            }
-            bg, hov, fg = styles.get(kind, styles["digit"])
-            btn.setStyleSheet(
-                f"QPushButton {{ background:{bg}; color:{fg}; border:1px solid {self._BORDER};"
-                f" border-radius:4px; font-size:12px; font-weight:700; }}"
-                f"QPushButton:hover {{ background:{hov}; }}"
-                f"QPushButton:pressed {{ background:{self._NAVY_3}; color:{self._WHITE}; }}"
-            )
-            return btn
-
-        bback = _nb("⌫", "del");     bback.clicked.connect(self._nb_back);  grid.addWidget(bback, 0, 0)
-        bclr  = _nb("CLR", "clear"); bclr.clicked.connect(self._nb_clear);  grid.addWidget(bclr,  0, 1)
-        bcan  = _nb("Cancel", "clear"); bcan.clicked.connect(self.reject);   grid.addWidget(bcan, 0, 2, 1, 2)
-
-        for ri, (digs, qa) in enumerate([("789", 10), ("456", 20), ("123", 50), ("0.", 100)], 1):
-            for ci, d in enumerate(digs):
-                b = _nb(d); b.clicked.connect(lambda _, x=d: self._nb_press(x))
-                grid.addWidget(b, ri, ci)
-            qb = _nb(str(qa), "quick")
-            qb.clicked.connect(lambda _, a=qa: self._nb_quick(a))
-            grid.addWidget(qb, ri, 3)
-
-        for c in range(4): grid.setColumnStretch(c, 1)
-
-        vbox.addLayout(grid)
-        vbox.addSpacing(6)
-
-        bsave = QPushButton("Post Payment")
-        bsave.setFixedHeight(40)
-        bsave.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        bsave.setCursor(Qt.PointingHandCursor)
-        bsave.setStyleSheet(
-            f"QPushButton {{ background:{self._SUCCESS}; color:{self._WHITE}; border:none;"
-            f" border-radius:6px; font-size:13px; font-weight:700; letter-spacing:0.4px; }}"
-            f"QPushButton:hover {{ background:{self._SUCCESS_H}; }}"
-            f"QPushButton:pressed {{ background:#165f30; }}"
+    def _create_method_row(self, method: dict, validator):
+        label = method["label"]
+        curr = method["currency"]
+        
+        row = QWidget()
+        row.setFixedHeight(34)
+        row.setStyleSheet("background:transparent;")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 1, 0, 1)
+        layout.setSpacing(6)
+        
+        btn = QPushButton(f"  {label}")
+        btn.setFixedHeight(28)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setStyleSheet(self._method_btn_style(False))
+        btn.clicked.connect(lambda _, m=label: self._activate_method(m))
+        
+        curr_label = QLabel(curr)
+        curr_label.setFixedHeight(28)
+        curr_label.setFixedWidth(50)
+        curr_label.setAlignment(Qt.AlignCenter)
+        curr_label.setStyleSheet(
+            f"background:{self._LIGHT}; color:{self._ACCENT}; border:1px solid {self._BORDER};"
+            f" border-radius:5px; font-size:10px; font-weight:bold;"
         )
-        bsave.clicked.connect(self._save)
-        vbox.addWidget(bsave)
-        vbox.addStretch()
+        
+        amount_entry = QLineEdit()
+        amount_entry.setFixedHeight(28)
+        amount_entry.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        amount_entry.setValidator(validator)
+        amount_entry.setStyleSheet(self._field_style(False))
+        amount_entry.focusInEvent = lambda e, m=label, orig=amount_entry.focusInEvent: (
+            self._activate_method(m, focus_field=False), orig(e))
+        amount_entry.textChanged.connect(lambda: self._on_amount_changed())
+        
+        due_label = QLabel("—")
+        due_label.setFixedHeight(28)
+        due_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        due_label.setStyleSheet(
+            f"color:{self._NAVY}; font-size:11px; font-weight:bold;"
+            f" background:{self._WHITE}; border:1px solid {self._BORDER};"
+            f" border-radius:5px; padding:0 8px;"
+        )
+        
+        layout.addWidget(btn, 4)
+        layout.addWidget(curr_label, 1)
+        layout.addWidget(amount_entry, 3)
+        layout.addWidget(due_label, 4)
+        
+        self._method_rows[label] = (btn, amount_entry, due_label)
+        return row
 
-        return vbox
-
-    # ── Helpers ────────────────────────────────────────────────────────────
-    def _on_acct_changed(self, idx: int):
-        m = self._acct_combo.itemData(idx)
-        if m and m["label"] in self._method_rows:
-            self._activate(m["label"])
-
-    def _method_style(self, active: bool) -> str:
+    def _method_btn_style(self, active: bool) -> str:
         if active:
-            return (
-                f"QPushButton {{ background:{self._NAVY}; color:{self._WHITE}; border:none;"
-                f" border-radius:5px; font-size:12px; font-weight:700;"
-                f" text-align:left; padding:0 10px; }}"
-                f"QPushButton:hover {{ background:{self._NAVY_2}; }}"
-            )
-        return (
-            f"QPushButton {{ background:{self._WHITE}; color:{self._NAVY};"
-            f" border:1px solid {self._BORDER}; border-radius:5px;"
-            f" font-size:12px; font-weight:500; text-align:left; padding:0 10px; }}"
-            f"QPushButton:hover {{ background:{self._LIGHT}; }}"
-        )
+            return (f"QPushButton {{ background:{self._NAVY}; color:{self._WHITE}; border:none;"
+                    f" border-radius:5px; font-size:12px; font-weight:bold;"
+                    f" text-align:left; padding:0 12px; }}"
+                    f"QPushButton:hover {{ background:{self._NAVY_2}; }}")
+        return (f"QPushButton {{ background:{self._WHITE}; color:{self._NAVY};"
+                f" border:1px solid {self._BORDER}; border-radius:5px;"
+                f" font-size:12px; text-align:left; padding:0 12px; }}"
+                f"QPushButton:hover {{ background:{self._LIGHT}; }}")
 
     def _field_style(self, active: bool) -> str:
-        border = f"1.5px solid {self._NAVY}" if active else f"1px solid {self._BORDER}"
-        bg     = self._WHITE
-        return (
-            f"QLineEdit {{ background:{bg}; color:{self._NAVY};"
-            f" border:{border}; border-radius:5px;"
-            f" font-size:14px; font-weight:700; padding:0 8px; }}"
-        )
+        if active:
+            return (f"QLineEdit {{ background:{self._WHITE}; color:{self._NAVY};"
+                    f" border:2px solid {self._NAVY}; border-radius:5px;"
+                    f" font-size:14px; font-weight:bold; padding:0 10px; }}")
+        return (f"QLineEdit {{ background:{self._WHITE}; color:{self._NAVY};"
+                f" border:1px solid {self._BORDER}; border-radius:5px;"
+                f" font-size:14px; padding:0 10px; }}"
+                f"QLineEdit:focus {{ border:2px solid {self._NAVY}; }}")
 
-    def _activate(self, label: str, focus: bool = True):
+    def _activate_method(self, label: str, focus_field: bool = True):
         self._active_method = label
-        for lbl, (mb, ae) in self._method_rows.items():
-            mb.setStyleSheet(self._method_style(lbl == label))
-            ae.setStyleSheet(self._field_style(lbl == label))
-        if focus and label in self._method_rows:
+        for lbl, (btn, ae, _) in self._method_rows.items():
+            active = lbl == label
+            btn.setStyleSheet(self._method_btn_style(active))
+            ae.setStyleSheet(self._field_style(active))
+        if focus_field and label in self._method_rows:
             ae = self._method_rows[label][1]
-            ae.setFocus(); ae.selectAll()
+            ae.setFocus()
+            ae.selectAll()
 
     def _active_field(self) -> QLineEdit:
         if self._active_method in self._method_rows:
             return self._method_rows[self._active_method][1]
         return next(iter(self._method_rows.values()))[1]
 
-    # ── Numpad ─────────────────────────────────────────────────────────────
-    def _nb_press(self, key: str):
+    def _method_info(self, label: str):
+        for m in self._methods:
+            if m["label"] == label:
+                return m["currency"], m.get("rate_to_usd", 1.0), m.get("gl_account", "")
+        return "USD", 1.0, ""
+
+    # =========================================================================
+    # Amount Calculations
+    # =========================================================================
+    
+    def _get_paid_amount_native(self, label: str) -> float:
+        if label not in self._method_rows:
+            return 0.0
+        _, ae, _ = self._method_rows[label]
+        try:
+            return float(ae.text() or "0")
+        except ValueError:
+            return 0.0
+
+    def _get_paid_amount_usd(self, label: str) -> float:
+        native = self._get_paid_amount_native(label)
+        _, rate, _ = self._method_info(label)
+        return native * rate
+
+    def _get_total_paid_usd(self) -> float:
+        return sum(self._get_paid_amount_usd(m["label"]) for m in self._methods)
+
+    def _get_remaining_due_usd(self) -> float:
+        if not self._customer:
+            return 0.0
+        if self._payment_type == "laybye":
+            total_due = float(self._customer.get("laybye_balance", 0))
+        else:
+            total_due = float(self._customer.get("outstanding_amount", 0))
+        paid = self._get_total_paid_usd()
+        return max(total_due - paid, 0.0)
+
+    def _on_amount_changed(self):
+        self._update_total_display()
+        self._update_due_amounts()
+
+    def _update_total_display(self):
+        total_usd = self._get_total_paid_usd()
+        self._total_lbl.setText(f"{total_usd:,.2f}")
+
+    def _update_due_amounts(self):
+        remaining_usd = self._get_remaining_due_usd()
+        is_settled = remaining_usd <= 0.005
+        
+        for label in self._method_rows:
+            _, _, due_label = self._method_rows[label]
+            curr, rate, _ = self._method_info(label)
+            
+            if curr.upper() == "USD":
+                due_text = f"USD  {remaining_usd:.2f}"
+            else:
+                if rate > 0:
+                    native_due = remaining_usd / rate
+                else:
+                    native_due = remaining_usd
+                due_text = f"{curr}  {native_due:,.2f}"
+            
+            due_label.setText(due_text)
+            fg_color = self._SUCCESS if is_settled else self._NAVY
+            due_label.setStyleSheet(
+                f"color:{fg_color}; font-size:11px; font-weight:bold;"
+                f" background:{self._WHITE}; border:1px solid {self._BORDER};"
+                f" border-radius:5px; padding:0 8px;"
+            )
+
+    # =========================================================================
+    # Right Panel - Numpad
+    # =========================================================================
+    
+    def _build_right(self):
+        vbox = QVBoxLayout()
+        vbox.setSpacing(8)
+        
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        
+        def _numpad_btn(text, kind="digit"):
+            btn = QPushButton(text)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.NoFocus)
+            styles = {
+                "digit": (self._WHITE, self._LIGHT, self._NAVY),
+                "quick": (self._NAVY_3, self._NAVY_2, self._WHITE),
+                "del": (self._NAVY_2, self._NAVY_3, self._WHITE),
+                "clear": (self._DANGER, "#cc2828", self._WHITE),
+            }
+            bg, hov, fg = styles.get(kind, styles["digit"])
+            btn.setStyleSheet(
+                f"QPushButton {{ background:{bg}; color:{fg}; border:1px solid {self._BORDER};"
+                f" border-radius:6px; font-size:15px; font-weight:bold; }}"
+                f"QPushButton:hover {{ background:{hov}; }}"
+                f"QPushButton:pressed {{ background:{self._NAVY_3}; color:{self._WHITE}; }}"
+            )
+            return btn
+        
+        bback = _numpad_btn("", "del")
+        bback.setIcon(qta.icon("fa5s.backspace", color="white"))
+        bback.clicked.connect(self._numpad_back)
+        grid.addWidget(bback, 0, 0)
+        
+        bclr = _numpad_btn("Clear", "clear")
+        bclr.clicked.connect(self._numpad_clear)
+        grid.addWidget(bclr, 0, 1)
+        
+        bcan = _numpad_btn("Cancel", "clear")
+        bcan.clicked.connect(self.reject)
+        grid.addWidget(bcan, 0, 2, 1, 2)
+        
+        digit_rows = [["7","8","9"], ["4","5","6"], ["1","2","3"]]
+        quick_amts = [10, 20, 50, 100]
+        
+        for ri, digs in enumerate(digit_rows, 1):
+            for ci, d in enumerate(digs):
+                b = _numpad_btn(d, "digit")
+                b.clicked.connect(lambda _, x=d: self._numpad_press(x))
+                grid.addWidget(b, ri, ci)
+            qa = quick_amts[ri - 1]
+            qb = _numpad_btn(str(qa), "quick")
+            qb.clicked.connect(lambda _, a=qa: self._numpad_quick(a))
+            grid.addWidget(qb, ri, 3)
+        
+        b0 = _numpad_btn("0", "digit")
+        b0.clicked.connect(lambda: self._numpad_press("0"))
+        grid.addWidget(b0, 4, 0)
+        
+        b00 = _numpad_btn("00", "digit")
+        b00.clicked.connect(lambda: self._numpad_press_multi("00"))
+        grid.addWidget(b00, 4, 1)
+        
+        bdot = _numpad_btn(".", "digit")
+        bdot.clicked.connect(lambda: self._numpad_press("."))
+        grid.addWidget(bdot, 4, 2)
+        
+        qb100 = _numpad_btn("100", "quick")
+        qb100.clicked.connect(lambda: self._numpad_quick(100))
+        grid.addWidget(qb100, 4, 3)
+        
+        b000 = _numpad_btn("000", "digit")
+        b000.clicked.connect(lambda: self._numpad_press_multi("000"))
+        grid.addWidget(b000, 5, 0, 1, 3)
+        
+        for r in range(6):
+            grid.setRowMinimumHeight(r, 42)
+            grid.setRowStretch(r, 0)
+        for c in range(4):
+            grid.setColumnStretch(c, 1)
+        
+        vbox.addLayout(grid, stretch=0)
+        vbox.addSpacing(8)
+        
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"background:{self._BORDER}; border:none;")
+        sep.setFixedHeight(1)
+        vbox.addWidget(sep)
+        vbox.addSpacing(8)
+        
+        bsave = QPushButton("Post Payment")
+        bsave.setFixedHeight(52)
+        bsave.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        bsave.setCursor(Qt.PointingHandCursor)
+        bsave.setStyleSheet(
+            f"QPushButton {{ background:{self._SUCCESS}; color:{self._WHITE}; border:none;"
+            f" border-radius:6px; font-size:14px; font-weight:bold; }}"
+            f"QPushButton:hover {{ background:{self._SUCCESS_H}; }}"
+        )
+        bsave.clicked.connect(self._save)
+        vbox.addWidget(bsave, stretch=1)
+        
+        return vbox
+
+    def _numpad_press(self, key: str):
         f = self._active_field()
         cur = f.text()
         if key == ".":
@@ -10038,311 +13550,148 @@ class CustomerPaymentDialog(QDialog):
             elif len(ip) < 8:
                 f.setText(cur + key)
 
-    def _nb_back(self):
-        f = self._active_field(); f.setText(f.text()[:-1])
+    def _numpad_press_multi(self, digits: str):
+        for d in digits:
+            self._numpad_press(d)
 
-    def _nb_clear(self):
+    def _numpad_back(self):
+        f = self._active_field()
+        f.setText(f.text()[:-1])
+
+    def _numpad_clear(self):
         self._active_field().clear()
 
-    def _nb_quick(self, amt: int):
-        self._active_field().setText(f"{amt:.2f}")
+    def _numpad_quick(self, amt: int):
+        curr, rate, _ = self._method_info(self._active_method)
+        if curr.upper() != "USD" and rate > 0:
+            native = amt / rate
+            self._active_field().setText(f"{native:.2f}")
+        else:
+            self._active_field().setText(f"{amt:.2f}")
 
-    # ── Live total ─────────────────────────────────────────────────────────
-    def _get_paid_usd(self, label: str) -> float:
-        if label not in self._method_rows:
-            return 0.0
-        _, ae = self._method_rows[label]
-        try:
-            val = float(ae.text() or "0")
-        except ValueError:
-            val = 0.0
-        rate = next((m["rate"] for m in self._methods if m["label"] == label), 1.0)
-        return val * rate
-
-    def _update_due(self):
-        total_usd = sum(self._get_paid_usd(m["label"]) for m in self._methods)
-        self._total_lbl.setText(f"{total_usd:,.2f}")
-        color = self._SUCCESS if total_usd > 0 else self._NAVY
-        self._total_lbl.setStyleSheet(
-            f"color:{color}; font-size:22px; font-weight:800;"
-            f" font-family:'Courier New',monospace;"
-        )
-
-    # ── Save ───────────────────────────────────────────────────────────────
+    # =========================================================================
+    # Save Payment - NO CONFIRMATIONS
+    # =========================================================================
+    
     def _save(self):
-        if not self._customer:
-            QMessageBox.warning(self, "No Customer",
-                                "Please select a customer before recording a payment.")
+        """Save payment - no confirmations, just save and close."""
+        if self._processing_save:
             return
-
-        total_usd = sum(self._get_paid_usd(m["label"]) for m in self._methods)
+        
+        if not self._customer:
+            QMessageBox.warning(self, "No Customer", "Please select a customer.")
+            return
+        
+        total_usd = self._get_total_paid_usd()
         if total_usd <= 0:
-            QMessageBox.warning(self, "No Amount", "Please enter the payment amount.")
+            QMessageBox.warning(self, "No Amount", "Please enter a payment amount.")
             self._active_field().setFocus()
             return
+        
+        self._processing_save = True
+        
+        # Remove outer try and merge into the main one below
+        from models.payment import create_customer_payment
+        from database.db import get_connection
 
-        outstanding = float(self._customer.get("outstanding_amount", 0))
-        laybye      = float(self._customer.get("laybye_balance", 0))
-
-        if self._payment_type == "laybye":
-            if laybye <= 0:
-                QMessageBox.warning(self, "No Laybye Balance",
-                                    "This customer has no laybye balance to pay.")
-                return
-            if total_usd > laybye:
-                QMessageBox.warning(self, "Amount Exceeds Balance",
-                                    f"Payment (${total_usd:.2f}) exceeds laybye balance (${laybye:.2f}).")
-                return
-        else:
-            if total_usd > outstanding and outstanding > 0:
-                reply = QMessageBox.question(
-                    self, "Amount Exceeds Balance",
-                    f"Payment (${total_usd:.2f}) exceeds outstanding balance (${outstanding:.2f}).\n"
-                    f"This will create a credit. Continue?",
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-                )
-                if reply != QMessageBox.Yes:
-                    return
-
+        # Group methods into one recording with splits
         splits = []
-        for m in self._methods:
-            _, ae = self._method_rows[m["label"]]
-            try:
-                val = float(ae.text() or "0")
-            except ValueError:
-                val = 0.0
-            if val > 0:
+        total_usd_tendered = 0
+        
+        for method in self._methods:
+            native_amt = self._get_paid_amount_native(method["label"])
+            if native_amt > 0.005:
+                curr, rate, gl_account = self._method_info(method["label"])
+                usd_amt = self._get_paid_amount_usd(method["label"])
+                total_usd_tendered += usd_amt
                 splits.append({
-                    "method":     m["label"],
-                    "currency":   m["currency"],
-                    "amount":     val,
-                    "amount_usd": self._get_paid_usd(m["label"]),
+                    "method": method["label"],
+                    "currency": curr,
+                    "amount": native_amt,
+                    "amount_usd": usd_amt,
+                    "exchange_rate": rate
                 })
 
-        method_label = splits[0]["method"]   if len(splits) == 1 else "SPLIT"
-        currency     = splits[0]["currency"] if len(splits) == 1 else "USD"
-        payment_date = self._date_edit.date().toString("yyyy-MM-dd")
-        acct_data    = self._acct_combo.currentData() or {}
-        account_name = acct_data.get("label", method_label)
+        if not splits:
+            QMessageBox.warning(self, "No Payment", "Please enter a payment amount.")
+            self._processing_save = False
+            return
 
-        cashier_id = None
+
+        try:
+            from models.payment import create_customer_payment
+            
+            saved_ids = []
+            for split in splits:
+                curr, rate, gl_account = self._method_info(split["method"])
+                
+                payment_rec = create_customer_payment(
+                    customer_id=self._customer["id"],
+                    amount=split["amount"],
+                    currency=split["currency"],
+                    method=split["method"],
+                    account_name=gl_account, # Pass the GL account name
+                    reference=self._ref_input.text().strip(),
+                    cashier_id=self._get_cashier_id(),
+                    payment_date=self._date_edit.date().toString("yyyy-MM-dd"),
+                    payment_type=self._payment_type,
+                    amount_usd=split["amount_usd"],
+                    exchange_rate=split["exchange_rate"]
+                )
+
+                if payment_rec and payment_rec.get("id"):
+                    pid = payment_rec["id"]
+                    saved_ids.append(pid)
+                    
+                    # Sync to Frappe (non-blocking)
+                    try:
+                        from services.payment_upload_service import post_payment_entry_to_frappe
+                        import threading
+                        threading.Thread(target=post_payment_entry_to_frappe, args=(pid,)).start()
+                    except Exception as e:
+                        print(f"Sync trigger error: {e}")
+                    
+                    # Print THIS receipt
+                    try:
+                        from models.payment import print_customer_payment
+                        from PySide6.QtCore import QCoreApplication
+                        import time
+                        
+                        QCoreApplication.processEvents()
+                        print(f"DEBUG: Printing Payment ID {pid}")
+                        print_customer_payment(pid)
+                        time.sleep(2) # Give printer time to finish
+                    except Exception as e:
+                        print(f"Print error: {e}")
+
+            if saved_ids:
+                self.accept()
+            else:
+                QMessageBox.warning(self, "Error", "Failed to create payment records.")
+            
+        except Exception as e:
+            print(f"Error saving payment: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to save payment: {e}")
+        finally:
+            self._processing_save = False
+
+    def _get_cashier_id(self):
         try:
             p = self.parent()
             while p:
                 if hasattr(p, "user") and p.user:
-                    cashier_id = p.user.get("id")
-                    break
+                    return p.user.get("id")
                 p = p.parent()
         except Exception:
             pass
+        return None
 
-        payment_id = None
-        try:
-            from models.payment import create_customer_payment
-            from database.db import get_connection
-
-            payment = create_customer_payment(
-                customer_id  = self._customer["id"],
-                amount       = total_usd,
-                method       = method_label,
-                currency     = currency,
-                reference    = self._ref_input.text().strip(),
-                cashier_id   = cashier_id,
-                splits       = splits,
-                payment_date = payment_date,
-                account_name = account_name,
-            )
-            payment_id = payment.get("id") if payment else None
-
-            conn = get_connection()
-            cur  = conn.cursor()
-            if self._payment_type == "laybye":
-                cur.execute("""
-                    UPDATE customers
-                    SET laybye_balance = COALESCE(laybye_balance, 0) - ?
-                    WHERE id = ?
-                """, (total_usd, self._customer["id"]))
-            else:
-                cur.execute("""
-                    UPDATE customers
-                    SET outstanding_amount = COALESCE(outstanding_amount, 0) - ?
-                    WHERE id = ?
-                """, (total_usd, self._customer["id"]))
-            conn.commit()
-            conn.close()
-
-            from models.customer import get_customer_by_id
-            updated_customer = get_customer_by_id(self._customer["id"])
-            if updated_customer:
-                self._customer = updated_customer
-                self._refresh_balances()
-
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Could not save payment:\n{e}")
-            return
-
-        sync_status = "queued"
-        if payment_id:
-            try:
-                from services.payment_entry_service import post_payment_entry_to_frappe
-                result = post_payment_entry_to_frappe(payment_id)
-                sync_status = "posted" if result else "queued"
-            except Exception:
-                sync_status = "queued"
-
-        if payment_id:
-            self._print_payment_slip(payment_id, sync_status, splits=splits)
-
-        cname = self._customer.get("customer_name", "Customer")
-        if self._payment_type == "laybye":
-            new_balance = laybye - total_usd
-            QMessageBox.information(
-                self, "Payment Recorded",
-                f"USD {total_usd:.2f} laybye payment recorded for {cname}.\n"
-                f"Previous Laybye Balance: ${laybye:.2f}\n"
-                f"New Laybye Balance: ${new_balance:.2f}\n"
-                f"Sync: {sync_status}."
-            )
-        else:
-            new_balance = outstanding - total_usd
-            QMessageBox.information(
-                self, "Payment Recorded",
-                f"USD {total_usd:.2f} payment recorded for {cname}.\n"
-                f"Previous Outstanding Balance: ${outstanding:.2f}\n"
-                f"New Outstanding Balance: ${new_balance:.2f}\n"
-                f"Sync: {sync_status}."
-            )
-        self.accept()
-
-    def _print_payment_slip(self, payment_id, sync_status: str = "queued", splits: list = None):
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
-        from PySide6.QtGui import QFont
-        import json as _json
-
-        payment_data = {}
-        try:
-            from models.payment import get_payment_by_id
-            payment_data = get_payment_by_id(payment_id) or {}
-        except Exception:
-            pass
-
-        try:
-            from models.payment import print_customer_payment
-            print_customer_payment(payment_id)
-        except Exception as e:
-            print(f"Thermal Print Error: {e}")
-
-        cname    = self._customer.get("customer_name", "") if self._customer else payment_data.get("customer_name", "Customer")
-        amount   = float(payment_data.get("amount", 0))
-        ref      = payment_data.get("reference", "") or ""
-        pdate    = payment_data.get("payment_date") or self._date_edit.date().toString("yyyy-MM-dd")
-        p_id_str = f"PAY-{payment_id:05d}" if payment_id else "NEW"
-
-        outstanding = float(self._customer.get("outstanding_amount", 0))
-        laybye      = float(self._customer.get("laybye_balance", 0))
-
-        # ── Resolve splits ────────────────────────────────────────────────
-        # Priority: live splits passed from _save → splits stored in payment_data
-        if not splits:
-            raw = payment_data.get("splits") or []
-            if isinstance(raw, str):
-                try:
-                    raw = _json.loads(raw)
-                except Exception:
-                    raw = []
-            splits = raw if isinstance(raw, list) else []
-
-        # Last resort: build a single-entry split from top-level payment fields
-        if not splits:
-            splits = [{
-                "method":   payment_data.get("method", "Payment"),
-                "currency": payment_data.get("currency", "USD"),
-                "amount":   amount,
-            }]
-
-        W = 42
-
-        def _row(label: str, value: str) -> str:
-            """Left-align label, right-align value within W chars."""
-            space = W - len(label) - len(value)
-            return f"{label}{'.' * max(space, 1)}{value}"
-
-        # Build per-method lines — always explicit, never "SPLIT"
-        method_lines = []
-        for s in splits:
-            lbl  = s.get("method", "Payment")
-            curr = s.get("currency", "USD")
-            amt  = float(s.get("amount", 0))
-            method_lines.append(_row(f"  {lbl}", f"{curr} {amt:,.2f}"))
-
-        ptype_label = "LAYBYE PAYMENT" if self._payment_type == "laybye" else "OUTSTANDING BAL"
-        balance_val = f"${laybye:,.2f}" if self._payment_type == "laybye" else f"${outstanding:,.2f}"
-
-        lines = [
-            "=" * W,
-            "  HAVANO POS — PAYMENT RECEIPT".center(W),
-            "=" * W,
-            _row("  Receipt", p_id_str),
-            _row("  Date   ", pdate),
-            _row("  Customer", cname[:20]),
-            _row("  Type   ", ptype_label),
-            "-" * W,
-            "  PAYMENT BREAKDOWN",
-            "-" * W,
-        ]
-        lines += method_lines
-        lines += [
-            "-" * W,
-            _row("  TOTAL PAID", f"USD {amount:,.2f}"),
-            _row("  Balance   ", balance_val),
-        ]
-        if ref:
-            lines.append(_row("  Ref", ref))
-        lines += [
-            "-" * W,
-            _row("  Sync", sync_status.upper()),
-            "=" * W,
-            "",
-            "  Thank you for your payment!".center(W),
-        ]
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Payment Receipt")
-        dlg.setMinimumSize(360, 400)
-        dlg.setStyleSheet(f"QDialog {{ background:{self._WHITE}; }}")
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(14, 14, 14, 14)
-        lay.setSpacing(10)
-
-        txt = QTextEdit()
-        txt.setReadOnly(True)
-        txt.setFont(QFont("Courier New", 10))
-        txt.setPlainText("\n".join(lines))
-        txt.setStyleSheet(
-            f"QTextEdit {{ background:{self._WHITE}; color:{self._NAVY};"
-            f" border:1px solid {self._BORDER}; border-radius:4px; }}"
-        )
-        lay.addWidget(txt, 1)
-
-        close_btn = QPushButton("Close")
-        close_btn.setFixedHeight(34)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setStyleSheet(
-            f"QPushButton {{ background:{self._NAVY}; color:{self._WHITE}; border:none;"
-            f" border-radius:5px; font-size:12px; font-weight:700; padding:0 18px; }}"
-            f"QPushButton:hover {{ background:{self._NAVY_2}; }}"
-        )
-        close_btn.clicked.connect(dlg.accept)
-        br = QHBoxLayout()
-        br.addStretch()
-        br.addWidget(close_btn)
-        lay.addLayout(br)
-        dlg.exec()
-
-    # ── Keyboard ───────────────────────────────────────────────────────────
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.reject()
+        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if self._get_total_paid_usd() > 0:
+                self._save()
         else:
             super().keyPressEvent(event)
 
@@ -10350,959 +13699,100 @@ class CustomerPaymentDialog(QDialog):
         super().showEvent(event)
         self._refresh_balances()
         if self._active_method:
-            self._activate(self._active_method)
- # =============================================================================
-# # CUSTOMER PAYMENT ENTRY DIALOG (Requirement 3)
-# # =============================================================================
-# # =============================================================================
-# # CUSTOMER PAYMENT ENTRY DIALOG (Requirement 3)
-# # Updated with simple Laybye vs Outstanding Balance toggle
-# # Just deducts from customer.laybye_balance or customer.outstanding_amount
-# # =============================================================================
-# class CustomerPaymentDialog(QDialog):
-#     """
-#     Full customer payment entry dialog.
-#     - Customer search at top (pre-filled if selected on POS)
-#     - Toggle between Laybye Payment and Outstanding Balance Payment
-#     - Payment methods pulled from GL accounts (same as PaymentDialog)
-#     - Numpad for amount entry
-#     - Saves to local DB + queues for Frappe sync
-#     - Automatically deducts from customer.laybye_balance or customer.outstanding_amount
-#     """
-
-#     # ── colours (same palette as rest of main_window) ─────────────────────
-#     _NAVY      = "#0d1f3c"
-#     _NAVY_2    = "#162d52"
-#     _NAVY_3    = "#1e3d6e"
-#     _ACCENT    = "#1a5fb4"
-#     _ACCENT_H  = "#1c6dd0"
-#     _WHITE     = "#ffffff"
-#     _OFF_WHITE = "#f5f8fc"
-#     _LIGHT     = "#e4eaf4"
-#     _MID       = "#8fa8c8"
-#     _MUTED     = "#5a7a9a"
-#     _BORDER    = "#c8d8ec"
-#     _SUCCESS   = "#1a7a3c"
-#     _SUCCESS_H = "#1f9447"
-#     _DANGER    = "#b02020"
-#     _DANGER_H  = "#cc2828"
-#     _AMBER     = "#c05a00"
-#     _ORANGE    = "#b06000"
-
-#     def __init__(self, parent=None, customer=None):
-#         super().__init__(parent)
-#         self._customer   = customer   # always set — enforced by caller
-#         self._methods:    list[dict] = []
-#         self._active_method: str     = ""
-#         self._method_rows: dict      = {}   # label → (btn, QLineEdit)
-
-#         self.setWindowTitle("Customer Payment Entry")
-#         self.setMinimumSize(820, 580)
-#         self.setModal(True)
-#         self.setWindowState(Qt.WindowMaximized)
-#         self.setStyleSheet(
-#             f"QDialog {{ background:{self._OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}"
-#             f"QLabel   {{ background:transparent; color:{self._NAVY}; }}"
-#         )
-#         self._load_data()
-#         self._build_ui()
-#         self._refresh_balances()
-
-#     # ── data loading ──────────────────────────────────────────────────────
-#     def _load_data(self):
-#         company = ""
-#         try:
-#             from models.company_defaults import get_defaults
-#             company = (get_defaults() or {}).get("server_company", "")
-#         except Exception:
-#             pass
-
-#         try:
-#             from models.gl_account import get_all_accounts
-#             all_accts = get_all_accounts()
-#             accts = [a for a in all_accts if a.get("company") == company] or all_accts
-#         except Exception:
-#             accts = []
-
-#         seen = set()
-#         for a in accts:
-#             curr  = (a.get("account_currency") or "USD").upper()
-#             atype = (a.get("account_name") or a.get("name") or "Cash").strip()
-#             key   = (atype.lower(), curr)
-#             if key in seen:
-#                 continue
-#             seen.add(key)
-#             rate = 1.0
-#             try:
-#                 from models.exchange_rate import get_rate
-#                 r = get_rate(curr, "USD")
-#                 if r:
-#                     rate = float(r)
-#             except Exception:
-#                 pass
-#             self._methods.append({"label": atype, "currency": curr, "rate": rate})
-
-#         if not self._methods:
-#             self._methods = [
-#                 {"label": "Cash",       "currency": "USD", "rate": 1.0},
-#                 {"label": "Cash (ZIG)", "currency": "ZIG", "rate": 1.0},
-#                 {"label": "Card",       "currency": "USD", "rate": 1.0},
-#                 {"label": "Bank / EFT", "currency": "USD", "rate": 1.0},
-#             ]
-
-#         if self._methods:
-#             self._active_method = self._methods[0]["label"]
-
-#     def _refresh_balances(self):
-#         """Refresh both outstanding and laybye balances from the customer record."""
-#         if not self._customer:
-#             return
-        
-#         try:
-#             from models.customer import get_customer_by_id
-#             updated = get_customer_by_id(self._customer["id"])
-#             if updated:
-#                 self._customer = updated
-            
-#             outstanding = float(self._customer.get("outstanding_amount", 0))
-#             laybye = float(self._customer.get("laybye_balance", 0))
-            
-#             self._lbl_outstanding_bal.setText(f"${outstanding:.2f}")
-#             color = self._DANGER if outstanding > 0 else self._SUCCESS
-#             self._lbl_outstanding_bal.setStyleSheet(f"font-size:13px; font-weight:bold; color:{color};")
-            
-#             self._lbl_laybye_bal.setText(f"${laybye:.2f}")
-#             color = self._DANGER if laybye > 0 else self._SUCCESS
-#             self._lbl_laybye_bal.setStyleSheet(f"font-size:13px; font-weight:bold; color:{color};")
-#         except Exception as e:
-#             print(f"Error refreshing balances: {e}")
-
-#     # ── UI ────────────────────────────────────────────────────────────────
-#     def _build_ui(self):
-#         outer = QVBoxLayout(self)
-#         outer.setSpacing(0)
-#         outer.setContentsMargins(0, 0, 0, 0)
-
-#         # header bar
-#         hdr = QWidget()
-#         hdr.setFixedHeight(52)
-#         hdr.setStyleSheet(f"background:{self._WHITE}; border-bottom:2px solid {self._BORDER};")
-#         hl = QHBoxLayout(hdr)
-#         hl.setContentsMargins(28, 0, 28, 0)
-#         title = QLabel("💰  Customer Payment Entry")
-#         title.setStyleSheet(f"color:{self._NAVY}; font-size:17px; font-weight:bold;")
-#         hint = QLabel("Select payment type · Enter amount · Save")
-#         hint.setStyleSheet(f"color:{self._MUTED}; font-size:10px;")
-#         hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-#         hl.addWidget(title)
-#         hl.addStretch()
-#         hl.addWidget(hint)
-#         outer.addWidget(hdr)
-
-#         # customer display bar
-#         outer.addWidget(self._build_customer_bar())
-
-#         # body — left (methods) + right (numpad)
-#         body_w = QWidget()
-#         body_w.setStyleSheet(f"background:{self._OFF_WHITE};")
-#         body_l = QHBoxLayout(body_w)
-#         body_l.setContentsMargins(32, 20, 32, 20)
-#         body_l.setSpacing(28)
-#         body_l.addLayout(self._build_left(), stretch=5)
-
-#         sep = QFrame()
-#         sep.setFrameShape(QFrame.VLine)
-#         sep.setStyleSheet(f"background:{self._BORDER}; border:none;")
-#         sep.setFixedWidth(1)
-#         body_l.addWidget(sep)
-
-#         body_l.addLayout(self._build_right(), stretch=4)
-#         outer.addWidget(body_w, stretch=1)
-
-#     def _build_customer_bar(self):
-#         """Fixed customer display with payment type toggle and balances."""
-#         bar = QWidget()
-#         bar.setFixedHeight(90)
-#         bar.setStyleSheet(
-#             f"background:{self._LIGHT}; border-bottom:1px solid {self._BORDER};"
-#         )
-#         bl = QVBoxLayout(bar)
-#         bl.setContentsMargins(28, 8, 28, 8)
-#         bl.setSpacing(8)
-
-#         # Top row: Customer info
-#         top_row = QHBoxLayout()
-        
-#         icon = QLabel("👤")
-#         icon.setStyleSheet("font-size:20px; background:transparent;")
-#         top_row.addWidget(icon)
-
-#         name = self._customer.get("customer_name", "Unknown") if self._customer else "Unknown"
-#         phone = self._customer.get("custom_telephone_number", "") if self._customer else ""
-#         group = self._customer.get("customer_group_name", "") if self._customer else ""
-
-#         name_lbl = QLabel(name)
-#         name_lbl.setStyleSheet(
-#             f"font-size:15px; font-weight:bold; color:{self._NAVY}; background:transparent;"
-#         )
-#         top_row.addWidget(name_lbl)
-
-#         if phone or group:
-#             detail = QLabel(f"{phone}{'  ·  ' if phone and group else ''}{group}")
-#             detail.setStyleSheet(f"font-size:11px; color:{self._MUTED}; background:transparent;")
-#             top_row.addWidget(detail)
-
-#         top_row.addStretch()
-        
-#         badge = QLabel("PAYMENT ENTRY")
-#         badge.setStyleSheet(
-#             f"background:{self._ACCENT}; color:{self._WHITE}; border-radius:4px;"
-#             f" font-size:10px; font-weight:bold; padding:3px 10px;"
-#         )
-#         top_row.addWidget(badge)
-        
-#         bl.addLayout(top_row)
-
-#         # Bottom row: Payment Type Toggle + Balances
-#         bottom_row = QHBoxLayout()
-#         bottom_row.setSpacing(20)
-
-#         # Payment type toggle
-#         payment_type_group = QWidget()
-#         payment_type_group.setStyleSheet("background:transparent;")
-#         pt_layout = QHBoxLayout(payment_type_group)
-#         pt_layout.setSpacing(0)
-#         pt_layout.setContentsMargins(0, 0, 0, 0)
-
-#         self._btn_outstanding = QPushButton("Outstanding Balance")
-#         self._btn_laybye = QPushButton("Laybye Payment")
-
-#         for btn in (self._btn_outstanding, self._btn_laybye):
-#             btn.setCheckable(True)
-#             btn.setFixedHeight(32)
-#             btn.setCursor(Qt.PointingHandCursor)
-#             btn.setStyleSheet("""
-#                 QPushButton {
-#                     background: #f0f0f0;
-#                     color: #555;
-#                     border: 1px solid #ccc;
-#                     padding: 0 15px;
-#                     font-size: 11px;
-#                     font-weight: bold;
-#                 }
-#                 QPushButton:checked {
-#                     background: #1a5fb4;
-#                     color: white;
-#                     border: 1px solid #1a5fb4;
-#                 }
-#             """)
-
-#         self._btn_outstanding.setChecked(True)
-#         self._btn_outstanding.clicked.connect(lambda: self._set_payment_type("outstanding"))
-#         self._btn_laybye.clicked.connect(lambda: self._set_payment_type("laybye"))
-
-#         pt_layout.addWidget(self._btn_outstanding)
-#         pt_layout.addWidget(self._btn_laybye)
-#         bottom_row.addWidget(payment_type_group)
-
-#         # Separator
-#         sep_line = QFrame()
-#         sep_line.setFrameShape(QFrame.VLine)
-#         sep_line.setStyleSheet(f"background:{self._BORDER};")
-#         sep_line.setFixedWidth(1)
-#         sep_line.setFixedHeight(32)
-#         bottom_row.addWidget(sep_line)
-
-#         # Balances display
-#         balances_widget = QWidget()
-#         balances_layout = QHBoxLayout(balances_widget)
-#         balances_layout.setSpacing(20)
-#         balances_layout.setContentsMargins(0, 0, 0, 0)
-
-#         # Outstanding balance display
-#         outstanding_widget = QWidget()
-#         out_layout = QHBoxLayout(outstanding_widget)
-#         out_layout.setSpacing(6)
-#         out_layout.setContentsMargins(0, 0, 0, 0)
-#         out_label = QLabel("Outstanding:")
-#         out_label.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
-#         self._lbl_outstanding_bal = QLabel("$0.00")
-#         self._lbl_outstanding_bal.setStyleSheet(f"font-size:12px; font-weight:bold; color:{self._NAVY};")
-#         out_layout.addWidget(out_label)
-#         out_layout.addWidget(self._lbl_outstanding_bal)
-        
-#         # Laybye balance display
-#         laybye_widget = QWidget()
-#         laybye_layout = QHBoxLayout(laybye_widget)
-#         laybye_layout.setSpacing(6)
-#         laybye_layout.setContentsMargins(0, 0, 0, 0)
-#         laybye_label = QLabel("Laybye:")
-#         laybye_label.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
-#         self._lbl_laybye_bal = QLabel("$0.00")
-#         self._lbl_laybye_bal.setStyleSheet(f"font-size:12px; font-weight:bold; color:{self._NAVY};")
-#         laybye_layout.addWidget(laybye_label)
-#         laybye_layout.addWidget(self._lbl_laybye_bal)
-        
-#         balances_layout.addWidget(outstanding_widget)
-#         balances_layout.addWidget(laybye_widget)
-#         bottom_row.addWidget(balances_widget)
-        
-#         bottom_row.addStretch()
-#         bl.addLayout(bottom_row)
-
-#         return bar
-
-#     def _set_payment_type(self, ptype: str):
-#         """Toggle between Outstanding Balance and Laybye payment modes."""
-#         self._payment_type = ptype
-#         if ptype == "laybye":
-#             self._info_label.setText("💰  Enter amount to pay toward laybye balance")
-#             self._info_label.setStyleSheet(f"color:{self._AMBER}; font-size:11px; margin-top:5px;")
-#         else:
-#             self._info_label.setText("💰  Enter amount to pay toward outstanding balance")
-#             self._info_label.setStyleSheet(f"color:{self._ACCENT}; font-size:11px; margin-top:5px;")
-
-#     # ── left panel — payment methods ──────────────────────────────────────
-#     def _build_left(self):
-#         vbox = QVBoxLayout()
-#         vbox.setSpacing(10)
-
-#         # ── Date field ────────────────────────────────────────────────────────
-#         from PySide6.QtWidgets import QDateEdit
-#         from PySide6.QtCore import QDate
-#         date_row = QHBoxLayout()
-#         date_lbl = QLabel("Date:")
-#         date_lbl.setFixedWidth(80)
-#         date_lbl.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
-#         self._date_edit = QDateEdit(QDate.currentDate())
-#         self._date_edit.setFixedHeight(32)
-#         self._date_edit.setCalendarPopup(True)
-#         self._date_edit.setDisplayFormat("dd/MM/yyyy")
-#         self._date_edit.setStyleSheet(
-#             f"QDateEdit {{ background:{self._WHITE}; color:{self._NAVY};"
-#             f" border:1px solid {self._BORDER}; border-radius:6px;"
-#             f" font-size:12px; padding:0 10px; }}"
-#             f"QDateEdit:focus {{ border:2px solid {self._ACCENT}; }}"
-#         )
-#         date_row.addWidget(date_lbl)
-#         date_row.addWidget(self._date_edit, 1)
-#         vbox.addLayout(date_row)
-
-#         # ── Account (mode of payment) selector ────────────────────────────────
-#         acct_row = QHBoxLayout()
-#         acct_lbl = QLabel("Account:")
-#         acct_lbl.setFixedWidth(80)
-#         acct_lbl.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
-#         self._acct_combo = QComboBox()
-#         self._acct_combo.setFixedHeight(32)
-#         for m in self._methods:
-#             self._acct_combo.addItem(f"{m['label']}  ({m['currency']})", userData=m)
-#         self._acct_combo.setStyleSheet(
-#             f"QComboBox {{ background:{self._WHITE}; color:{self._NAVY};"
-#             f" border:1px solid {self._BORDER}; border-radius:6px;"
-#             f" font-size:12px; padding:0 10px; }}"
-#             f"QComboBox::drop-down {{ border:none; width:20px; }}"
-#             f"QComboBox QAbstractItemView {{ background:{self._WHITE}; border:1px solid {self._BORDER};"
-#             f" selection-background-color:{self._ACCENT}; selection-color:{self._WHITE}; }}"
-#         )
-#         self._acct_combo.currentIndexChanged.connect(self._on_acct_changed)
-#         acct_row.addWidget(acct_lbl)
-#         acct_row.addWidget(self._acct_combo, 1)
-#         vbox.addLayout(acct_row)
-
-#         # Info label for payment type
-#         self._info_label = QLabel("💰  Enter amount to pay toward outstanding balance")
-#         self._info_label.setStyleSheet(f"color:{self._ACCENT}; font-size:11px; margin-top:5px;")
-#         vbox.addWidget(self._info_label)
-
-#         # amount card
-#         cards = QHBoxLayout()
-#         cards.setSpacing(10)
-#         amt_card = QFrame()
-#         amt_card.setFixedHeight(72)
-#         amt_card.setStyleSheet(
-#             f"QFrame {{ background:{self._WHITE}; border:2px solid {self._BORDER}; border-radius:8px; }}"
-#         )
-#         acl = QVBoxLayout(amt_card)
-#         acl.setContentsMargins(14, 6, 14, 6)
-#         cap = QLabel("PAYMENT AMOUNT")
-#         cap.setAlignment(Qt.AlignCenter)
-#         cap.setStyleSheet(
-#             f"color:{self._MUTED}; font-size:9px; font-weight:bold; letter-spacing:1px;"
-#         )
-#         self._total_lbl = QLabel("USD  0.00")
-#         self._total_lbl.setAlignment(Qt.AlignCenter)
-#         self._total_lbl.setStyleSheet(
-#             f"color:{self._NAVY}; font-size:20px; font-weight:bold;"
-#             f" font-family:'Courier New',monospace;"
-#         )
-#         acl.addWidget(cap)
-#         acl.addWidget(self._total_lbl)
-#         cards.addWidget(amt_card)
-#         vbox.addLayout(cards)
-
-#         # reference field
-#         ref_row = QHBoxLayout()
-#         ref_lbl = QLabel("Ref / Note:")
-#         ref_lbl.setFixedWidth(80)
-#         ref_lbl.setStyleSheet(f"font-size:11px; color:{self._MUTED}; font-weight:bold;")
-#         self._ref_input = QLineEdit()
-#         self._ref_input.setFixedHeight(32)
-#         self._ref_input.setPlaceholderText("Receipt / cheque number (optional)")
-#         self._ref_input.setStyleSheet(
-#             f"QLineEdit {{ background:{self._WHITE}; color:{self._NAVY};"
-#             f" border:1px solid {self._BORDER}; border-radius:6px;"
-#             f" font-size:12px; padding:0 10px; }}"
-#             f"QLineEdit:focus {{ border:2px solid {self._ACCENT}; }}"
-#         )
-#         ref_row.addWidget(ref_lbl)
-#         ref_row.addWidget(self._ref_input, 1)
-#         vbox.addLayout(ref_row)
-
-#         # column headers
-#         ch = QWidget()
-#         ch.setFixedHeight(18)
-#         ch.setStyleSheet("background:transparent;")
-#         chl = QHBoxLayout(ch)
-#         chl.setContentsMargins(0, 0, 0, 0)
-#         for txt, st, al in [
-#             ("MODE OF PAYMENT", 4, Qt.AlignLeft),
-#             ("CCY",             1, Qt.AlignCenter),
-#             ("AMOUNT",         3, Qt.AlignRight),
-#         ]:
-#             l = QLabel(txt)
-#             l.setStyleSheet(
-#                 f"color:{self._MUTED}; font-size:9px; font-weight:bold; letter-spacing:0.7px;"
-#             )
-#             l.setAlignment(al)
-#             chl.addWidget(l, st)
-#         vbox.addWidget(ch)
-
-#         # method rows
-#         from PySide6.QtGui import QDoubleValidator
-#         from PySide6.QtCore import QLocale as _QLocale
-#         validator = QDoubleValidator(0.0, 999999.99, 2)
-#         validator.setLocale(_QLocale(_QLocale.English))
-
-#         rows_w = QWidget()
-#         rows_w.setStyleSheet("background:transparent;")
-#         rows_l = QVBoxLayout(rows_w)
-#         rows_l.setSpacing(4)
-#         rows_l.setContentsMargins(0, 0, 0, 0)
-
-#         for m in self._methods:
-#             label = m["label"]
-#             curr  = m["currency"]
-
-#             rw = QWidget()
-#             rw.setFixedHeight(40)
-#             rw.setStyleSheet("background:transparent;")
-#             rl = QHBoxLayout(rw)
-#             rl.setContentsMargins(0, 0, 0, 0)
-#             rl.setSpacing(8)
-
-#             mb = QPushButton(f"  {label}")
-#             mb.setFixedHeight(32)
-#             mb.setCursor(Qt.PointingHandCursor)
-#             mb.setFocusPolicy(Qt.NoFocus)
-#             mb.setStyleSheet(self._method_style(False))
-#             mb.clicked.connect(lambda _, lbl=label: self._activate(lbl))
-
-#             cb = QLabel(curr)
-#             cb.setFixedSize(46, 32)
-#             cb.setAlignment(Qt.AlignCenter)
-#             cb.setStyleSheet(
-#                 f"background:{self._LIGHT}; color:{self._ACCENT}; border:1px solid {self._BORDER};"
-#                 f" border-radius:6px; font-size:10px; font-weight:bold;"
-#             )
-
-#             ae = QLineEdit()
-#             ae.setFixedHeight(32)
-#             ae.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-#             ae.setValidator(validator)
-#             ae.setStyleSheet(self._field_style(False))
-#             ae.focusInEvent = lambda e, lbl=label, orig=ae.focusInEvent: (
-#                 self._activate(lbl, focus=False), orig(e))
-#             ae.textChanged.connect(self._update_due)
-
-#             rl.addWidget(mb, 4)
-#             rl.addWidget(cb, 1)
-#             rl.addWidget(ae, 3)
-#             rows_l.addWidget(rw)
-#             self._method_rows[label] = (mb, ae)
-
-#         rows_l.addStretch(1)
-
-#         sa = QScrollArea()
-#         sa.setWidget(rows_w)
-#         sa.setWidgetResizable(True)
-#         sa.setFrameShape(QFrame.NoFrame)
-#         sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-#         sa.setStyleSheet("background:transparent;")
-#         vbox.addWidget(sa, stretch=1)
-
-#         return vbox
-
-#     # ── right panel — numpad ──────────────────────────────────────────────
-#     def _build_right(self):
-#         vbox = QVBoxLayout()
-#         vbox.setSpacing(8)
-
-#         grid = QGridLayout()
-#         grid.setSpacing(6)
-
-#         def _nb(text, kind="digit"):
-#             btn = QPushButton(text)
-#             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-#             btn.setCursor(Qt.PointingHandCursor)
-#             btn.setFocusPolicy(Qt.NoFocus)
-#             styles = {
-#                 "digit": (self._WHITE,   self._LIGHT,    self._NAVY),
-#                 "quick": (self._NAVY_3,  self._NAVY_2,   self._WHITE),
-#                 "del":   (self._NAVY_2,  self._NAVY_3,   self._WHITE),
-#                 "clear": ("#b02020",     "#cc2828",      self._WHITE),
-#             }
-#             bg, hov, fg = styles.get(kind, styles["digit"])
-#             btn.setStyleSheet(
-#                 f"QPushButton {{ background:{bg}; color:{fg}; border:1px solid {self._BORDER};"
-#                 f" border-radius:6px; font-size:15px; font-weight:bold; }}"
-#                 f"QPushButton:hover {{ background:{hov}; }}"
-#                 f"QPushButton:pressed {{ background:{self._NAVY_3}; color:{self._WHITE}; }}"
-#             )
-#             return btn
-
-#         bback = _nb("⌫", "del");   bback.clicked.connect(self._nb_back);  grid.addWidget(bback, 0, 0)
-#         bclr  = _nb("Clear","clear"); bclr.clicked.connect(self._nb_clear); grid.addWidget(bclr,  0, 1)
-#         bcan  = _nb("Cancel","clear"); bcan.clicked.connect(self.reject);   grid.addWidget(bcan,  0, 2, 1, 2)
-
-#         for ri, (digs, qa) in enumerate(
-#             [("789", 10), ("456", 20), ("123", 50), ("0.", 100)], 1
-#         ):
-#             for ci, d in enumerate(digs):
-#                 b = _nb(d); b.clicked.connect(lambda _, x=d: self._nb_press(x))
-#                 grid.addWidget(b, ri, ci)
-#             qb = _nb(str(qa), "quick")
-#             qb.clicked.connect(lambda _, a=qa: self._nb_quick(a))
-#             grid.addWidget(qb, ri, 3)
-
-#         for r in range(5): grid.setRowStretch(r, 1)
-#         for c in range(4): grid.setColumnStretch(c, 1)
-
-#         vbox.addLayout(grid, stretch=5)
-
-#         sep = QFrame(); sep.setFrameShape(QFrame.HLine)
-#         sep.setStyleSheet(f"background:{self._BORDER}; border:none;"); sep.setFixedHeight(1)
-#         vbox.addWidget(sep)
-
-#         brow = QHBoxLayout(); brow.setSpacing(8)
-#         bsave = QPushButton("🖨  Print & Post to server")
-#         bsave.setFixedHeight(48)
-#         bsave.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-#         bsave.setCursor(Qt.PointingHandCursor)
-#         bsave.setStyleSheet(
-#             f"QPushButton {{ background:{self._SUCCESS}; color:{self._WHITE}; border:none;"
-#             f" border-radius:6px; font-size:13px; font-weight:bold; }}"
-#             f"QPushButton:hover {{ background:{self._SUCCESS_H}; }}"
-#         )
-#         bsave.clicked.connect(self._save)
-#         brow.addWidget(bsave)
-#         vbox.addLayout(brow, stretch=1)
-
-#         return vbox
-
-#     # ── account / balance helpers ─────────────────────────────────────────
-#     def _on_acct_changed(self, idx: int):
-#         """Sync active payment method when the account combo changes."""
-#         m = self._acct_combo.itemData(idx)
-#         if m and m["label"] in self._method_rows:
-#             self._activate(m["label"])
-
-#     # ── style helpers ─────────────────────────────────────────────────────
-#     def _method_style(self, active: bool) -> str:
-#         if active:
-#             return (f"QPushButton {{ background:{self._ACCENT}; color:{self._WHITE}; border:none;"
-#                     f" border-radius:6px; font-size:12px; font-weight:bold;"
-#                     f" text-align:left; padding:0 12px; }}"
-#                     f"QPushButton:hover {{ background:{self._ACCENT_H}; }}")
-#         return (f"QPushButton {{ background:{self._WHITE}; color:{self._NAVY};"
-#                 f" border:1px solid {self._BORDER}; border-radius:6px;"
-#                 f" font-size:12px; text-align:left; padding:0 12px; }}"
-#                 f"QPushButton:hover {{ background:{self._LIGHT}; }}")
-
-#     def _field_style(self, active: bool) -> str:
-#         border = f"2px solid {self._ACCENT}" if active else f"1px solid {self._BORDER}"
-#         return (f"QLineEdit {{ background:{self._WHITE}; color:{self._NAVY};"
-#                 f" border:{border}; border-radius:6px;"
-#                 f" font-size:14px; font-weight:bold; padding:0 10px; }}")
-
-#     # ── method activation ─────────────────────────────────────────────────
-#     def _activate(self, label: str, focus: bool = True):
-#         self._active_method = label
-#         for lbl, (mb, ae) in self._method_rows.items():
-#             mb.setStyleSheet(self._method_style(lbl == label))
-#             ae.setStyleSheet(self._field_style(lbl == label))
-#         if focus and label in self._method_rows:
-#             ae = self._method_rows[label][1]
-#             ae.setFocus(); ae.selectAll()
-
-#     def _active_field(self) -> QLineEdit:
-#         if self._active_method in self._method_rows:
-#             return self._method_rows[self._active_method][1]
-#         return next(iter(self._method_rows.values()))[1]
-
-#     # ── numpad ────────────────────────────────────────────────────────────
-#     def _nb_press(self, key: str):
-#         f = self._active_field()
-#         cur = f.text()
-#         if key == ".":
-#             if "." not in cur:
-#                 f.setText(cur + ".")
-#         else:
-#             ip = cur.split(".")[0]
-#             if "." in cur:
-#                 if len(cur.split(".")[1]) < 2:
-#                     f.setText(cur + key)
-#             elif len(ip) < 8:
-#                 f.setText(cur + key)
-
-#     def _nb_back(self):
-#         f = self._active_field(); f.setText(f.text()[:-1])
-
-#     def _nb_clear(self):
-#         self._active_field().clear()
-
-#     def _nb_quick(self, amt: int):
-#         self._active_field().setText(f"{amt:.2f}")
-
-#     # ── live total ────────────────────────────────────────────────────────
-#     def _get_paid_usd(self, label: str) -> float:
-#         if label not in self._method_rows:
-#             return 0.0
-#         _, ae = self._method_rows[label]
-#         try:
-#             val = float(ae.text() or "0")
-#         except ValueError:
-#             val = 0.0
-#         rate = next((m["rate"] for m in self._methods if m["label"] == label), 1.0)
-#         return val * rate
-
-#     def _update_due(self):
-#         total_usd = sum(self._get_paid_usd(m["label"]) for m in self._methods)
-#         self._total_lbl.setText(f"USD  {total_usd:.2f}")
-#         color = self._SUCCESS if total_usd > 0 else self._NAVY
-#         self._total_lbl.setStyleSheet(
-#             f"color:{color}; font-size:20px; font-weight:bold;"
-#             f" font-family:'Courier New',monospace;"
-#         )
-
-#     # ── save ──────────────────────────────────────────────────────────────
-#     def _save(self):
-#         if not self._customer:
-#             QMessageBox.warning(self, "No Customer",
-#                                 "Please select a customer before recording a payment.")
-#             return
-
-#         total_usd = sum(self._get_paid_usd(m["label"]) for m in self._methods)
-#         if total_usd <= 0:
-#             QMessageBox.warning(self, "No Amount", "Please enter the payment amount.")
-#             self._active_field().setFocus()
-#             return
-
-#         # Get current balances
-#         outstanding = float(self._customer.get("outstanding_amount", 0))
-#         laybye = float(self._customer.get("laybye_balance", 0))
-
-#         # Validate based on payment type
-#         if self._payment_type == "laybye":
-#             if laybye <= 0:
-#                 QMessageBox.warning(self, "No Laybye Balance",
-#                                     "This customer has no laybye balance to pay.")
-#                 return
-#             if total_usd > laybye:
-#                 QMessageBox.warning(self, "Amount Exceeds Balance",
-#                                     f"Payment amount (${total_usd:.2f}) exceeds laybye balance (${laybye:.2f}).")
-#                 return
-#         else:
-#             # Outstanding balance payment - can overpay to create credit
-#             if total_usd > outstanding and outstanding > 0:
-#                 reply = QMessageBox.question(
-#                     self, "Amount Exceeds Balance",
-#                     f"Payment amount (${total_usd:.2f}) exceeds outstanding balance (${outstanding:.2f}).\n"
-#                     f"This will overpay and create a credit.\n\n"
-#                     f"Continue?",
-#                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-#                 )
-#                 if reply != QMessageBox.Yes:
-#                     return
-
-#         # 1. Collect splits
-#         splits = []
-#         for m in self._methods:
-#             _, ae = self._method_rows[m["label"]]
-#             try:
-#                 val = float(ae.text() or "0")
-#             except ValueError:
-#                 val = 0.0
-#             if val > 0:
-#                 splits.append({
-#                     "method":     m["label"],
-#                     "currency":   m["currency"],
-#                     "amount":     val,
-#                     "amount_usd": self._get_paid_usd(m["label"]),
-#                 })
-
-#         method_label = splits[0]["method"]   if len(splits) == 1 else "SPLIT"
-#         currency     = splits[0]["currency"] if len(splits) == 1 else "USD"
-
-#         # Date from the date picker
-#         payment_date = self._date_edit.date().toString("yyyy-MM-dd")
-
-#         # Account from the combo
-#         acct_data    = self._acct_combo.currentData() or {}
-#         account_name = acct_data.get("label", method_label)
-
-#         # Retrieve Cashier ID from parent hierarchy
-#         cashier_id = None
-#         try:
-#             p = self.parent()
-#             while p:
-#                 if hasattr(p, "user") and p.user:
-#                     cashier_id = p.user.get("id")
-#                     break
-#                 p = p.parent()
-#         except Exception:
-#             pass
-
-#         # 2. Save to Local DB and update balances
-#         payment_id = None
-#         try:
-#             from models.payment import create_customer_payment
-#             from database.db import get_connection
-
-#             if self._payment_type == "laybye":
-#                 # Create payment (no sales_order_id for simple laybye payment)
-#                 payment = create_customer_payment(
-#                     customer_id     = self._customer["id"],
-#                     amount          = total_usd,
-#                     method          = method_label,
-#                     currency        = currency,
-#                     reference       = self._ref_input.text().strip(),
-#                     cashier_id      = cashier_id,
-#                     splits          = splits,
-#                     payment_date    = payment_date,
-#                     account_name    = account_name,
-#                     # No sales_order_id for simple laybye balance payment
-#                 )
-#                 payment_id = payment.get("id") if payment else None
-
-#                 # Update customer laybye_balance
-#                 conn = get_connection()
-#                 cur = conn.cursor()
-#                 cur.execute("""
-#                     UPDATE customers 
-#                     SET laybye_balance = COALESCE(laybye_balance, 0) - ?
-#                     WHERE id = ?
-#                 """, (total_usd, self._customer["id"]))
-#                 conn.commit()
-#                 conn.close()
-
-#             else:
-#                 # Outstanding balance payment - update customer outstanding_amount
-#                 payment = create_customer_payment(
-#                     customer_id     = self._customer["id"],
-#                     amount          = total_usd,
-#                     method          = method_label,
-#                     currency        = currency,
-#                     reference       = self._ref_input.text().strip(),
-#                     cashier_id      = cashier_id,
-#                     splits          = splits,
-#                     payment_date    = payment_date,
-#                     account_name    = account_name,
-#                 )
-#                 payment_id = payment.get("id") if payment else None
-
-#                 # Update customer outstanding amount (can go negative for credit)
-#                 conn = get_connection()
-#                 cur = conn.cursor()
-#                 cur.execute("""
-#                     UPDATE customers 
-#                     SET outstanding_amount = COALESCE(outstanding_amount, 0) - ?
-#                     WHERE id = ?
-#                 """, (total_usd, self._customer["id"]))
-#                 conn.commit()
-#                 conn.close()
-
-#             # Refresh the customer data
-#             from models.customer import get_customer_by_id
-#             updated_customer = get_customer_by_id(self._customer["id"])
-#             if updated_customer:
-#                 self._customer = updated_customer
-#                 self._refresh_balances()
-
-#         except Exception as e:
-#             QMessageBox.warning(self, "Error", f"Could not save payment:\n{e}")
-#             return
-
-#         # 3. Post to server (Background)
-#         frappe_status = "queued"
-#         if payment_id:
-#             try:
-#                 from services.payment_entry_service import post_payment_entry_to_frappe
-#                 result = post_payment_entry_to_frappe(payment_id)
-#                 frappe_status = "posted" if result else "queued"
-#             except Exception:
-#                 frappe_status = "queued"
-
-#         # 4. Print Receipt Slip
-#         if payment_id:
-#             self._print_payment_slip(payment_id, frappe_status)
-
-#         cname = self._customer.get("customer_name", "Customer")
-#         if self._payment_type == "laybye":
-#             new_balance = laybye - total_usd
-#             QMessageBox.information(
-#                 self, "Payment Recorded",
-#                 f"✅  USD {total_usd:.2f} laybye payment recorded for {cname}.\n"
-#                 f"Previous Laybye Balance: ${laybye:.2f}\n"
-#                 f"New Laybye Balance: ${new_balance:.2f}\n"
-#                 f"Frappe: {frappe_status}.\n"
-#                 f"Receipt sent to printer."
-#             )
-#         else:
-#             new_balance = outstanding - total_usd
-#             QMessageBox.information(
-#                 self, "Payment Recorded",
-#                 f"✅  USD {total_usd:.2f} payment recorded for {cname}.\n"
-#                 f"Previous Outstanding Balance: ${outstanding:.2f}\n"
-#                 f"New Outstanding Balance: ${new_balance:.2f}\n"
-#                 f"Frappe: {frappe_status}.\n"
-#                 f"Receipt sent to printer."
-#             )
-#         self.accept()
-
-#     def _print_payment_slip(self, payment_id, frappe_status: str = "queued"):
-#         """
-#         Show a printable payment receipt slip on screen and send to thermal printer.
-#         """
-#         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
-#         from PySide6.QtGui import QFont
-#         from PySide6.QtCore import Qt
-
-#         # 1. Ensure we have a dictionary of data
-#         payment_data = {}
-#         try:
-#             from models.payment import get_payment_by_id
-#             payment_data = get_payment_by_id(payment_id) or {}
-#         except Exception:
-#             pass
-
-#         # 2. Trigger the actual Thermal Printer
-#         try:
-#             from models.payment import print_customer_payment
-#             print_customer_payment(payment_id)
-#         except Exception as e:
-#             print(f"Thermal Print Error: {e}")
-
-#         # 3. Prepare the On-Screen Preview Dialog
-#         cname   = self._customer.get("customer_name", "") if self._customer else payment_data.get("customer_name", "Customer")
-#         amount  = float(payment_data.get("amount", 0))
-#         method  = payment_data.get("method", "")
-#         ref     = payment_data.get("reference", "") or ""
-#         pdate   = payment_data.get("payment_date") or self._date_edit.date().toString("yyyy-MM-dd")
-#         account = self._acct_combo.currentText()
-#         p_id_str = f"PAY-{payment_id:05d}" if payment_id else "NEW"
-
-#         # Get current balances
-#         outstanding = float(self._customer.get("outstanding_amount", 0))
-#         laybye = float(self._customer.get("laybye_balance", 0))
-
-#         W = 40
-#         lines = [
-#             "=" * W,
-#             "      HAVANO POS — PAYMENT RECEIPT",
-#             f"  Receipt No: {p_id_str}",
-#             f"  Date:       {pdate}",
-#             f"  Customer:   {cname}",
-#         ]
-
-#         if self._payment_type == "laybye":
-#             lines.append(f"  Payment Type: LAYBYE PAYMENT")
-#             lines.append(f"  Balance After: ${laybye:.2f}")
-#         else:
-#             lines.append(f"  Payment Type: OUTSTANDING BALANCE")
-#             lines.append(f"  Balance After: ${outstanding:.2f}")
-
-#         lines += [
-#             "-" * W,
-#             f"  Account:    {account}",
-#             f"  Method:     {method}",
-#             f"  Amount:     USD {amount:.2f}",
-#         ]
-#         if ref:
-#             lines.append(f"  Ref:        {ref}")
-#         lines += [
-#             "-" * W,
-#             f"  Frappe:     {frappe_status.upper()}",
-#             "=" * W,
-#             "\n   Thank you for your payment!",
-#         ]
-
-#         # 4. Create and Show the Dialog
-#         dlg = QDialog(self)
-#         dlg.setWindowTitle("Payment Receipt Preview")
-#         dlg.setMinimumSize(380, 420)
-#         white = getattr(self, '_WHITE', '#FFFFFF')
-#         navy = getattr(self, '_NAVY', '#001f3f')
-#         border = getattr(self, '_BORDER', '#CCCCCC')
-#         navy2 = getattr(self, '_NAVY_2', '#003366')
-
-#         dlg.setStyleSheet(f"QDialog {{ background:{white}; }}")
-#         lay = QVBoxLayout(dlg)
-#         lay.setContentsMargins(16,16,16,16)
-#         lay.setSpacing(10)
-
-#         txt = QTextEdit()
-#         txt.setReadOnly(True)
-#         txt.setFont(QFont("Courier New", 10))
-#         txt.setPlainText("\n".join(lines))
-#         txt.setStyleSheet(
-#             f"QTextEdit {{ background:{white}; color:{navy};"
-#             f" border:1px solid {border}; border-radius:4px; }}"
-#         )
-#         lay.addWidget(txt, 1)
-
-#         br = QHBoxLayout()
-#         br.setSpacing(8)
-#         close_btn = QPushButton("Close")
-#         close_btn.setFixedHeight(36)
-#         close_btn.setCursor(Qt.PointingHandCursor)
-#         close_btn.setStyleSheet(
-#             f"QPushButton {{ background:{navy}; color:{white}; border:none;"
-#             f" border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }}"
-#             f"QPushButton:hover {{ background:{navy2}; }}"
-#         )
-#         close_btn.clicked.connect(dlg.accept)
-#         br.addStretch()
-#         br.addWidget(close_btn)
-#         lay.addLayout(br)
-
-#         dlg.exec()
-
-#     # ── keyboard ──────────────────────────────────────────────────────────
-#     def keyPressEvent(self, event):
-#         k = event.key()
-#         if k == Qt.Key_Escape:
-#             self.reject()
-#         else:
-#             super().keyPressEvent(event)
-
-#     def showEvent(self, event):
-#         super().showEvent(event)
-#         self._refresh_balances()
-#         if self._active_method:
-# 
-# self._activate(self._active_method)
+            self._activate_method(self._active_method)
 # =============================================================================
+# FISCALIZATION WAIT DIALOG & THREAD
+# =============================================================================
+from PySide6.QtCore import QThread, Signal
+
+class FiscalPollThread(QThread):
+    finished = Signal(bool, dict)  # success, refreshed_sale
+
+    def __init__(self, sale_id):
+        super().__init__()
+        self.sale_id = sale_id
+        self._running = True
+
+    def run(self):
+        import time
+        from database.db import get_connection, fetchone_dict
+        
+        start_time = time.time()
+        max_wait = 6.0
+        
+        while time.time() - start_time < max_wait and self._running:
+            try:
+                # BYPASS CACHE - Direct DB check for QR code
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT id, fiscal_qr_code, fiscal_verification_code, fiscal_status FROM sales WHERE id = ?", (self.sale_id,))
+                sale = fetchone_dict(cur)
+                conn.close()
+                
+                if sale and sale.get("fiscal_qr_code") and str(sale.get("fiscal_qr_code")).strip():
+                    self.finished.emit(True, sale)
+                    return
+            except Exception as e:
+                print(f"[FiscalPoll] Error: {e}")
+            
+            time.sleep(0.5)
+        
+        self.finished.emit(False, {})
+
+    def stop(self):
+        self._running = False
+
+class FiscalWaitDialog(QDialog):
+    def __init__(self, parent=None, sale_id=None):
+        super().__init__(parent)
+        self.sale_id = sale_id
+        self.refreshed_sale = None
+        self.success = False
+        
+        self.setWindowTitle("Fiscalization")
+        self.setFixedSize(320, 200)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setStyleSheet(f"QDialog {{ background: {WHITE}; border: 2px solid {ACCENT}; border-radius: 10px; }}")
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 20, 30, 20)
+        layout.setSpacing(15)
+        
+        # Icon/Spinner Placeholder
+        self.icon_lbl = QLabel("⏳")
+        self.icon_lbl.setAlignment(Qt.AlignCenter)
+        self.icon_lbl.setStyleSheet("font-size: 40px; background: transparent;")
+        layout.addWidget(self.icon_lbl)
+        
+        self.msg_lbl = QLabel("Waiting for ZIMRA Fiscalization...")
+        self.msg_lbl.setAlignment(Qt.AlignCenter)
+        self.msg_lbl.setWordWrap(True)
+        self.msg_lbl.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {NAVY}; background: transparent;")
+        layout.addWidget(self.msg_lbl)
+        
+        # Subtext
+        self.sub_lbl = QLabel("Waiting up to 6 seconds for QR code...")
+        self.sub_lbl.setAlignment(Qt.AlignCenter)
+        self.sub_lbl.setStyleSheet(f"font-size: 12px; color: {MUTED}; background: transparent;")
+        layout.addWidget(self.sub_lbl)
+        
+        # Start polling
+        self.thread = FiscalPollThread(sale_id)
+        self.thread.finished.connect(self._on_finished)
+        self.thread.start()
+        
+    def _on_finished(self, success, sale):
+        self.success = success
+        self.refreshed_sale = sale
+        self.accept()
+
+    def closeEvent(self, event):
+        if self.thread.isRunning():
+            self.thread.stop()
+            self.thread.wait()
+        super().closeEvent(event)
+
+# # =============================================================================
 # REPRINT DIALOG  —  two tabs: Sales Invoice  |  Sales Order
 # =============================================================================
 class ReprintDialog(QDialog):
@@ -11403,7 +13893,7 @@ class ReprintDialog(QDialog):
         hdr = QWidget(); hdr.setFixedHeight(52)
         hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
-        title = QLabel("🖨  Reprint")
+        title = QLabel("Reprint")
         title.setStyleSheet(f"color:{NAVY}; font-size:16px; font-weight:bold; background:transparent;")
         sub = QLabel("Choose Sales Invoice or Sales Order")
         sub.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
@@ -11420,8 +13910,8 @@ class ReprintDialog(QDialog):
             QTabBar::tab:selected  {{ background:{OFF_WHITE}; border-bottom:3px solid {ACCENT}; }}
             QTabBar::tab:hover     {{ background:{BORDER}; }}
         """)
-        self._tabs.addTab(self._build_invoice_tab(), "🧾  Sales Invoice")
-        self._tabs.addTab(self._build_order_tab(),   "📋  Sales Order")
+        self._tabs.addTab(self._build_invoice_tab(), "  Sales Invoice")
+        self._tabs.addTab(self._build_order_tab(),   "  Sales Order")
         root.addWidget(self._tabs, 1)
 
     def _build_invoice_tab(self) -> QWidget:
@@ -11462,7 +13952,8 @@ class ReprintDialog(QDialog):
         bcancel = QPushButton("Cancel"); bcancel.setFixedHeight(40); bcancel.setFixedWidth(90)
         bcancel.setCursor(Qt.PointingHandCursor); bcancel.setStyleSheet(self._BTN_CANCEL_SS)
         bcancel.clicked.connect(self.reject)
-        self._inv_btn = QPushButton("🖨  Reprint Invoice")
+        self._inv_btn = QPushButton("Reprint Invoice")
+        self._inv_btn.setIcon(qta.icon("fa5s.print", color="white"))
         self._inv_btn.setFixedHeight(40); self._inv_btn.setEnabled(False)
         self._inv_btn.setCursor(Qt.PointingHandCursor)
         self._inv_btn.setStyleSheet(self._BTN_REPRINT_SS)
@@ -11504,7 +13995,8 @@ class ReprintDialog(QDialog):
         bcancel = QPushButton("Cancel"); bcancel.setFixedHeight(40); bcancel.setFixedWidth(90)
         bcancel.setCursor(Qt.PointingHandCursor); bcancel.setStyleSheet(self._BTN_CANCEL_SS)
         bcancel.clicked.connect(self.reject)
-        self._so_btn = QPushButton("🖨  Reprint Sales Order")
+        self._so_btn = QPushButton("Reprint Sales Order")
+        self._so_btn.setIcon(qta.icon("fa5s.print", color="white"))
         self._so_btn.setFixedHeight(40); self._so_btn.setEnabled(False)
         self._so_btn.setCursor(Qt.PointingHandCursor)
         self._so_btn.setStyleSheet(self._BTN_REPRINT_SS)
@@ -11612,7 +14104,8 @@ class ReprintDialog(QDialog):
                 discAmt             = float(sale.get("discount_amount", 0)),
                 paymentMode         = sale.get("method", "CASH"),
                 currency            = sale.get("currency", "USD"),
-                footer              = co.get("footer_text", "......."),
+                receiptHeader       = co.get("receipt_header", ""),
+                footer              = co.get("footer_text", "Thank you for your purchase!"),
             )
 
             for it in sale["items"]:
@@ -11747,10 +14240,8 @@ class ReprintDialog(QDialog):
                 ac.setFocus()
         else:
             super().keyPressEvent(e)
-
-
 class CreditNoteDialog(QDialog):
-    """Search-only dialog. Enter/click → confirmation popup → items load into POSView."""
+    """Simple return dialog - click invoice → loads into cart for return."""
 
     credit_note_ready = Signal(dict)
 
@@ -11763,6 +14254,7 @@ class CreditNoteDialog(QDialog):
             f"QDialog {{ background:{WHITE}; font-family:'Segoe UI',sans-serif; }}"
         )
         self._all_sales = []
+        self._existing_cns = set()  # Track which sales already have credit notes
         self._stimer = QTimer(self)
         self._stimer.setSingleShot(True)
         self._stimer.setInterval(200)
@@ -11774,8 +14266,23 @@ class CreditNoteDialog(QDialog):
         try:
             from models.sale import get_all_sales
             self._all_sales = get_all_sales()
+            self._load_existing_credit_notes()
         except Exception:
             self._all_sales = []
+
+    def _load_existing_credit_notes(self):
+        """Load all sale IDs that already have credit notes."""
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT original_sale_id FROM credit_notes")
+            rows = cur.fetchall()
+            self._existing_cns = {row[0] for row in rows}
+            conn.close()
+        except Exception as e:
+            print(f"Error loading existing credit notes: {e}")
+            self._existing_cns = set()
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -11786,7 +14293,8 @@ class CreditNoteDialog(QDialog):
             f"color:{NAVY}; font-size:15px; font-weight:bold; background:transparent;"
         )
         root.addWidget(title)
-        row = QHBoxLayout(); row.setSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(8)
         lbl = QLabel("Invoice / Customer:")
         lbl.setFixedWidth(140)
         lbl.setStyleSheet(
@@ -11803,8 +14311,10 @@ class CreditNoteDialog(QDialog):
         )
         self._search.textChanged.connect(lambda _: self._stimer.start())
         self._search.returnPressed.connect(self._run_search)
-        row.addWidget(lbl); row.addWidget(self._search, 1)
+        row.addWidget(lbl)
+        row.addWidget(self._search, 1)
         root.addLayout(row)
+        
         self._ac = QListWidget()
         self._ac.setFixedHeight(0)
         self._ac.setStyleSheet(
@@ -11820,10 +14330,14 @@ class CreditNoteDialog(QDialog):
         ac_row.setContentsMargins(148, 0, 0, 0)
         ac_row.addWidget(self._ac)
         root.addLayout(ac_row)
-        btn_row = QHBoxLayout(); btn_row.addStretch()
+        
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
         bc = QPushButton("Cancel")
-        bc.setFixedHeight(32); bc.setFixedWidth(80)
-        bc.setCursor(Qt.PointingHandCursor); bc.setFocusPolicy(Qt.NoFocus)
+        bc.setFixedHeight(32)
+        bc.setFixedWidth(80)
+        bc.setCursor(Qt.PointingHandCursor)
+        bc.setFocusPolicy(Qt.NoFocus)
         bc.setStyleSheet(
             f"QPushButton {{ background:{LIGHT}; color:{DARK_TEXT};"
             f" border:1px solid {BORDER}; border-radius:6px; font-size:12px; }}"
@@ -11837,27 +14351,41 @@ class CreditNoteDialog(QDialog):
         q = self._search.text().strip()
         self._ac.clear()
         if not q:
-            self._ac.setFixedHeight(0); self.setFixedSize(600, 170); return
+            self._ac.setFixedHeight(0)
+            self.setFixedSize(600, 170)
+            return
+        
         ql = q.lower()
         matches = [
             s for s in self._all_sales
-            if ql in (s.get("invoice_no")    or "").lower()
-            or ql in (s.get("frappe_ref")    or "").lower()
+            if ql in (s.get("invoice_no") or "").lower()
+            or ql in (s.get("frappe_ref") or "").lower()
             or ql in (s.get("customer_name") or "").lower()
         ][:15]
+        
         if not matches:
-            self._ac.setFixedHeight(0); self.setFixedSize(600, 170); return
-        # Exact match on local invoice_no OR frappe_ref → confirm then load
+            self._ac.setFixedHeight(0)
+            self.setFixedSize(600, 170)
+            return
+        
+        # Check for exact match - load immediately
         exact = [
             s for s in matches
             if (s.get("invoice_no") or "").lower() == ql
             or (s.get("frappe_ref") or "").lower() == ql
         ]
         if exact:
-            self._confirm_and_load(exact[0]); return
+            self._load_and_close(exact[0])
+            return
+        
         if len(matches) == 1:
-            self._confirm_and_load(matches[0]); return
+            self._load_and_close(matches[0])
+            return
+        
+        # Show list for multiple matches
         for s in matches:
+            # Check if already has credit note
+            has_cn = s.get("id") in self._existing_cns
             frappe = s.get("frappe_ref") or ""
             label = (
                 f"{s.get('invoice_no', '?')}"
@@ -11866,299 +14394,81 @@ class CreditNoteDialog(QDialog):
                 + f"   ·   ${float(s.get('total', 0)):.2f}"
                 + f"   ·   {s.get('invoice_date', '')}"
             )
-            it = QListWidgetItem(label); it.setData(Qt.UserRole, s)
+            if has_cn:
+                label += "   RETURN ALREADY PROCESSED"
+
+            it = QListWidgetItem(label)
+            it.setData(Qt.UserRole, s)
+            if has_cn:
+                it.setIcon(qta.icon("fa5s.exclamation-triangle", color="#e67e22"))
+                it.setForeground(QColor(MUTED))
+                it.setFlags(it.flags() & ~Qt.ItemIsSelectable)  # Disable selection
             self._ac.addItem(it)
+        
         h = min(len(matches), 6) * 42
-        self._ac.setFixedHeight(h); self.setFixedSize(600, 170 + h)
+        self._ac.setFixedHeight(h)
+        self.setFixedSize(600, 170 + h)
 
     def _pick(self, item: QListWidgetItem):
-        self._confirm_and_load(item.data(Qt.UserRole))
-
-    def _confirm_and_load(self, stub: dict):
-        """Show confirmation popup before loading invoice into return mode."""
-        inv_no   = stub.get("invoice_no", "?")
-        customer = stub.get("customer_name") or "Walk-in"
-        total    = float(stub.get("total", 0))
-        inv_date = stub.get("invoice_date", "")
-        frappe   = stub.get("frappe_ref", "")
-
-        detail = (
-            f"Invoice:   {inv_no}"
-            + (f"  [{frappe}]" if frappe else "")
-            + f"\nCustomer:  {customer}"
-            + (f"\nDate:      {inv_date}" if inv_date else "")
-            + f"\nTotal:     ${total:.2f}"
-        )
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Confirm Return")
-        msg.setText(f"Load invoice <b>{inv_no}</b> for return?")
-        msg.setInformativeText(detail)
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg.setDefaultButton(QMessageBox.No)
-        msg.setStyleSheet(f"""
-            QMessageBox {{ background:{WHITE}; }}
-            QLabel      {{ color:{DARK_TEXT}; font-size:13px; background:transparent; }}
-            QPushButton {{
-                background:{ACCENT}; color:{WHITE}; border:none;
-                border-radius:6px; padding:8px 24px;
-                font-size:13px; font-weight:bold; min-width:80px;
-            }}
-            QPushButton:hover {{ background:{ACCENT_H}; }}
-        """)
-        if msg.exec() != QMessageBox.Yes:
+        sale = item.data(Qt.UserRole)
+        if sale.get("id") in self._existing_cns:
+            QMessageBox.warning(self, "Already Returned", 
+                f"Invoice {sale.get('invoice_no', '')} already has a credit note.\n"
+                "Cannot process another return for this invoice.")
             return
+        self._load_and_close(sale)
 
-        self._load_and_close(stub)
-
-    def _load_and_close(self, stub: dict):
-        sid = stub["id"]
+    def _load_and_close(self, sale_stub: dict):
+        sid = sale_stub["id"]
+        
+        # Double-check if already has credit note
+        if sid in self._existing_cns:
+            QMessageBox.warning(self, "Already Returned", 
+                f"Invoice {sale_stub.get('invoice_no', '')} already has a credit note.\n"
+                "Cannot process another return for this invoice.")
+            return
+        
         try:
             from models.sale import get_sale_by_id, get_sale_items
             full = get_sale_by_id(sid)
             if full and not full.get("items"):
                 full["items"] = get_sale_items(sid)
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Could not load sale:\n{e}"); return
+            QMessageBox.warning(self, "Error", f"Could not load sale:\n{e}")
+            return
+        
         if not full:
-            QMessageBox.warning(self, "Not Found", "Sale not found."); return
+            QMessageBox.warning(self, "Not Found", "Sale not found.")
+            return
+        
         if not full.get("items"):
             QMessageBox.warning(
                 self, "No Items",
                 f"No items found for {full.get('invoice_no', '')}."
-            ); return
-        self.credit_note_ready.emit(full)
-        self.accept()
-
-
-class CreditNoteManagerDialog(QDialog):
-    """Shows all credit notes with sync status. Select and push manually."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Credit Note Sync")
-        self.setFixedSize(900, 520)
-        self.setModal(True)
-        self.setStyleSheet(
-            f"QDialog {{ background:{OFF_WHITE}; font-family:'Segoe UI',sans-serif; }}"
-        )
-        self._cns = []
-        self._build()
-        QTimer.singleShot(0, self._load)
-
-    def _build(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
-
-        hdr = QWidget(); hdr.setFixedHeight(52)
-        hdr.setStyleSheet(f"background:{WHITE}; border-bottom:2px solid {BORDER};")
-        hl = QHBoxLayout(hdr); hl.setContentsMargins(24, 0, 24, 0)
-        t = QLabel("Credit Note Sync")
-        t.setStyleSheet(f"color:{NAVY}; font-size:16px; font-weight:bold; background:transparent;")
-        s = QLabel("Select credit notes and push to server.")
-        s.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
-        hl.addWidget(t); hl.addSpacing(14); hl.addWidget(s); hl.addStretch()
-        self._status_lbl = QLabel("")
-        self._status_lbl.setStyleSheet(
-            f"color:{SUCCESS}; font-size:11px; font-weight:bold; background:transparent;")
-        hl.addWidget(self._status_lbl)
-        root.addWidget(hdr)
-
-        body = QWidget(); body.setStyleSheet(f"background:{OFF_WHITE};")
-        bl = QVBoxLayout(body); bl.setContentsMargins(20, 14, 20, 14); bl.setSpacing(10)
-
-        self._tbl = QTableWidget(0, 7)
-        self._tbl.setHorizontalHeaderLabels(
-            ["", "CN NUMBER", "INVOICE", "CUSTOMER", "TOTAL", "STATUS", "SYNC REF"])
-        hh = self._tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed);  self._tbl.setColumnWidth(0, 32)
-        hh.setSectionResizeMode(1, QHeaderView.Fixed);  self._tbl.setColumnWidth(1, 130)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed);  self._tbl.setColumnWidth(2, 150)
-        hh.setSectionResizeMode(3, QHeaderView.Stretch)
-        hh.setSectionResizeMode(4, QHeaderView.Fixed);  self._tbl.setColumnWidth(4, 80)
-        hh.setSectionResizeMode(5, QHeaderView.Fixed);  self._tbl.setColumnWidth(5, 100)
-        hh.setSectionResizeMode(6, QHeaderView.Fixed);  self._tbl.setColumnWidth(6, 160)
-        self._tbl.verticalHeader().setVisible(False)
-        self._tbl.setAlternatingRowColors(True)
-        self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._tbl.setSelectionMode(QAbstractItemView.NoSelection)
-        self._tbl.setStyleSheet(
-            f"QTableWidget {{ background:{WHITE}; border:1px solid {BORDER};"
-            f" gridline-color:{LIGHT}; font-size:12px; outline:none; }}"
-            f"QTableWidget::item {{ padding:4px 8px; }}"
-            f"QTableWidget::item:alternate {{ background:{OFF_WHITE}; }}"
-            f"QHeaderView::section {{ background:{NAVY}; color:{WHITE}; padding:6px;"
-            f" border:none; border-right:1px solid {NAVY_2};"
-            f" font-size:10px; font-weight:bold; }}"
-        )
-        self._tbl.cellClicked.connect(lambda r, c: self._toggle(r))
-        bl.addWidget(self._tbl, 1)
-
-        br = QHBoxLayout(); br.setSpacing(8)
-        def _btn(text, w=None):
-            b = QPushButton(text); b.setFixedHeight(36)
-            b.setCursor(Qt.PointingHandCursor); b.setFocusPolicy(Qt.NoFocus)
-            if w: b.setFixedWidth(w)
-            b.setStyleSheet(
-                f"QPushButton {{ background:{LIGHT}; color:{DARK_TEXT}; border:1px solid {BORDER};"
-                f" border-radius:6px; font-size:12px; font-weight:bold; }}"
-                f"QPushButton:hover {{ background:{BORDER}; }}"
             )
-            return b
-
-        sel_btn = _btn("Select Unsynced")
-        sel_btn.clicked.connect(self._select_unsynced)
-        ref_btn = _btn("Refresh")
-        ref_btn.clicked.connect(self._load)
-
-        self._sync_btn = QPushButton("\u2b06  Sync Selected")
-        self._sync_btn.setFixedHeight(36); self._sync_btn.setFixedWidth(160)
-        self._sync_btn.setCursor(Qt.PointingHandCursor)
-        self._sync_btn.setFocusPolicy(Qt.NoFocus)
-        self._sync_btn.setEnabled(False)
-        self._sync_btn.setStyleSheet(
-            f"QPushButton {{ background:{SUCCESS}; color:{WHITE}; border:none;"
-            f" border-radius:6px; font-size:12px; font-weight:bold; }}"
-            f"QPushButton:hover    {{ background:{SUCCESS_H}; }}"
-            f"QPushButton:disabled {{ background:{LIGHT}; color:{MUTED}; }}"
-        )
-        self._sync_btn.clicked.connect(self._sync_selected)
-
-        close_btn = _btn("Close", 80)
-        close_btn.clicked.connect(self.accept)
-
-        br.addWidget(sel_btn); br.addWidget(ref_btn)
-        br.addStretch()
-        br.addWidget(self._sync_btn); br.addWidget(close_btn)
-        bl.addLayout(br)
-        root.addWidget(body, 1)
-
-    def _load(self):
+            return
+        
+        # Build items for return
+        items_to_return = []
+        for item in full.get("items", []):
+            items_to_return.append({
+                "part_no": item.get("part_no", ""),
+                "product_name": item.get("product_name", ""),
+                "qty": float(item.get("qty", 1)),
+                "price": float(item.get("price", 0)),
+                "total": float(item.get("total", 0)),
+                "tax_amount": float(item.get("tax_amount", 0)),
+                "tax_rate": float(item.get("tax_rate", 0)),
+                "tax_type": item.get("tax_type", ""),
+                "reason": "Customer Return"
+            })
+        
         try:
-            from database.db import get_connection
-            conn = get_connection(); cur = conn.cursor()
-            cur.execute("""
-                SELECT id, cn_number, original_invoice_no,
-                       customer_name, total, cn_status,
-                       COALESCE(frappe_cn_ref,'') AS frappe_cn_ref,
-                       COALESCE(frappe_ref,'')    AS frappe_ref
-                FROM   credit_notes
-                ORDER  BY created_at DESC
-            """)
-            cols = [d[0] for d in cur.description]
-            self._cns = [dict(zip(cols, r)) for r in cur.fetchall()]
-            conn.close()
+            self._existing_cns.add(sid)
+            self.credit_note_ready.emit(full)
+            self.accept()
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Could not load credit notes:\n{e}"); return
-
-        self._tbl.setRowCount(0)
-        for cn in self._cns:
-            r = self._tbl.rowCount(); self._tbl.insertRow(r)
-            self._tbl.setRowHeight(r, 36)
-            chk = QTableWidgetItem(); chk.setCheckState(Qt.Unchecked)
-            chk.setTextAlignment(Qt.AlignCenter); self._tbl.setItem(r, 0, chk)
-            self._tbl.setItem(r, 1, QTableWidgetItem(cn.get("cn_number","")))
-            self._tbl.setItem(r, 2, QTableWidgetItem(cn.get("original_invoice_no","")))
-            self._tbl.setItem(r, 3, QTableWidgetItem(cn.get("customer_name","") or "Walk-in"))
-            amt = QTableWidgetItem(f"${float(cn.get('total',0)):.2f}")
-            amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter); self._tbl.setItem(r, 4, amt)
-            status = cn.get("cn_status","")
-            si = QTableWidgetItem(status)
-            si.setForeground(QColor(
-                SUCCESS if status=="synced" else AMBER if status=="ready" else MUTED))
-            si.setTextAlignment(Qt.AlignCenter); self._tbl.setItem(r, 5, si)
-            self._tbl.setItem(r, 6, QTableWidgetItem(
-                cn.get("frappe_cn_ref","") or cn.get("frappe_ref","") or "—"))
-
-        ready = sum(1 for c in self._cns if c.get("cn_status") != "synced")
-        self._status_lbl.setText(f"{len(self._cns)} total  \u00b7  {ready} unsynced")
-        self._update_sync_btn()
-
-    def _toggle(self, row):
-        chk = self._tbl.item(row, 0)
-        if chk:
-            chk.setCheckState(Qt.Unchecked if chk.checkState()==Qt.Checked else Qt.Checked)
-        self._update_sync_btn()
-
-    def _select_unsynced(self):
-        for r in range(self._tbl.rowCount()):
-            st = self._tbl.item(r, 5).text() if self._tbl.item(r, 5) else ""
-            chk = self._tbl.item(r, 0)
-            if chk:
-                chk.setCheckState(Qt.Checked if st != "synced" else Qt.Unchecked)
-        self._update_sync_btn()
-
-    def _update_sync_btn(self):
-        n = sum(1 for r in range(self._tbl.rowCount())
-                if self._tbl.item(r,0) and self._tbl.item(r,0).checkState()==Qt.Checked)
-        self._sync_btn.setEnabled(n > 0)
-        self._sync_btn.setText(f"\u2b06  Sync {n} Selected" if n else "\u2b06  Sync Selected")
-
-    def _sync_selected(self):
-        ids = []
-        for r in range(self._tbl.rowCount()):
-            chk = self._tbl.item(r, 0)
-            if chk and chk.checkState()==Qt.Checked and r < len(self._cns):
-                ids.append(self._cns[r]["id"])
-        if not ids: return
-
-        self._sync_btn.setEnabled(False)
-        self._sync_btn.setText("Syncing\u2026")
-        QApplication.processEvents()
-
-        pushed=0; failed=0; no_ref=0
-        try:
-            from services.credit_note_sync_service import (
-                _push_cn, _get_credentials, _get_defaults, _get_host)
-            from models.credit_note import mark_cn_synced
-            from database.db import get_connection
-
-            api_key, api_secret = _get_credentials()
-            if not api_key:
-                QMessageBox.warning(self, "No Credentials",
-                    "No API credentials found.\nCheck company settings.")
-                return
-
-            host=_get_host(); defaults=_get_defaults()
-            conn=get_connection(); cur=conn.cursor()
-            for cn_id in ids:
-                cur.execute("""
-                    SELECT id, cn_number, original_invoice_no, customer_name,
-                           total, currency, cn_status,
-                           COALESCE(frappe_ref,'')    AS frappe_ref,
-                           COALESCE(frappe_cn_ref,'') AS frappe_cn_ref
-                    FROM credit_notes WHERE id=?
-                """, (cn_id,))
-                row=cur.fetchone()
-                if not row: continue
-                cols=[d[0] for d in cur.description]; cn=dict(zip(cols,row))
-                cur.execute(
-                    "SELECT part_no,product_name,qty,price,total,reason "
-                    "FROM credit_note_items WHERE credit_note_id=?", (cn_id,))
-                ic=[d[0] for d in cur.description]
-                cn["items_to_return"]=[dict(zip(ic,ir)) for ir in cur.fetchall()]
-                if not cn.get("frappe_ref"): no_ref+=1; continue
-                val=_push_cn(cn, api_key, api_secret, defaults, host)
-                if val:
-                    mark_cn_synced(cn["id"], val if isinstance(val,str) else "")
-                    pushed+=1
-                else:
-                    failed+=1
-            conn.close()
-        except Exception as e:
-            QMessageBox.critical(self, "Sync Error", str(e)); return
-        finally:
-            self._load()
-
-        msg = f"\u2705 Pushed: {pushed}"
-        if failed: msg += f"  \u274c Failed: {failed}"
-        if no_ref: msg += f"  ⏳ No sync ref: {no_ref}"
-        self._status_lbl.setText(msg)
-        if no_ref:
-            QMessageBox.information(self, "Some Skipped",
-                f"{no_ref} credit note(s) skipped — original sale not yet synced.\n"
-                "Wait for the sale to sync first, then retry.")
-
+            QMessageBox.critical(self, "Error", f"Failed to load items for return:\n{str(e)}")
 # =============================================================================
 # ADD THIS CLASS TO views/main_window.py
 # (Paste it near the bottom, after CreditNoteDialog / ShiftReconciliationDialog)
@@ -12177,7 +14487,8 @@ class AdvanceSettingsDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("🖨 Advanced Printing & Receipt Settings")
+        self.setWindowTitle("Advanced Printing & Receipt Settings")
+        self.setWindowIcon(qta.icon("fa5s.print"))
         self.setMinimumSize(920, 680)
         self.setModal(True)
         self.setStyleSheet(f"QDialog {{ background-color: {OFF_WHITE}; }}")
@@ -12224,7 +14535,8 @@ class AdvanceSettingsDialog(QDialog):
         reset_btn.setFixedHeight(40)
         reset_btn.clicked.connect(self._reset_to_defaults)
 
-        save_btn = navy_btn("💾 Save & Apply", height=40, color=SUCCESS, hover=SUCCESS_H)
+        save_btn = navy_btn("Save & Apply", height=40, color=SUCCESS, hover=SUCCESS_H)
+        save_btn.setIcon(qta.icon("fa5s.save", color="white"))
         save_btn.clicked.connect(self._save_and_close)
 
         cancel_btn = navy_btn("Cancel", height=40, color=DANGER, hover=DANGER_H)
@@ -12392,7 +14704,7 @@ class AdvanceSettingsDialog(QDialog):
         default = AdvanceSettings()
         # Fonts
         self.cb_content_name.setCurrentText(default.contentFontName)
-        self.sb_content_size.setValue(max(6, int(default.contentFontSize or 0)))
+        self.sb_content_size.setValue(max(6, int(default.contentFontSize or 8)))
         self.cb_content_style.setCurrentText(default.contentFontStyle)
         # ... (repeat for header, subheader, order — same as before)
         self.le_logo.setText("") if hasattr(self, 'le_logo') else None
@@ -12456,171 +14768,3 @@ class AdvanceSettingsDialog(QDialog):
             f"app_data\\logos\\{self.default_logo_name}\n\n"
             "Changes take effect on the next receipt print.")
         self.accept()
-# =============================================================================
-# ADD THIS TO THE MENU (inside MainWindow._build_menubar)
-# =============================================================================
-
-
-# =============================================================================
-# SHIFT RECONCILIATION DIALOG (Requirement 4)
-# =============================================================================
-# =============================================================================
-# SHIFT RECONCILIATION DIALOG (Requirement 4)
-# =============================================================================
-class ShiftReconciliationDialog(QDialog):
-    def __init__(self, parent=None, cashier_id=None):
-        super().__init__(parent)
-        self.cashier_id = cashier_id
-        self.setWindowTitle("Close Shift - Final Reconciliation")
-        self.setFixedSize(500, 550)
-        self.setStyleSheet(f"QDialog {{ background: {WHITE}; }}")
-        self.final_data = []
-        self._build_ui()
-        self._load_expected_data()
-
-    def _build_ui(self):
-        lay = QVBoxLayout(self)
-        
-        hdr = QLabel("🏁 End of Shift Reconciliation")
-        hdr.setStyleSheet(f"background: {ORANGE}; color: {WHITE}; padding: 12px; font-weight: bold; border-radius: 5px; font-size: 14px;")
-        lay.addWidget(hdr)
-
-        instr = QLabel("Count your drawer and enter the actual amounts available below:")
-        instr.setStyleSheet(f"color: {MUTED}; font-size: 11px; margin: 5px 0;")
-        lay.addWidget(instr)
-
-        # Table for Expected vs Actual
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Method", "Expected", "Actual", "Variance"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers) # We will use custom cell widgets
-        lay.addWidget(self.table)
-
-        # Totals Summary
-        self.lbl_summary = QLabel("Total Variance: $0.00")
-        self.lbl_summary.setAlignment(Qt.AlignCenter)
-        self.lbl_summary.setStyleSheet(f"font-weight: bold; font-size: 15px; color: {NAVY}; padding: 10px; background: {LIGHT}; border-radius: 5px;")
-        lay.addWidget(self.lbl_summary)
-
-        # Buttons
-        btns = QHBoxLayout()
-        self.close_btn = navy_btn("Finalize & Close Shift", color=SUCCESS, hover=SUCCESS_H, height=45)
-        self.close_btn.clicked.connect(self._on_finalize)
-        
-        cancel_btn = navy_btn("Back to POS", color=DANGER, hover=DANGER_H, height=45)
-        cancel_btn.clicked.connect(self.reject)
-        
-        btns.addWidget(self.close_btn)
-        btns.addWidget(cancel_btn)
-        lay.addLayout(btns)
-
-    def _load_expected_data(self):
-        """Load expected totals directly from GL accounts"""
-        try:
-            from models.gl_account import get_all_accounts
-            
-            # Get all GL accounts
-            accounts = get_all_accounts()
-            
-            # Filter to only cash/bank accounts
-            cash_accounts = []
-            for acc in accounts:
-                acc_type = acc.get("account_type", "").upper()
-                acc_name = acc.get("account_name", "").upper()
-                # Only include cash, bank, and payment accounts
-                if "CASH" in acc_type or "BANK" in acc_type or "CARD" in acc_name or "EFTPOS" in acc_name or "CHECK" in acc_name:
-                    cash_accounts.append(acc)
-            
-            # If no filtered accounts, show first 4 accounts
-            if not cash_accounts:
-                cash_accounts = accounts[:4]
-            
-            self.table.setRowCount(len(cash_accounts))
-            
-            for i, acc in enumerate(cash_accounts):
-                # Method Name (use account name)
-                method_name = acc.get("account_name", "Unknown")
-                currency = acc.get("account_currency", "USD")
-                display_name = f"{method_name} ({currency})"
-                
-                # Expected amount (for now, set to 0 - you can modify this)
-                expected = 0.0
-                
-                # Method Name
-                self.table.setItem(i, 0, QTableWidgetItem(display_name))
-                
-                # Expected (Read Only)
-                exp_item = QTableWidgetItem(f"{expected:.2f}")
-                exp_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                self.table.setItem(i, 1, exp_item)
-                
-                # Actual Input (Editable)
-                actual_input = QLineEdit("0.00")
-                actual_input.setAlignment(Qt.AlignRight)
-                actual_input.setStyleSheet("border: 1px solid #1a5fb4; font-weight: bold;")
-                actual_input.textChanged.connect(lambda _, row=i: self._update_variance(row))
-                self.table.setCellWidget(i, 2, actual_input)
-                
-                # Variance (Calculated)
-                var_item = QTableWidgetItem("0.00")
-                var_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                self.table.setItem(i, 3, var_item)
-                
-        except Exception as e:
-            QMessageBox.critical(self, "Data Error", f"Could not load GL accounts: {str(e)}")
-
-    def _update_variance(self, row):
-        try:
-            expected = float(self.table.item(row, 1).text())
-            actual = float(self.table.cellWidget(row, 2).text() or 0)
-            variance = actual - expected
-            
-            var_item = self.table.item(row, 3)
-            var_item.setText(f"{variance:.2f}")
-            
-            # Visual feedback: Red for shortage
-            if variance < 0:
-                var_item.setForeground(QColor(DANGER))
-            else:
-                var_item.setForeground(QColor(SUCCESS))
-                
-            self._update_total_summary()
-        except ValueError: pass
-
-    def _update_total_summary(self):
-        total_var = 0.0
-        for r in range(self.table.rowCount()):
-            total_var += float(self.table.item(r, 3).text())
-        
-        self.lbl_summary.setText(f"Total Shift Variance: ${total_var:.2f}")
-        color = DANGER if total_var < 0 else SUCCESS
-        self.lbl_summary.setStyleSheet(f"font-weight: bold; font-size: 15px; color: {color}; padding: 10px; background: {LIGHT}; border-radius: 5px;")
-
-    def _on_finalize(self):
-        """Save the final report with method, expected, available, and variance"""
-        if QMessageBox.question(self, "Confirm", "Are you sure you want to close this shift? This will log you out.") != QMessageBox.Yes:
-            return
-            
-        # Collect data for DB
-        totals = []
-        for r in range(self.table.rowCount()):
-            totals.append({
-                "method": self.table.item(r, 0).text(),
-                "expected": float(self.table.item(r, 1).text()),
-                "actual": float(self.table.cellWidget(r, 2).text() or 0)
-            })
-            
-        try:
-            from models.shift import end_shift
-            # Retrieve active shift ID
-            from models.shift import get_active_shift
-            active = get_active_shift()
-            
-            if active:
-                counted_map = {t['method']: t['actual'] for t in totals}
-                end_shift(active['id'], counted_map)
-                self.accept()
-            else:
-                QMessageBox.warning(self, "Error", "No active shift found to close.")
-        except Exception as e:
-            QMessageBox.critical(self, "Save Error", str(e))

@@ -1279,55 +1279,68 @@ class PrintingService:
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, rect.height(), Qt.TextWordWrap, name)
                 y += rect.height() + 4
 
-                # ── Batch / expiry — look up product_batches by part_no ──
+                # ── Batch / expiry — latest batch only, controlled by pos_settings ──
+                _print_batch = True
+                try:
+                    from database.db import get_connection as _gcb
+                    _sb = _gcb(); _sbc = _sb.cursor()
+                    _sbc.execute(
+                        "SELECT setting_value FROM pos_settings WHERE setting_key=?",
+                        ("print_batch_on_receipt",),
+                    )
+                    _sr = _sbc.fetchone(); _sb.close()
+                    if _sr is not None:
+                        _print_batch = str(_sr[0]) == "1"
+                except Exception:
+                    pass
+
                 _part_no = (getattr(item, "productid", None) or "").strip().upper()
-                _batches = []
-                if _part_no:
+                _batch_row = None
+                if _print_batch and _part_no:
                     try:
                         from database.db import get_connection
                         _bc = get_connection()
                         _bcur = _bc.cursor()
                         _bcur.execute(
                             """
-                            SELECT pb.batch_no, pb.expiry_date
+                            SELECT TOP 1 pb.batch_no, pb.expiry_date
                             FROM product_batches pb
                             JOIN products p ON pb.product_id = p.id
                             WHERE UPPER(p.part_no) = ?
                               AND (pb.qty IS NULL OR pb.qty > 0)
-                            ORDER BY pb.expiry_date ASC
+                            ORDER BY pb.expiry_date DESC
                             """,
                             (_part_no,),
                         )
-                        _batches = _bcur.fetchall() or []
+                        _batch_row = _bcur.fetchone()
                         _bc.close()
                     except Exception as _be:
                         print(f"[Print] batch lookup failed for {_part_no}: {_be}")
 
-                if _batches:
+                if _batch_row:
                     painter.setFont(small_batch_font)
                     _bfm = painter.fontMetrics()
                     _blh = _bfm.height() + 2
-                    for _row in _batches:
-                        _bn  = (str(_row[0] or "")).strip()
-                        _exp = _row[1]
-                        _parts = []
-                        if _bn:
-                            _parts.append(f"Batch: {_bn}")
-                        if _exp:
-                            try:
-                                from datetime import datetime as _dt
-                                _exp_str = _exp.isoformat() if hasattr(_exp, "isoformat") else str(_exp)
-                                _exp_fmt = _dt.strptime(_exp_str[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
-                            except Exception:
-                                _exp_fmt = str(_exp)
-                            _parts.append(f"Exp: {_exp_fmt}")
-                        if _parts:
-                            painter.drawText(
-                                self.margin + 4, y,
-                                self.paper_width - self.margin * 2 - 4, _blh,
-                                Qt.AlignLeft, "  ".join(_parts),
-                            )
-                            y += _blh + 2
+                    _bn   = (str(_batch_row[0] or "")).strip()
+                    _exp  = _batch_row[1]
+                    _parts = []
+                    if _bn:
+                        _parts.append(f"Batch: {_bn}")
+                    if _exp:
+                        try:
+                            from datetime import datetime as _dt
+                            _exp_str = _exp.isoformat() if hasattr(_exp, "isoformat") else str(_exp)
+                            _exp_fmt = _dt.strptime(_exp_str[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+                        except Exception:
+                            _exp_fmt = str(_exp)
+                        _parts.append(f"Exp: {_exp_fmt}")
+                    if _parts:
+                        painter.drawText(
+                            self.margin + 4, y,
+                            self.paper_width - self.margin * 2 - 4, _blh,
+                            Qt.AlignLeft, "  ".join(_parts),
+                        )
+                        y += _blh + 2
                     painter.setFont(normal_font)
                 # ─────────────────────────────────────────────────────────
 
