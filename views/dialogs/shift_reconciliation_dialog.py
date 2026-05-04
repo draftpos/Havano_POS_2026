@@ -47,6 +47,18 @@ class ShiftReconciliationDialog(QDialog):
         self.setWindowTitle("Shift Reconciliation")
         self.setMinimumSize(1000, 750)
         self.setModal(True)
+
+        # HIDE EXPECTED amount check
+        self.show_expected = True
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'show_expected_in_reconciliation'")
+            r = cur.fetchone()
+            if r: self.show_expected = (str(r[0]) == "1")
+            conn.close()
+        except: pass
+
         self._setup_styles()
         self._refresh_shift()
         self._build_ui()
@@ -213,6 +225,11 @@ class ShiftReconciliationDialog(QDialog):
         self.table.setColumnWidth(4, 120)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        
+        if not self.show_expected:
+            self.table.setColumnHidden(2, True)
+            self.table.setColumnHidden(4, True)
+            
         main_layout.addWidget(self.table)
 
         # Summary panel
@@ -456,6 +473,9 @@ class ShiftReconciliationDialog(QDialog):
                 color: #212121;
             }
         """)
+
+        if not self.show_expected:
+            table.setColumnHidden(1, True)
         
         payment_methods = cashier_data.get("totals", {}).get("payment_methods", {})
         
@@ -501,7 +521,10 @@ class ShiftReconciliationDialog(QDialog):
         summary_frame.setStyleSheet("QFrame { background: #f5f5f5; border-radius: 6px; margin-top: 10px; }")
         summary_layout = QHBoxLayout(summary_frame)
         
-        summary_text = f"<b>Cashier Summary:</b>  Total Collected: ${total_sales:,.2f}  |  Total Transactions: {num_transactions}  |  Items Sold: {total_items}"
+        if self.show_expected:
+            summary_text = f"<b>Cashier Summary:</b>  Total Collected: ${total_sales:,.2f}  |  Total Transactions: {num_transactions}  |  Items Sold: {total_items}"
+        else:
+            summary_text = f"<b>Cashier Summary:</b>  Total Transactions: {num_transactions}  |  Items Sold: {total_items}"
         summary_label = QLabel(summary_text)
         summary_label.setTextFormat(Qt.RichText)
         summary_label.setStyleSheet("padding: 12px; font-size: 13px; color: #212121;")
@@ -581,8 +604,12 @@ class ShiftReconciliationDialog(QDialog):
         variance_color = "#d32f2f" if total_variance < 0 else "#388e3c" if total_variance > 0 else "#212121"
         variance_sign = "+" if total_variance > 0 else ""
         
-        self.summary_label.setText(f"Expected: ${total_expected:,.2f}  |  Counted: ${total_counted:,.2f}  |  Variance: {variance_sign}${total_variance:,.2f}")
-        self.summary_label.setStyleSheet(f"font-weight: bold; font-size: 14px; padding: 12px; color: {variance_color};")
+        if self.show_expected:
+            self.summary_label.setText(f"Expected: ${total_expected:,.2f}  |  Counted: ${total_counted:,.2f}  |  Variance: {variance_sign}${total_variance:,.2f}")
+            self.summary_label.setStyleSheet(f"font-weight: bold; font-size: 14px; padding: 12px; color: {variance_color};")
+        else:
+            self.summary_label.setText(f"Total Counted: ${total_counted:,.2f}")
+            self.summary_label.setStyleSheet(f"font-weight: bold; font-size: 14px; padding: 12px; color: #212121;")
 
     def _clean_for_json(self, obj):
         """Recursively clean objects for JSON serialization."""
@@ -782,6 +809,25 @@ class ShiftReconciliationDialog(QDialog):
         return self._clean_for_json(data)
 
     def _on_finalize(self):
+        # ── Restaurant Check ──────────────────────────────────────────────────
+        try:
+            from models.restaurant_order import get_active_orders
+            active_tables = get_active_orders()
+            if active_tables:
+                table_list = "\n".join([f"• Table {t.get('table_number')} (ORD-{t.get('id')})" for t in active_tables[:10]])
+                if len(active_tables) > 10:
+                    table_list += f"\n... and {len(active_tables)-10} more."
+                
+                QMessageBox.critical(
+                    self, 
+                    "Open Tables Found",
+                    f"You cannot close the shift while there are open restaurant tables.\n\n"
+                    f"Please settle or cancel these orders first:\n{table_list}"
+                )
+                return
+        except Exception as _e:
+            print(f"[ShiftRecon] Active tables check failed: {_e}")
+
         print("\n" + "="*80)
         print("DEBUG: _on_finalize - START")
         print("="*80)

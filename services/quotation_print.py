@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from models.receipt import ReceiptData, Item, MultiCurrencyDetail
 
 log = logging.getLogger("quotation_print")
 
@@ -40,8 +41,7 @@ def _format_date(raw) -> str:
     return s.split(" ")[0].split("T")[0]
 
 
-def _build_receipt(quotation) -> "ReceiptData":
-    from models.receipt import ReceiptData, Item, MultiCurrencyDetail
+def _build_receipt(quotation) -> ReceiptData:
 
     co = _get_company_defaults()
 
@@ -159,6 +159,19 @@ def print_quotation(ref) -> bool:
     if not quotation:
         log.error("print_quotation: quotation not found (ref=%r, resolved=%r)", ref, resolved)
         return False
+
+    # Check if quotation printing is enabled in settings
+    try:
+        from database.db import get_connection
+        conn = get_connection(); cur = conn.cursor()
+        cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'enable_quotation_printing'")
+        row = cur.fetchone()
+        if row and str(row[0]) == "0":
+            log.info("Quotation printing is DISABLED in settings. Skipping.")
+            return True
+        conn.close()
+    except Exception as e:
+        log.warning("print_quotation: failed to check enable_quotation_printing — %s", e)
 
     printers = _get_active_printers()
     if not printers:

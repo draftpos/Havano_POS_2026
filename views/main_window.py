@@ -2835,7 +2835,8 @@ class ManageUsersDialog(QDialog):
         rw4, self._perm_reprint  = _perm_row("Allow Reprint",       "Can reprint past invoices")
         rw5, self._perm_laybye   = _perm_row("Allow Laybye",        "Can save a cart as a Laybye order")
         rw6, self._perm_quote    = _perm_row("Allow Quotation",     "Can create and print Quotations")
-        for rw in [rw1, rw2, rw3, rw4, rw5, rw6]:
+        rw7, self._perm_cancel_kot = _perm_row("Allow Order Close", "Can cancel or remove restaurant orders")
+        for rw in [rw1, rw2, rw3, rw4, rw5, rw6, rw7]:
             c4l.addWidget(rw)
 
         # ── Discount limits row ────────────────────────────────────────────
@@ -3009,6 +3010,7 @@ class ManageUsersDialog(QDialog):
         self._perm_reprint.setChecked( bool(u.get("allow_reprint",   True)))
         self._perm_laybye.setChecked(  bool(u.get("allow_laybye",    True)))
         self._perm_quote.setChecked(   bool(u.get("allow_quote",     True)))
+        self._perm_cancel_kot.setChecked(bool(u.get("allow_cancel_kot", False)))
         # Discount limits
         self._f_max_disc.setValue(int(u.get("max_discount_percent", 0) or 0))
         expiry_str = u.get("discount_expiry_date", "") or ""
@@ -3054,6 +3056,7 @@ class ManageUsersDialog(QDialog):
         perm_reprint  = int(self._perm_reprint.isChecked())
         perm_laybye   = int(self._perm_laybye.isChecked())
         perm_quote    = int(self._perm_quote.isChecked())
+        perm_cancel_kot = int(self._perm_cancel_kot.isChecked())
         max_disc_pct  = self._f_max_disc.value()
         disc_expiry   = self._f_disc_expiry.date().toString("yyyy-MM-dd")
 
@@ -3087,7 +3090,7 @@ class ManageUsersDialog(QDialog):
                     # separately before the UPDATE runs (SQL Server requirement)
                     for col in ["allow_discount", "allow_receipt",
                                 "allow_credit_note", "allow_reprint",
-                                "allow_laybye", "allow_quote"]:
+                                "allow_laybye", "allow_quote", "allow_cancel_kot"]:
                         try:
                             cur.execute(f"""
                                 IF NOT EXISTS (
@@ -3134,6 +3137,7 @@ class ManageUsersDialog(QDialog):
                             allow_reprint        = ?,
                             allow_laybye         = ?,
                             allow_quote          = ?,
+                            allow_cancel_kot     = ?,
                             max_discount_percent = ?,
                             discount_expiry_date = ?
                         WHERE id = ?
@@ -3146,7 +3150,7 @@ class ManageUsersDialog(QDialog):
                           int(active),
                           perm_discount, perm_receipt,
                           perm_cn, perm_reprint,
-                          perm_laybye, perm_quote,
+                          perm_laybye, perm_quote, perm_cancel_kot,
                           max_disc_pct, disc_expiry,
                           self._editing_id))
 
@@ -3203,51 +3207,8 @@ UsersDialog = ManageUsersDialog
 # ADMIN DASHBOARD
 # =============================================================================
 
-# class AdminDashboard(QWidget):
-#     def __init__(self, parent_window=None, user=None):
-#         super().__init__()
-#         self.parent_window = parent_window
-#         self.user = user or {}
-#         self._build()
-#         self._load_data()
+# [Removed legacy AdminDashboard commented-out block]
 
-#     def _build(self):
-#         root = QVBoxLayout(self)
-#         root.setSpacing(0)
-#         root.setContentsMargins(0, 0, 0, 0)
-
-#         nav = QWidget(); nav.setFixedHeight(54)
-#         nav.setStyleSheet(f"background-color: {NAVY};")
-#         nav_layout = QHBoxLayout(nav)
-#         nav_layout.setContentsMargins(20, 8, 20, 8); nav_layout.setSpacing(12)
-
-#         logo = QLabel("POS System")
-#         logo.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {WHITE}; background: transparent; letter-spacing: 1px;")
-#         nav_layout.addWidget(logo)
-
-#         badge = QLabel("ADMIN")
-#         badge.setStyleSheet(f"""
-#             background-color: {ACCENT}; color: {WHITE};
-#             border-radius: 4px; font-size: 10px; font-weight: bold;
-#             padding: 2px 8px; letter-spacing: 1px;
-#         """)
-#         nav_layout.addWidget(badge); nav_layout.addStretch()
-
-#         date_lbl = QLabel(QDate.currentDate().toString("dd MMM yyyy"))
-#         date_lbl.setStyleSheet(f"font-size: 12px; color: {NAVY}; background: transparent;")
-#         nav_layout.addWidget(date_lbl); nav_layout.addSpacing(16)
-
-#         logout_btn = navy_btn("Logout", height=30, width=72, color=DANGER, hover=DANGER_H)
-#         if self.parent_window:
-#             logout_btn.clicked.connect(self.parent_window._logout)
-#         nav_layout.addWidget(logout_btn)
-
-#         root.addWidget(nav); root.addWidget(hr())
-
-#         scroll = QScrollArea(); scroll.setWidgetResizable(True)
-#         scroll.setStyleSheet(f"QScrollArea {{ border: none; background: {OFF_WHITE}; }}")
-
-#         body = QWidget(); body.setStyleSheet(f"background: {OFF_WHITE};")
 #         body_layout = QVBoxLayout(body)
 #         body_layout.setSpacing(20); body_layout.setContentsMargins(24, 20, 24, 24)
 
@@ -3507,40 +3468,51 @@ class AdminDashboard(QWidget):
         root.setSpacing(0)
         root.setContentsMargins(0, 0, 0, 0)
 
-        # Header with POS Switcher
+        # Header with Switchers
         header = QWidget()
         header.setFixedHeight(50)
         header.setStyleSheet(f"background-color: {WHITE}; border-bottom: 1px solid {BORDER};")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(20, 0, 20, 0)
-        
+        header_layout.setSpacing(8)
+
         title = QLabel("Dashboard")
         title.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {NAVY};")
-        
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+
+        # Orders Button (Floor Management)
+        from models.restaurant_order import is_restaurant_enabled
+        if is_restaurant_enabled():
+            orders_btn = QPushButton("ORDERS")
+            orders_btn.setFixedHeight(32)
+            orders_btn.setCursor(Qt.PointingHandCursor)
+            orders_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {SUCCESS}; color: white; border: none;
+                    border-radius: 4px; font-size: 11px; font-weight: bold; padding: 0 16px;
+                }}
+                QPushButton:hover {{ background-color: {SUCCESS_H}; }}
+            """)
+            if self.parent_window:
+                orders_btn.clicked.connect(self.parent_window.switch_to_orders)
+            header_layout.addWidget(orders_btn)
+
         # POS Switcher Button
-        pos_btn = QPushButton("◀  Switch to POS")
+        pos_btn = QPushButton("SWITCH TO POS")
         pos_btn.setFixedHeight(32)
         pos_btn.setCursor(Qt.PointingHandCursor)
         pos_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {ACCENT};
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 12px;
-                font-weight: 500;
-                padding: 0 16px;
+                background-color: {ACCENT}; color: white; border: none;
+                border-radius: 4px; font-size: 11px; font-weight: 700; padding: 0 16px;
             }}
-            QPushButton:hover {{
-                background-color: {ACCENT_H};
-            }}
+            QPushButton:hover {{ background-color: {ACCENT_H}; }}
         """)
         if self.parent_window:
             pos_btn.clicked.connect(self.parent_window.switch_to_pos)
-        
-        header_layout.addWidget(title)
-        header_layout.addStretch()
         header_layout.addWidget(pos_btn)
+        
         root.addWidget(header)
 
         # ── Tab widget ────────────────────────────────────────────────────────
@@ -4625,13 +4597,43 @@ class MaintenanceDialog(QDialog):
             "ALLOW QTY CHANGE ON LOADED QUOTATION",
             "Let cashiers edit the quantity of pharmacy items loaded from a quotation.",
         ),
+        (
+            "print_packaging_list",
+            "PRINT PACKAGING LIST",
+            "Print an extra packaging list (only products and quantities) immediately after the normal receipt.",
+        ),
+        (
+            "show_expected_in_reconciliation",
+            "SHOW EXPECTED AMOUNT IN RECONCILIATION",
+            "Display the expected sales total in the shift reconciliation dialog.",
+        ),
+        (
+            "enable_quotation_printing",
+            "ENABLE QUOTATION THERMAL PRINTING",
+            "Allow printing quotations to the standard receipt printer.",
+        ),
+        (
+            "auto_print_quotations",
+            "AUTO-PRINT QUOTATIONS",
+            "Skip the preview popup and print quotations immediately when saved.",
+        ),
+        (
+            "allow_others_to_view_orders",
+            "ALLOW CASHIERS TO VIEW OTHERS' ORDERS",
+            "Let non-admin cashiers open and view orders started by other staff.",
+        ),
+        (
+            "allow_others_to_close_orders",
+            "ALLOW CASHIERS TO CLOSE OTHERS' ORDERS",
+            "Let non-admin cashiers finalize payment on orders started by other staff.",
+        ),
     ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._toggles = {}
         self.setWindowTitle("Maintenance Settings")
-        self.setFixedSize(500, 260)
+        self.setFixedSize(500, 680)
         self.setModal(True)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setStyleSheet(f"QDialog {{ background:{WHITE}; border:1px solid {NAVY}; }}")
@@ -5694,7 +5696,215 @@ class POSView(QWidget):
         dlg = OptionsDialog(self, pos_view=self)
         dlg._do_sync_products()
 
+    def _on_orders(self):
+        if self.orders_btn.isChecked():
+            if self.parent_window:
+                self.parent_window.switch_to_orders()
+        else:
+            self._clear_restaurant_mode()
+
+    def _set_view_only_mode(self, enabled: bool):
+        """Disable or enable payment and editing buttons based on cashier permissions."""
+        if hasattr(self, 'pay_btn'):
+            self.pay_btn.setEnabled(not enabled)
+            self.pay_btn.setToolTip("View-Only Mode: You do not have permission to close this order." if enabled else "")
+        
+        # Disable editing triggers on the table if view-only
+        if hasattr(self, 'invoice_table'):
+            if enabled:
+                self.invoice_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            else:
+                self.invoice_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.AnyKeyPressed | QAbstractItemView.EditKeyPressed)
+
+    def link_to_table(self, table_data: dict, append_mode: bool = False, order_id: int = None, force_new: bool = False):
+        """
+        Link the current cart to a restaurant table.
+        - If force_new is True: Don't load any previous orders. Start empty.
+        - If order_id is provided: Load that specific order (Edit KOT / Pay KOT).
+        - If self._pay_all_mode is True: Load ALL orders for that table combined.
+        - Otherwise: Load the most recent active order (Standard ADD/APPEND).
+        """
+        from database.db import get_connection
+        from models.restaurant_order import get_order_by_table, get_order_items, get_orders_for_table
+        
+        # 1. Fetch OrderPower permissions
+        view_others = True
+        close_others = True
+        try:
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_key, setting_value FROM pos_settings WHERE setting_key IN ('allow_others_to_view_orders', 'allow_others_to_close_orders')")
+            for k, v in cur.fetchall():
+                if k == 'allow_others_to_view_orders': view_others = (str(v) == "1")
+                if k == 'allow_others_to_close_orders': close_others = (str(v) == "1")
+            conn.close()
+        except Exception: pass
+
+        order = None
+        is_combined = getattr(self, "_pay_all_mode", False)
+
+        # 2. Resolve WHICH Order(s) to load
+        if force_new:
+            order = None
+        elif order_id:
+            try:
+                from database.db import fetchone_dict
+                _conn = get_connection(); _cur = _conn.cursor()
+                _cur.execute("SELECT o.*, t.name as table_name, t.table_number FROM restaurant_orders o JOIN restaurant_tables t ON o.table_id = t.id WHERE o.id = ?", (order_id,))
+                order = fetchone_dict(_cur)
+                _conn.close()
+            except Exception: order = None
+        elif is_combined:
+            # COMBINED MODE: All orders for table
+            orders = get_orders_for_table(table_data["id"])
+            if orders:
+                self._new_sale(confirm=False)
+                
+                # Set state AFTER _new_sale clears it
+                self._current_order_ids = [o["id"] for o in orders]
+                self._current_order_id = orders[0]["id"] # for legacy
+                self._current_table = table_data
+                self._restaurant_mode = True
+                self._restaurant_append_mode = False
+                
+                all_items = []
+                cnames = []
+                for o in orders:
+                    items = get_order_items(o["id"])
+                    all_items.extend(items)
+                    if o.get("customer_name") and o["customer_name"] not in cnames:
+                        cnames.append(o["customer_name"])
+                
+                self._add_quotation_to_cart({
+                    "cart_items": all_items,
+                    "customer": ", ".join(cnames),
+                    "quotation_name": f"Table {table_data['table_number']} (Combined)"
+                })
+                
+                # Re-assert state in case _add_quotation_to_cart wiped it
+                self._current_order_ids = [o["id"] for o in orders]
+                self._current_order_id = orders[0]["id"]
+                self._current_table = table_data
+                self._restaurant_mode = True
+                self._restaurant_append_mode = False
+                self._refresh_pay_button_label()
+                
+                self._set_view_only_mode(False)
+                if self.parent_window:
+                    self.parent_window._set_status(f"Combined Payment for Table {table_data['table_number']} ({len(orders)} KOTs)")
+                return
+        else:
+            # DEFAULT: Most recent active order
+            order = get_order_by_table(table_data["id"])
+
+        # 3. Ownership / Permission Check
+        is_admin = (self.user.get("role") == "Administrator")
+        current_waiter_id = self.user.get("id")
+
+        if order and order.get("waiter_id") != current_waiter_id and not is_admin:
+            if not view_others:
+                QMessageBox.warning(self, "Permission Denied", "No permission to view others' orders.")
+                return
+            if not close_others:
+                self._set_view_only_mode(True)
+            else:
+                self._set_view_only_mode(False)
+        else:
+            self._set_view_only_mode(False)
+
+        # 4. Apply UI Labels
+        self._current_table = table_data
+        self._restaurant_mode = True
+        self._restaurant_append_mode = append_mode
+        self.orders_btn.setChecked(True)
+        self.orders_btn.setText(f"TABLE: {table_data['table_number']}")
+        self.orders_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ACCENT}; color: {WHITE}; border: none;
+                border-radius: 4px; font-size: 11px; font-weight: bold;
+            }}
+        """)
+
+        # 5. Load Items
+        if order:
+            saved_order_id = order["id"]
+            order_items = get_order_items(order["id"])
+            
+            # Set ALL state BEFORE _new_sale so _refresh_pay_button_label reads correctly
+            self._current_order_id = saved_order_id
+            self._restaurant_mode = True
+            self._restaurant_append_mode = append_mode
+            self._new_sale(confirm=False)
+            
+            # Re-assert state after _new_sale clears _current_order_id
+            self._current_order_id = saved_order_id
+            self._current_table = table_data
+            self._restaurant_mode = True
+            self._restaurant_append_mode = append_mode
+            
+            self._add_quotation_to_cart({
+                "cart_items": order_items,
+                "customer": order.get("customer_name", ""),
+                "quotation_name": f"KOT #ORD-{saved_order_id}"
+            })
+            
+            # Re-assert state in case _add_quotation_to_cart wiped it
+            self._current_order_id = saved_order_id
+            self._current_table = table_data
+            self._restaurant_mode = True
+            self._restaurant_append_mode = append_mode
+            self._refresh_pay_button_label()
+            
+            if append_mode:
+                self._recalc_totals()
+                if self.parent_window:
+                    self.parent_window._set_status(f"Editing KOT #ORD-{saved_order_id} (Table {table_data['table_number']})")
+            else:
+                if self.parent_window:
+                    self.parent_window._set_status(f"Paying KOT #ORD-{saved_order_id}")
+        else:
+            self._current_order_id = None
+            self._restaurant_mode = True
+            self._restaurant_append_mode = False
+            self._new_sale(confirm=False)
+            # Re-assert restaurant mode after _new_sale
+            self._restaurant_mode = True
+            self._current_table = table_data
+            self._current_order_id = None
+            if self.parent_window:
+                self.parent_window._set_status(f"MODE: Restaurant (Table {table_data.get('table_number')}) — New Order")
+
+        # Final: always refresh Pay button label with correct state
+        self._refresh_pay_button_label()
+
+    def _clear_restaurant_mode(self):
+        """Fully exit restaurant mode and return POS to standard sale state."""
+        self._current_table = None
+        self._current_order_id = None
+        self._current_order_ids = []  # Clear combined list
+        self._pay_all_mode = False
+        self._restaurant_mode = False
+        self._restaurant_append_mode = False
+        self._refresh_pay_button_label()
+        
+        if hasattr(self, 'orders_btn'):
+            self.orders_btn.setText("Orders")
+            self.orders_btn.setChecked(False)
+            from models.restaurant_order import is_restaurant_enabled
+            self.orders_btn.setVisible(is_restaurant_enabled())
+            self.orders_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {SUCCESS}; color: {WHITE}; border: none;
+                    border-radius: 4px; font-size: 11px; font-weight: bold;
+                }}
+                QPushButton:hover {{ background-color: {SUCCESS_H}; }}
+            """)
+        
+        self._set_view_only_mode(False)
+        if self.parent_window:
+            self.parent_window._set_status("MODE: Standard Sale")
+
     def _on_laybye(self):
+
         """
         Simple UI Switcher: 
         Changes the PAY F5 button to a DEPOSIT button without breaking header styles.
@@ -5909,11 +6119,10 @@ class POSView(QWidget):
         if self.parent_window:
             self.parent_window._set_status(f"Laybye #{order_id} Saved Successfully")
     def _refresh_pay_button_label(self):
-        # Pharmacists always dispense (Quote workflow, no payment). Everyone
-        # else follows the explicit cart-mode toggle. Checking is_pharmacist
-        # live on every call — not relying on the potentially-stale
-        # _cart_mode — means the label is always correct for the current
-        # session regardless of init-time timing.
+        # Skip if we're currently loading a table — link_to_table calls us
+        # explicitly at the end once all state flags are correctly set.
+        if getattr(self, "_linking_table", False):
+            return
         if not hasattr(self, "btn_pay") or self.btn_pay is None:
             return
         _user = getattr(self, "user", None)
@@ -5929,11 +6138,39 @@ class POSView(QWidget):
             # Lock pharmacists into Quote mode so _open_payment reroutes too
             self._cart_mode = "quote"
             self.btn_pay.setText("DISPENSE")
+            self.btn_pay.setStyleSheet(
+                f"background-color: {SUCCESS}; color: {WHITE}; font-weight: bold; "
+                f"border-radius: 6px; font-size: 17px;"
+            )
+        elif getattr(self, "_restaurant_mode", False):
+            if getattr(self, "_current_order_id", None) and not getattr(self, "_restaurant_append_mode", False):
+                # Order loaded from an occupied table — ready for checkout
+                self.btn_pay.setText("PAY ORDER (F5)")
+                self.btn_pay.setStyleSheet(
+                    f"background-color: {SUCCESS}; color: {WHITE}; font-weight: bold; "
+                    f"border-radius: 6px; font-size: 17px;"
+                )
+            else:
+                # Fresh table or Append Mode — save the order first
+                self.btn_pay.setText("SAVE ORDER (F5)")
+                self.btn_pay.setStyleSheet(
+                    f"background-color: #3498db; color: {WHITE}; font-weight: bold; "
+                    f"border-radius: 6px; font-size: 17px;"
+                )
         elif getattr(self, "_cart_mode", "sales") == "quote":
             self.btn_pay.setText("FINALIZE QUOTE")
+            self.btn_pay.setStyleSheet(
+                f"background-color: {SUCCESS}; color: {WHITE}; font-weight: bold; "
+                f"border-radius: 6px; font-size: 17px;"
+            )
         else:
             self.btn_pay.setText("PAY  F5")
+            self.btn_pay.setStyleSheet(
+                f"background-color: {SUCCESS}; color: {WHITE}; font-weight: bold; "
+                f"border-radius: 6px; font-size: 17px;"
+            )
         print(f"[POSView] PAY label refresh: mode={getattr(self, '_cart_mode', '?')!r} "
+              f"restaurant={getattr(self, '_restaurant_mode', False)} "
               f"role={_role!r} is_pharmacist={_is_p} → {self.btn_pay.text()!r}",
               flush=True)
 
@@ -5978,12 +6215,30 @@ class POSView(QWidget):
             self._save_quotation()
             return
 
-        # ── 0b. REDIRECTION LOGIC (Laybye Check) ─────────────────────────────
+        # ── 0b. REDIRECTION LOGIC (Laybye & Restaurant Check) ─────────────────────────────
         # If the laybye switcher is toggled ON, execute the Laybye flow instead
         if hasattr(self, 'laybye_btn') and self.laybye_btn.isChecked():
             # This calls the full Laybye Flow (Confirmation -> Deposit -> Save)
             self._execute_laybye_transaction()
             return
+
+        if getattr(self, "_restaurant_mode", False):
+            btn_text = self.btn_pay.text().upper()
+            if "PAY" in btn_text:
+                pass # Fall through to normal payment flow
+            elif getattr(self, "_restaurant_append_mode", False):
+                # An existing order is loaded but we are in Append Mode.
+                # Save the new items to the KOT first.
+                self._save_restaurant_order()
+                return
+            
+            if getattr(self, "_current_order_id", None):
+                # Loaded order — go straight to payment
+                pass  # fall through to normal payment flow below
+            else:
+                # Fresh table with new items — save as KOT order first
+                self._save_restaurant_order()
+                return
 
         # ── 1. PERMISSION & VALIDATION ──────────────────────────────────────
         if not self._check_permission("allow_receipt", "Process Payment / Print Receipt"):
@@ -6255,6 +6510,32 @@ class POSView(QWidget):
                     self.parent_window._set_status(status)
                 self._refresh_unsynced_badge()
 
+            # If in restaurant mode, close the active order and clear state
+            if getattr(self, "_restaurant_mode", False) and getattr(self, "_current_table", None):
+                try:
+                    from database.db import get_connection
+                    _conn = get_connection(); _cur = _conn.cursor()
+                    _tid = self._current_table["id"]
+                    # Mark order Paid (handle both 'Open' and legacy 'Ordered' status)
+                    if getattr(self, "_current_order_id", None):
+                        _cur.execute(
+                            "UPDATE restaurant_orders SET status = 'Paid', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (self._current_order_id,)
+                        )
+                    else:
+                        _cur.execute(
+                            "UPDATE restaurant_orders SET status = 'Paid', updated_at = CURRENT_TIMESTAMP WHERE table_id = ? AND status IN ('Open', 'Ordered')",
+                            (_tid,)
+                        )
+                    
+                    # Mark table Available
+                    _cur.execute("UPDATE restaurant_tables SET status = 'Available' WHERE id = ?", (_tid,))
+                    _conn.commit(); _conn.close()
+                except Exception as _re:
+                    print(f"[POSView] Error closing restaurant order: {_re}")
+                
+                self._clear_restaurant_mode()
+
             # Clear invoice for next customer
             self._new_sale(confirm=False)
             
@@ -6274,6 +6555,11 @@ class POSView(QWidget):
         self._cat_page        = 0
         self._last_filled_row = -1
         self._selected_customer: dict | None = None
+        self._current_table: dict | None = None
+        self._current_order_id: int | None = None
+        self._restaurant_mode: bool = False
+        self._restaurant_append_mode: bool = False
+
 
         # ── Previous transaction info ─────────────────────────────────────────
         # Shown in the footer bar so the cashier always sees the last sale
@@ -6378,9 +6664,11 @@ class POSView(QWidget):
             except (TypeError, ValueError):
                 qty = 1.0
 
-            name       = item.get("product_name", "")
+            # Support both quotation format (product_name/part_no)
+            # and restaurant KOT format (item_name/item_code)
+            name       = item.get("product_name") or item.get("item_name", "")
             price      = item.get("price", 0)
-            part_no    = item.get("part_no", "")
+            part_no    = item.get("part_no") or item.get("item_code", "")
             product_id = item.get("product_id", None)
             discount   = item.get("discount", 0)
 
@@ -6461,9 +6749,6 @@ class POSView(QWidget):
         
         if self.parent_window:
             self.parent_window._set_status(f"Loaded quotation: {len(cart_items)} items")
-        
-        QMessageBox.information(self, "Success", 
-            f"Quotation {quotation_name} loaded with {len(cart_items)} item(s).")
     # =========================================================================
     # REST OF YOUR EXISTING POSView METHODS BELOW
     # =========================================================================
@@ -6591,6 +6876,17 @@ class POSView(QWidget):
         if not self._selected_customer:
             QMessageBox.information(self, "No Customer", "Please select a customer first.")
             return
+
+        # Fetch Auto-Print setting
+        auto_print = False
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'auto_print_quotations'")
+            row = cur.fetchone()
+            if row: auto_print = (str(row[0]) == "1")
+            conn.close()
+        except Exception: pass
         
         try:
             total = float(self._lbl_total.text() or "0")
@@ -6896,7 +7192,15 @@ class POSView(QWidget):
         br.addWidget(close_btn)
         lay.addLayout(br)
 
-        dlg.exec()
+        # Auto-Print Enforcement
+        if auto_print:
+            # Bypass Dialog
+            _do_print_and_close()
+        else:
+            dlg.exec()
+            # If dialog was closed without clicking print, we still clear if dlg was accepted
+            # (which it is on both buttons in current logic).
+        
 
         # Clear cart + fully exit quotation mode (both flags + navbar pill +
         # PAY button label). No "Success" popup — status bar already carries
@@ -7008,6 +7312,7 @@ class POSView(QWidget):
 
             maint_btn.addItem("Users",              _sd("ManageUsersDialog"))
             maint_btn.addItem("Category Visibility", lambda: CategoryVisibilityDialog(self).exec())
+            maint_btn.addItem("Order Settings",      _sd("POSRulesDialog"))
             maint_btn.addItem("Maintenance Settings", lambda: MaintenanceDialog(self.parent_window or self).exec())
             maint_btn.addSeparator()
             maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
@@ -7191,6 +7496,13 @@ class POSView(QWidget):
         self._unsynced_timer.start()
 
         layout.addStretch(1)
+
+        # ── Orders Button (Floor Management) ─────────────────────────────────
+        from models.restaurant_order import is_restaurant_enabled
+        if is_restaurant_enabled():
+            self.orders_btn = _nb("Orders", self.parent_window.switch_to_orders if self.parent_window else lambda: None, color=SUCCESS, hov=SUCCESS_H)
+            layout.addWidget(self.orders_btn)
+            layout.addSpacing(4)
 
         # ── Dashboard button (admin only) ─────────────────────────────────────
         if is_admin_user:
@@ -8233,6 +8545,7 @@ class POSView(QWidget):
 
             maint_btn.addItem("Users",              _sd("ManageUsersDialog"))
             maint_btn.addItem("Category Visibility", lambda: CategoryVisibilityDialog(self).exec())
+            maint_btn.addItem("Order Settings",      _sd("POSRulesDialog"))
             maint_btn.addItem("Maintenance Settings", lambda: MaintenanceDialog(self.parent_window or self).exec())
             maint_btn.addSeparator()
             maint_btn.addItem("Company Defaults",   self._open_company_defaults_nav)
@@ -8327,7 +8640,34 @@ class POSView(QWidget):
             }}
         """)
 
+        # ── Restaurant / Orders Switcher ──────────────────────────────────────
+        self.orders_btn = QPushButton("Orders")
+        self.orders_btn.setCheckable(True)
+        self.orders_btn.setFixedHeight(NAV_H)
+        self.orders_btn.setMinimumWidth(110)
+        self.orders_btn.setCursor(Qt.PointingHandCursor)
+        self.orders_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {SUCCESS}; color: {WHITE}; border: none;
+                border-radius: {NAV_R}px; font-size: {NAV_FS}px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {SUCCESS_H}; }}
+            QPushButton:checked {{ background-color: {ACCENT}; }}
+        """)
+        self.orders_btn.clicked.connect(self._on_orders)
+
+        # Show button only if feature is enabled in settings
+        try:
+            from models.restaurant_order import is_restaurant_enabled
+            self.orders_btn.setVisible(is_restaurant_enabled())
+        except Exception:
+            self.orders_btn.setVisible(False)
+            
+        layout.addWidget(self.orders_btn)
+        layout.addSpacing(4)
+
         self.laybye_btn.setToolTip("Toggle Laybye Mode")
+
         self.laybye_btn.clicked.connect(self._on_laybye)
         layout.addWidget(self.laybye_btn)
         layout.addSpacing(4)
@@ -8448,6 +8788,13 @@ class POSView(QWidget):
             lay.addWidget(CompanyDefaultsPage())
             dlg.setWindowState(Qt.WindowMaximized)
             dlg.exec()
+            
+            # Refresh visibility of Orders button after settings close
+            if hasattr(self, '_pos_view') and hasattr(self._pos_view, 'orders_btn'):
+                try:
+                    from models.restaurant_order import is_restaurant_enabled
+                    self._pos_view.orders_btn.setVisible(is_restaurant_enabled())
+                except Exception: pass
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open Company Defaults:\n{e}")
 
@@ -9513,7 +9860,7 @@ class POSView(QWidget):
         if (user.get("role") or "").lower() == "admin":
             return True
         # Check flag — default True if not set (backward compat)
-        allowed = bool(user.get(flag, True))
+        allowed = bool(user.get(flag, False))
         if not allowed:
             # Offer admin PIN bypass
             pin, ok = QInputDialog.getText(
@@ -11560,6 +11907,7 @@ class POSView(QWidget):
         # tap the customer button at any time to switch to a different customer.
         self._refresh_customer_btn()
         self._recalc_totals()
+        self._current_order_id = None
         self._highlight_active_row(0)
         self.invoice_table.setCurrentCell(0, 0)
         self.invoice_table.setFocus()
@@ -12013,6 +12361,104 @@ class POSView(QWidget):
                     win32print.ClosePrinter(hp)
         except Exception as e:
             QMessageBox.warning(self, "Print Error", f"Could not print quotation:\n{e}")
+    def _save_restaurant_order(self):
+        """Saves the current cart as a restaurant order for the linked table."""
+        if not self._current_table:
+            QMessageBox.warning(self, "No Table", "No restaurant table is linked to this cart.")
+            return
+
+        items = self._collect_invoice_items()
+        if not items:
+            QMessageBox.warning(self, "Empty Order", "Add items to the order first.")
+            return
+
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+
+            table_id = self._current_table["id"]
+            cust_name = (self._selected_customer or {}).get("customer_name", "Walk-in")
+
+            order_id = getattr(self, "_current_order_id", None)
+            if order_id:
+                if getattr(self, "_restaurant_append_mode", False):
+                    # We are adding on top, do NOT delete old items!
+                    cur.execute("UPDATE restaurant_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (order_id,))
+                else:
+                    # Update existing order by replacing items
+                    cur.execute("DELETE FROM restaurant_order_items WHERE order_id = ?", (order_id,))
+                    cur.execute("UPDATE restaurant_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (order_id,))
+            else:
+                # 1. Create or Find Order
+                cur.execute("""
+                    INSERT INTO restaurant_orders (table_id, waiter_id, customer_name, status, created_at)
+                    OUTPUT INSERTED.id
+                    VALUES (?, ?, ?, 'Open', CURRENT_TIMESTAMP)
+                """, (table_id, self.user.get("id"), cust_name))
+                order_id = cur.fetchone()[0]
+
+            # 2. Add Items
+            for it in items:
+                cur.execute("""
+                    INSERT INTO restaurant_order_items (order_id, product_id, item_code, item_name, quantity, rate)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (order_id, it.get("product_id", 0), it.get("part_no", ""), it["product_name"], it["qty"], it["price"]))
+
+            # 3. Mark Table Occupied
+            cur.execute("UPDATE restaurant_tables SET status = 'Occupied' WHERE id = ?", (table_id,))
+            
+            conn.commit()
+            conn.close()
+
+            if self.parent_window:
+                self.parent_window._set_status(f"Order saved for Table {self._current_table['table_number']}")
+                self.parent_window.switch_to_orders()
+            
+            self._new_sale(confirm=False)
+            self._clear_restaurant_mode()
+            
+            # --- KOT PRINTING ---
+            try:
+                from models.receipt import ReceiptData, Item
+                from services.printing_service import PrintingService
+                import json
+                from pathlib import Path
+
+                kot_items = []
+                for it in items:
+                    kot_items.append(Item(
+                        productName=it["product_name"],
+                        qty=float(it["qty"])
+                    ))
+                
+                receipt = ReceiptData(
+                    invoiceNo=f"ORD-{order_id}",
+                    items=kot_items,
+                    customerName=cust_name,
+                    orderNumber=order_id,
+                    KOT=f"Table {self._current_table['table_number']}"
+                )
+                
+                # Get KOT printer from settings
+                hw_path = Path("app_data/hardware_settings.json")
+                kot_printer = None
+                if hw_path.exists():
+                    try:
+                        hw = json.loads(hw_path.read_text())
+                        kot_printer = hw.get("kot_printer") or hw.get("main_printer")
+                    except: pass
+                
+                ps = PrintingService()
+                ps.print_kitchen_order(receipt, printer_name=kot_printer)
+                print(f"[Restaurant] KOT Printed for Order {order_id} to {kot_printer}")
+            except Exception as _pe:
+                print(f"[Restaurant] KOT Print failed: {_pe}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", f"Restaurant order error:\n{e}")
+            import traceback; traceback.print_exc()
+
 # =============================================================================
 # CASHIER POS VIEW
 # 
@@ -12053,12 +12499,10 @@ class MainWindow(QMainWindow):
     def __init__(self, user=None):
         super().__init__()
 
-        # Single-instance guard — works correctly across logout/re-login cycles
-        # because the socket lives at class level, not on self.
+        # Single-instance guard
         if not MainWindow._acquire_instance_lock():
             from PySide6.QtWidgets import QMessageBox as _MB
-            _MB.warning(None, "Already Running",
-                        "Havano POS is already open.\nPlease use the existing window.")
+            _MB.warning(None, "Already Running", "Havano POS is already open.")
             import sys; sys.exit(0)
 
         self.user = user or {"username": "admin", "role": "admin"}
@@ -12068,95 +12512,54 @@ class MainWindow(QMainWindow):
         
         self.quotation_sync_thread = start_quotation_sync_thread()
 
+        # ── 1. Init Status Bar FIRST so views can find it ──────────────────
+        from PySide6.QtWidgets import QStatusBar
+        self._status_bar = QStatusBar()
+        self._status_bar.setSizeGripEnabled(False)
+        self._status_bar.showMessage("  Ready")
+        self.setStatusBar(self._status_bar)
+
+        # Permanent widgets in footer
+        _uname = self.user.get("username", "")
+        _urole = self.user.get("role", "cashier")
+        _user_lbl = QLabel(f"  {_uname} [{_urole.upper()}]  ")
+        _user_lbl.setStyleSheet(f"color: {MID}; font-size: 11px;")
+        self._status_bar.addPermanentWidget(_user_lbl)
+
+        # ── 2. Views ──────────────────────────────────────────────────────
         self._stack = QStackedWidget()
         self._pos_view = POSView(parent_window=self, user=self.user)
         self._stack.addWidget(self._pos_view)
+
+        try:
+            from views.restaurant_view import OrderView
+            self._restaurant_view = OrderView(parent=self)
+            self._restaurant_view.back_to_pos.connect(self.switch_to_pos)
+            self._restaurant_view.table_selected.connect(lambda t: self._on_table_selected_from_restaurant(t, append_mode=False))
+            self._restaurant_view.action_add_order.connect(lambda t: self._on_table_selected_from_restaurant(t, append_mode=False, force_new=True))
+            self._restaurant_view.action_pay_order.connect(lambda o: self._on_kot_action("pay", o))
+            self._restaurant_view.action_edit_kot.connect(lambda o: self._on_kot_action("edit", o))
+            self._restaurant_view.action_cancel_kot.connect(self._on_cancel_kot)
+            self._restaurant_view.action_pay_all.connect(self._on_pay_all_orders)
+            self._stack.addWidget(self._restaurant_view)
+        except Exception as e:
+            print(f" restaurant view error: {e}")
+            self._restaurant_view = None
 
         from models.user import is_admin
         if is_admin(self.user):
             self._dashboard = AdminDashboard(parent_window=self, user=self.user)
             self._stack.addWidget(self._dashboard)
 
+        # ── 3. Finalize UI ────────────────────────────────────────────────
         self.setCentralWidget(self._stack)
-        self._build_menubar()
-        self.menuBar().setVisible(False)
+        self.menuBar().hide() # Hide redundant navbar as requested
 
-        self._status_bar = QStatusBar()
-        self._status_bar.setSizeGripEnabled(False)
-        self._status_bar.showMessage("  Ready")
-        self.setStatusBar(self._status_bar)
-
-        # #37 — logged-in user in footer
-        _uname = self.user.get("username", "")
-        _urole = self.user.get("role", "cashier")
-        _user_w = QWidget(); _user_w.setStyleSheet("background: transparent;")
-        _user_h = QHBoxLayout(_user_w); _user_h.setContentsMargins(6, 0, 6, 0); _user_h.setSpacing(4)
-        _user_ic = QLabel(); _user_ic.setPixmap(qta.icon("fa5s.user", color=MID).pixmap(12, 12))
-        _user_ic.setStyleSheet("background: transparent;")
-        _user_lbl = QLabel(f"{_uname} [{_urole.upper()}]")
-        _user_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
-        _user_h.addWidget(_user_ic); _user_h.addWidget(_user_lbl)
-        self._status_bar.addPermanentWidget(_user_w)
-
-        _sep1 = QLabel("|")
-        _sep1.setStyleSheet(f"color: {NAVY_2}; background: transparent;")
-        self._status_bar.addPermanentWidget(_sep1)
-
-        # #38 — server URL in footer
-        try:
-            from services.site_config import get_host_label as _ghl
-            _srv = _ghl()
-        except Exception:
-            _srv = "—"
-        _srv_w = QWidget(); _srv_w.setStyleSheet("background: transparent;")
-        _srv_h = QHBoxLayout(_srv_w); _srv_h.setContentsMargins(6, 0, 6, 0); _srv_h.setSpacing(4)
-        _srv_ic = QLabel(); _srv_ic.setPixmap(qta.icon("fa5s.globe", color=MID).pixmap(12, 12))
-        _srv_ic.setStyleSheet("background: transparent;")
-        _srv_lbl = QLabel(f"{_srv}")
-        _srv_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
-        _srv_h.addWidget(_srv_ic); _srv_h.addWidget(_srv_lbl)
-        self._status_bar.addPermanentWidget(_srv_w)
-
-        _sep2 = QLabel("|")
-        _sep2.setStyleSheet(f"color: {NAVY_2}; background: transparent;")
-        self._status_bar.addPermanentWidget(_sep2)
-
-        # #39 — SQL connection string in footer
-        _sql = ""
-        try:
-            from database.db import get_connection as _gc
-            _conn = _gc()
-            try: _sql = _conn.getinfo(2)
-            except Exception: pass
-            _conn.close()
-        except Exception:
-            pass
-        if not _sql:
-            try:
-                from models.company_defaults import get_defaults as _gd
-                _d = _gd() or {}
-                _sql = _d.get("db_server", "") or _d.get("server", "") or "localhost"
-            except Exception:
-                _sql = "localhost"
-        _sql_w = QWidget(); _sql_w.setStyleSheet("background: transparent;")
-        _sql_h = QHBoxLayout(_sql_w); _sql_h.setContentsMargins(6, 0, 6, 0); _sql_h.setSpacing(4)
-        _sql_ic = QLabel(); _sql_ic.setPixmap(qta.icon("fa5s.database", color=MID).pixmap(12, 12))
-        _sql_ic.setStyleSheet("background: transparent;")
-        _sql_lbl = QLabel(f"{_sql}")
-        _sql_lbl.setStyleSheet(f"color: {MID}; font-size: 11px; background: transparent;")
-        _sql_h.addWidget(_sql_ic); _sql_h.addWidget(_sql_lbl)
-        self._status_bar.addPermanentWidget(_sql_w)
-
-        # #18 — everyone lands on POS first, always.
-        # POSView picks its initial cart mode (Sales vs Quote) based on the
-        # user's role; pharmacists default to Quote, everyone else to Sales.
-        # The mode is toggleable from the POS navbar at any time.
-        self._stack.setCurrentIndex(0)
+        # -- 4. Initial logic after UI is up -------------------------------
+        # Default Landing Page: Always POS (using timer to ensure it overrides any auto-switching)
+        QTimer.singleShot(100, self.switch_to_pos)
 
         # Proactively prompt for a shift right after login if none is running.
-        # Deferred via singleShot so the main window finishes painting first;
-        # the chooser then opens immediately without an intermediate popup.
-        # The method lives on POSView — MainWindow doesn't own the shift UI.
         QTimer.singleShot(0, self._pos_view._prompt_open_shift_if_missing)
 
         # ── Background sync services ──────────────────────────────────────────
@@ -12256,6 +12659,7 @@ class MainWindow(QMainWindow):
 
         # ── Sync error bus — route background sync errors to the GUI ─────────────
         try:
+            from services.sync_errors_service import sync_error_bus
             sync_error_bus.error_posted.connect(
                 self._on_sync_error,
                 Qt.QueuedConnection)
@@ -12265,22 +12669,111 @@ class MainWindow(QMainWindow):
         try:
             from services.bundle_sync_service import start_bundle_sync_daemon
             self._bundle_sync = start_bundle_sync_daemon()
-            print("[MainWindow] Bundle sync daemon started (every 20s)")
-        except Exception as _e:
-            import logging
-            logging.getLogger("MainWindow").warning(
-                "Bundle sync service could not start: %s", _e)
-        try:
-            from services.sync_errors_service import ensure_table as _set
-            _set()
+            print("[MainWindow] Bundle sync daemon started (every 10s)")
         except Exception:
             pass
-        # ── One-shot startup sync (runs immediately in background on login) ──
-        # Fires once right after MainWindow opens so products, customers,
-        # users, accounts and exchange rates are all refreshed without the
-        # cashier having to click anything manually.
-        QTimer.singleShot(2000, self._run_startup_sync)   # 2 s delay lets the
-        # UI finish rendering before the network calls start.
+
+        # -- Price List Assignment Background Task -------------------------
+        self._price_list_timer = QTimer(self)
+        self._price_list_timer.setInterval(60000) # every 1 minute
+        self._price_list_timer.timeout.connect(self._ensure_default_price_list_assigned)
+        self._price_list_timer.start()
+        QTimer.singleShot(5000, self._ensure_default_price_list_assigned) # Initial check
+
+    def _ensure_default_price_list_assigned(self):
+        """
+        Background task to ensure ALL customers have a default price list (ID: 1).
+        Corrects records where price list is NULL or 0.
+        """
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("""
+                UPDATE customers 
+                SET default_price_list_id = 1 
+                WHERE default_price_list_id IS NULL OR default_price_list_id = 0
+            """)
+            if cur.rowcount > 0:
+                conn.commit()
+                print(f"[Service] Auto-assigned Price List 1 to {cur.rowcount} customer(s).")
+            conn.close()
+        except Exception as e:
+            print(f"[Service] Price list assignment failed: {e}")
+            # Check if default customer exists and has price list assigned
+            cust = db.fetch_one("SELECT id, default_price_list_id FROM customers WHERE id = 1")
+            if cust:
+                if not cust.get("default_price_list_id") or cust.get("default_price_list_id") != 1:
+                    print("[MainWindow] Assigning Price List ID 1 to default customer...")
+                    db.execute_non_query("UPDATE customers SET default_price_list_id = 1 WHERE id = 1")
+            
+            # Also check company_defaults
+            defaults = db.fetch_one("SELECT default_customer_id, default_price_list_id FROM company_defaults")
+            if defaults:
+                if not defaults.get("default_price_list_id") or defaults.get("default_price_list_id") != 1:
+                    db.execute_non_query("UPDATE company_defaults SET default_price_list_id = 1")
+                    
+        except Exception as e:
+            print(f"[MainWindow] Price List Assignment Error: {e}")
+
+    def switch_to_pos(self):
+        self._stack.setCurrentWidget(self._pos_view)
+        if hasattr(self._pos_view, 'orders_btn'):
+            self._pos_view.orders_btn.setChecked(False)
+
+    def switch_to_orders(self):
+        if self._restaurant_view:
+            self._restaurant_view.refresh()
+            self._stack.setCurrentWidget(self._restaurant_view)
+
+    def _on_table_selected_from_restaurant(self, table_data: dict, append_mode: bool = False, force_new: bool = False):
+        """Table picked in restaurant view -> Open it in POS cart."""
+        self.switch_to_pos()
+        self._pos_view._pay_all_mode = False
+        self._pos_view.link_to_table(table_data, append_mode=append_mode, force_new=force_new)
+        self._set_status(f"Tables linked: {table_data.get('name')}")
+        self._stack.setCurrentWidget(self._pos_view)
+
+        # Proactively prompt for a shift right after login if none is running.
+        QTimer.singleShot(0, self._pos_view._prompt_open_shift_if_missing)
+
+    def _on_kot_action(self, action: str, order_data: dict):
+        """Edit or Pay a specific KOT."""
+        self.switch_to_pos()
+        td = {
+            "id": order_data["table_id"],
+            "name": order_data.get("table_name", "Table"),
+            "table_number": order_data.get("table_number", ""),
+            "capacity": 2, "floor": "Main", "status": "Occupied"
+        }
+        self._pos_view._pay_all_mode = False
+        self._pos_view.link_to_table(td, append_mode=(action == "edit"), order_id=order_data["id"])
+        self._set_status(f"KOT #{order_data['id']} loaded for {action.upper()}")
+        if action == "pay":
+            QTimer.singleShot(200, self._pos_view._open_payment)
+
+    def _on_cancel_kot(self, order_id: int):
+        """Cancel a specific KOT."""
+        if not self._pos_view._check_permission("allow_cancel_kot", "Order Close"):
+            return
+            
+        from models.restaurant_order import cancel_order
+        reply = QMessageBox.question(self, "Cancel KOT", f"Are you sure you want to cancel order #ORD-{order_id}?\nThis will remove it from billing.", QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            if cancel_order(order_id):
+                self._set_status(f"KOT #ORD-{order_id} cancelled.")
+                if self._restaurant_view:
+                    self._restaurant_view.refresh()
+            else:
+                QMessageBox.warning(self, "Error", "Failed to cancel order.")
+
+    def _on_pay_all_orders(self, table_data: dict):
+        """Load all orders for a table into the cart."""
+        self.switch_to_pos()
+        self._pos_view._pay_all_mode = True
+        self._pos_view.link_to_table(table_data, append_mode=False)
+        self._set_status(f"Combined Payment for Table {table_data.get('table_number')}")
+        QTimer.singleShot(200, self._pos_view._open_payment)
+
 
     # =========================================================================
     # PHARMACIST LANDING — open the Quotations list dialog right after login
@@ -12394,119 +12887,7 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
             QMessageBox.warning(self, "Error", f"Could not open reprint dialog: {str(e)}")
 
-    # =========================================================================
-    # BUILD MENUBAR
-    # =========================================================================
-    def _build_menubar(self):
-        mb = self.menuBar()
-        mb.setVisible(False)  # hidden by default, but we still build it for toggle
 
-        # ── Sales ─────────────────────────────────────────────────────────────
-        sales_menu = mb.addMenu("Sales")
-        for label, fn in [
-            ("Sales Invoice List", self._pos_view._open_sales_list),
-            ("Sales Orders",       self._pos_view._open_sales_order_list),
-            (None, None),
-            ("Payments",           self._pos_view._open_customer_payment_entry),
-            (None, None),
-            ("Reprint Shift Reconciliation", self._open_shift_reprint),
-        ]:
-            if label is None:
-                sales_menu.addSeparator()
-            else:
-                a = QAction(label, self)
-                a.triggered.connect(fn)
-                sales_menu.addAction(a)
-
-        # ── Admin / Other menus would go here ─────────────────────────────────
-        # ... rest of your menu code ...
-
-    # =========================================================================
-    # SYNC ERROR HANDLER
-    # =========================================================================
-    def _on_sync_error(self, error_msg: str):
-        """Show sync errors in the status bar."""
-        self._status_bar.showMessage(f"{error_msg}", 5000)
-    def _run_startup_sync(self):
-        """
-        Called automatically 2 seconds after MainWindow opens.
-        Runs every sync in a single background QThread so none of them
-        block the UI.  Errors are logged and silently swallowed — the
-        periodic daemons will retry on their own schedules.
-        """
-        import logging
-        log = logging.getLogger("StartupSync")
-
-        from PySide6.QtCore import QThread
-
-        class _StartupSyncWorker(QThread):
-            def run(self_inner):                          # noqa: N805
-                log.info("[startup-sync] Starting full sync on login…")
-
-                # 1. Accounts + exchange rates  (needed first: other syncs
-                #    may depend on company_currency from defaults)
-                try:
-                    from services.accounts_sync_service import sync_accounts_and_rates
-                    r = sync_accounts_and_rates()
-                    log.info("[startup-sync] Accounts: %d  Rates: %d",
-                             r.get("accounts", 0), r.get("rates", 0))
-                except Exception as exc:
-                    log.warning("[startup-sync] Accounts/rates error: %s", exc)
-
-                # 2. Products  (largest payload — run second so accounts are
-                #    already in DB if any product logic needs them)
-                try:
-                    from services.sync_service import sync_products, _read_credentials
-                    api_key, api_secret = _read_credentials()
-                    if api_key and api_secret:
-                        r = sync_products(api_key=api_key, api_secret=api_secret)
-                        log.info(
-                            "[startup-sync] Products: %d inserted, %d updated, %d skipped",
-                            r.get("products_inserted", 0),
-                            r.get("products_updated",  0),
-                            r.get("skipped", 0),
-                        )
-                    else:
-                        log.warning("[startup-sync] No credentials — product sync skipped.")
-                except Exception as exc:
-                    log.warning("[startup-sync] Products error: %s", exc)
-
-                # 3. Customers
-                try:
-                    from services.customer_sync_service import sync_customers
-                    sync_customers()
-                    log.info("[startup-sync] Customers synced.")
-                except Exception as exc:
-                    log.warning("[startup-sync] Customers error: %s", exc)
-
-                # 4. Users
-                try:
-                    from services.user_sync_service import sync_users
-                    r = sync_users()
-                    log.info(
-                        "[startup-sync] Users: %d synced, %d skipped, %d errors",
-                        r.get("synced", 0), r.get("skipped", 0), r.get("errors", 0),
-                    )
-                except Exception as exc:
-                    log.warning("[startup-sync] Users error: %s", exc)
-
-                # 5. Invoice back-matching  (links Frappe SI names to local sales)
-                try:
-                    from services.invoice_sync_services import sync_invoices_from_frappe
-                    r = sync_invoices_from_frappe()
-                    log.info(
-                        "[startup-sync] Invoices: %d matched, %d already set, %d unmatched",
-                        r.get("matched", 0), r.get("already_set", 0), r.get("unmatched", 0),
-                    )
-                except Exception as exc:
-                    log.warning("[startup-sync] Invoices error: %s", exc)
-
-                log.info("[startup-sync] ✅ All startup syncs complete.")
-
-        self._startup_sync_thread = _StartupSyncWorker(self)
-        self._startup_sync_thread.start()
-        
-        
     def enter_laybye_mode(self):
         """
         Triggered by the Laybye button in the header.
@@ -12664,11 +13045,14 @@ class MainWindow(QMainWindow):
         from models.user import is_admin
         if is_admin(self.user):
             self._dashboard._load_data()
-            self._stack.setCurrentIndex(1)
+            self._stack.setCurrentWidget(self._dashboard)
             self._set_status("Admin Dashboard.")
 
-    def _set_status(self, msg):
-        self._status_bar.showMessage(f"  {msg}")
+    def _set_status(self, msg: str):
+        if hasattr(self, '_status_bar') and self._status_bar:
+            self._status_bar.showMessage(f"  {msg}")
+        else:
+            self.statusBar().showMessage(f"  {msg}")
 
     def _build_menubar(self):
         mb = self.menuBar()

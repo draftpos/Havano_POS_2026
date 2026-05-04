@@ -45,11 +45,17 @@ def migrate():
             allow_receipt        BIT           NOT NULL DEFAULT 1,
             allow_credit_note    BIT           NOT NULL DEFAULT 1,
             allow_reprint        BIT           NOT NULL DEFAULT 1,
+            allow_laybye         BIT           NOT NULL DEFAULT 1,
+            allow_quote          BIT           NOT NULL DEFAULT 1,
+            allow_cancel_kot     BIT           NOT NULL DEFAULT 0,
             company              NVARCHAR(140) NULL DEFAULT '',
             max_discount_percent INT           NULL DEFAULT 0
         )
     """)
     print("[migrate] OK users")
+    _add_column_if_missing("users", "allow_laybye", "BIT NOT NULL DEFAULT 1")
+    _add_column_if_missing("users", "allow_quote", "BIT NOT NULL DEFAULT 1")
+    _add_column_if_missing("users", "allow_cancel_kot", "BIT NOT NULL DEFAULT 0")
 
     # ── companies ─────────────────────────────────────────────────────────────
     cur.execute("""
@@ -559,6 +565,17 @@ def migrate():
         )
     """)
     print("[migrate] OK  pos_settings")
+    # Seed new settings if missing
+    for key, val in [
+        ("enable_quotation_printing", "1"),
+        ("auto_print_quotations", "0"),
+        ("allow_others_to_view_orders", "1"),
+        ("allow_others_to_close_orders", "1"),
+    ]:
+        cur.execute("""
+            IF NOT EXISTS (SELECT 1 FROM pos_settings WHERE setting_key = ?)
+            INSERT INTO pos_settings (setting_key, setting_value) VALUES (?, ?)
+        """, (key, key, val))
 
     # ── doctors ───────────────────────────────────────────────────────────────
     cur.execute("""

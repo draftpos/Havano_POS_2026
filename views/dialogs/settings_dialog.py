@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QMessageBox, QCheckBox, QScrollArea,
 )
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter
+from models.receipt import ReceiptData, Item, MultiCurrencyDetail
+from PySide6.QtGui import QColor, QFont, QPainter, QIcon
 from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
 import qtawesome as qta
 from datetime import datetime
@@ -120,29 +121,110 @@ def _tbl():
     return t
 
 # ── Hardware Config Logic ─────────────────────────────────────────────────────
-# _HW_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "hardware_settings.json")
-# _HW_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "hardware_settings.json")
-# _ORDER_STATIONS = [f"Order {i}" for i in range(1, 7)]
-# ── Hardware Config Logic ─────────────────────────────────────────────────────
-_HW_FILE = Path("app_data/hardware_settings.json")   # ← now matches sql_settings.json
+# Path is anchored to the executable / script location so it resolves
+# correctly regardless of how or from where the app is launched.
+import sys as _sys
+import logging as _logging
+_hw_log = _logging.getLogger(__name__)
+
+def _hw_file() -> Path:
+    """
+    Always returns the same absolute path to hardware_settings.json,
+    no matter what the current working directory is.
+
+    • Frozen (PyInstaller exe) → sits next to the .exe
+    • Normal Python            → sits next to this .py file's project root
+    """
+    if getattr(_sys, "frozen", False):
+        # Running as compiled exe — use the folder that contains the exe
+        base = Path(_sys.executable).parent
+    else:
+        # Running as plain Python — go up from this file to project root
+        base = Path(__file__).resolve().parent.parent
+    return base / "app_data" / "hardware_settings.json"
+
 _ORDER_STATIONS = [f"Order {i}" for i in range(1, 7)]
+
+_HW_DEFAULTS: dict = {
+    "main_printer": "(None)",
+    "kitchen_printing_enabled": False,
+    "pharmacy_label_printer": "(None)",
+    "orders": {}
+}
+
 def _load_hw() -> dict:
+    """
+    Load hardware settings from JSON.
+    Logs exactly what went wrong instead of silently swallowing errors.
+    Falls back to DB if the file is missing or corrupt, then to defaults.
+    """
+    hw_path = _hw_file()
+
+    # ── Ensure the folder exists ──────────────────────────────────────────
     try:
-        _HW_FILE.parent.mkdir(parents=True, exist_ok=True)   # ensure app_data/ exists
-        if _HW_FILE.exists():
-            with open(_HW_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {"main_printer": "(None)", "orders": {}}
+        hw_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        _hw_log.error("Cannot create app_data folder at %s: %s", hw_path.parent, e)
+
+    # ── Try JSON (primary) ────────────────────────────────────────────────
+    if hw_path.exists():
+        try:
+            with open(hw_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data:
+                return data
+            _hw_log.warning("hardware_settings.json exists but is empty/invalid at %s", hw_path)
+        except json.JSONDecodeError as e:
+            _hw_log.error("hardware_settings.json is corrupt at %s: %s", hw_path, e)
+        except PermissionError as e:
+            _hw_log.error("No read permission for %s: %s", hw_path, e)
+        except Exception as e:
+            _hw_log.error("Unexpected error reading %s: %s", hw_path, e)
+    else:
+        _hw_log.info("hardware_settings.json not found at %s — will try DB", hw_path)
+
+    # ── Try DB fallback ───────────────────────────────────────────────────
+    try:
+        from database.hardware_settings_db import load_hw as _db_load
+        data = _db_load()
+        if data:
+            # Restore JSON so all other modules find it next time
+            _save_hw(data)
+            _hw_log.info("Restored hardware_settings.json from DB fallback")
+            return data
+    except Exception as e:
+        _hw_log.warning("DB fallback also failed: %s", e)
+
+    # ── Hard defaults ─────────────────────────────────────────────────────
+    _hw_log.warning("Using hard-coded defaults for hardware settings")
+    return dict(_HW_DEFAULTS)
+
 
 def _save_hw(data: dict):
+    """
+    Save hardware settings to JSON.
+    Logs the exact error if the write fails instead of silently dropping it.
+    Also syncs to DB as a background safety copy.
+    """
+    hw_path = _hw_file()
+
+    # ── Write JSON (primary — must succeed) ───────────────────────────────
     try:
-        _HW_FILE.parent.mkdir(parents=True, exist_ok=True)   # ensure app_data/ exists
-        with open(_HW_FILE, "w", encoding="utf-8") as f:
+        hw_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(hw_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-    except Exception:
-        pass
+        _hw_log.debug("hardware_settings.json saved to %s", hw_path)
+    except PermissionError as e:
+        _hw_log.error("Cannot write hardware_settings.json — permission denied at %s: %s", hw_path, e)
+    except Exception as e:
+        _hw_log.error("Failed to write hardware_settings.json at %s: %s", hw_path, e)
+
+    # ── Sync to DB (best-effort safety copy) ─────────────────────────────
+    try:
+        from database.hardware_settings_db import save_hw as _db_save
+        _db_save(data)
+    except Exception as e:
+        _hw_log.warning("DB sync failed (non-fatal): %s", e)
     
 def _get_system_printers() -> list[str]:
     printers = ["(None)"]
@@ -957,12 +1039,39 @@ class MaintenanceDialog(QDialog):
             "Include batch number and expiry date lines beneath\n"
             "each pharmacy item on the printed customer receipt.",
         ),
+        (
+            "show_expected_in_reconciliation",
+            "SHOW EXPECTED AMOUNT IN RECONCILIATION",
+            "Display the mathematically expected cash drawer amount\n"
+            "and variance in the shift closing dialog.",
+        ),
+        (
+            "enable_quotation_printing",
+            "ENABLE QUOTATION THERMAL PRINTING",
+            "Allow printing quotes to standard receipt printer.",
+        ),
+        (
+            "auto_print_quotations",
+            "AUTO-PRINT QUOTATIONS (SKIP PREVIEW)",
+            "Skip preview popup when saving quotations.",
+        ),
+        (
+            "allow_others_to_view_orders",
+            "ALLOW CASHIERS TO VIEW OTHER ORDERS",
+            "Let non-admin cashiers open orders started by others.",
+        ),
+        (
+            "allow_others_to_close_orders",
+            "ALLOW CASHIERS TO CLOSE OTHER ORDERS",
+            "Let non-admin cashiers finalize payments for orders\n"
+            "started by another user/cashier.",
+        ),
     ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._toggles: dict = {}
-        self.setFixedSize(520, 300)
+        self.setFixedSize(520, 560)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setStyleSheet("QDialog { background:#ffffff; border:1px solid #0d1f3c; }")
         self._build()
@@ -1069,6 +1178,11 @@ class MaintenanceDialog(QDialog):
         defaults = {
             "allow_loaded_quotation_qty_change": False,
             "print_batch_on_receipt": True,
+            "show_expected_in_reconciliation": True,
+            "enable_quotation_printing": True,
+            "auto_print_quotations": False,
+            "allow_others_to_view_orders": True,
+            "allow_others_to_close_orders": True,
         }
         for key, tog in self._toggles.items():
             tog.setChecked(defaults.get(key, False))
@@ -1092,17 +1206,26 @@ class MaintenanceDialog(QDialog):
             self._save_btn.setText("SAVING…")
             from database.db import get_connection
             conn = get_connection(); cur = conn.cursor()
+            cur.execute("""
+                IF NOT EXISTS (
+                    SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_NAME='pos_settings'
+                )
+                CREATE TABLE pos_settings (
+                    setting_key   NVARCHAR(80)  NOT NULL PRIMARY KEY,
+                    setting_value NVARCHAR(255) NOT NULL DEFAULT '0'
+                )
+            """)
             for key, tog in self._toggles.items():
                 val = "1" if tog.isChecked() else "0"
                 cur.execute(
                     """
-                    MERGE pos_settings AS t
-                    USING (SELECT ? AS k, ? AS v) AS s ON t.setting_key = s.k
-                    WHEN MATCHED     THEN UPDATE SET setting_value = s.v
-                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
-                                          VALUES (s.k, s.v);
+                    IF EXISTS (SELECT 1 FROM pos_settings WHERE setting_key = ?)
+                        UPDATE pos_settings SET setting_value = ? WHERE setting_key = ?
+                    ELSE
+                        INSERT INTO pos_settings (setting_key, setting_value) VALUES (?, ?)
                     """,
-                    (key, val),
+                    (key, val, key, key, val)
                 )
             conn.commit(); conn.close()
             self._save_btn.setText("SAVED")
@@ -1196,6 +1319,14 @@ class SettingsDialog(QDialog):
                 from PySide6.QtWidgets import QMessageBox as _MB
                 _MB.warning(self, "Error", f"Could not open Advanced Printing:\n{e}")
 
+        def _open_category_visibility():
+            try:
+                from views.main_window import CategoryVisibilityDialog
+                CategoryVisibilityDialog(self).exec()
+            except Exception as e:
+                from PySide6.QtWidgets import QMessageBox as _MB
+                _MB.warning(self, "Error", f"Could not open Category Visibility:\n{e}")
+
         def _add_items(item_list):
             for icon_name, label, handler in item_list:
                 row = QPushButton(f"    {label}")
@@ -1228,6 +1359,8 @@ class SettingsDialog(QDialog):
             ("fa5s.key",        "Users",             lambda: UsersDialog(self, current_user=self.user).exec()),
             ("fa5s.landmark",   "Company Defaults",  _open_company_defaults),
             ("fa5s.shield-alt", "POS Rules",         lambda: POSRulesDialog(self).exec()),
+            ("fa5s.eye-slash",  "Category Visibility", self._open_category_visibility),
+            ("fa5s.concierge-bell", "Order Settings",   lambda: MaintenanceDialog(self).exec()),
         ])
 
         # ── HARDWARE & PRINTING ────────────────────────────────────────────────
@@ -1424,7 +1557,7 @@ class POSRulesDialog(QDialog):
         super().__init__(parent)
         self._toggles = {}
         
-        self.setFixedSize(520, 420)
+        self.setFixedSize(520, 680)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         # Navy Blue Border
         self.setStyleSheet("QDialog { background:#ffffff; border:1px solid #0d1f3c; }")
@@ -1490,7 +1623,11 @@ class POSRulesDialog(QDialog):
         rules = [
             ("block_zero_price", "BLOCK ZERO-PRICE SALES", "Prevent $0.00 items on invoices."),
             ("block_zero_stock", "BLOCK ZERO-STOCK SALES", "Stop sales when stock is empty."),
-            ("use_pricing_rules", "APPLY PRICING RULES", "Auto-apply ERP discount rules.")
+            ("use_pricing_rules", "APPLY PRICING RULES", "Auto-apply ERP discount rules."),
+            ("enable_quotation_printing", "ENABLE QUOTATION THERMAL PRINTING", "Allow printing quotes to standard receipt printer."),
+            ("auto_print_quotations", "AUTO-PRINT QUOTATIONS", "Skip preview popup when saving quotations."),
+            ("allow_others_to_view_orders", "ALLOW CASHIERS TO VIEW OTHER ORDERS", "Let non-admin cashiers open orders started by others."),
+            ("allow_others_to_close_orders", "ALLOW CASHIERS TO CLOSE OTHER ORDERS", "Let non-admin cashiers finalize/pay others' orders.")
         ]
 
         for key, lbl, desc in rules:
@@ -1567,9 +1704,11 @@ class POSRulesDialog(QDialog):
 
     def _load_existing_rules(self):
         # Default ALL to True first (Consistency with _get_pos_rule)
-        for t in self._toggles.values():
-            t.setChecked(True)
-            t.position = 1.0
+        for k, t in self._toggles.items():
+            # auto_print_quotations typically should be OFF by default even if not in DB
+            default = (k != "auto_print_quotations")
+            t.setChecked(default)
+            t.position = 1.0 if default else 0.0
 
         try:
             from database.db import get_connection

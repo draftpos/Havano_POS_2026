@@ -1,0 +1,31 @@
+{
+  "main_printer": "POS-80C (copy 2)",
+  "kitchen_printing_enabled": false,
+  "pharmacy_label_printer": "ZDesigner GK420d",
+  "orders": {
+    "Order 1": {
+      "active": true,
+      "printer": "POS-80C (copy 2)"
+    },
+    "Order 2": {
+      "active": false,
+      "printer": "(None)"
+    },
+    "Order 3": {
+      "active": false,
+      "printer": "(None)"
+    },
+    "Order 4": {
+      "active": false,
+      "printer": "(None)"
+    },
+    "Order 5": {
+      "active": false,
+      "printer": "(None)"
+    },
+    "Order 6": {
+      "active": false,
+      "printer": "(None)"
+    }
+  }
+}

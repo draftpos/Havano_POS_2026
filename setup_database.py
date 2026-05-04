@@ -422,6 +422,7 @@
 #                 [allow_reprint]        BIT           NOT NULL DEFAULT 1,
 #                 [allow_laybye]         BIT           NOT NULL DEFAULT 1,
 #                 [allow_quote]          BIT           NOT NULL DEFAULT 1,
+#                 [allow_cancel_kot]     BIT           NOT NULL DEFAULT 0,
 #                 [discount_expiry_date] NVARCHAR(50)  NULL,
 #                 [company]              NVARCHAR(140) NULL  DEFAULT '',
 #                 [max_discount_percent] INT           NULL  DEFAULT 0,
@@ -449,6 +450,7 @@
 #             ("allow_reprint",        "BIT           NOT NULL DEFAULT 1"),
 #             ("allow_laybye",         "BIT           NOT NULL DEFAULT 1"),   #← ADD THIS
 #             ("allow_quote",          "BIT           NOT NULL DEFAULT 1"),  # ← ADD THIS
+#             ("allow_cancel_kot",     "BIT           NOT NULL DEFAULT 0"),
 #             ("discount_expiry_date", "NVARCHAR(50)  NULL"),
 #             ("company",              "NVARCHAR(140) NULL DEFAULT ''"),
 #             ("max_discount_percent", "INT           NULL DEFAULT 0"),
@@ -1647,6 +1649,7 @@
 #             add_col("bundle_items", col, defn)
 
 
+
 #     # ------------------------------------------------------------------
 #     # Commit all table DDL before foreign keys
 #     # ------------------------------------------------------------------
@@ -1822,7 +1825,7 @@ import time
 # table / index. Mismatches between this constant and schema_info.version
 # trigger a full migration pass on next launch; matches short-circuit so
 # startup doesn't burn 5–15s on INFORMATION_SCHEMA round-trips every time.
-SCHEMA_VERSION = "2026.04.25.2"
+SCHEMA_VERSION = "2026.04.30.4"
 
 
 def _hash(pw: str) -> str:
@@ -2599,6 +2602,7 @@ def run():
                 [amount_zwd]               DECIMAL(14,4) NULL DEFAULT 0,
                 [amount_zwg]               DECIMAL(14,4) NULL DEFAULT 0,
                 [exchange_rate]            DECIMAL(18,8) NULL DEFAULT 1,
+                [shift_id]                 INT           NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -2626,6 +2630,7 @@ def run():
             ("amount_zwd",    "DECIMAL(14,4) NULL DEFAULT 0"),
             ("amount_zwg",    "DECIMAL(14,4) NULL DEFAULT 0"),
             ("exchange_rate", "DECIMAL(18,8) NULL DEFAULT 1"),
+            ("shift_id",     "INT           NULL"),
         ]:
             add_col("payment_entries", col, defn)
 
@@ -3474,6 +3479,100 @@ def run():
         except Exception as e:
             print(f"    ! could not add default constraint on bundle_items.uom: {e}")
 
+
+    # ==================================================================
+    # 40. restaurant_settings
+    # ==================================================================
+    if not table_exists("restaurant_settings"):
+        cur.execute("""
+            CREATE TABLE [dbo].[restaurant_settings] (
+                [id]      INT IDENTITY(1,1) PRIMARY KEY,
+                [enabled] BIT NOT NULL DEFAULT 0
+            )
+        """)
+        cur.execute("INSERT INTO [dbo].[restaurant_settings] (enabled) VALUES (0)")
+        ok("restaurant_settings")
+    else:
+        skip("restaurant_settings")
+
+    # ==================================================================
+    # 41. restaurant_tables
+    # ==================================================================
+    if not table_exists("restaurant_tables"):
+        cur.execute("""
+            CREATE TABLE [dbo].[restaurant_tables] (
+                [id]           INT IDENTITY(1,1) PRIMARY KEY,
+                [name]         NVARCHAR(100) NOT NULL,
+                [table_number] NVARCHAR(20) NOT NULL,
+                [capacity]     INT DEFAULT 2,
+                [floor]        NVARCHAR(50) DEFAULT 'Main',
+                [status]       NVARCHAR(20) DEFAULT 'Available',
+                [active]       BIT DEFAULT 1
+            )
+        """)
+        ok("restaurant_tables")
+    else:
+        skip("restaurant_tables")
+        add_col("restaurant_tables", "status", "NVARCHAR(20) DEFAULT 'Available'")
+        add_col("restaurant_tables", "active", "BIT DEFAULT 1")
+
+    # ==================================================================
+    # 41b. restaurant_floors
+    # ==================================================================
+    if not table_exists("restaurant_floors"):
+        cur.execute("""
+            CREATE TABLE [dbo].[restaurant_floors] (
+                [id]     INT IDENTITY(1,1) PRIMARY KEY,
+                [name]   NVARCHAR(100) NOT NULL,
+                [active] BIT DEFAULT 1
+            )
+        """)
+        # Seed a default floor
+        cur.execute("INSERT INTO [dbo].[restaurant_floors] (name, active) VALUES ('Main Floor', 1)")
+        ok("restaurant_floors")
+    else:
+        skip("restaurant_floors")
+
+    # ==================================================================
+    # 42. restaurant_orders (Active/Open Orders for KOT)
+    # ==================================================================
+    if not table_exists("restaurant_orders"):
+        cur.execute("""
+            CREATE TABLE [dbo].[restaurant_orders] (
+                [id]            INT IDENTITY(1,1) PRIMARY KEY,
+                [table_id]      INT NOT NULL,
+                [waiter_id]     INT NULL,
+                [customer_name] NVARCHAR(100) DEFAULT 'Guest',
+                [status]        NVARCHAR(20) DEFAULT 'Open', -- Open, Billing, Paid, Cancelled
+                [created_at]    DATETIME2(7) NOT NULL DEFAULT SYSDATETIME(),
+                [updated_at]    DATETIME2(7) NOT NULL DEFAULT SYSDATETIME()
+            )
+        """)
+        ok("restaurant_orders")
+    else:
+        skip("restaurant_orders")
+        add_col("restaurant_orders", "status", "NVARCHAR(20) DEFAULT 'Open'")
+
+    # ==================================================================
+    # 43. restaurant_order_items
+    # ==================================================================
+    if not table_exists("restaurant_order_items"):
+        cur.execute("""
+            CREATE TABLE [dbo].[restaurant_order_items] (
+                [id]          INT IDENTITY(1,1) PRIMARY KEY,
+                [order_id]    INT NOT NULL,
+                [product_id]  INT NOT NULL,
+                [item_code]   NVARCHAR(50) NOT NULL,
+                [item_name]   NVARCHAR(200) NOT NULL,
+                [quantity]    DECIMAL(12,4) NOT NULL DEFAULT 1,
+                [rate]        DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [is_printed]  BIT NOT NULL DEFAULT 0, -- Kitchen Ticket Printed
+                [created_at]  DATETIME2(7) NOT NULL DEFAULT SYSDATETIME()
+            )
+        """)
+        ok("restaurant_order_items")
+    else:
+        skip("restaurant_order_items")
 
     # ------------------------------------------------------------------
     # Commit all table DDL before foreign keys

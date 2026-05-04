@@ -403,9 +403,25 @@ class CompanyDefaultsPage(QWidget):
         """)
         save_btn.clicked.connect(self._save)
 
+        # ── RESTAURANT / ORDERS BUTTON ────────────────────────────────────────
+        self.restaurant_btn = QPushButton("Restaurant / Orders")
+        self.restaurant_btn.setIcon(qta.icon("fa5s.utensils", color="white"))
+        self.restaurant_btn.setFixedHeight(38)
+        self.restaurant_btn.setCursor(Qt.PointingHandCursor)
+        self.restaurant_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY_2}; color:{WHITE}; border:1px solid #10b981;
+                border-radius:6px; font-size:12px; font-weight:bold; padding:0 16px;
+            }}
+            QPushButton:hover   {{ background:{NAVY_3}; border:1px solid #34d399; }}
+            QPushButton:pressed {{ background:{NAVY}; }}
+        """)
+        self.restaurant_btn.clicked.connect(self._open_restaurant_settings)
+
         hl.addWidget(title)
         hl.addStretch()
         hl.addWidget(self._status_lbl)
+        hl.addWidget(self.restaurant_btn) # Added before fiscalization
         hl.addWidget(fiscal_btn)
         hl.addWidget(external_btn)  # External site button after fiscalization
         hl.addWidget(pharmacy_btn)  # Pharmacy masters (hidden unless pharmacy mode)
@@ -1151,3 +1167,17 @@ class CompanyDefaultsPage(QWidget):
         QTimer.singleShot(3000, lambda: (
             shiboken6.isValid(self._status_lbl) and self._status_lbl.setText("")
         ))
+
+    def _open_restaurant_settings(self):
+        """Open the restaurant / orders settings dialog"""
+        try:
+            from views.dialogs.restaurant_settings_dialog import RestaurantSettingsPage
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Restaurant / Orders Settings")
+            dlg.setMinimumSize(800, 600)
+            dlg.setStyleSheet(f"QDialog {{ background: {OFF_WHITE}; }}")
+            lay = QVBoxLayout(dlg)
+            lay.addWidget(RestaurantSettingsPage())
+            dlg.exec()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not open restaurant settings:\n{e}")

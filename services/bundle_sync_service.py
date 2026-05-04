@@ -273,7 +273,7 @@ class BundleSyncWorker:
     
     def __init__(self):
         self._running = True
-        self._interval = 20  # 20 seconds
+        self._interval = 10  # 10 seconds
         self._last_sync = 0
     
     def stop(self):

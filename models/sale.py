@@ -1010,6 +1010,20 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
                 expiry_date=it.get("expiry_date") or "",
             ))
 
+        # Check if packaging list is enabled
+        print_pkg = False
+        try:
+            from database.db import get_connection as _gc
+            _conn = _gc()
+            _cur = _conn.cursor()
+            _cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'print_packaging_list'")
+            _row = _cur.fetchone()
+            if _row and str(_row[0]) == "1":
+                print_pkg = True
+            _conn.close()
+        except:
+            pass
+
         for printer_name in active_printers:
             try:
                 success = PrintingService().print_receipt(receipt, printer_name=printer_name)
@@ -1017,6 +1031,8 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
                     print(f"✅ Receipt printed successfully → {printer_name}")
                     if fiscal_enabled and not fiscal_ready:
                         print(f"   Note: Printed with 'Fiscalization Pending' message")
+                    if print_pkg:
+                        PrintingService().print_packaging_list(receipt, printer_name=printer_name)
             except Exception as e:
                 print(f"❌ Printer error on {printer_name}: {e}")
 

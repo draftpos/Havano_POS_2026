@@ -16,8 +16,9 @@ _PERM_COLS = [
     "allow_receipt",
     "allow_credit_note",
     "allow_reprint",
-    "allow_laybye",   # ← ADDED
-    "allow_quote",    # ← ADDED
+    "allow_laybye",
+    "allow_quote",
+    "allow_cancel_kot",
 ]
 
 # Extra VARCHAR columns added after initial schema — auto-migrated on startup
@@ -37,7 +38,7 @@ def _ensure_perm_cols(cur, conn):
                     SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
                     WHERE TABLE_NAME='users' AND COLUMN_NAME='{col}'
                 )
-                ALTER TABLE users ADD {col} BIT NOT NULL DEFAULT 1
+                ALTER TABLE users ADD {col} BIT NOT NULL DEFAULT 0
             """)
             conn.commit()
         except Exception:
@@ -115,8 +116,9 @@ def create_user(username: str, password: str, role: str = "cashier",
                 cost_center: str = "", warehouse: str = "",
                 frappe_user: str = "", synced_from_frappe: bool = False,
                 max_discount_percent: int = 0,
-                allow_laybye: bool = True,    # ← ADDED
-                allow_quote: bool = True      # ← ADDED
+                allow_laybye: bool = True,
+                allow_quote: bool = True,
+                allow_cancel_kot: bool = False
                 ) -> dict | None:
     if role not in ("admin", "cashier"):
         raise ValueError(f"Invalid role: {role!r}. Must be 'admin' or 'cashier'.")
@@ -129,8 +131,8 @@ def create_user(username: str, password: str, role: str = "cashier",
             INSERT INTO users
                 (username, password, role, email, full_name, first_name, last_name,
                  pin, cost_center, warehouse, frappe_user, synced_from_frappe,
-                 max_discount_percent, allow_laybye, allow_quote)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 max_discount_percent, allow_laybye, allow_quote, allow_cancel_kot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             username.strip(),
             _hash(password) if password else _hash("changeme"),
@@ -145,8 +147,9 @@ def create_user(username: str, password: str, role: str = "cashier",
             (frappe_user or "").strip(),
             int(synced_from_frappe),
             max_discount_percent,
-            int(allow_laybye),    # ← ADDED
-            int(allow_quote),     # ← ADDED
+            int(allow_laybye),
+            int(allow_quote),
+            int(allow_cancel_kot),
         ))
         conn.commit()
         cur.execute("SELECT id FROM users WHERE username = ?", (username.strip(),))
@@ -176,8 +179,9 @@ def update_user(user_id: int, **kwargs) -> dict | None:
         "username", "role", "display_name", "active", "pin",
         "full_name", "email", "cost_center", "warehouse", "max_discount_percent",
         "allow_discount", "allow_receipt", "allow_credit_note", "allow_reprint",
-        "allow_laybye",   # ← ADDED
-        "allow_quote",    # ← ADDED
+        "allow_laybye",
+        "allow_quote",
+        "allow_cancel_kot",
     }
     sets = []; params = []
     for k, v in kwargs.items():
@@ -386,7 +390,8 @@ def migrate():
             allow_credit_note  BIT           NOT NULL DEFAULT 1,
             allow_reprint      BIT           NOT NULL DEFAULT 1,
             allow_laybye       BIT           NOT NULL DEFAULT 1,
-            allow_quote        BIT           NOT NULL DEFAULT 1
+            allow_quote        BIT           NOT NULL DEFAULT 1,
+            allow_cancel_kot   BIT           NOT NULL DEFAULT 0
         )
     """)
     conn.commit()
@@ -427,6 +432,7 @@ def _to_dict(row: dict) -> dict | None:
         "allow_receipt":        bool(row.get("allow_receipt",     1)),
         "allow_credit_note":    bool(row.get("allow_credit_note", 1)),
         "allow_reprint":        bool(row.get("allow_reprint",     1)),
-        "allow_laybye":         bool(row.get("allow_laybye",      1)),   # ← ADDED
-        "allow_quote":          bool(row.get("allow_quote",       1)),   # ← ADDED
+        "allow_laybye":         bool(row.get("allow_laybye",      1)),
+        "allow_quote":          bool(row.get("allow_quote",       1)),
+        "allow_cancel_kot":     bool(row.get("allow_cancel_kot",  0)),
     }

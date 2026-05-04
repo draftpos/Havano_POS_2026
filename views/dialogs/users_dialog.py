@@ -551,9 +551,11 @@ class _UserFormDialog(QDialog):
         self._p_cn       = ToggleSwitch("Issue credit notes",   "Cashier can process returns and refunds")
         self._p_reprint  = ToggleSwitch("Reprint receipts",     "Cashier can reprint a past receipt")
         self._p_laybye   = ToggleSwitch("Allow laybye",         "Cashier can create and manage laybyes")
+        self._p_quote    = ToggleSwitch("Allow quotation",      "Cashier can create and print quotations")
+        self._p_cancel_kot = ToggleSwitch("Allow Order Close",  "Can cancel or remove restaurant orders")
 
         for toggle in [self._p_discount, self._p_receipt, self._p_cn,
-                       self._p_reprint, self._p_laybye]:
+                       self._p_reprint, self._p_laybye, self._p_quote, self._p_cancel_kot]:
             toggles_col.addWidget(toggle)
 
         toggles_row.addLayout(toggles_col)
@@ -635,6 +637,8 @@ class _UserFormDialog(QDialog):
         self._p_cn.setChecked(u.get("allow_credit_note",      True))
         self._p_reprint.setChecked(u.get("allow_reprint",     True))
         self._p_laybye.setChecked(u.get("allow_laybye",       True))
+        self._p_quote.setChecked(u.get("allow_quote",         True))
+        self._p_cancel_kot.setChecked(u.get("allow_cancel_kot", False))
 
     def _set_status(self, msg, error=False):
         color = DANGER if error else SUCCESS
@@ -683,13 +687,15 @@ class _UserFormDialog(QDialog):
                 "allow_credit_note":     int(self._p_cn.isChecked()),
                 "allow_reprint":         int(self._p_reprint.isChecked()),
                 "allow_laybye":          int(self._p_laybye.isChecked()),
+                "allow_quote":           int(self._p_quote.isChecked()),
+                "allow_cancel_kot":      int(self._p_cancel_kot.isChecked()),
             }
 
             conn = get_connection()
             cur  = conn.cursor()
 
             for col in ["allow_discount", "allow_receipt", "allow_credit_note",
-                        "allow_reprint", "allow_laybye"]:
+                        "allow_reprint", "allow_laybye", "allow_quote", "allow_cancel_kot"]:
                 try:
                     cur.execute(f"""
                         IF NOT EXISTS (

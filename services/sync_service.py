@@ -33,7 +33,7 @@ PAGE_SIZE         = 100
 MAX_PAGES         = 200
 
 # Background-sync intervals
-PRODUCT_SYNC_INTERVAL_SECONDS = 15   # aggressive product sync
+PRODUCT_SYNC_INTERVAL_SECONDS = 10   # aggressive product sync
 GL_MOP_SYNC_INTERVAL_SECONDS  = 600  # GL / MOP / exchange rates every 10 min
 
 

@@ -976,6 +976,117 @@ class PrintingService:
     # =========================================================================
     # ROUTING
     # =========================================================================
+    def print_packaging_list(self, receipt: ReceiptData, printer_name: str = None) -> bool:
+        """Prints a simplified packaging list with just products and quantities."""
+        settings = AdvanceSettings.load_from_file()
+        painter = None
+        try:
+            printer = QPrinter(QPrinter.HighResolution)
+            if printer_name and printer_name != "(None)":
+                info = QPrinterInfo.printerInfo(printer_name)
+                if not info.isNull():
+                    printer.setPrinterName(printer_name)
+
+            printer.setPageSize(QPageSize(QSizeF(100, 1000), QPageSize.Millimeter))
+            printer.setFullPage(True)
+            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+
+            painter = QPainter(printer)
+            rect = printer.pageRect(QPrinter.DevicePixel)
+            painter.translate(0, -rect.top())
+            y = 0
+
+            now = datetime.now()
+            normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
+            bold_font   = self._make_bold(normal_font)
+
+            y = self._draw_logo(painter, receipt, settings, y)
+
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
+                             Qt.AlignCenter, (receipt.companyName or "Havano POS").upper())
+            y += 50
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+
+            painter.setFont(bold_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 40,
+                             Qt.AlignCenter, "*** PACKAGING LIST ***")
+            y += 50
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+
+            painter.setFont(normal_font)
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Invoice No: {receipt.invoiceNo or 'N/A'}")
+            y += 32
+            
+            _raw_date = str(receipt.invoiceDate or "").split(" ")[0].split("T")[0]
+            try:
+                _display_date = datetime.strptime(_raw_date, "%Y-%m-%d").strftime("%d/%m/%Y") if _raw_date else now.strftime("%d/%m/%Y")
+            except ValueError:
+                _display_date = _raw_date or now.strftime("%d/%m/%Y")
+            
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                             Qt.AlignCenter, f"Date: {_display_date}  Time: {now.strftime('%H:%M:%S')}")
+            y += 32
+            
+            if receipt.customerName:
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
+                                 Qt.AlignCenter, f"Customer: {receipt.customerName}")
+                y += 32
+
+            y += 10
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+
+            painter.setFont(bold_font)
+            fm = painter.fontMetrics()
+            qty_w = fm.horizontalAdvance("Qty") + 20
+            
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2 - qty_w, 24, Qt.AlignLeft, "Item")
+            painter.drawText(self.paper_width - self.margin - qty_w, y, qty_w, 24, Qt.AlignRight, "Qty")
+            y += 30
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+
+            painter.setFont(normal_font)
+            line_h = fm.height() + 6
+            for item in receipt.items:
+                name = item.productName or ""
+                qty_str = f"{item.qty:.0f}"
+                name_w = self.paper_width - self.margin*2 - qty_w - 10
+                
+                rect_b = fm.boundingRect(0, 0, name_w, 1000, Qt.TextWordWrap, name)
+                painter.drawText(self.margin, y, name_w, rect_b.height(), Qt.TextWordWrap, name)
+                
+                row_h = max(rect_b.height(), line_h)
+                painter.setFont(bold_font)
+                painter.drawText(self.paper_width - self.margin - qty_w, y, qty_w, row_h, Qt.AlignRight, qty_str)
+                painter.setFont(normal_font)
+                
+                y += row_h + 10
+                self._draw_dot_line(painter, self.margin, y, self.paper_width - self.margin * 2, ".")
+                y += 14
+
+            painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+            y += 20
+            
+            painter.drawText(self.margin, y, self.paper_width - self.margin*2, 30,
+                             Qt.AlignCenter, "END OF PACKAGING LIST")
+            y += 30
+
+            painter.end()
+            print(f"✅ PACKAGING LIST printed successfully → {printer_name or 'Default'}")
+            return True
+
+        except Exception as e:
+            print(f"❌ Packaging list printing failed: {str(e)}")
+            if painter and painter.isActive():
+                painter.end()
+            return False
+
     def print_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
         """Main entry point — routes to the correct template by doc_type."""
         doc_type = getattr(receipt, "doc_type", "receipt")
@@ -1539,6 +1650,25 @@ class PrintingService:
 
             painter.end()
             print(f"✅ INVOICE printed successfully → {printer_name or 'Default'}")
+
+            # Optionally trigger packaging list
+            print_pkg = False
+            try:
+                from database.db import get_connection as _gc
+                _conn = _gc()
+                _cur = _conn.cursor()
+                _cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'print_packaging_list'")
+                _row = _cur.fetchone()
+                if _row and str(_row[0]) == "1":
+                    print_pkg = True
+                _conn.close()
+            except Exception as e:
+                print(f"[PrintingService] Error checking pkg list setting: {e}")
+
+            if print_pkg:
+                print(f"[PrintingService] Triggering packaging list print to {printer_name or 'Default'}...")
+                self.print_packaging_list(receipt, printer_name=printer_name)
+
             return True
 
         except Exception as e:

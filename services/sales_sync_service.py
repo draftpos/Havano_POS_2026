@@ -475,7 +475,7 @@ logging.basicConfig(
 log = logging.getLogger("SalesSync")
 
 # ── Config ───────────────────────────────────────────────────────────────────
-SYNC_INTERVAL_SECONDS = 60          # run every 1 minute
+SYNC_INTERVAL_SECONDS = 10          # run every 10 seconds
 PAGE_SIZE             = 20          # invoices per fetch
 from services.site_config import get_host as _get_host
 API_URL = _get_host() + "/api/method/havano_pos_integration.api.get_sales_invoice"
