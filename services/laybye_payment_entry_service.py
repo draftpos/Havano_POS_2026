@@ -362,9 +362,10 @@ def _create_single_payment_entry(order: dict) -> int | None:
                 (sales_order_id, order_no, customer_name,
                  deposit_amount, deposit_method, deposit_currency,
                  gl_account, exchange_rate, received_amount,
+                 discount_amount, discount_percent,
                  status, created_at)
             OUTPUT INSERTED.id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         """, (
             int(order["id"]),
             order.get("order_no") or "",
@@ -375,6 +376,8 @@ def _create_single_payment_entry(order: dict) -> int | None:
             gl_account or None,
             exch_rate,
             received_amount,
+            float(order.get("discount_amount") or 0),
+            float(order.get("discount_percent") or 0),
             datetime.now().isoformat(timespec="seconds"),
         ))
         pe_id = cur.fetchone()[0]
@@ -539,12 +542,13 @@ def _build_payment_payload(payment: dict, defaults: dict) -> dict | None:
     created_at     = payment.get("created_at") or ""
     reference_date = created_at[:10] if created_at else date.today().isoformat()
 
-    customer_name = (payment.get("customer_name") or "Walk-in Customer").strip()
+    customer_name = (payment.get("customer_name") or "Default").strip()
     method_label  = payment.get("deposit_method", "")
     remarks = (
         f"Laybye Deposit via {method_label} | "
         f"USD {paid_amount_for_frappe:.2f} @ {exch_rate:.4f} {currency}/USD = "
-        f"{currency} {received_amount_for_frappe:.2f}"
+        f"{currency} {received_amount_for_frappe:.2f}" +
+        (f" | Disc: {payment.get('discount_percent')}% / ${payment.get('discount_amount')}" if float(payment.get('discount_amount') or 0) > 0 else "")
         if method_label else "Laybye Deposit"
     )
 

@@ -297,7 +297,7 @@ class PaymentDialog(QDialog):
     def __init__(self, parent=None, total: float = 0.0, customer: dict | None = None,
                  items: list = None, cashier_id: int = None, cashier_name: str = "",
                  subtotal: float = None, total_vat: float = 0.0, discount_amount: float = 0.0,
-                 shift_id: int = None):
+                 discount_percent: float = 0.0, shift_id: int = None):
         super().__init__(parent)
         self.total             = total
         self.items             = items or []
@@ -306,6 +306,7 @@ class PaymentDialog(QDialog):
         self.subtotal          = subtotal
         self.total_vat         = total_vat
         self.discount_amount   = discount_amount
+        self.discount_percent  = discount_percent
         self.shift_id          = shift_id
         
         # ✅ Add processing flag to prevent duplicate saves
@@ -1130,6 +1131,7 @@ class PaymentDialog(QDialog):
                 subtotal=self.subtotal,
                 total_vat=self.total_vat,
                 discount_amount=self.discount_amount,
+                discount_percent=self.discount_percent,
                 receipt_type="Invoice",
                 footer="",
                 change_amount=self.accepted_change,

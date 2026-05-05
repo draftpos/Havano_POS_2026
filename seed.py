@@ -176,7 +176,7 @@ def step3_send_invoice(csrf_token):
         "invoice_flag":              "1",
         "currency":                  "USD",
         "invoice_number":            INVOICE_NO,
-        "customer_name":             "Walk-in Customer",
+        "customer_name":             "Default",
         "trade_name":                "",
         "customer_vat_number":       "",
         "customer_address":          "",

@@ -333,10 +333,11 @@ def create_payment_entry(sale: dict, override_rate: float = None,
                 reference_no, reference_date,
                 remarks, synced,
                 amount_usd, amount_zwd, amount_zwg, exchange_rate,
+                discount_amount, discount_percent,
                 shift_id
             )
             OUTPUT INSERTED.id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
         """, (
             sale["id"], inv_no,
             frappe_ref,  # Use the properly resolved frappe_ref
@@ -348,8 +349,10 @@ def create_payment_entry(sale: dict, override_rate: float = None,
             gl_account or None,
             mop_name,
             inv_no, inv_date,
-            f"POS Payment - {mop_name}",
+            f"POS Payment - {mop_name}" + (f" (Disc: {sale.get('discount_percent')}% / ${sale.get('discount_amount')})" if float(sale.get('discount_amount') or 0) > 0 else ""),
             amount_usd, amount_zwd, amount_zwg, exch_rate,
+            float(sale.get("discount_amount") or 0),
+            float(sale.get("discount_percent") or 0),
             sid
         ))
 
@@ -768,7 +771,8 @@ def _build_payload(pe: dict, defaults: dict,
             pe.get("remarks") or
             f"POS Payment - {mop_name} | "
             f"USD {paid_amount_for_frappe:.2f} @ {source_exch_rate:.4f} {currency}/USD = "
-            f"{currency} {received_amount_for_frappe:.2f}"
+            f"{currency} {received_amount_for_frappe:.2f}" +
+            (f" | Discount: {pe.get('discount_percent')}% / ${pe.get('discount_amount')}" if float(pe.get('discount_amount') or 0) > 0 else "")
         ),
         "docstatus": 1,
     }

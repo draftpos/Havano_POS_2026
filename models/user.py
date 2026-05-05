@@ -275,21 +275,33 @@ def upsert_frappe_user(u: dict) -> dict | None:
     cur  = conn.cursor()
     _ensure_perm_cols(cur, conn)
 
-    cur.execute("SELECT id FROM users WHERE frappe_user = ?", (frappe_name,))
+    # Robust matching: Try frappe_user first, then email, then username.
+    # This prevents duplicates and preserves local PINs when syncing.
+    frappe_name = (u.get("name") or u.get("frappe_user") or "").strip()
+    
+    cur.execute("SELECT id FROM users WHERE (frappe_user = ? AND frappe_user <> '')", (frappe_name,))
     existing = cur.fetchone()
 
+    if not existing and email:
+        cur.execute("SELECT id FROM users WHERE (email = ? AND email <> '')", (email,))
+        existing = cur.fetchone()
+    
+    if not existing and username:
+        cur.execute("SELECT id FROM users WHERE username = ?", (username,))
+        existing = cur.fetchone()
+
     if existing:
+        user_id = existing[0]
         # Update everything EXCEPT the 'pin'. Preserve local-only PIN.
         cur.execute("""
             UPDATE users SET
                 username=?, role=?, email=?, full_name=?, first_name=?,
                 last_name=?, company=?, cost_center=?, warehouse=?,
-                synced_from_frappe=1
-            WHERE frappe_user=?
+                frappe_user=?, synced_from_frappe=1
+            WHERE id=?
         """, (username, role, email, full_name, first_name,
-                last_name, company, cost_center, warehouse, frappe_name))
+                last_name, company, cost_center, warehouse, frappe_name, user_id))
         conn.commit()
-        user_id = existing[0]
     else:
         # Create user WITHOUT a PIN (will prompt to set one during login)
         cur.execute("""
@@ -307,6 +319,55 @@ def upsert_frappe_user(u: dict) -> dict | None:
 
     conn.close()
     return get_user_by_id(user_id) if user_id else None
+
+
+def update_user_credentials_from_online(username_or_email: str, password: str, u: dict) -> dict | None:
+    """
+    Called after a successful online login. Updates the local password hash
+    and other profile data so the user can login offline next time.
+    """
+    conn = get_connection()
+    cur  = conn.cursor()
+    _ensure_perm_cols(cur, conn)
+
+    # 1. Find the user
+    cur.execute(
+        "SELECT id FROM users WHERE (username = ? OR email = ? OR frappe_user = ?)",
+        (username_or_email.strip(), username_or_email.strip(), (u.get("name") or "").strip())
+    )
+    row = cur.fetchone()
+    
+    # 2. If user doesn't exist, create them
+    if not row:
+        conn.close()
+        return upsert_frappe_user(u) # This will create them with 'changeme' but we'll update it below
+    
+    user_id = row[0]
+    
+    # 3. Update password and other fields
+    frappe_name = (u.get("name")        or "").strip()
+    email       = (u.get("email")       or "").strip()
+    full_name   = (u.get("full_name")   or "").strip()
+    first_name  = (u.get("first_name")  or "").strip()
+    last_name   = (u.get("last_name")   or "").strip()
+    company     = (u.get("company")     or "").strip()
+    cost_center = (u.get("cost_center") or "").strip()
+    warehouse   = (u.get("warehouse")   or "").strip()
+    
+    cur.execute("""
+        UPDATE users SET
+            password=?, email=?, full_name=?, first_name=?,
+            last_name=?, company=?, cost_center=?, warehouse=?,
+            frappe_user=?, synced_from_frappe=1
+        WHERE id=?
+    """, (
+        _hash(password), email, full_name, first_name,
+        last_name, company, cost_center, warehouse, frappe_name, user_id
+    ))
+    conn.commit()
+    conn.close()
+    
+    return get_user_by_id(user_id)
 
 
 def delete_user(user_id: int) -> bool:

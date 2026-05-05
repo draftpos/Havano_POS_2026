@@ -1825,7 +1825,7 @@ import time
 # table / index. Mismatches between this constant and schema_info.version
 # trigger a full migration pass on next launch; matches short-circuit so
 # startup doesn't burn 5–15s on INFORMATION_SCHEMA round-trips every time.
-SCHEMA_VERSION = "2026.04.30.4"
+SCHEMA_VERSION = "2026.05.04.2"
 
 
 def _hash(pw: str) -> str:
@@ -2048,6 +2048,7 @@ def run():
                 [server_pos_account]       NVARCHAR(255) NOT NULL DEFAULT '',
                 [server_taxes_and_charges] NVARCHAR(255) NOT NULL DEFAULT '',
                 [server_walk_in_customer]  NVARCHAR(255) NOT NULL DEFAULT 'default',
+                [default_price_list_id]    INT           NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -2083,6 +2084,7 @@ def run():
             ("api_secret",               "NVARCHAR(200) NOT NULL DEFAULT ''"),
             ("terms_and_conditions",     "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
             ("receipt_header",            "NVARCHAR(200) NOT NULL DEFAULT ''"),
+            ("default_price_list_id",     "INT           NULL"),
         ]:
             add_col("company_defaults", col, defn)
         
@@ -2435,6 +2437,7 @@ def run():
                 -- Per-shift running counter — resets to 1 whenever a new shift
                 -- opens. Shown on receipts and is the KOT header line.
                 [order_number]    INT           NULL,
+                [discount_percent] DECIMAL(12,2) NULL DEFAULT 0,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -2470,6 +2473,7 @@ def run():
         ("tendered_zwd",  "DECIMAL(14,4) NULL DEFAULT 0"),
         ("exchange_rate", "DECIMAL(18,8) NULL DEFAULT 1"),
         ("order_number",  "INT           NULL"),
+        ("discount_percent", "DECIMAL(12,2) NULL DEFAULT 0"),
     ]:
         add_col("sales", col, defn)
 
@@ -2602,6 +2606,8 @@ def run():
                 [amount_zwd]               DECIMAL(14,4) NULL DEFAULT 0,
                 [amount_zwg]               DECIMAL(14,4) NULL DEFAULT 0,
                 [exchange_rate]            DECIMAL(18,8) NULL DEFAULT 1,
+                [discount_amount]          DECIMAL(12,2) NULL DEFAULT 0,
+                [discount_percent]         DECIMAL(12,2) NULL DEFAULT 0,
                 [shift_id]                 INT           NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
@@ -2630,6 +2636,8 @@ def run():
             ("amount_zwd",    "DECIMAL(14,4) NULL DEFAULT 0"),
             ("amount_zwg",    "DECIMAL(14,4) NULL DEFAULT 0"),
             ("exchange_rate", "DECIMAL(18,8) NULL DEFAULT 1"),
+            ("discount_amount", "DECIMAL(12,2) NULL DEFAULT 0"),
+            ("discount_percent", "DECIMAL(12,2) NULL DEFAULT 0"),
             ("shift_id",     "INT           NULL"),
         ]:
             add_col("payment_entries", col, defn)
@@ -2800,6 +2808,7 @@ def run():
         ("account_name", "NVARCHAR(100) NULL"),
         ("payment_date", "DATE          NULL"),
         ("sync_error",   "NVARCHAR(MAX) NULL"),
+        ("discount_percent",  "DECIMAL(12,2) NULL DEFAULT 0"),
     ]:
         add_col("customer_payments", col, defn)
 
@@ -2925,6 +2934,8 @@ def run():
                 [last_attempt_at]  NVARCHAR(50)  NOT NULL DEFAULT '',
                 [error_message]    NVARCHAR(MAX) NOT NULL DEFAULT '',
                 [sync_error]       NVARCHAR(MAX) NULL,
+                [discount_amount]  DECIMAL(12,2) NULL DEFAULT 0,
+                [discount_percent] DECIMAL(12,2) NULL DEFAULT 0,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -2949,6 +2960,8 @@ def run():
         ("last_attempt_at",  "NVARCHAR(50)  NOT NULL DEFAULT ''"),
         ("error_message",    "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
         ("sync_error",       "NVARCHAR(MAX) NULL"),
+        ("discount_amount",  "DECIMAL(12,2) NULL DEFAULT 0"),
+        ("discount_percent", "DECIMAL(12,2) NULL DEFAULT 0"),
     ]:
         add_col("laybye_payment_entries", col, defn)
 

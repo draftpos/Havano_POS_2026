@@ -248,7 +248,7 @@ def create_credit_note(
         
         # CRITICAL: Use original sale's currency and exchange rate - NO CONVERSION
         final_currency = original_currency
-        final_customer_name = customer_name or original_customer or "Walk-in Customer"
+        final_customer_name = customer_name or original_customer or "Default"
         
         # Store the original exchange_rate (USD per local) for later use
         stored_rate = None

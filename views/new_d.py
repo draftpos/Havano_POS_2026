@@ -2046,9 +2046,13 @@ class CustomerDialog(QDialog):
 
 
 class PaymentDialog(QDialog):
-    def __init__(self, parent=None, total=0.0, customer=None):
+    def __init__(self, parent=None, total=0.0, customer=None, **kwargs):
         super().__init__(parent)
         self.total    = total
+        self.customer = customer
+        # Absorb extra kwargs to prevent crashes if called with advanced arguments
+        for k, v in kwargs.items():
+            setattr(self, k, v)
         self._method  = "Cash"
         self._method_btns = {}
         self.setWindowTitle("Payment")
@@ -4906,11 +4910,12 @@ class UnsyncedPopup(QDialog):
                     cur.execute("""
                         SELECT id, customer_name, custom_telephone_number
                         FROM   customers
-                        WHERE  frappe_synced = 0 OR frappe_synced IS NULL
+                        WHERE  (frappe_synced = 0 OR frappe_synced IS NULL)
+                          AND  customer_name != 'Default'
                         ORDER  BY id DESC
                     """)
                     for cid, cname, phone in cur.fetchall():
-                        cust_key = f"CUST-{cid}"
+                        cust_key = str(cid)
                         raw_err = (
                             _match_error(error_map, cust_key)
                             or _match_error(error_map, str(cid))
@@ -5555,12 +5560,28 @@ class POSView(QWidget):
             print(f"   Item {idx+1}: {it.get('product_name')} - qty: {it.get('qty')} - total: {it.get('total')}")
         
         # Calculate subtotal and VAT
-        subtotal = 0.0
+        gross_subtotal = 0.0
+        total_line_discount = 0.0
         total_vat = 0.0
-        for it in items:
-            subtotal += it.get("total", 0)
-            total_vat += it.get("tax_amount", 0)
         
+        for it in items:
+            # item['price'] is the price BEFORE line discount in some cases, 
+            # but let's check _collect_invoice_items.
+            # In _collect_invoice_items:
+            # price = self.invoice_table.item(r, self.COL_PRICE).text()
+            # qty = self.invoice_table.item(r, self.COL_QTY).text()
+            # total = self.invoice_table.item(r, self.COL_TOTAL).text()
+            # total is usually (price * qty) - discount.
+            
+            item_price = it.get("price", 0.0)
+            item_qty = it.get("qty", 0.0)
+            item_total = it.get("total", 0.0)
+            item_tax = it.get("tax_amount", 0.0)
+            
+            gross_subtotal += (item_price * item_qty)
+            total_line_discount += it.get("discount", 0.0)
+            total_vat += item_tax
+            
         # Get cashier info
         cashier_id = self.user.get("id") if isinstance(self.user, dict) else None
         cashier_name = self.user.get("username", "") if isinstance(self.user, dict) else ""
@@ -5569,7 +5590,13 @@ class POSView(QWidget):
         from models.shift import get_active_shift
         active_shift = get_active_shift()
         shift_id = active_shift.get("id") if active_shift else None
-        discount_amount = getattr(self, "current_discount_percent", 0.0)
+        
+        # Global discount (from the right panel / state)
+        global_discount_pct = getattr(self, "current_discount_percent", 0.0)
+        global_discount_amt = (gross_subtotal - total_line_discount) * (global_discount_pct / 100.0)
+        
+        final_discount_amount = total_line_discount + global_discount_amt
+        final_discount_percent = (final_discount_amount / gross_subtotal * 100.0) if gross_subtotal > 0 else 0.0
         
         # ── 4. OPEN PAYMENT DIALOG WITH ITEMS ──────────────────────────────────
         if _HAS_PAYMENT_DIALOG:
@@ -5577,12 +5604,13 @@ class POSView(QWidget):
                 self,
                 total=total,
                 customer=self._selected_customer,
-                items=items,  # PASS THE ITEMS!
+                items=items,
                 cashier_id=cashier_id,
                 cashier_name=cashier_name,
-                subtotal=subtotal,
+                subtotal=gross_subtotal,
                 total_vat=total_vat,
-                discount_amount=discount_amount,
+                discount_amount=final_discount_amount,
+                discount_percent=final_discount_percent,
                 shift_id=shift_id,
             )
         else:
@@ -5590,12 +5618,13 @@ class POSView(QWidget):
                 self,
                 total=total,
                 customer=self._selected_customer,
-                items=items,  # PASS THE ITEMS!
+                items=items,
                 cashier_id=cashier_id,
                 cashier_name=cashier_name,
-                subtotal=subtotal,
+                subtotal=gross_subtotal,
                 total_vat=total_vat,
-                discount_amount=discount_amount,
+                discount_amount=final_discount_amount,
+                discount_percent=final_discount_percent,
                 shift_id=shift_id,
             )
 
@@ -10803,7 +10832,8 @@ class POSView(QWidget):
                 msg_box.exec()
 
         # ── 4. Permission / admin PIN bypass ─────────────────────────────────
-        if not can_disc:
+        is_admin = (current_user.get("role") == "admin")
+        if not can_disc and not is_admin:
             pin, ok = QInputDialog.getText(
                 self, "Authorization",
                 "Manager PIN required for discount:",

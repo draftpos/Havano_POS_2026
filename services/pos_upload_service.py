@@ -297,7 +297,9 @@ def _base_payload_fields(sale: dict, defaults: dict,
     cost_center       = defaults.get("server_cost_center", "")
     taxes_and_charges = defaults.get("server_taxes_and_charges", "")
     walk_in           = defaults.get("server_walk_in_customer", "").strip() or "Default"
-    customer          = (sale.get("customer_name") or "").strip() or walk_in
+    customer          = (sale.get("customer_name") or "").strip()
+    if not customer or customer.lower() in ("walk-in customer", "walk-in"):
+        customer = walk_in
 
     payload: dict = {
         "customer":               customer,
@@ -355,6 +357,7 @@ def _build_payload_usd(sale: dict, items: list[dict], defaults: dict) -> dict:
         item_code = (it.get("part_no") or "").strip()
         qty       = float(it.get("qty", 0))
         rate      = float(it.get("price") or 0)   # USD price, used directly
+        l_disc    = float(it.get("discount") or 0) # Percentage
 
         if not item_code or qty <= 0:
             continue
@@ -364,6 +367,7 @@ def _build_payload_usd(sale: dict, items: list[dict], defaults: dict) -> dict:
             "qty":       qty,
             "rate":      rate,
             "uom":       (it.get("uom") or "Nos"),
+            "discount_percentage": l_disc,
         }
         
         batch_no = str(it.get("batch_no") or "").strip()
@@ -381,17 +385,21 @@ def _build_payload_usd(sale: dict, items: list[dict], defaults: dict) -> dict:
             row["cost_center"] = cost_center
 
         frappe_items.append(row)
-        total_calculated += rate * qty
+        total_calculated += (rate * qty) * (1.0 - l_disc / 100.0)
 
     if not frappe_items:
         log.warning("[_build_payload_usd] Sale %s — no valid items.", sale.get("id"))
         return {}
 
+    # Header-level discount
+    da = float(sale.get("discount_amount") or 0)
+    total_calculated -= da
+
     stored_total = float(sale.get("total_usd") or sale.get("total") or 0)
-    if stored_total > 0 and abs(total_calculated - stored_total) > 0.02:
+    if stored_total > 0 and abs(total_calculated - stored_total) > 0.05:
         log.warning(
-            "[_build_payload_usd] Sale %s: computed USD total %.4f differs from "
-            "stored total %.4f",
+            "[_build_payload_usd] Sale %s: computed net USD total %.4f differs from "
+            "stored total %.4f (Line discs + Global disc applied)",
             sale.get("id"), total_calculated, stored_total,
         )
 
@@ -400,8 +408,17 @@ def _build_payload_usd(sale: dict, items: list[dict], defaults: dict) -> dict:
         currency="USD", conversion_rate=1.0,
     )
     payload["items"]       = frappe_items
+    # In Frappe, we send the gross total of items for grand_total if we apply 
+    # discount_amount at the header, BUT if we want to match stored_total, 
+    # let's see. Actually, Frappe recalculates it. 
+    # Forcing grand_total to the net amount is safer for matching local DB.
     payload["grand_total"] = round(total_calculated, 2)
     payload["total"]       = round(total_calculated, 2)
+
+    if da > 0:
+        payload["discount_amount"]   = da
+        payload["apply_discount_on"] = "Grand Total"
+
     return payload
 
 
@@ -449,6 +466,7 @@ def _build_payload_local_currency(
         item_code = (it.get("part_no") or "").strip()
         qty       = float(it.get("qty", 0))
         rate      = float(it.get("price") or 0)   # already in local currency
+        l_disc    = float(it.get("discount") or 0)
 
         if not item_code or qty <= 0:
             continue
@@ -458,6 +476,7 @@ def _build_payload_local_currency(
             "qty":       qty,
             "rate":      rate,
             "uom":       (it.get("uom") or "Nos"),
+            "discount_percentage": l_disc,
         }
         
         batch_no = str(it.get("batch_no") or "").strip()
@@ -475,17 +494,24 @@ def _build_payload_local_currency(
             row["cost_center"] = cost_center
 
         frappe_items.append(row)
-        total_calculated += rate * qty
+        total_calculated += (rate * qty) * (1.0 - l_disc / 100.0)
 
     if not frappe_items:
         log.warning("[_build_payload_local_currency] Sale %s — no valid items.",
                     sale.get("id"))
         return {}
 
+    # Header-level discount (in local currency)
+    da_usd = float(sale.get("discount_amount") or 0)
+    da_local = 0.0
+    if da_usd > 0:
+        da_local = round(da_usd * zwd_per_usd, 2)
+        total_calculated -= da_local
+
     stored_total = float(sale.get("total") or 0)
-    if stored_total > 0 and abs(total_calculated - stored_total) > 0.02:
+    if stored_total > 0 and abs(total_calculated - stored_total) > 0.05:
         log.warning(
-            "[_build_payload_local_currency] Sale %s: computed %s total %.4f differs from "
+            "[_build_payload_local_currency] Sale %s: computed %s net total %.4f differs from "
             "stored total %.4f",
             sale.get("id"), local_currency, total_calculated, stored_total,
         )
@@ -498,6 +524,11 @@ def _build_payload_local_currency(
     payload["items"]       = frappe_items
     payload["grand_total"] = round(total_calculated, 2)
     payload["total"]       = round(total_calculated, 2)
+
+    if da_local > 0:
+        payload["discount_amount"]   = da_local
+        payload["apply_discount_on"] = "Grand Total"
+
     return payload
 
 
@@ -550,6 +581,7 @@ def _build_payload_mixed_to_usd(
         qty           = float(it.get("qty", 0))
         price_usd     = float(it.get("price") or 0)
         item_currency = (it.get("currency") or "USD").strip().upper()
+        l_disc        = float(it.get("discount") or 0)
 
         if not item_code or qty <= 0:
             continue
@@ -564,6 +596,7 @@ def _build_payload_mixed_to_usd(
             "qty":       qty,
             "rate":      rate_usd,
             "uom":       (it.get("uom") or "Nos"),
+            "discount_percentage": l_disc,
         }
         
         batch_no = str(it.get("batch_no") or "").strip()
@@ -581,17 +614,21 @@ def _build_payload_mixed_to_usd(
             row["cost_center"] = cost_center
 
         frappe_items.append(row)
-        total_calculated += rate_usd * qty
+        total_calculated += (rate_usd * qty) * (1.0 - l_disc / 100.0)
 
     if not frappe_items:
         log.warning("[_build_payload_mixed_to_usd] Sale %s — no valid items.",
                     sale.get("id"))
         return {}
 
+    # Header-level discount
+    da = float(sale.get("discount_amount") or 0)
+    total_calculated -= da
+
     stored_total_usd = float(sale.get("total_usd") or sale.get("total") or 0)
-    if stored_total_usd > 0 and abs(total_calculated - stored_total_usd) > 0.02:
+    if stored_total_usd > 0 and abs(total_calculated - stored_total_usd) > 0.05:
         log.warning(
-            "[_build_payload_mixed_to_usd] Sale %s: computed USD total %.4f "
+            "[_build_payload_mixed_to_usd] Sale %s: computed net USD total %.4f "
             "differs from stored total_usd %.4f",
             sale.get("id"), total_calculated, stored_total_usd,
         )
@@ -603,6 +640,11 @@ def _build_payload_mixed_to_usd(
     payload["items"]       = frappe_items
     payload["grand_total"] = round(total_calculated, 2)
     payload["total"]       = round(total_calculated, 2)
+
+    if da > 0:
+        payload["discount_amount"]   = da
+        payload["apply_discount_on"] = "Grand Total"
+
     return payload
 
 

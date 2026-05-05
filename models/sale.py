@@ -87,7 +87,7 @@ _SALE_SELECT = """
        s.invoice_no, s.invoice_date, s.kot,
        s.customer_name, s.customer_contact,
        s.currency, s.subtotal, s.total_vat,
-       s.discount_amount, s.receipt_type, s.footer,
+       s.discount_amount, s.discount_percent, s.receipt_type, s.footer,
        s.cashier_name,
        s.synced,
        COALESCE(s.frappe_ref,      '')  AS frappe_ref,
@@ -556,7 +556,7 @@ def create_sale(
                     total, tendered, method, cashier_id,
                     cashier_name, customer_name, customer_contact,
                     company_name, kot, currency,
-                    subtotal, total_vat, discount_amount,
+                    subtotal, total_vat, discount_amount, discount_percent,
                     receipt_type, footer, synced,
                     total_items, change_amount, is_on_account,
                     shift_id, fiscal_status,
@@ -564,13 +564,13 @@ def create_sale(
                     order_number
                 )
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 seq, invoice_no, invoice_date,
                 total_amount, tendered_amount, method, cashier_id,
                 cashier_name, customer_name, customer_contact,
                 company_name, kot, currency,
-                float(effective_sub), float(total_vat), float(discount_amount),
+                float(effective_sub), float(total_vat), float(discount_amount), float(discount_percent),
                 receipt_type, footer, 0,
                 float(total_items_val), float(change_val), 1 if is_on_account else 0,
                 shift_id, "pending",
@@ -584,7 +584,7 @@ def create_sale(
                     total, tendered, method, cashier_id,
                     cashier_name, customer_name, customer_contact,
                     company_name, kot, currency,
-                    subtotal, total_vat, discount_amount,
+                    subtotal, total_vat, discount_amount, discount_percent,
                     receipt_type, footer, synced,
                     total_items, change_amount, is_on_account,
                     shift_id,
@@ -592,13 +592,13 @@ def create_sale(
                     order_number
                 )
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 seq, invoice_no, invoice_date,
                 total_amount, tendered_amount, method, cashier_id,
                 cashier_name, customer_name, customer_contact,
                 company_name, kot, currency,
-                float(effective_sub), float(total_vat), float(discount_amount),
+                float(effective_sub), float(total_vat), float(discount_amount), float(discount_percent),
                 receipt_type, footer, 0,
                 float(total_items_val), float(change_val), 1 if is_on_account else 0,
                 shift_id,
@@ -1225,7 +1225,9 @@ def migrate():
         ("fiscal_receipt_counter",     "INT NULL"),
         ("fiscal_global_no",           "NVARCHAR(50)  NULL"),
         ("fiscal_sync_date",           "DATETIME2     NULL"),
+        ("discount_percent",           "DECIMAL(8,4)  NOT NULL DEFAULT 0"),
         ("fiscal_error",               "NVARCHAR(MAX) NULL"),
+        
         # syncing flag — set to 1 while a background thread is pushing this
         # sale to Frappe; cleared to 0 when push succeeds or fails.
         # Prevents two threads from posting the same invoice simultaneously.
@@ -1405,6 +1407,7 @@ def _sale_to_dict(row: dict) -> dict:
         "subtotal":         float(row["subtotal"]        or 0),
         "total_vat":        float(row["total_vat"]       or 0),
         "discount_amount":  float(row["discount_amount"] or 0),
+        "discount_percent": float(row.get("discount_percent", 0) or 0),
         "receipt_type":     row["receipt_type"]     or "Invoice",
         "footer":           row["footer"]           or "",
         "cashier_name":     row["cashier_name"]     or "",

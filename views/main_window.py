@@ -2356,9 +2356,13 @@ class CustomerDialog(QDialog):
 
 
 class PaymentDialog(QDialog):
-    def __init__(self, parent=None, total=0.0, customer=None):
+    def __init__(self, parent=None, total=0.0, customer=None, **kwargs):
         super().__init__(parent)
         self.total    = total
+        self.customer = customer
+        # Absorb extra kwargs
+        for k, v in kwargs.items():
+            setattr(self, k, v)
         self._method  = "Cash"
         self._method_btns = {}
         self.setWindowTitle("Payment")
@@ -6295,7 +6299,13 @@ class POSView(QWidget):
         from models.shift import get_active_shift
         active_shift = get_active_shift()
         shift_id = active_shift.get("id") if active_shift else None
-        discount_amount = getattr(self, "current_discount_percent", 0.0)
+        
+        discount_pct = getattr(self, "current_discount_percent", 0.0)
+        # ── FIX: discount_amount is tracked directly in _on_discount_clicked
+        # from gross line totals.  Never recompute it here from `subtotal`
+        # because subtotal is already the post-discount sum of COL_TOTAL values,
+        # which would cause double-counting.
+        discount_amt = getattr(self, "current_discount_amount", 0.0)
         
         # ── 4. OPEN PAYMENT DIALOG WITH ITEMS ──────────────────────────────────
         if _HAS_PAYMENT_DIALOG:
@@ -6308,7 +6318,8 @@ class POSView(QWidget):
                 cashier_name=cashier_name,
                 subtotal=subtotal,
                 total_vat=total_vat,
-                discount_amount=discount_amount,
+                discount_amount=discount_amt,
+                discount_percent=discount_pct,
                 shift_id=shift_id,
             )
         else:
@@ -6321,7 +6332,8 @@ class POSView(QWidget):
                 cashier_name=cashier_name,
                 subtotal=subtotal,
                 total_vat=total_vat,
-                discount_amount=discount_amount,
+                discount_amount=discount_amt,
+                discount_percent=discount_pct,
                 shift_id=shift_id,
             )
 
@@ -6450,7 +6462,7 @@ class POSView(QWidget):
                 from services.payment_entry_service import create_payment_entry
                 
                 discount_pct = getattr(self, "current_discount_percent", 0.0)
-                discount_amt = round(subtotal * (discount_pct / 100.0), 4) if discount_pct > 0 else 0.0
+                discount_amt = getattr(self, "current_discount_amount", 0.0)
                 cust_name = final_customer.get("customer_name", "Walk-in") if final_customer else "Walk-in"
                 cust_contact = final_customer.get("custom_telephone_number", "") if final_customer else ""
                 company_name = ""
@@ -6579,6 +6591,7 @@ class POSView(QWidget):
         self._return_mode = False
         self._return_cn   = None
         self.current_discount_percent = 0.0   # ← Discount state
+        self.current_discount_amount  = 0.0
         self._quotation_mode = False           # ← Quotation mode flag
 
         # Active price list for the current customer — resolved from the
@@ -6799,6 +6812,7 @@ class POSView(QWidget):
         
         # Reset discount
         self.current_discount_percent = 0.0
+        self.current_discount_amount  = 0.0
         
         # Clear any selected items
         self._active_row = -1
@@ -8296,7 +8310,7 @@ class POSView(QWidget):
             subtotal = sum(item.get("total", 0) for item in items)
             total_vat = sum(item.get("tax_amount", 0) for item in items)
             discount_pct = getattr(self, "current_discount_percent", 0.0)
-            discount_amt = subtotal * (discount_pct / 100.0) if discount_pct > 0 else 0.0
+            discount_amt = getattr(self, "current_discount_amount", 0.0)
             
             sale = create_sale(
                 items=items,
@@ -8362,6 +8376,7 @@ class POSView(QWidget):
         self._return_mode = False
         self._return_cn   = None
         self.current_discount_percent = 0.0   # ← Discount state
+        self.current_discount_amount  = 0.0
         self._quotation_mode = False           # ← Quotation mode flag
         self._build_ui()
 
@@ -8429,6 +8444,7 @@ class POSView(QWidget):
         self._return_mode = False
         self._return_cn   = None
         self.current_discount_percent = 0.0   # ← Discount state (Change 1)
+        self.current_discount_amount  = 0.0
         self._quotation_mode = False           # ← Quotation mode flag
         self._build_ui()
         QTimer.singleShot(0, self._ensure_default_customer)
@@ -9131,18 +9147,20 @@ class POSView(QWidget):
             except (ValueError, AttributeError):
                 pass
 
-        # Apply transaction-level discount
+        # COL_TOTAL is already (price × qty - disc_amount) so the subtotal here
+        # is post-discount.  Do NOT apply current_discount_percent again — that
+        # would double-count.  Use the pre-computed discount_amount directly.
+        discount_amount = getattr(self, "current_discount_amount", 0.0)
         discount_pct    = getattr(self, "current_discount_percent", 0.0)
-        discount_amount = subtotal * (discount_pct / 100.0)
-        grand_total     = subtotal - discount_amount
+        grand_total     = subtotal  # already discounted
 
         self._lbl_total.setText(f"{grand_total:.2f}" if grand_total else "")
         self._bin_qty.setText(f"Items: {int(qty_total)}")
 
         # Show discount badge on the label when active
-        if discount_pct > 0:
+        if discount_amount > 0:
             self._lbl_total.setToolTip(
-                f"Subtotal: ${subtotal:.2f}  |  Discount {discount_pct:.2f}%: -${discount_amount:.2f}"
+                f"Discount {discount_pct:.2f}%: -${discount_amount:.2f}  |  Total: ${grand_total:.2f}"
             )
         else:
             self._lbl_total.setToolTip("")
@@ -9158,7 +9176,7 @@ class POSView(QWidget):
         # Update status bar
         if self.parent_window:
             status = f"  Items: {int(qty_total)}   |   Total: ${grand_total:.2f}"
-            if discount_pct > 0:
+            if discount_amount > 0:
                 status += f"   |   Discount: {discount_pct:.2f}% (-${discount_amount:.2f})"
             self.parent_window._set_status(status)
 
@@ -11902,6 +11920,7 @@ class POSView(QWidget):
         self._active_col              = 0
         self._last_filled_row         = -1
         self.current_discount_percent = 0.0   # ← Reset discount for next customer
+        self.current_discount_amount  = 0.0
         # Keep the selected customer across sales so the cashier does not have
         # to re-select the same customer every transaction.  The cashier can
         # tap the customer button at any time to switch to a different customer.
@@ -12254,6 +12273,30 @@ class POSView(QWidget):
         self.invoice_table.setItem(row, self.COL_DISC, disc_item)
         self._recalc_row(row)
         self._recalc_totals()
+
+        # ── FIX: Recompute discount_amount and discount_percent from GROSS line
+        # totals (price × qty) so we never double-count the already-discounted
+        # COL_TOTAL values that _open_payment uses as its subtotal base.
+        try:
+            _total_disc  = 0.0
+            _gross_total = 0.0
+            for _r in range(self.invoice_table.rowCount()):
+                _pi = self.invoice_table.item(_r, self.COL_PRICE)
+                _qi = self.invoice_table.item(_r, self.COL_QTY)
+                _di = self.invoice_table.item(_r, self.COL_DISC)
+                if not _pi or not _pi.text().strip():
+                    continue
+                _p = float(_pi.text() or 0)
+                _q = float(_qi.text() or 1) if _qi else 1
+                _d = float((_di.text() or "0").replace('%', '').strip()) if _di else 0
+                _gross_total += _p * _q
+                _total_disc  += _d
+            self.current_discount_amount  = round(_total_disc, 4)
+            self.current_discount_percent = round((_total_disc / _gross_total) * 100, 4) if _gross_total > 0 else 0.0
+            print(f"[discount] gross={_gross_total:.2f}  disc_amt={self.current_discount_amount:.4f}"
+                  f"  disc_pct={self.current_discount_percent:.4f}%")
+        except Exception as _e:
+            print(f"[discount] percent recalc failed: {_e}")
 
         print(f"[discount] {msg}")
         if self.parent_window:
@@ -12682,38 +12725,61 @@ class MainWindow(QMainWindow):
 
     def _ensure_default_price_list_assigned(self):
         """
-        Background task to ensure ALL customers have a default price list (ID: 1).
+        Background task to ensure ALL customers have a default price list.
         Corrects records where price list is NULL or 0.
         """
         try:
             from database.db import get_connection
             conn = get_connection(); cur = conn.cursor()
+            
+            # 1. Ensure at least one price list exists
+            cur.execute("SELECT TOP 1 id FROM price_lists ORDER BY id ASC")
+            row = cur.fetchone()
+            if not row:
+                cur.execute("INSERT INTO price_lists (name, selling) VALUES ('Standard', 1)")
+                conn.commit()
+                cur.execute("SELECT TOP 1 id FROM price_lists ORDER BY id ASC")
+                row = cur.fetchone()
+            
+            if not row:
+                conn.close()
+                return
+            
+            default_pl_id = row[0]
+
+            # 2. Update customers missing a price list
             cur.execute("""
                 UPDATE customers 
-                SET default_price_list_id = 1 
+                SET default_price_list_id = ? 
                 WHERE default_price_list_id IS NULL OR default_price_list_id = 0
-            """)
+            """, (default_pl_id,))
+            
             if cur.rowcount > 0:
                 conn.commit()
-                print(f"[Service] Auto-assigned Price List 1 to {cur.rowcount} customer(s).")
+                print(f"[Service] Auto-assigned Price List {default_pl_id} to {cur.rowcount} customer(s).")
+            
+            # 3. Check specific defaults (Walk-in customer and Company Defaults)
+            cur.execute("SELECT id, default_price_list_id FROM customers WHERE id = 1")
+            cust = cur.fetchone()
+            if cust:
+                if not cust[1] or cust[1] == 0:
+                    print(f"[MainWindow] Assigning Price List ID {default_pl_id} to Walk-in customer...")
+                    cur.execute("UPDATE customers SET default_price_list_id = ? WHERE id = 1", (default_pl_id,))
+                    conn.commit()
+            
+            cur.execute("SELECT id, default_price_list_id FROM company_defaults")
+            defaults = cur.fetchone()
+            if defaults:
+                if not defaults[1] or defaults[1] == 0:
+                    print(f"[MainWindow] Setting default_price_list_id in company_defaults to {default_pl_id}")
+                    cur.execute("UPDATE company_defaults SET default_price_list_id = ?", (default_pl_id,))
+                    conn.commit()
+
             conn.close()
         except Exception as e:
-            print(f"[Service] Price list assignment failed: {e}")
-            # Check if default customer exists and has price list assigned
-            cust = db.fetch_one("SELECT id, default_price_list_id FROM customers WHERE id = 1")
-            if cust:
-                if not cust.get("default_price_list_id") or cust.get("default_price_list_id") != 1:
-                    print("[MainWindow] Assigning Price List ID 1 to default customer...")
-                    db.execute_non_query("UPDATE customers SET default_price_list_id = 1 WHERE id = 1")
-            
-            # Also check company_defaults
-            defaults = db.fetch_one("SELECT default_customer_id, default_price_list_id FROM company_defaults")
-            if defaults:
-                if not defaults.get("default_price_list_id") or defaults.get("default_price_list_id") != 1:
-                    db.execute_non_query("UPDATE company_defaults SET default_price_list_id = 1")
-                    
-        except Exception as e:
             print(f"[MainWindow] Price List Assignment Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def switch_to_pos(self):
         self._stack.setCurrentWidget(self._pos_view)

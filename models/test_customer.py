@@ -113,7 +113,7 @@ def main():
         print_section("3. Determining Default Customer Settings")
         
         # Customer name from company defaults or default
-        default_customer_name = "Walk-in Customer"
+        default_customer_name = "Default"
         if company_default[2] and company_default[2] != 'default':
             default_customer_name = company_default[2]
             print_info(f"Using custom customer name from company defaults: '{default_customer_name}'")

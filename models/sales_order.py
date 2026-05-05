@@ -183,7 +183,7 @@ def create_sales_order(
 
     balance_due   = round(max(total - deposit_amount, 0.0), 4)
     customer_id   = (customer or {}).get("id") or (customer or {}).get("customer_id")
-    customer_name = (customer or {}).get("customer_name") or "Walk-in Customer"
+    customer_name = (customer or {}).get("customer_name") or "Default"
     created_at    = datetime.now().isoformat(timespec="seconds")
 
     conn = _get_conn()

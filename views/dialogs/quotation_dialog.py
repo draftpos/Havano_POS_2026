@@ -438,7 +438,7 @@ class QuotationDialog(QDialog):
         self.label_preview_btn.clicked.connect(self._preview_pharmacy_labels)
 
         # Reprint — prints ZPL labels for the selected quotation inline
-        self.reprint_btn = QPushButton("Reprint Labels")
+        self.reprint_btn = QPushButton("Reprint Label")
         self.reprint_btn.setObjectName("primaryBtn")
         self.reprint_btn.setEnabled(False)
         self.reprint_btn.setToolTip("Reprint pharmacy labels for this quotation")
@@ -863,7 +863,7 @@ class QuotationDialog(QDialog):
         qid = getattr(self.current_quotation, "local_id", None)
         if not qid:
             QMessageBox.warning(
-                self, "Reprint Labels",
+                self, "",
                 "Cannot reprint — quotation is not saved locally yet."
             )
             return
@@ -875,7 +875,7 @@ class QuotationDialog(QDialog):
                 _send_to_printer,
             )
         except Exception as e:
-            QMessageBox.critical(self, "Reprint Labels", f"Could not load printer service:\n{e}")
+            QMessageBox.critical(self, "Reprint Label", f"Could not load printer service:\n{e}")
             return
 
         printer_name = _get_pharmacy_printer_name()
@@ -890,12 +890,12 @@ class QuotationDialog(QDialog):
         try:
             labels = _get_pharmacy_items_from_quotation(int(qid))
         except Exception as e:
-            QMessageBox.critical(self, "Reprint Labels", f"Failed to load pharmacy items:\n{e}")
+            QMessageBox.critical(self, "Reprint Label", f"Failed to load pharmacy items:\n{e}")
             return
 
         if not labels:
             QMessageBox.information(
-                self, "Reprint Labels",
+                self, "",
                 "No pharmacy items found on this quotation."
             )
             return
@@ -997,7 +997,7 @@ class QuotationDialog(QDialog):
                 f"Sent {printed}, failed {failed} \u2014 check printer connection."
             )
             QMessageBox.warning(
-                self, "Reprint Labels",
+                self, "Reprint Label",
                 f"Sent {printed} label(s), but {failed} failed.\n"
                 "Check the printer connection."
             )

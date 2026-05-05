@@ -111,6 +111,19 @@ def login(username: str, password: str) -> dict:
                 print(f"[auth] ⚠️  Auto-sync failed: {e}")
                 sync_result = {"error": str(e)}
 
+        # ── PERSIST CREDENTIALS LOCALLY ──────────────────────────────────
+        try:
+            from models.user import update_user_credentials_from_online
+            # raw_data['user'] contains the full user block from Frappe
+            # online['user'] is our mapped clean dict
+            u_block = (online.get("raw_data") or {}).get("user") or {}
+            persisted = update_user_credentials_from_online(username, password, u_block)
+            if persisted:
+                user["id"] = persisted.get("id")
+                print(f"[auth] ✅ Local credentials persisted for {user['username']}")
+        except Exception as e:
+            print(f"[auth] ⚠️  Could not persist local credentials: {e}")
+
         return {"success": True, "user": user, "source": "online", "sync_result": sync_result}
 
     # If both offline and online fail
@@ -206,6 +219,8 @@ def _parse_online_success(data: dict, username: str) -> dict:
         "cost_center":  raw_cost_center,
         "company":      raw_company,
         "role":         _map_role(roles, raw_username),
+        "frappe_user":  user_block.get("name") or data.get("email") or raw_username,
+        "email":        user_block.get("email") or data.get("email") or "",
     }
     return {
         "success": True, "user": user,

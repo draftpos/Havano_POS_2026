@@ -110,7 +110,7 @@ class FiscalizationService:
             items_xml = FiscalInvoiceItem.build_items_xml(fiscal_items)
 
             invoice_number = str(sale.get("invoice_no", sale_id))
-            customer_name = sale.get("customer_name", "Walk-in Customer") or "Walk-in Customer"
+            customer_name = sale.get("customer_name", "Default") or "Default"
 
             print(f"\n{'='*60}")
             print(f"SALE FISCALIZATION PAYLOAD:")
@@ -192,7 +192,7 @@ class FiscalizationService:
             # USE CREDIT NOTE'S OWN CURRENCY - NO CONVERSION
             fiscal_currency = cn.get("currency", "USD").upper()
             fiscal_tendered = abs(float(cn.get("total") or 0))
-            customer_name = cn.get("customer_name", "Walk-in Customer") or "Walk-in Customer"
+            customer_name = cn.get("customer_name", "Default") or "Default"
             
             # Map Zimbabwe currencies to ZIG for ZIMRA
             if fiscal_currency in ("ZWD", "ZWL", "ZWG"):

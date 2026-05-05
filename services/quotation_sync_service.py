@@ -86,7 +86,7 @@ def _build_quotation_payload(quotation: dict, defaults: dict) -> dict:
     # Get customer name from quotation or fallback to walk-in customer
     customer = quotation.get("customer", "")
     if not customer:
-        customer = defaults.get("server_walk_in_customer", "Walk-in Customer")
+        customer = defaults.get("server_walk_in_customer", "Default")
     
     # Format items for Frappe.
     # Pharmacy custom fields (custom_is_pharmacy, custom_dosage,

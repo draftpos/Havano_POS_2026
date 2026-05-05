@@ -69,6 +69,12 @@ def migrate():
         )
     """)
     print("[migrate] OK  companies")
+    cur.execute("""
+        IF NOT EXISTS (SELECT 1 FROM companies)
+            INSERT INTO companies (name, abbreviation, default_currency, country)
+            VALUES ('Default Company', 'DEF', 'USD', 'Zimbabwe')
+    """)
+    conn.commit()
 
     # ── company_defaults ──────────────────────────────────────────────────────
     cur.execute("""
@@ -156,6 +162,11 @@ def migrate():
         )
     """)
     print("[migrate] OK  price_lists")
+    cur.execute("""
+        IF NOT EXISTS (SELECT 1 FROM price_lists)
+            INSERT INTO price_lists (name, selling) VALUES ('Standard', 1)
+    """)
+    conn.commit()
 
     # ── customers ─────────────────────────────────────────────────────────────
     cur.execute("""
@@ -181,6 +192,14 @@ def migrate():
         )
     """)
     print("[migrate] OK  customers")
+    cur.execute("""
+        IF NOT EXISTS (SELECT 1 FROM customers WHERE id=1)
+            SET IDENTITY_INSERT customers ON;
+            INSERT INTO customers (id, customer_name, customer_type, frappe_synced, balance, outstanding_amount, loyalty_points)
+            VALUES (1, 'Walk-in', 'Individual', 0, 0, 0, 0);
+            SET IDENTITY_INSERT customers OFF;
+    """)
+    conn.commit()
     _add_column_if_missing("customers", "frappe_synced", "BIT NOT NULL DEFAULT 0")
     _add_column_if_missing("customers", "laybye_balance", "DECIMAL(18,2) NULL DEFAULT 0")
 
