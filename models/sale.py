@@ -1546,18 +1546,42 @@ def print_s(sale: dict):
             if not order_items:
                 continue
 
+            # Fetch company branding if missing from the sale dict
+            company_name = sale.get("company_name", "")
+            address_1 = sale.get("address_1", "")
+            address_2 = sale.get("address_2", "")
+            phone = sale.get("phone", "")
+            
+            if not company_name:
+                try:
+                    from models.company_defaults import get_defaults
+                    co = get_defaults() or {}
+                    company_name = co.get("company_name", "Havano POS")
+                    address_1 = co.get("address", "")
+                    phone = co.get("phone", "")
+                except Exception:
+                    company_name = "Havano POS"
+
             print(f"[KITCHEN DEBUG] Creating KOT receipt for {order_key} with {len(order_items)} items")
             kot_receipt = ReceiptData(
-                invoiceNo=sale["invoice_no"],
+                invoiceNo=sale.get("invoice_no", "N/A"),
                 KOT=order_key,
                 cashierName=sale.get("cashier_name", ""),
                 orderNumber=int(sale.get("order_number", 0) or 0),
+                companyName=company_name,
                 items=[Item(
                     productName=it["product_name"],
-                    qty=float(it["qty"]),
-                    productid=it.get("part_no", "")
-                ) for it in order_items]
+                    qty=float(it["qty"] if it.get("qty") is not None else 1),
+                    productid=it.get("part_no", ""),
+                    item_notes=it.get("item_notes", it.get("notes", ""))
+                ) for it in order_items],
+                bill_notes=sale.get("bill_notes", ""),
+                customerName=sale.get("customer_name", "")
             )
+            # Populate additional branding fields
+            kot_receipt.companyAddress = address_1
+            kot_receipt.companyAddressLine1 = address_2
+            kot_receipt.tel = phone
             
             print(f"[KITCHEN DEBUG] Sending to printer: {printer_name}")
             success = PrintingService().print_kitchen_order(kot_receipt, printer_name=printer_name)
@@ -1725,6 +1749,7 @@ def prepare_receipt_data(sale: dict) -> ReceiptData:
             tax_amount=float(it.get("tax_amount", 0)),
             batch_no=it.get("batch_no") or "",
             expiry_date=it.get("expiry_date") or "",
+            item_notes=it.get("item_notes", it.get("notes", "")),
         ))
 
     currency    = (sale.get("currency") or "USD").strip().upper()
@@ -1761,7 +1786,8 @@ def prepare_receipt_data(sale: dict) -> ReceiptData:
         items=items_list,
         footer=sale.get("footer", "Thank you for your purchase!"),
         receiptHeader=sale.get("receipt_type", "SALES RECEIPT"),
-        orderNumber=int(sale.get("order_number", 0) or 0)
+        orderNumber=int(sale.get("order_number", 0) or 0),
+        bill_notes=sale.get("bill_notes", "")
     )
 
     # ── Company info ──────────────────────────────────────────────────────────
@@ -1777,6 +1803,9 @@ def prepare_receipt_data(sale: dict) -> ReceiptData:
     receipt.vCode        = sale.get("fiscal_verification_code", "")
     receipt.deviceSerial = sale.get("zimra_serial_no", "")
     receipt.deviceId     = sale.get("zimra_device_id", "")
+    receipt.receiptNo    = sale.get("fiscal_global_no", "")
+    receipt.fiscalDay    = sale.get("fiscal_day", "")
+    receipt.fiscal_status = sale.get("fiscal_status", "pending")
 
     # ── Payment Details (paymentItems) ───────────────────────────────────────
     # Priority:

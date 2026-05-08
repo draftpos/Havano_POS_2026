@@ -72,14 +72,29 @@ _DEFAULT_SO_TERMS = (
 # =============================================================================
 
 def _get_active_printers() -> list[str]:
-    """Read main_printer from hardware_settings.json (same logic as sale.py)."""
+    """Read main_printer AND Order 1-6 from hardware_settings.json."""
     hw_file = Path("app_data/hardware_settings.json")
     try:
+        if not hw_file.exists():
+            log.warning("hardware_settings.json missing at %s", hw_file.absolute())
+            return []
+            
         with open(hw_file, "r", encoding="utf-8") as f:
             hw = json.load(f)
+        
         printers = []
-        if hw.get("main_printer") and hw["main_printer"] != "(None)":
-            printers.append(hw["main_printer"])
+        # 1. Main printer
+        main = hw.get("main_printer")
+        if main and main != "(None)":
+            printers.append(main)
+            
+        # 2. Orders 1-6 (KOT stations) — user wants these to print on Save Order too
+        order_cfg = hw.get("orders", {})
+        for i in range(1, 7):
+            cfg = order_cfg.get(f"Order {i}", {})
+            if cfg.get("active") and cfg.get("printer") and cfg["printer"] != "(None)":
+                printers.append(cfg["printer"])
+                
         return list(dict.fromkeys(printers))
     except Exception as exc:
         log.warning("Could not read hardware_settings.json: %s", exc)

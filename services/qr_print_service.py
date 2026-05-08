@@ -509,12 +509,12 @@ class QRPrintService:
             return QPixmap()
 
         try:
-            # Generate QR code
+            # Generate QR code with better settings for thermal printers
             qr = qrcode.QRCode(
-                version=2,
-                error_correction=qrcode.constants.ERROR_CORRECT_L,
-                box_size=4,
-                border=2,
+                version=None, # Auto version
+                error_correction=qrcode.constants.ERROR_CORRECT_Q, # Higher correction for thermal paper
+                box_size=10,
+                border=4, # Larger border for better scannability
             )
             qr.add_data(qr_url)
             qr.make(fit=True)

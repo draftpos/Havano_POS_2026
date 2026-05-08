@@ -48,6 +48,7 @@ def migrate():
             allow_laybye         BIT           NOT NULL DEFAULT 1,
             allow_quote          BIT           NOT NULL DEFAULT 1,
             allow_cancel_kot     BIT           NOT NULL DEFAULT 0,
+            allow_pay_kot        BIT           NOT NULL DEFAULT 1,
             company              NVARCHAR(140) NULL DEFAULT '',
             max_discount_percent INT           NULL DEFAULT 0
         )
@@ -56,6 +57,7 @@ def migrate():
     _add_column_if_missing("users", "allow_laybye", "BIT NOT NULL DEFAULT 1")
     _add_column_if_missing("users", "allow_quote", "BIT NOT NULL DEFAULT 1")
     _add_column_if_missing("users", "allow_cancel_kot", "BIT NOT NULL DEFAULT 0")
+    _add_column_if_missing("users", "allow_pay_kot", "BIT NOT NULL DEFAULT 1")
 
     # ── companies ─────────────────────────────────────────────────────────────
     cur.execute("""

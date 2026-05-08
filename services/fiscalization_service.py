@@ -6,6 +6,7 @@ from typing import Optional, List
 from dataclasses import dataclass
 import xml.etree.ElementTree as ET
 import json
+from datetime import datetime
 
 from models.fiscal_settings import FiscalSettingsRepository
 from services.zimra_api_service import get_zimra_service
@@ -132,9 +133,12 @@ class FiscalizationService:
             )
 
             if not result.is_success:
-                raise Exception(f"ZIMRA API error: {result.error}")
+                print(f"⚠️ ZIMRA API error: {result.error}. Falling back to offline mode.")
+                return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
+                
             if result.data is None:
-                raise Exception("No data returned from ZIMRA")
+                print(f"⚠️ No data returned from ZIMRA. Falling back to offline mode.")
+                return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
 
             fd = result.data
             self._update_sale_fiscal_data(
@@ -151,10 +155,67 @@ class FiscalizationService:
 
         except Exception as e:
             error_msg = str(e)
-            print(f"❌ Fiscalization failed for sale {sale_id}: {error_msg}")
-            import traceback
-            traceback.print_exc()
-            self._update_sale_fiscal_error(sale_id, error_msg)
+            print(f"❌ Fiscalization exception for sale {sale_id}: {error_msg}. Attempting offline fallback.")
+            try:
+                # Try offline fallback even on exception (e.g. timeout)
+                settings = self._settings_repo.get_settings()
+                sale = self._get_sale_by_id(sale_id)
+                fiscal_currency = sale.get("currency", "USD").upper()
+                if fiscal_currency in ("ZWD", "ZWL", "ZWG"):
+                    fiscal_currency = "ZIG"
+                return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
+            except Exception as e2:
+                print(f"❌ Critical failure: {e2}")
+                self._update_sale_fiscal_error(sale_id, f"Both online and offline modes failed: {error_msg}")
+                return False
+
+    # =========================================================================
+    # OFFLINE FISCALIZATION HELPERS
+    # =========================================================================
+
+    def _process_offline_sale(self, sale_id: int, settings, sale, currency: str) -> bool:
+        """
+        Processes a sale in offline mode by generating a dynamic ZIMRA URL locally.
+        Marks the sale as PENDING_SYNC for later background upload.
+        """
+        try:
+            from services.fiscal import FiscalLogic
+            
+            # 1. Use the sale's own invoice sequence as the temporary global number
+            # This ensures that the receipt number and the database invoice number match offline.
+            global_no = int(sale.get("invoice_number", 0))
+            if global_no == 0:
+                global_no = FiscalLogic.get_next_global_no()
+            else:
+                # Sync the global counter to match this invoice number
+                FiscalLogic.repo = self._settings_repo # Ensure repo is set
+                from models.fiscal_settings import FiscalSettingsRepository
+                FiscalSettingsRepository.update_last_global_no(global_no)
+            
+            # 2. Generate signature (hash)
+            date = datetime.now()
+            total = float(sale.get("total") or 0)
+            sig = FiscalLogic.generate_offline_signature(settings.device_sn, date, global_no, total)
+            
+            # 3. Construct URL
+            url = FiscalLogic.construct_url(settings.device_sn, date, global_no, sig)
+            
+            # 4. Update sale with offline data
+            self._update_sale_fiscal_data(
+                sale_id=sale_id,
+                fiscal_status="PENDING_SYNC",
+                qr_code=url,
+                verification_code=sig[:16].upper(), # Match the 16 chars used in the URL
+                receipt_counter=0, # Unknown until synced
+                global_no=str(global_no)
+            )
+            
+            print(f"✅ Sale {sale_id} processed OFFLINE — Local Global No: {global_no}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Critical failure in offline fiscalization for sale {sale_id}: {e}")
+            self._update_sale_fiscal_error(sale_id, f"Offline mode failure: {e}")
             return False
 
     # =========================================================================
@@ -523,7 +584,7 @@ class FiscalizationService:
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT COUNT(*) FROM sales WHERE fiscal_status IN ('pending', 'failed')")
+            cursor.execute("SELECT COUNT(*) FROM sales WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC')")
             row = cursor.fetchone()
             return int(row[0]) if row else 0
         finally:
@@ -534,7 +595,7 @@ class FiscalizationService:
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT id FROM sales WHERE fiscal_status IN ('pending', 'failed') ORDER BY id")
+            cursor.execute("SELECT id FROM sales WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC') ORDER BY id")
             pending = cursor.fetchall()
             result.total_count = len(pending)
         finally:

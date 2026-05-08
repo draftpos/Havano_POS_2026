@@ -128,6 +128,7 @@ class Item:
     tax_amount: float = 0.0
     batch_no: str = ""
     expiry_date: str = ""
+    item_notes: str = ""
 
 
 @dataclass
@@ -158,6 +159,7 @@ class ReceiptData:
     companyLogoPath: str = ""
     companyName: str = ""
     KOT: str = ""
+    tableName: str = ""
 
     companyAddress: str = ""
     companyAddressLine1: str = ""
@@ -195,6 +197,7 @@ class ReceiptData:
     currency: str = "USD"
     receiptHeader: str = ""
     footer: str = "Thank you for your purchase!"
+    bill_notes: str = ""
 
     multiCurrencyDetails: List[MultiCurrencyDetail] = field(default_factory=list)
 

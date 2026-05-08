@@ -26,7 +26,8 @@ from PySide6.QtCore import Qt
 from views.main_window import MainWindow
 from views.login_dialog import LoginDialog
 from views.dialogs.sql_settings_dialog import SqlSettingsDialog
-from database.db import is_connection_valid
+from views.dialogs.onboarding_dialog import OnboardingDialog
+from database.db import is_connection_valid, get_connection
 
 def resource_path(relative_path: str) -> str:
     """
@@ -152,46 +153,63 @@ if __name__ == "__main__":
             continue
         break
 
-    # 4. API URL Logic (Server Change Detection)
-    print("[startup] Verifying API Server configuration...")
-    try:
-        from services.site_config import check_url_changed, wipe_database, save_current_url
-
-        if check_url_changed():
-            confirm = QMessageBox(None)
-            confirm.setWindowTitle("Server Configuration Changed")
-            confirm.setIcon(QMessageBox.Warning)
-            confirm.setText("The API server URL has changed.")
-            confirm.setInformativeText(
-                "Your local database is tied to the previous server.\n\n"
-                "To continue, the local database must be wiped and re-synced.\n"
-                "Do you want to proceed with a database wipe?"
-            )
-            confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-            confirm.setDefaultButton(QMessageBox.No)
-            
-            if confirm.exec() == QMessageBox.Yes:
-                wipe_database()
-                save_current_url()
-                print("[startup] Database wiped successfully.")
-            else:
-                print("[startup] User declined DB wipe. Proceeding at own risk.")
-        else:
-            save_current_url()
-    except Exception as e:
-        print(f"[startup] Site configuration error: {e}")
-
-    # 5. Database Schema Migration (short-circuits when schema version matches)
-    import time as _timing
-    _t_mig = _timing.perf_counter()
-    print("[startup] Running database migrations...")
-    try:
-        from setup_database import run as setup_db
-        setup_db()
-    except Exception as e:
-        QMessageBox.critical(None, "Database Error", f"Failed to initialize database:\n{e}")
-        sys.exit(1)
     print(f"[startup] migrations phase: {int((_timing.perf_counter() - _t_mig) * 1000)} ms")
+
+    # 5b. Onboarding Check
+    is_offline = False
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'offline_mode'")
+        row = cur.fetchone()
+        conn.close()
+        
+        if row is None:
+            print("[startup] No mode selected. Launching onboarding...")
+            onboard_dlg = OnboardingDialog()
+            if onboard_dlg.exec() != QDialog.Accepted:
+                print("[startup] Onboarding cancelled. Exiting.")
+                sys.exit(0)
+            # Re-check after onboarding
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'offline_mode'")
+            row = cur.fetchone(); conn.close()
+            
+        is_offline = (row[0] == "1") if row else False
+    except Exception as e:
+        print(f"[startup] Onboarding check failed: {e}")
+
+    # 4. API URL Logic (Server Change Detection) - SKIP IF OFFLINE
+    if not is_offline:
+        print("[startup] Verifying API Server configuration...")
+        try:
+            from services.site_config import check_url_changed, wipe_database, save_current_url
+
+            if check_url_changed():
+                confirm = QMessageBox(None)
+                confirm.setWindowTitle("Server Configuration Changed")
+                confirm.setIcon(QMessageBox.Warning)
+                confirm.setText("The API server URL has changed.")
+                confirm.setInformativeText(
+                    "Your local database is tied to the previous server.\n\n"
+                    "To continue, the local database must be wiped and re-synced.\n"
+                    "Do you want to proceed with a database wipe?"
+                )
+                confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                confirm.setDefaultButton(QMessageBox.No)
+                
+                if confirm.exec() == QMessageBox.Yes:
+                    wipe_database()
+                    save_current_url()
+                    print("[startup] Database wiped successfully.")
+                else:
+                    print("[startup] User declined DB wipe. Proceeding at own risk.")
+            else:
+                save_current_url()
+        except Exception as e:
+            print(f"[startup] Site configuration error: {e}")
+    else:
+        print("[startup] Offline Mode active. Skipping server validation.")
 
     # 6. Execution Flow (Login -> Main)
     _t_login = _timing.perf_counter()

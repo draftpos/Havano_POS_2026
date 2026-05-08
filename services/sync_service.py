@@ -1408,12 +1408,21 @@ try:
                         except Exception as e:
                             log.error("[sync] GL/MOP/rates sync error: %s", e)
 
-                    # ── 3. Retry failed sale uploads ──────────────────────
                     try:
                         from services.pos_upload_service import push_unsynced_sales
                         push_unsynced_sales()
                     except Exception as e:
                         log.error("[sync] Auto-recovery upload trigger failed: %s", e)
+
+                    # ── 4. Process pending fiscalizations (offline fallback) 
+                    try:
+                        from services.fiscalization_service import FiscalizationService
+                        fiscal_service = FiscalizationService()
+                        res = fiscal_service.process_all_pending()
+                        if res.success_count > 0:
+                            log.info(f"[sync] ✅ Fiscalized {res.success_count} pending sales")
+                    except Exception as e:
+                        log.error("[sync] Background fiscalization failed: %s", e)
 
                 except Exception as e:
                     log.error("[sync] Unexpected error in SyncWorker loop: %s", e)

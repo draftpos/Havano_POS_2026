@@ -423,6 +423,7 @@
 #                 [allow_laybye]         BIT           NOT NULL DEFAULT 1,
 #                 [allow_quote]          BIT           NOT NULL DEFAULT 1,
 #                 [allow_cancel_kot]     BIT           NOT NULL DEFAULT 0,
+#                 [allow_pay_kot]        BIT           NOT NULL DEFAULT 1,
 #                 [discount_expiry_date] NVARCHAR(50)  NULL,
 #                 [company]              NVARCHAR(140) NULL  DEFAULT '',
 #                 [max_discount_percent] INT           NULL  DEFAULT 0,
@@ -1825,7 +1826,7 @@ import time
 # table / index. Mismatches between this constant and schema_info.version
 # trigger a full migration pass on next launch; matches short-circuit so
 # startup doesn't burn 5–15s on INFORMATION_SCHEMA round-trips every time.
-SCHEMA_VERSION = "2026.05.04.2"
+SCHEMA_VERSION = "2026.05.06.1"
 
 
 def _hash(pw: str) -> str:
@@ -3089,6 +3090,7 @@ def run():
                 [last_ping_time]        DATETIME2(7)  NULL,
                 [reporting_frequency]   INT           NULL,
                 [operation_id]          NVARCHAR(100) NULL,
+                [last_global_no]        INT           NOT NULL DEFAULT 0,
                 [created_at]            DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 [updated_at]            DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
                 PRIMARY KEY CLUSTERED ([id] ASC)
@@ -3108,6 +3110,7 @@ def run():
             ("last_ping_time",        "DATETIME2(7)  NULL"),
             ("reporting_frequency",   "INT           NULL"),
             ("operation_id",          "NVARCHAR(100) NULL"),
+            ("last_global_no",        "INT           NOT NULL DEFAULT 0"),
             ("created_at",            "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
             ("updated_at",            "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
         ]:

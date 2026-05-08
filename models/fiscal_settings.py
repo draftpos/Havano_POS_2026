@@ -18,6 +18,7 @@ class FiscalSettings:
     last_ping_time: Optional[datetime] = None
     reporting_frequency: Optional[int] = None
     operation_id: Optional[str] = None
+    last_global_no: int = 0
     id: Optional[int] = None
     
     @classmethod
@@ -34,6 +35,7 @@ class FiscalSettings:
             last_ping_time=data.get("last_ping_time"),
             reporting_frequency=data.get("reporting_frequency"),
             operation_id=data.get("operation_id"),
+            last_global_no=int(data.get("last_global_no", 0) or 0),
         )
 
 
@@ -104,6 +106,7 @@ class FiscalSettingsRepository:
                         last_ping_time DATETIME2 NULL,
                         reporting_frequency INT NULL,
                         operation_id NVARCHAR(100) NULL,
+                        last_global_no INT NOT NULL DEFAULT 0,
                         created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
                         updated_at DATETIME2 NOT NULL DEFAULT SYSDATETIME()
                     )
@@ -121,10 +124,10 @@ class FiscalSettingsRepository:
                     INSERT INTO fiscal_settings (
                         enabled, base_url, api_key, api_secret, device_sn,
                         ping_interval_minutes, device_status, last_ping_time,
-                        reporting_frequency, operation_id, created_at, updated_at
+                        reporting_frequency, operation_id, last_global_no, created_at, updated_at
                     ) 
                     OUTPUT INSERTED.id
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, SYSDATETIME(), SYSDATETIME())
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, SYSDATETIME(), SYSDATETIME())
                 """, (
                     1 if settings.enabled else 0,
                     settings.base_url,
@@ -136,6 +139,7 @@ class FiscalSettingsRepository:
                     settings.last_ping_time,
                     settings.reporting_frequency,
                     settings.operation_id,
+                    settings.last_global_no,
                 ))
                 row = cursor.fetchone()
                 if row:
@@ -166,6 +170,7 @@ class FiscalSettingsRepository:
                             last_ping_time = ?,
                             reporting_frequency = ?,
                             operation_id = ?,
+                            last_global_no = ?,
                             updated_at = SYSDATETIME()
                         WHERE id = ?
                     """, (
@@ -179,6 +184,7 @@ class FiscalSettingsRepository:
                         settings.last_ping_time,
                         settings.reporting_frequency,
                         settings.operation_id,
+                        settings.last_global_no,
                         existing_id
                     ))
             
@@ -234,6 +240,24 @@ class FiscalSettingsRepository:
             return affected > 0
         except Exception as e:
             print(f"[FiscalSettings] Error updating device status: {e}")
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def update_last_global_no(last_no: int) -> bool:
+        """Update last global number"""
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE fiscal_settings 
+                SET last_global_no = ?, updated_at = SYSDATETIME()
+            """, (last_no,))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"[FiscalSettings] Error updating last_global_no: {e}")
             return False
         finally:
             conn.close()

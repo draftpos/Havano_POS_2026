@@ -19,6 +19,7 @@ _PERM_COLS = [
     "allow_laybye",
     "allow_quote",
     "allow_cancel_kot",
+    "allow_pay_kot",
 ]
 
 # Extra VARCHAR columns added after initial schema — auto-migrated on startup
@@ -118,7 +119,8 @@ def create_user(username: str, password: str, role: str = "cashier",
                 max_discount_percent: int = 0,
                 allow_laybye: bool = True,
                 allow_quote: bool = True,
-                allow_cancel_kot: bool = False
+                allow_cancel_kot: bool = False,
+                allow_pay_kot: bool = True
                 ) -> dict | None:
     if role not in ("admin", "cashier"):
         raise ValueError(f"Invalid role: {role!r}. Must be 'admin' or 'cashier'.")
@@ -131,8 +133,8 @@ def create_user(username: str, password: str, role: str = "cashier",
             INSERT INTO users
                 (username, password, role, email, full_name, first_name, last_name,
                  pin, cost_center, warehouse, frappe_user, synced_from_frappe,
-                 max_discount_percent, allow_laybye, allow_quote, allow_cancel_kot)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 max_discount_percent, allow_laybye, allow_quote, allow_cancel_kot, allow_pay_kot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             username.strip(),
             _hash(password) if password else _hash("changeme"),
@@ -150,6 +152,7 @@ def create_user(username: str, password: str, role: str = "cashier",
             int(allow_laybye),
             int(allow_quote),
             int(allow_cancel_kot),
+            int(allow_pay_kot),
         ))
         conn.commit()
         cur.execute("SELECT id FROM users WHERE username = ?", (username.strip(),))
@@ -182,6 +185,7 @@ def update_user(user_id: int, **kwargs) -> dict | None:
         "allow_laybye",
         "allow_quote",
         "allow_cancel_kot",
+        "allow_pay_kot",
     }
     sets = []; params = []
     for k, v in kwargs.items():
@@ -452,7 +456,8 @@ def migrate():
             allow_reprint      BIT           NOT NULL DEFAULT 1,
             allow_laybye       BIT           NOT NULL DEFAULT 1,
             allow_quote        BIT           NOT NULL DEFAULT 1,
-            allow_cancel_kot   BIT           NOT NULL DEFAULT 0
+            allow_cancel_kot   BIT           NOT NULL DEFAULT 0,
+            allow_pay_kot      BIT           NOT NULL DEFAULT 1
         )
     """)
     conn.commit()
@@ -496,4 +501,5 @@ def _to_dict(row: dict) -> dict | None:
         "allow_laybye":         bool(row.get("allow_laybye",      1)),
         "allow_quote":          bool(row.get("allow_quote",       1)),
         "allow_cancel_kot":     bool(row.get("allow_cancel_kot",  0)),
+        "allow_pay_kot":        bool(row.get("allow_pay_kot",     1)),
     }

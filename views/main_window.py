@@ -5819,6 +5819,9 @@ class POSView(QWidget):
         self._current_table = table_data
         self._restaurant_mode = True
         self._restaurant_append_mode = append_mode
+        # Show Notes column + notes bar when in restaurant mode
+        if hasattr(self, 'invoice_table'):
+            self.invoice_table.setColumnHidden(self.COL_NOTES, False)
         self.orders_btn.setChecked(True)
         self.orders_btn.setText(f"TABLE: {table_data['table_number']}")
         self.orders_btn.setStyleSheet(f"""
@@ -5889,6 +5892,9 @@ class POSView(QWidget):
         self._restaurant_mode = False
         self._restaurant_append_mode = False
         self._refresh_pay_button_label()
+        # Hide Notes column + notes bar in standard sale mode
+        if hasattr(self, 'invoice_table'):
+            self.invoice_table.setColumnHidden(self.COL_NOTES, True)
         
         if hasattr(self, 'orders_btn'):
             self.orders_btn.setText("Orders")
@@ -6308,6 +6314,9 @@ class POSView(QWidget):
         discount_amt = getattr(self, "current_discount_amount", 0.0)
         
         # ── 4. OPEN PAYMENT DIALOG WITH ITEMS ──────────────────────────────────
+        is_restaurant = getattr(self, "_restaurant_mode", False)
+        _prefill = getattr(self, "_prefill_amounts", None)
+        self._prefill_amounts = None  # consume it so next open is clean
         if _HAS_PAYMENT_DIALOG:
             dlg = _ExternalPaymentDialog(
                 self,
@@ -6321,6 +6330,8 @@ class POSView(QWidget):
                 discount_amount=discount_amt,
                 discount_percent=discount_pct,
                 shift_id=shift_id,
+                is_restaurant_order=is_restaurant,
+                prefill_amounts=_prefill,
             )
         else:
             dlg = PaymentDialog(
@@ -6335,6 +6346,8 @@ class POSView(QWidget):
                 discount_amount=discount_amt,
                 discount_percent=discount_pct,
                 shift_id=shift_id,
+                is_restaurant_order=is_restaurant,
+                prefill_amounts=_prefill,
             )
 
         if dlg.exec() == QDialog.Accepted:
@@ -6529,20 +6542,36 @@ class POSView(QWidget):
                     _conn = get_connection(); _cur = _conn.cursor()
                     _tid = self._current_table["id"]
                     # Mark order Paid (handle both 'Open' and legacy 'Ordered' status)
-                    if getattr(self, "_current_order_id", None):
+                    # We also set prep_status = 'Closed' so it leaves the KDS screen
+                    _oid = getattr(self, "_current_order_id", None)
+                    if _oid:
                         _cur.execute(
-                            "UPDATE restaurant_orders SET status = 'Paid', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                            (self._current_order_id,)
+                            "UPDATE restaurant_orders SET status = 'Paid', prep_status = 'Closed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (_oid,)
                         )
                     else:
                         _cur.execute(
-                            "UPDATE restaurant_orders SET status = 'Paid', updated_at = CURRENT_TIMESTAMP WHERE table_id = ? AND status IN ('Open', 'Ordered')",
+                            "UPDATE restaurant_orders SET status = 'Paid', prep_status = 'Closed', updated_at = CURRENT_TIMESTAMP WHERE table_id = ? AND status IN ('Open', 'Ordered')",
                             (_tid,)
                         )
                     
                     # Mark table Available
                     _cur.execute("UPDATE restaurant_tables SET status = 'Available' WHERE id = ?", (_tid,))
                     _conn.commit(); _conn.close()
+
+                    # Clear any collected shares for this table
+                    try:
+                        from models.restaurant_order import clear_bill_splits
+                        clear_bill_splits(_tid)
+                    except Exception:
+                        pass
+
+                    # Notify KDS monitors to clear this order
+                    try:
+                        from services.kds_service import kds_service
+                        kds_service.broadcast_sync({"type": "refresh", "order_id": _oid or 0})
+                    except Exception:
+                        pass
                 except Exception as _re:
                     print(f"[POSView] Error closing restaurant order: {_re}")
                 
@@ -6571,6 +6600,7 @@ class POSView(QWidget):
         self._current_order_id: int | None = None
         self._restaurant_mode: bool = False
         self._restaurant_append_mode: bool = False
+        self._bill_notes: str = ""
 
 
         # ── Previous transaction info ─────────────────────────────────────────
@@ -6760,6 +6790,9 @@ class POSView(QWidget):
             except Exception as e:
                 print(f"Error setting customer: {e}")
         
+        if "bill_notes" in data and data["bill_notes"]:
+            self._bill_notes = data["bill_notes"]
+        
         if self.parent_window:
             self.parent_window._set_status(f"Loaded quotation: {len(cart_items)} items")
     # =========================================================================
@@ -6891,16 +6924,6 @@ class POSView(QWidget):
             QMessageBox.information(self, "No Customer", "Please select a customer first.")
             return
 
-        # Fetch Auto-Print setting
-        auto_print = False
-        try:
-            from database.db import get_connection
-            conn = get_connection(); cur = conn.cursor()
-            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'auto_print_quotations'")
-            row = cur.fetchone()
-            if row: auto_print = (str(row[0]) == "1")
-            conn.close()
-        except Exception: pass
         
         try:
             total = float(self._lbl_total.text() or "0")
@@ -6909,29 +6932,7 @@ class POSView(QWidget):
 
         cname = self._selected_customer.get("customer_name", "")
         from PySide6.QtCore import QDateTime, QDate
-        now = QDateTime.currentDateTime().toString("dd/MM/yyyy  hh:mm")
-
-        # Cashier / discount rules info
-        current_user = (getattr(self, 'user', None)
-                        or (getattr(self.parent_window, 'user', {}) if self.parent_window else {}))
-        cashier_name = current_user.get("full_name") or current_user.get("username", "")
-        allow_disc   = current_user.get("allow_discount", False)
-        max_disc_pct = current_user.get("max_discount_percent", 0) or 0
-        expiry_str   = current_user.get("discount_expiry_date", "") or ""
-        disc_expired = False
-        expiry_display = ""
-        if expiry_str:
-            try:
-                ed = QDate.fromString(expiry_str, "yyyy-MM-dd")
-                if not ed.isValid():
-                    ed = QDate.fromString(expiry_str, "dd/MM/yyyy")
-                if ed.isValid():
-                    expiry_display = ed.toString("dd/MM/yyyy")
-                    if QDate.currentDate() > ed:
-                        disc_expired = True
-            except Exception:
-                pass
-
+        
         # =========================================================================
         # SAVE TO DATABASE
         # =========================================================================
@@ -7080,140 +7081,22 @@ class POSView(QWidget):
             return
 
         # =========================================================================
-        # BUILD PRINT TEXT
+        # PRINT SILENTLY — no preview dialog, fire directly to printer
         # =========================================================================
-        W = 40
-        lines = ["=" * W,
-                 f"QUOTATION",
-                 "=" * W,
-                 f"  QTN No:     {qtn_name}",
-                 f"  Date:       {now}",
-                 f"  Customer:   {cname}",
-                 f"  Cashier:    {cashier_name}",
-                 f"  Status:     DRAFT",
-                 "-" * W]
-        
-        for it in items:
-            name = str(it.get("product_name", ""))[:24]
-            qty = it.get("qty")
-            if qty is None:
-                qty = 1.0
-            else:
-                qty = float(qty)
-            
-            price = it.get("price")
-            if price is None:
-                price = 0.0
-            else:
-                price = float(price)
-            
-            disc = it.get("discount")
-            if disc is None:
-                disc = 0.0
-            else:
-                disc = float(disc)
-            
-            line_tot = it.get("total")
-            if line_tot is None:
-                line_tot = qty * price
-            else:
-                line_tot = float(line_tot)
-            
-            qty_str = f"{int(qty)}" if qty == int(qty) else f"{qty:.2f}"
-            lines.append(f"{name:<24} {qty_str:>3}x ${price:.2f}")
-            if disc > 0:
-                disc_amt = qty * price * (disc / 100.0)
-                lines.append(f"  Disc {disc:.0f}%            -${disc_amt:.2f}")
-            lines.append(f"  {'─'*20}  ${line_tot:.2f}")
+        _print_ok = False
+        try:
+            from services.quotation_print import print_quotation
+            _print_ok = print_quotation({"name": qtn_name, "local_id": local_id})
+        except Exception as _pe:
+            _print_ok = False
+            print(f"[Quotation] print_quotation raised: {_pe}")
 
-        lines += ["-" * W, f"  TOTAL:             ${total:.2f}", "=" * W]
-
-        # Discount Rules Section
-        lines.append("  DISCOUNT AUTHORISATION")
-        lines.append("-" * W)
-        if not allow_disc:
-            lines.append("  Discount: NOT PERMITTED for this cashier")
-        elif disc_expired:
-            lines.append(f"  Discount: EXPIRED ({expiry_display})")
-            lines.append("  (Manager PIN required to override)")
-        else:
-            lines.append(f"  Cashier:  {cashier_name}")
-            lines.append(f"  Allowed:  Up to {max_disc_pct}%")
-            if expiry_display:
-                lines.append(f"  Valid to: {expiry_display}")
-            else:
-                lines.append("  Valid to: No expiry set")
-
-        lines += ["=" * W, "  This quotation is valid for 30 days.",
-                 f"  ID: {local_id} | Synced: No",
-                 "=" * W]
-
-        # =========================================================================
-        # SHOW PREVIEW DIALOG
-        # =========================================================================
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Quotation Saved")
-        dlg.setMinimumSize(450, 580)
-        dlg.setStyleSheet(f"QDialog {{ background:{WHITE}; }}")
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(10)
-        
-        txt = QTextEdit()
-        txt.setReadOnly(True)
-        txt.setFont(__import__("PySide6.QtGui", fromlist=["QFont"]).QFont("Courier New", 10))
-        txt.setPlainText("\n".join(lines))
-        txt.setStyleSheet(f"QTextEdit {{ background:{WHITE}; color:{DARK_TEXT}; border:1px solid {BORDER}; border-radius:4px; }}")
-        lay.addWidget(txt, 1)
-        
-        br = QHBoxLayout()
-        br.setSpacing(8)
-        
-        print_btn = QPushButton("Print")
-        print_btn.setFixedHeight(36)
-        print_btn.setCursor(Qt.PointingHandCursor)
-        print_btn.setStyleSheet(f"QPushButton {{ background:{SUCCESS}; color:{WHITE}; border:none; border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }} QPushButton:hover {{ background:{SUCCESS_H}; }}")
-        
-        close_btn = QPushButton("Close")
-        close_btn.setFixedHeight(36)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setStyleSheet(f"QPushButton {{ background:{NAVY}; color:{WHITE}; border:none; border-radius:5px; font-size:13px; font-weight:bold; padding:0 20px; }} QPushButton:hover {{ background:{NAVY_2}; }}")
-        
-        # Print fires services.quotation_print directly and closes the preview
-        # silently — no "Printing is temporarily disabled" popup, no final
-        # "Success" dialog. Any failure is surfaced on the parent status bar.
-        def _do_print_and_close():
-            try:
-                from services.quotation_print import print_quotation
-                ok = print_quotation({"name": qtn_name, "local_id": local_id})
-            except Exception as _pe:
-                ok = False
-                print(f"[Quotation] print_quotation raised: {_pe}")
-            if self.parent_window and hasattr(self.parent_window, "_set_status"):
-                self.parent_window._set_status(
-                    f"Quotation {qtn_name} sent to printer."
-                    if ok else
-                    f"Quotation {qtn_name} saved; print failed — check printer."
-                )
-            dlg.accept()
-
-        print_btn.clicked.connect(_do_print_and_close)
-        close_btn.clicked.connect(dlg.accept)
-
-        br.addStretch()
-        br.addWidget(print_btn)
-        br.addWidget(close_btn)
-        lay.addLayout(br)
-
-        # Auto-Print Enforcement
-        if auto_print:
-            # Bypass Dialog
-            _do_print_and_close()
-        else:
-            dlg.exec()
-            # If dialog was closed without clicking print, we still clear if dlg was accepted
-            # (which it is on both buttons in current logic).
+        if self.parent_window and hasattr(self.parent_window, "_set_status"):
+            self.parent_window._set_status(
+                f"Quotation {qtn_name} sent to printer."
+                if _print_ok else
+                f"Quotation {qtn_name} saved; print failed — check printer."
+            )
         
 
         # Clear cart + fully exit quotation mode (both flags + navbar pill +
@@ -7517,6 +7400,12 @@ class POSView(QWidget):
             self.orders_btn = _nb("Orders", self.parent_window.switch_to_orders if self.parent_window else lambda: None, color=SUCCESS, hov=SUCCESS_H)
             layout.addWidget(self.orders_btn)
             layout.addSpacing(4)
+            
+            # Bill Notes button
+            self._btn_bill_notes = _nb("Notes", self._on_bill_notes, color=NAVY_2, hov=NAVY_3)
+            self._btn_bill_notes.setToolTip("Add Bill Notes / Order Instructions")
+            layout.addWidget(self._btn_bill_notes)
+            layout.addSpacing(4)
 
         # ── Dashboard button (admin only) ─────────────────────────────────────
         if is_admin_user:
@@ -7534,6 +7423,17 @@ class POSView(QWidget):
         layout.addWidget(logout)
 
         return bar
+
+    def _on_bill_notes(self):
+        """Prompt for general order/bill notes."""
+        from PySide6.QtWidgets import QInputDialog
+        notes, ok = QInputDialog.getMultiLineText(
+            self, "Bill Notes", "Order Instructions / Notes:", self._bill_notes
+        )
+        if ok:
+            self._bill_notes = notes.strip()
+            if self.parent_window:
+                self.parent_window._set_status(f"Bill Notes updated: {self._bill_notes[:30]}...")
     
     def _show_unfiscalized_popup(self):
         """Show popup with unfiscalized sales"""
@@ -7881,7 +7781,7 @@ class POSView(QWidget):
             pass
         QApplication.beep()
 
-    def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None, uom=""):
+    def _add_product_to_invoice(self, name, price, part_no="", product_id=None, stock=None, uom="", notes=""):
         # ── Always close any open inline search before we touch the table ─────
         self._close_inline_search()
 
@@ -8032,6 +7932,11 @@ class POSView(QWidget):
                 # Use existing tax or new tax display
                 existing_tax = _cell_text(r, self.COL_TAX)
                 saved_tax = existing_tax if existing_tax else tax_display
+                saved_notes = _cell_text(r, self.COL_NOTES)
+                if saved_notes.startswith("🖊"):
+                    saved_notes = saved_notes.lstrip("🖊").strip()
+                if saved_notes == "📌":
+                    saved_notes = ""
 
                 # ── Remove this row and compact upward ────────────────────────
                 self._block_signals = True
@@ -8073,7 +7978,7 @@ class POSView(QWidget):
                 self._init_row(dest, part_no=saved_part_no, details=saved_name,
                                qty=f"{new_qty:.4g}", amount=saved_price,
                                uom=saved_uom,
-                               disc=saved_disc or "0.00", tax=saved_tax)
+                               disc=saved_disc or "0.00", tax=saved_tax, notes=saved_notes)
                 item0 = self.invoice_table.item(dest, 0)
                 if item0:
                     item0.setData(Qt.UserRole, saved_pid)
@@ -8142,7 +8047,7 @@ class POSView(QWidget):
         self._init_row(r, part_no=part_no, details=_display_name, qty="1",
                        amount=f"{price:.2f}",
                        uom=_row_uom,
-                       disc="0.00", tax=tax_display)
+                       disc="0.00", tax=tax_display, notes=notes)
         item = self.invoice_table.item(r, self.COL_PART_NO)
         if item:
             item.setData(Qt.UserRole, product_id)
@@ -8199,6 +8104,10 @@ class POSView(QWidget):
                 product_id   = self.invoice_table.item(r, self.COL_PART_NO).data(Qt.UserRole)
                 _uom_item    = self.invoice_table.item(r, self.COL_UOM)
                 uom_cell     = _uom_item.text().strip() if _uom_item else ""
+                _notes_item  = self.invoice_table.item(r, self.COL_NOTES)
+                _raw_note    = _notes_item.text().strip() if _notes_item else ""
+                _raw_note    = _raw_note.lstrip("🖊").strip() if _raw_note.startswith("🖊") else _raw_note
+                notes        = "" if _raw_note == "📌" else _raw_note
                 
                 # Parse tax rate from tax column
                 tax_rate = 0.0
@@ -8276,6 +8185,7 @@ class POSView(QWidget):
                 # Unit of measure — populated for both sale & quotation paths.
                 # Empty string when unresolvable (legacy product rows).
                 "uom":         uom_val,
+                "notes":       notes,
                 # Pharmacy round-trip fields (None if not a pharmacy row)
                 "is_pharmacy": bool(pharm.get("is_pharmacy")) if pharm else False,
                 "dosage":      pharm.get("dosage") if pharm else None,
@@ -8832,15 +8742,104 @@ class POSView(QWidget):
     # =========================================================================
     def _build_left_panel(self):
         panel = QWidget(); panel.setStyleSheet(f"background-color: {OFF_WHITE};")
-        # 12 rows × 32 px + 32 header + 42 footer = 458 px min before scrolling
         panel.setMinimumHeight(290)
         layout = QVBoxLayout(panel)
         layout.setSpacing(0); layout.setContentsMargins(0, 0, 0, 0)
-        # Inline customer search strip (applies in all modes; pharmacy or not)
         layout.addWidget(self._build_customer_search_strip())
         layout.addWidget(self._build_invoice_table(), 1)
         layout.addWidget(self._build_invoice_footer())
         return panel
+
+    def _open_item_note_popup(self, row: int):
+        """Open a clean popup to add/edit the note for a cart row."""
+        name_item = self.invoice_table.item(row, self.COL_NAME)
+        if not name_item or not name_item.text().strip():
+            return
+
+        notes_item = self.invoice_table.item(row, self.COL_NOTES)
+        raw        = notes_item.text().strip() if notes_item else ""
+        # Strip the pencil prefix that _init_row adds so we only get the real note
+        existing   = raw.lstrip("🖊").strip() if raw.startswith("🖊") else raw
+
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Note")
+        dlg.setFixedWidth(380)
+        dlg.setStyleSheet(f"""
+            QDialog  {{ background: {WHITE}; }}
+            QLabel   {{ background: transparent; color: {DARK_TEXT}; }}
+        """)
+
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(10)
+
+        header = QLabel(f"🖊  {name_item.text().strip()}")
+        header.setStyleSheet(f"font-size: 12px; color: {DARK_TEXT}; font-weight: 600;")
+        v.addWidget(header)
+
+        edit = QTextEdit()
+        edit.setPlainText(existing)
+        edit.setFixedHeight(82)
+        edit.setStyleSheet(f"""
+            QTextEdit {{
+                background: {WHITE}; color: {DARK_TEXT};
+                border: 1px solid {BORDER}; border-radius: 5px;
+                padding: 5px 7px; font-size: 12px;
+            }}
+            QTextEdit:focus {{ border: 1px solid #999; }}
+        """)
+        v.addWidget(edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        _btn_style = f"""
+            QPushButton {{
+                background: #f0f0f0; color: {DARK_TEXT};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                font-size: 11px; padding: 0 14px; height: 30px;
+            }}
+            QPushButton:hover {{ background: #e4e4e4; }}
+        """
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedHeight(30)
+        clear_btn.setCursor(Qt.PointingHandCursor)
+        clear_btn.setStyleSheet(_btn_style)
+        clear_btn.clicked.connect(edit.clear)
+
+        save_btn = QPushButton("Save")
+        save_btn.setFixedHeight(30)
+        save_btn.setDefault(True)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {DARK_TEXT}; color: {WHITE};
+                border: none; border-radius: 4px;
+                font-size: 11px; font-weight: 600; padding: 0 18px; height: 30px;
+            }}
+            QPushButton:hover {{ background: #2a2a2a; }}
+        """)
+        save_btn.clicked.connect(dlg.accept)
+
+        btn_row.addWidget(clear_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(save_btn)
+        v.addLayout(btn_row)
+
+        edit.setFocus()
+
+        if dlg.exec() == QDialog.Accepted:
+            new_note = edit.toPlainText().strip()
+            self._block_signals = True
+            if notes_item is None:
+                notes_item = QTableWidgetItem("")
+                self.invoice_table.setItem(row, self.COL_NOTES, notes_item)
+            notes_item.setText("🖊" if not new_note else f"🖊  {new_note}")
+            notes_item.setForeground(QColor("#888888"))
+            notes_item.setToolTip(new_note)
+            self._block_signals = False
 
     # =========================================================================
     # INLINE CUSTOMER SEARCH STRIP (pharmacy phase — GLOBAL, not pharmacy-only)
@@ -9006,10 +9005,11 @@ class POSView(QWidget):
     COL_DISC     = 5
     COL_TAX      = 6
     COL_TOTAL    = 7
-    INVOICE_COL_COUNT = 8
+    COL_NOTES    = 8
+    INVOICE_COL_COUNT = 9
 
     # ── Invoice column labels — edit here to rename ──────────────────────────
-    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "UOM", "Disc", "TAX", "Total $"]
+    INVOICE_COL_LABELS = ["Item No.", "Item Details", "Amount $", "Qty", "UOM", "Disc", "TAX", "Total $", "Notes"]
 
     def _build_invoice_table(self):
         self.invoice_table = QTableWidget()
@@ -9024,6 +9024,9 @@ class POSView(QWidget):
         hh.setSectionResizeMode(self.COL_DISC,    QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_DISC, 65)
         hh.setSectionResizeMode(self.COL_TAX,     QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_TAX, 45)
         hh.setSectionResizeMode(self.COL_TOTAL,   QHeaderView.Fixed);  self.invoice_table.setColumnWidth(self.COL_TOTAL, 90)
+        hh.setSectionResizeMode(self.COL_NOTES,   QHeaderView.Stretch)
+        # Notes column only visible in restaurant/KOT mode
+        self.invoice_table.setColumnHidden(self.COL_NOTES, True)
 
         self.invoice_table.verticalHeader().setVisible(False)
         self.invoice_table.setAlternatingRowColors(False)
@@ -9068,15 +9071,29 @@ class POSView(QWidget):
         return self.invoice_table
 
     def _init_row(self, r, part_no="", details="", qty="",
-                  amount="", uom="", disc="", tax="", total=""):
-        # vals order must match COL_* constants (Part, Name, Price, Qty, UOM, Disc, TAX, Total)
-        vals = [part_no, details, amount, qty, uom, disc, tax, total]
+                  amount="", uom="", disc="", tax="", total="", notes=""):
+        # vals order must match COL_* constants
+        vals = [part_no, details, amount, qty, uom, disc, tax, total, notes]
         for c, val in enumerate(vals):
             item = QTableWidgetItem(str(val))
             item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if c == self.COL_NAME else Qt.AlignCenter)
-            if c in (self.COL_PRICE, self.COL_TOTAL):
+            if c in (self.COL_PRICE, self.COL_TOTAL, self.COL_NOTES):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                item.setForeground(QColor(ACCENT) if c == self.COL_TOTAL else QColor(NAVY))
+                if c == self.COL_TOTAL:
+                    item.setForeground(QColor(ACCENT))
+                elif c == self.COL_PRICE:
+                    item.setForeground(QColor(NAVY))
+                else:
+                    # Notes: only show edit icon when this row has a product
+                    note_val  = str(val).strip()
+                    name_val  = str(vals[self.COL_NAME]).strip() if self.COL_NAME < len(vals) else ""
+                    if name_val:
+                        item.setText("🖊" if not note_val else f"🖊  {note_val}")
+                        item.setForeground(QColor("#888888"))
+                        item.setToolTip(note_val)
+                    else:
+                        item.setText("")
+                        item.setToolTip("")
             else:
                 item.setForeground(QColor(NAVY))
             self.invoice_table.setItem(r, c, item)
@@ -9114,6 +9131,8 @@ class POSView(QWidget):
                     bg = FILLED_BG if r % 2 == 0 else ALT_BG
                     item.setBackground(bg)
                     item.setForeground(FILLED_FG if c != self.COL_TOTAL else QColor(ACCENT))
+
+        # (notes popup is opened on tap — no bar to sync)
 
     # ── Calculation engine ────────────────────────────────────────────────────
     def _recalc_row(self, r):
@@ -9614,7 +9633,11 @@ class POSView(QWidget):
         self._active_row    = row
         self._active_col    = col
         self._numpad_buffer = ""
-        if col == self.COL_TAX:
+        if col == self.COL_NOTES:
+            # Single tap on Notes cell → open popup immediately
+            self._open_item_note_popup(row)
+            return
+        elif col == self.COL_TAX:
             item = self.invoice_table.item(row, col)
             if item: item.setText("" if item.text() == "T" else "T")
         elif col in (self.COL_PART_NO, self.COL_NAME):
@@ -9634,29 +9657,20 @@ class POSView(QWidget):
             self._close_inline_search()
             self._highlight_active_row(row)
             self.invoice_table.setFocus()
-
-    def _on_cell_double_clicked(self, row, col):
+        
         if col not in (0, 1):
             return
-        part_item = self.invoice_table.item(row, 0)
-        query = part_item.text().strip() if part_item else ""
-        dlg = ProductSearchDialog(self, initial_query=query)
-        if dlg.exec() == QDialog.Accepted and dlg.selected_product:
-            picked = self._pick_product_uom_and_price(dlg.selected_product)
-            if picked is None:
-                return   # cancelled / blocked
-            p, uom, price = picked
-            self._block_signals = True
-            self._init_row(row, part_no=p["part_no"], details=p["name"],
-                           qty="1", amount=f"{price:.2f}",
-                           uom=(uom or ""),
-                           disc="0.00", tax="")
-            item0 = self.invoice_table.item(row, self.COL_PART_NO)
-            if item0: item0.setData(Qt.UserRole, p.get("id"))
-            self._block_signals = False
-            self._recalc_row(row)
-            self.invoice_table.setCurrentCell(row, self.COL_QTY)
-            self._active_row = row; self._active_col = self.COL_QTY; self._numpad_buffer = ""
+        # Removed ProductSearchDialog as requested - inline search handles this.
+
+    def _on_cell_double_clicked(self, row, col):
+        if col == self.COL_NOTES:
+            self._open_item_note_popup(row)
+            return
+        
+        # Other columns double-click behavior (e.g. open search if it's item name/code)
+        if col in (self.COL_PART_NO, self.COL_NAME):
+            # Already handled by _on_cell_clicked or inline search
+            pass
 
     def _on_product_btn_clicked(self, product: dict):
         """Product tile tapped — debounce, then route through the shared
@@ -11927,6 +11941,7 @@ class POSView(QWidget):
         self._refresh_customer_btn()
         self._recalc_totals()
         self._current_order_id = None
+        self._bill_notes       = ""
         self._highlight_active_row(0)
         self.invoice_table.setCurrentCell(0, 0)
         self.invoice_table.setFocus()
@@ -12419,34 +12434,54 @@ class POSView(QWidget):
             from database.db import get_connection
             conn = get_connection()
             cur = conn.cursor()
-
+            
+            order_id = getattr(self, "_current_order_id", None)
             table_id = self._current_table["id"]
             cust_name = (self._selected_customer or {}).get("customer_name", "Walk-in")
 
-            order_id = getattr(self, "_current_order_id", None)
             if order_id:
                 if getattr(self, "_restaurant_append_mode", False):
                     # We are adding on top, do NOT delete old items!
-                    cur.execute("UPDATE restaurant_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (order_id,))
+                    cur.execute("UPDATE restaurant_orders SET updated_at = CURRENT_TIMESTAMP, bill_notes = ? WHERE id = ?", (self._bill_notes, order_id))
                 else:
                     # Update existing order by replacing items
                     cur.execute("DELETE FROM restaurant_order_items WHERE order_id = ?", (order_id,))
-                    cur.execute("UPDATE restaurant_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (order_id,))
+                    cur.execute("UPDATE restaurant_orders SET updated_at = CURRENT_TIMESTAMP, bill_notes = ? WHERE id = ?", (self._bill_notes, order_id))
             else:
                 # 1. Create or Find Order
                 cur.execute("""
-                    INSERT INTO restaurant_orders (table_id, waiter_id, customer_name, status, created_at)
+                    INSERT INTO restaurant_orders (table_id, waiter_id, customer_name, status, bill_notes, created_at)
                     OUTPUT INSERTED.id
-                    VALUES (?, ?, ?, 'Open', CURRENT_TIMESTAMP)
-                """, (table_id, self.user.get("id"), cust_name))
+                    VALUES (?, ?, ?, 'Open', ?, CURRENT_TIMESTAMP)
+                """, (table_id, self.user.get("id"), cust_name, self._bill_notes))
                 order_id = cur.fetchone()[0]
 
-            # 2. Add Items
+            # 2. Add Items (with station flags lookup)
+            part_nos = {str(it.get("part_no", "")).strip() for it in items if it.get("part_no")}
+            order_map = {}
+            if part_nos:
+                placeholders = ",".join("?" * len(part_nos))
+                cur.execute(
+                    f"SELECT part_no, order_1, order_2, order_3, order_4, order_5, order_6 "
+                    f"FROM products WHERE part_no IN ({placeholders})",
+                    tuple(part_nos)
+                )
+                for row in cur.fetchall():
+                    order_map[(row[0] or "").strip()] = tuple(1 if row[i] else 0 for i in range(1, 7))
+
             for it in items:
+                part_no = str(it.get("part_no", "")).strip()
+                flags = order_map.get(part_no, (0, 0, 0, 0, 0, 0))
                 cur.execute("""
-                    INSERT INTO restaurant_order_items (order_id, product_id, item_code, item_name, quantity, rate)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (order_id, it.get("product_id", 0), it.get("part_no", ""), it["product_name"], it["qty"], it["price"]))
+                    INSERT INTO restaurant_order_items (
+                        order_id, product_id, item_code, item_name, quantity, rate,
+                        item_notes, order_1, order_2, order_3, order_4, order_5, order_6
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    order_id, it.get("product_id", 0), part_no, it["product_name"], it["qty"], it["price"],
+                    it.get("notes", ""), *flags
+                ))
 
             # 3. Mark Table Occupied
             cur.execute("UPDATE restaurant_tables SET status = 'Occupied' WHERE id = ?", (table_id,))
@@ -12454,49 +12489,38 @@ class POSView(QWidget):
             conn.commit()
             conn.close()
 
+            # 4. Print KOT (Multi-station)
+            if self.parent_window:
+                self.parent_window._print_kot(order_id)
+                # Notify KDS
+                try:
+                    from services.kds_service import kds_service
+                    kds_service.broadcast_sync({"type": "refresh", "order_id": order_id})
+                except Exception:
+                    pass
+
             if self.parent_window:
                 self.parent_window._set_status(f"Order saved for Table {self._current_table['table_number']}")
                 self.parent_window.switch_to_orders()
-            
+
+            # Log modify silently — no reason prompt on KOT save
+            if order_id:
+                try:
+                    from models.restaurant_order import log_kot_modify
+                    modify_reason = getattr(self, "_last_modify_reason", "")
+                    waiter_id = self.user.get("id") if isinstance(self.user, dict) else None
+                    if modify_reason:
+                        log_kot_modify(order_id, reason=modify_reason, waiter_id=waiter_id)
+                    self._last_modify_reason = ""
+                except Exception:
+                    pass
+
             self._new_sale(confirm=False)
             self._clear_restaurant_mode()
-            
-            # --- KOT PRINTING ---
-            try:
-                from models.receipt import ReceiptData, Item
-                from services.printing_service import PrintingService
-                import json
-                from pathlib import Path
 
-                kot_items = []
-                for it in items:
-                    kot_items.append(Item(
-                        productName=it["product_name"],
-                        qty=float(it["qty"])
-                    ))
-                
-                receipt = ReceiptData(
-                    invoiceNo=f"ORD-{order_id}",
-                    items=kot_items,
-                    customerName=cust_name,
-                    orderNumber=order_id,
-                    KOT=f"Table {self._current_table['table_number']}"
-                )
-                
-                # Get KOT printer from settings
-                hw_path = Path("app_data/hardware_settings.json")
-                kot_printer = None
-                if hw_path.exists():
-                    try:
-                        hw = json.loads(hw_path.read_text())
-                        kot_printer = hw.get("kot_printer") or hw.get("main_printer")
-                    except: pass
-                
-                ps = PrintingService()
-                ps.print_kitchen_order(receipt, printer_name=kot_printer)
-                print(f"[Restaurant] KOT Printed for Order {order_id} to {kot_printer}")
-            except Exception as _pe:
-                print(f"[Restaurant] KOT Print failed: {_pe}")
+            # Auto-logout after KOT save
+            if self.parent_window:
+                self.parent_window._restaurant_auto_logout()
 
         except Exception as e:
             QMessageBox.critical(self, "Save Failed", f"Restaurant order error:\n{e}")
@@ -12550,10 +12574,25 @@ class MainWindow(QMainWindow):
 
         self.user = user or {"username": "admin", "role": "admin"}
         self.setWindowTitle("Havano POS System")
+
+        # Run restaurant DB migrations (idempotent — safe to run every time)
+        try:
+            from models.restaurant_order import migrate as _restaurant_migrate
+            _restaurant_migrate()
+        except Exception as _me:
+            import logging; logging.getLogger("main_window").warning("Restaurant migrate: %s", _me)
         self.setMinimumSize(1280, 820)
         self.setStyleSheet(GLOBAL_STYLE)
         
         self.quotation_sync_thread = start_quotation_sync_thread()
+
+        # ── KDS WebSocket Server ───────────────────────────────────────────
+        try:
+            from services.kds_service import kds_service
+            kds_service.start_server()
+            print("[MainWindow] KDS WebSocket server started on port 8765")
+        except Exception as _e:
+            print(f"[MainWindow] KDS server failed: {_e}")
 
         # ── 1. Init Status Bar FIRST so views can find it ──────────────────
         from PySide6.QtWidgets import QStatusBar
@@ -12583,6 +12622,10 @@ class MainWindow(QMainWindow):
             self._restaurant_view.action_pay_order.connect(lambda o: self._on_kot_action("pay", o))
             self._restaurant_view.action_edit_kot.connect(lambda o: self._on_kot_action("edit", o))
             self._restaurant_view.action_cancel_kot.connect(self._on_cancel_kot)
+            from models.user import is_admin
+            self._restaurant_view.user = self.user
+            self._restaurant_view._is_admin = is_admin(self.user)
+            self._restaurant_view._current_waiter_id = self.user.get("id")
             self._restaurant_view.action_pay_all.connect(self._on_pay_all_orders)
             self._stack.addWidget(self._restaurant_view)
         except Exception as e:
@@ -12781,6 +12824,117 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
 
+    def _print_kot(self, order_id: int):
+        """Print KOT production slips for each kitchen station, then one full
+        summary receipt to the main invoice printer."""
+        try:
+            from models.restaurant_order import get_order_items, get_waiter_name
+            from database.db import get_connection, fetchone_dict
+
+            # Fetch order meta
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT * FROM restaurant_orders WHERE id = ?", (order_id,))
+            order = fetchone_dict(cur)
+            conn.close()
+            if not order: return
+
+            # Remap DB field names → print_s field names
+            raw_items = get_order_items(order_id)
+            items = []
+            for it in raw_items:
+                items.append({
+                    "product_name": it.get("item_name") or it.get("product_name", ""),
+                    "qty":          it.get("quantity") or it.get("qty") or 1,
+                    "price":        it.get("rate") or it.get("price") or 0,
+                    "part_no":      it.get("item_code") or it.get("part_no", ""),
+                    "notes":        it.get("item_notes") or it.get("notes", ""),
+                    "order_1":      it.get("order_1", 0),
+                    "order_2":      it.get("order_2", 0),
+                    "order_3":      it.get("order_3", 0),
+                    "order_4":      it.get("order_4", 0),
+                    "order_5":      it.get("order_5", 0),
+                    "order_6":      it.get("order_6", 0),
+                })
+
+            waiter_name = get_waiter_name(order.get("waiter_id"))
+
+            # ── 1. Kitchen station slips (existing behaviour, unchanged) ──────
+            sale_stub = {
+                "invoice_no":    f"ORD-{order_id}",
+                "items":         items,
+                "cashier_name":  waiter_name,
+                "waiter_name":   waiter_name,
+                "table_name":    order.get("table_name", f"Table {order.get('table_id', '')}"),
+                "customer_name": order.get("customer_name", ""),
+                "bill_notes":    order.get("bill_notes", ""),
+                "order_number":  order_id,
+            }
+            from models.sale import print_s
+            import threading
+            threading.Thread(target=print_s, args=(sale_stub,), daemon=True).start()
+
+            # ── 2. Full summary receipt → main invoice printer ─────────────────
+            threading.Thread(
+                target=self._print_kot_summary,
+                args=(order_id, order, items, waiter_name),
+                daemon=True,
+            ).start()
+
+        except Exception as e:
+            print(f"Error in _print_kot: {e}")
+
+    def _print_kot_summary(self, order_id: int, order: dict, items: list, waiter_name: str):
+        """Print one full receipt-style summary of the entire KOT to the main printer."""
+        try:
+            from models.company_defaults import get_defaults
+            from models.receipt import ReceiptData, Item
+            from models.hardware_settings import get_hardware_settings
+            from services.printing_service import PrintingService
+
+            co = get_defaults() or {}
+
+            receipt = ReceiptData()
+            receipt.companyName        = co.get("company_name", "Havano POS")
+            receipt.companyLogoPath    = co.get("logo_path", "")
+            receipt.companyAddress     = co.get("address", "")
+            receipt.tel                = co.get("phone", "")
+            receipt.tin                = co.get("tin", "")
+            receipt.vatNo              = co.get("vat_no", "")
+            receipt.receiptHeader      = "*** MAIN ORDER ***"
+            receipt.invoiceNo          = f"ORD-{order_id}"
+            receipt.orderNumber        = order_id
+            receipt.cashierName        = waiter_name
+            receipt.tableName          = order.get("table_name") or f"Table {order.get('table_id', '')}"
+            receipt.customerName       = order.get("customer_name", "")
+            receipt.bill_notes         = order.get("bill_notes", "")
+
+            from datetime import datetime
+            receipt.invoiceDate        = datetime.now().strftime("%Y-%m-%d")
+
+            receipt.items = [
+                Item(
+                    productName = it.get("product_name", ""),
+                    productid   = it.get("part_no", ""),
+                    qty         = float(it.get("qty") or 1),
+                    price       = float(it.get("price") or 0),
+                    amount      = float(it.get("qty") or 1) * float(it.get("price") or 0),
+                    item_notes  = it.get("notes", ""),
+                )
+                for it in items
+            ]
+            receipt.grandTotal = sum(i.amount for i in receipt.items)
+            receipt.footer     = "— end of kitchen order —"
+
+            hw = get_hardware_settings()
+            main_printer = hw.get("main_printer", "") or ""
+            if main_printer == "(None)":
+                main_printer = ""
+
+            PrintingService().print_master_kot(receipt, printer_name=main_printer or None)
+            print(f"✅ KOT summary printed to {main_printer or 'default'}")
+        except Exception as e:
+            print(f"Error printing KOT summary: {e}")
+
     def switch_to_pos(self):
         self._stack.setCurrentWidget(self._pos_view)
         if hasattr(self._pos_view, 'orders_btn'):
@@ -12792,7 +12946,10 @@ class MainWindow(QMainWindow):
             self._stack.setCurrentWidget(self._restaurant_view)
 
     def _on_table_selected_from_restaurant(self, table_data: dict, append_mode: bool = False, force_new: bool = False):
-        """Table picked in restaurant view -> Open it in POS cart."""
+        """Table picked in restaurant view -> Open it in POS cart. No reason prompt."""        # Always clear any stale modify reason — no prompts for adding orders
+        if hasattr(self._pos_view, '_last_modify_reason'):
+            self._pos_view._last_modify_reason = ""
+
         self.switch_to_pos()
         self._pos_view._pay_all_mode = False
         self._pos_view.link_to_table(table_data, append_mode=append_mode, force_new=force_new)
@@ -12804,6 +12961,21 @@ class MainWindow(QMainWindow):
 
     def _on_kot_action(self, action: str, order_data: dict):
         """Edit or Pay a specific KOT."""
+        if action == "edit":
+            from models.restaurant_order import get_restaurant_settings
+            rs = get_restaurant_settings()
+            if rs.get("require_modify_reason"):
+                from PySide6.QtWidgets import QInputDialog
+                reason, ok = QInputDialog.getText(
+                    self, "Edit Reason",
+                    f"Reason for modifying KOT #ORD-{order_data['id']}:"
+                )
+                if not ok or not reason.strip():
+                    return
+                self._pos_view._last_modify_reason = reason.strip()
+            else:
+                self._pos_view._last_modify_reason = "" 
+
         self.switch_to_pos()
         td = {
             "id": order_data["table_id"],
@@ -12815,25 +12987,82 @@ class MainWindow(QMainWindow):
         self._pos_view.link_to_table(td, append_mode=(action == "edit"), order_id=order_data["id"])
         self._set_status(f"KOT #{order_data['id']} loaded for {action.upper()}")
         if action == "pay":
+            if not self._pos_view._check_permission("allow_pay_kot", "Order Payment"):
+                return
             QTimer.singleShot(200, self._pos_view._open_payment)
 
     def _on_cancel_kot(self, order_id: int):
-        """Cancel a specific KOT."""
+        """Cancel a specific KOT, optionally requiring a reason."""
         if not self._pos_view._check_permission("allow_cancel_kot", "Order Close"):
             return
-            
-        from models.restaurant_order import cancel_order
-        reply = QMessageBox.question(self, "Cancel KOT", f"Are you sure you want to cancel order #ORD-{order_id}?\nThis will remove it from billing.", QMessageBox.Yes | QMessageBox.No)
+
+        # Check if cancel reason is required
+        reason = ""
+        try:
+            from models.restaurant_order import get_restaurant_settings
+            rs = get_restaurant_settings()
+            if rs.get("require_cancel_reason"):
+                from PySide6.QtWidgets import QInputDialog
+                reason, ok = QInputDialog.getText(
+                    self, "Cancel Reason",
+                    f"Reason for cancelling KOT #ORD-{order_id}:"
+                )
+                if not ok:
+                    return  # user pressed Cancel on the dialog
+                if not reason.strip():
+                    QMessageBox.warning(self, "Reason Required",
+                                        "You must enter a reason to cancel this KOT.")
+                    return
+        except Exception:
+            pass
+
+        reply = QMessageBox.question(
+            self, "Cancel KOT",
+            f"Are you sure you want to cancel order #ORD-{order_id}?\nThis will remove it from billing.",
+            QMessageBox.Yes | QMessageBox.No
+        )
         if reply == QMessageBox.Yes:
-            if cancel_order(order_id):
+            from models.restaurant_order import cancel_order
+            waiter_id = self.user.get("id") if isinstance(self.user, dict) else None
+            if cancel_order(order_id, reason=reason.strip(), waiter_id=waiter_id):
                 self._set_status(f"KOT #ORD-{order_id} cancelled.")
                 if self._restaurant_view:
                     self._restaurant_view.refresh()
+                # Auto-logout if enabled
+                self._restaurant_auto_logout()
             else:
                 QMessageBox.warning(self, "Error", "Failed to cancel order.")
 
+    def _restaurant_auto_logout(self):
+        """Log out after a finalised restaurant transaction if the setting is enabled."""
+        try:
+            from models.restaurant_order import get_restaurant_settings
+            rs = get_restaurant_settings()
+            if rs.get("auto_logout_on_finalise"):
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(500, self._do_logout)
+        except Exception:
+            pass
+
     def _on_pay_all_orders(self, table_data: dict):
-        """Load all orders for a table into the cart."""
+        """Load all orders for a table into the cart, pre-filling any collected shares."""
+        if not self._pos_view._check_permission("allow_pay_kot", "Table Payment"):
+            return
+        # Auto-load any previously collected shares for this table
+        try:
+            from models.restaurant_order import get_bill_splits
+            from collections import defaultdict
+            splits = get_bill_splits(table_data["id"])
+            if splits:
+                agg: dict = defaultdict(float)
+                for sp in splits:
+                    agg[sp["mop_label"]] += float(sp.get("amount_raw", 0))
+                self._pos_view._prefill_amounts = dict(agg)
+            else:
+                self._pos_view._prefill_amounts = None
+        except Exception:
+            self._pos_view._prefill_amounts = None
+
         self.switch_to_pos()
         self._pos_view._pay_all_mode = True
         self._pos_view.link_to_table(table_data, append_mode=False)

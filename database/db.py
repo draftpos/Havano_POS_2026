@@ -14,8 +14,8 @@ DATABASE = "pos_db"
 
 def _best_driver() -> str:
     preferred = [
-        "ODBC Driver 18 for SQL Server",
         "ODBC Driver 17 for SQL Server",
+        "ODBC Driver 18 for SQL Server",
         "ODBC Driver 13 for SQL Server",
         "SQL Server",
     ]
@@ -66,6 +66,7 @@ def is_connection_valid() -> bool:
                 f"DATABASE={cfg['database']};"
                 "Trusted_Connection=yes;"
                 "TrustServerCertificate=yes;"
+                "Encrypt=no;"
             )
         else:
             conn_str = (
@@ -75,6 +76,7 @@ def is_connection_valid() -> bool:
                 f"UID={cfg['username']};"
                 f"PWD={cfg['password']};"
                 "TrustServerCertificate=yes;"
+                "Encrypt=no;"
             )
         conn = pyodbc.connect(conn_str, timeout=4)
         conn.close()
@@ -93,6 +95,7 @@ def get_connection() -> pyodbc.Connection:
             f"DATABASE={cfg['database']};"
             "Trusted_Connection=yes;"
             "TrustServerCertificate=yes;"
+            "Encrypt=no;"
             "Application Name=POSSystem;"
         )
     else:
@@ -103,6 +106,7 @@ def get_connection() -> pyodbc.Connection:
             f"UID={cfg['username']};"
             f"PWD={cfg['password']};"
             "TrustServerCertificate=yes;"
+            "Encrypt=no;"
             "Application Name=POSSystem;"
         )
     return pyodbc.connect(conn_str)
