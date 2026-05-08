@@ -1627,7 +1627,8 @@ class POSRulesDialog(QDialog):
             ("enable_quotation_printing", "ENABLE QUOTATION THERMAL PRINTING", "Allow printing quotes to standard receipt printer."),
             ("auto_print_quotations", "AUTO-PRINT QUOTATIONS", "Skip preview popup when saving quotations."),
             ("allow_others_to_view_orders", "ALLOW CASHIERS TO VIEW OTHER ORDERS", "Let non-admin cashiers open orders started by others."),
-            ("allow_others_to_close_orders", "ALLOW CASHIERS TO CLOSE OTHER ORDERS", "Let non-admin cashiers finalize/pay others' orders.")
+            ("allow_others_to_close_orders", "ALLOW CASHIERS TO CLOSE OTHER ORDERS", "Let non-admin cashiers finalize/pay others' orders."),
+            ("offline_mode", "OFFLINE-ONLY MODE", "Disable cloud synchronization and hide sync badges.")
         ]
 
         for key, lbl, desc in rules:
@@ -1705,8 +1706,8 @@ class POSRulesDialog(QDialog):
     def _load_existing_rules(self):
         # Default ALL to True first (Consistency with _get_pos_rule)
         for k, t in self._toggles.items():
-            # auto_print_quotations typically should be OFF by default even if not in DB
-            default = (k != "auto_print_quotations")
+            # auto_print_quotations and offline_mode typically should be OFF by default
+            default = (k not in ("auto_print_quotations", "offline_mode"))
             t.setChecked(default)
             t.position = 1.0 if default else 0.0
 

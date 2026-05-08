@@ -466,7 +466,16 @@ class _UserFormDialog(QDialog):
         # ── Role & Status ─────────────────────────────────────────────────────
         _section_header(fl, "Role & Status", top_margin=4)
 
-        self._f_role   = _combo(["cashier", "admin"])
+        roles = ["cashier", "admin"]
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT role FROM user_roles ORDER BY role ASC")
+            rows = cur.fetchall()
+            if rows: roles = [r[0] for r in rows]
+            conn.close()
+        except: pass
+        self._f_role   = _combo(roles)
         self._f_active = _combo(["Active", "Inactive"])
 
         fl.addLayout(_field_row("Role",   self._f_role))
@@ -876,6 +885,7 @@ class ManageUsersDialog(QDialog):
             text_color=DANGER, border="#f5c0c0"
         )
         self._add_btn    = _action_btn("+ New User", color=ACCENT, hover="#1c6dd0")
+        self._role_btn   = _action_btn("+ Add Role", color=WHITE, hover=LIGHT, text_color=NAVY, border=BORDER)
 
         self._edit_btn.setEnabled(False)
         self._delete_btn.setEnabled(False)
@@ -883,11 +893,13 @@ class ManageUsersDialog(QDialog):
         self._edit_btn.clicked.connect(self._edit_selected)
         self._delete_btn.clicked.connect(self._delete_selected)
         self._add_btn.clicked.connect(self._add_user)
+        self._role_btn.clicked.connect(self._manage_roles)
 
         tbl.addWidget(self._edit_btn)
         tbl.addWidget(self._delete_btn)
         tbl.addSpacing(6)
         tbl.addWidget(self._add_btn)
+        tbl.addWidget(self._role_btn)
         root.addWidget(toolbar)
 
         # ── Column header ─────────────────────────────────────────────────────
@@ -1171,6 +1183,123 @@ class ManageUsersDialog(QDialog):
         )
         self._status_lbl.setText(msg)
         QTimer.singleShot(3000, lambda: self._status_lbl.setText(""))
+
+    def _manage_roles(self):
+        dlg = ManageRolesDialog(self)
+        dlg.exec()
+
+# =============================================================================
+# ManageRolesDialog — simple CRUD for user_roles table
+# =============================================================================
+
+class ManageRolesDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage User Roles")
+        self.setFixedSize(400, 500)
+        self.setModal(True)
+        self.setStyleSheet(f"QDialog {{ background:{OFF_WHITE}; }}")
+        self._build()
+        self._reload()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        title = QLabel("User Roles")
+        title.setStyleSheet(f"color:{NAVY}; font-size:18px; font-weight:800;")
+        layout.addWidget(title)
+
+        # Add row
+        add_row = QHBoxLayout()
+        self._new_role = _inp("New Role Name")
+        add_btn = _action_btn("Add", color=SUCCESS, hover=SUCCESS_H)
+        add_btn.clicked.connect(self._add_role)
+        add_row.addWidget(self._new_role)
+        add_row.addWidget(add_btn)
+        layout.addLayout(add_row)
+
+        # List
+        self._list = QScrollArea()
+        self._list.setWidgetResizable(True)
+        self._list.setFrameShape(QFrame.NoFrame)
+        self._list_content = QWidget()
+        self._list_content.setStyleSheet(f"background:{WHITE}; border:1px solid {BORDER}; border-radius:8px;")
+        self._list_layout = QVBoxLayout(self._list_content)
+        self._list_layout.setAlignment(Qt.AlignTop)
+        self._list.setWidget(self._list_content)
+        layout.addWidget(self._list)
+
+        close_btn = _action_btn("Close", color=NAVY)
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+
+    def _reload(self):
+        # Clear list
+        while self._list_layout.count():
+            item = self._list_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT id, role FROM user_roles ORDER BY role ASC")
+            rows = cur.fetchall()
+            conn.close()
+
+            for rid, rname in rows:
+                row = QWidget()
+                row_l = QHBoxLayout(row)
+                row_l.setContentsMargins(10, 5, 10, 5)
+                lbl = QLabel(rname)
+                lbl.setStyleSheet(f"color:{DARK_TEXT}; font-weight:600;")
+                del_btn = QPushButton()
+                del_btn.setIcon(qta.icon("fa5s.trash-alt", color=DANGER))
+                del_btn.setFixedSize(24, 24)
+                del_btn.setStyleSheet("background:transparent; border:none;")
+                del_btn.setCursor(Qt.PointingHandCursor)
+                del_btn.clicked.connect(lambda _, r=rid, n=rname: self._delete_role(r, n))
+                
+                row_l.addWidget(lbl)
+                row_l.addStretch()
+                if rname.lower() not in ["admin", "cashier"]:
+                    row_l.addWidget(del_btn)
+                
+                self._list_layout.addWidget(row)
+                self._list_layout.addWidget(_hr())
+        except Exception as e:
+            print(f"[roles] Error reloading: {e}")
+
+    def _add_role(self):
+        name = self._new_role.text().strip().lower()
+        if not name: return
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("INSERT INTO user_roles (role) VALUES (?)", (name,))
+            conn.commit(); conn.close()
+            self._new_role.clear()
+            self._reload()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not add role:\n{e}")
+
+    def _delete_role(self, rid, name):
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Are you sure you want to delete the role '{name}'?\n\n"
+            "Note: Users with this role will lose their access level.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                from database.db import get_connection
+                conn = get_connection(); cur = conn.cursor()
+                cur.execute("DELETE FROM user_roles WHERE id=?", (rid,))
+                conn.commit(); conn.close()
+                self._reload()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not delete role:\n{e}")
 
 
 # Backward compatibility

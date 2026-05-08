@@ -196,10 +196,12 @@ def migrate():
     print("[migrate] OK  customers")
     cur.execute("""
         IF NOT EXISTS (SELECT 1 FROM customers WHERE id=1)
+        BEGIN
             SET IDENTITY_INSERT customers ON;
             INSERT INTO customers (id, customer_name, customer_type, frappe_synced, balance, outstanding_amount, loyalty_points)
             VALUES (1, 'Walk-in', 'Individual', 0, 0, 0, 0);
             SET IDENTITY_INSERT customers OFF;
+        END
     """)
     conn.commit()
     _add_column_if_missing("customers", "frappe_synced", "BIT NOT NULL DEFAULT 0")

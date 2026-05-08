@@ -362,7 +362,7 @@ def sync_quotations_from_frappe() -> dict:
                     quotation = Quotation.from_dict(qtn_data)
                     # Mark as synced since we fetched it from Frappe
                     quotation.synced = True
-                    save_quotation(quotation)
+                    save_quotation(quotation, print_labels=False)
                     result["synced"] += 1
                 except Exception as e:
                     log.error(f"Failed to save quotation {qtn_data.get('name', 'unknown')}: {e}")

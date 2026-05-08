@@ -96,8 +96,19 @@ class LoginWorker(QThread):
     def run(self):
         print(f"[LoginWorker] ▶ started  username={self.username!r}")
 
-        online = _is_online(timeout=3.0)
-        print(f"[LoginWorker] connectivity={online}")
+        # Check Offline Mode setting
+        offline_mode = False
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'offline_mode'")
+            row = cur.fetchone()
+            if row: offline_mode = (str(row[0]) == "1")
+            conn.close()
+        except: pass
+
+        online = _is_online(timeout=3.0) if not offline_mode else False
+        print(f"[LoginWorker] offline_mode={offline_mode} connectivity={online}")
 
         if online:
             result = self._try_online()
@@ -222,6 +233,18 @@ class BackgroundSyncWorker(QThread):
     """Syncs users, products and taxes after a successful login."""
 
     def run(self):
+        # Check Offline Mode
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'offline_mode'")
+            row = cur.fetchone()
+            conn.close()
+            if row and str(row[0]) == "1":
+                print("[bg-sync] Offline Mode: skipping background sync loops.")
+                return
+        except: pass
+
         for label, func_path in [
             ("users",         "services.user_sync_service.sync_users"),
             ("products+taxes","services.sync_service.SyncWorker"),
@@ -525,6 +548,20 @@ class LoginDialog(QDialog):
         sl.addStretch()
         sl.addWidget(self._status_dot); sl.addWidget(self._status_lbl)
         sl.addStretch()
+
+        # Mode Switch Link
+        self._mode_btn = QPushButton("(Switch Mode)")
+        self._mode_btn.setCursor(Qt.PointingHandCursor)
+        self._mode_btn.setStyleSheet(f"""
+            QPushButton {{
+                color:{ACCENT}; font-size:11px; font-weight:bold; border:1px solid {BORDER}; 
+                background:{WHITE}; border-radius:6px; padding:2px 8px;
+            }}
+            QPushButton:hover {{ background:{OFF_WHITE}; border-color:{ACCENT}; }}
+        """)
+        self._mode_btn.clicked.connect(self._prompt_mode_switch)
+        sl.addWidget(self._mode_btn)
+        
         vl.addWidget(self._status_bar)
 
         # ── Tab row ───────────────────────────────────────────────────────────
@@ -1326,6 +1363,67 @@ class LoginDialog(QDialog):
         self._status_lbl.setText(msg)
         self._status_dot.setStyleSheet(f"color:{colour}; font-size:7px; background:transparent;")
         self._status_lbl.setStyleSheet(f"color:{colour}; font-size:10px; background:transparent;")
+
+    # =========================================================================
+    # MODE SWITCHING
+    # =========================================================================
+    def _prompt_mode_switch(self):
+        # 1. Get current mode
+        is_offline = False
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'offline_mode'")
+            row = cur.fetchone(); conn.close()
+            is_offline = (row and str(row[0]) == "1")
+        except: pass
+
+        target = "Standard (Online)" if is_offline else "Offline-Only"
+        
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "Switch Operational Mode",
+            f"Would you like to switch to {target} mode?\n\n"
+            "This will change how the system connects and synchronizes data.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                # 2. Ask about Database Wipe
+                wipe_reply = QMessageBox.question(
+                    self, "Wipe Local Database?",
+                    "Would you like to wipe the local database (Products, Sales, etc.) to start fresh in the new mode?\n\n"
+                    "WARNING: This will delete all local data!",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                
+                if wipe_reply == QMessageBox.Yes:
+                    self.setEnabled(False) # Prevent further interaction
+                    from services.site_config import wipe_database
+                    wipe_database()
+                    QMessageBox.information(self, "Success", "Database wiped. You will be taken to the Setup Wizard on restart.")
+                else:
+                    # Only save the mode if NOT wiping (wipe already clears everything for onboarding)
+                    new_val = "0" if is_offline else "1"
+                    try:
+                        conn = get_connection(); cur = conn.cursor()
+                        cur.execute("""
+                            MERGE pos_settings AS t
+                            USING (SELECT 'offline_mode' AS k, ? AS v) AS s ON t.setting_key = s.k
+                            WHEN MATCHED THEN UPDATE SET setting_value = s.v
+                            WHEN NOT MATCHED THEN INSERT (setting_key, setting_value) VALUES (s.k, s.v);
+                        """, (new_val,))
+                        conn.commit(); conn.close()
+                        QMessageBox.information(self, "Success", f"Mode switched to {target}. The application will now restart.")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"Could not update mode: {e}")
+                
+                # Restart
+                import os, sys
+                os.execl(sys.executable, sys.executable, *sys.argv)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not switch mode:\n{e}")
 
     # =========================================================================
     # Button helpers

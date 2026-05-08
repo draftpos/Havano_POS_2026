@@ -520,6 +520,7 @@ class ReprintQuotationLabelsDialog(QDialog):
                 self._pharm_labels = []
 
         self._pharm_ct_lbl.setText(str(len(self._pharm_labels)))
+        print(f"[DEBUG] Reprint Dialog: Found {len(self._pharm_labels)} pharmacy items for Quotation ID {qid}")
         self._populate_items_table()
 
         has_items = bool(self._pharm_labels)

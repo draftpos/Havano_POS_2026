@@ -1341,6 +1341,18 @@ try:
         """
 
         def run(self) -> None:
+            # Check Offline Mode
+            try:
+                from database.db import get_connection
+                conn = get_connection(); cur = conn.cursor()
+                cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'offline_mode'")
+                row = cur.fetchone()
+                conn.close()
+                if row and str(row[0]) == "1":
+                    log.info("[SyncWorker] Offline Mode enabled: skipping periodic sync daemon.")
+                    return
+            except: pass
+
             import subprocess
             import sys
             import os

@@ -80,21 +80,33 @@ def wipe_database():
     conn = get_connection()
     cur  = conn.cursor()
     
-    tables = [
-        "products", "customers", "users", "sales", "sale_items", 
-        "shifts", "shift_rows", "item_prices", "payment_entries",
-        "warehouses", "cost_centers", "price_lists", "companies",
-        "company_defaults", "customer_groups", "schema_info"
-    ]
-    
-    print("[site_config] Wiping database for fresh server sync...")
-    for t in tables:
-        try:
-            cur.execute(f"IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[{t}]') AND type in (N'U')) DROP TABLE [dbo].[{t}]")
-            print(f"  - Dropped table {t}")
-        except Exception as e:
-            print(f"  ! Error dropping {t}: {e}")
+    # 1. Drop all Foreign Key constraints first
+    print("[site_config] Dropping all database constraints...")
+    try:
+        cur.execute("SELECT f.name, t.name FROM sys.foreign_keys AS f INNER JOIN sys.tables AS t ON f.parent_object_id = t.object_id")
+        fks = cur.fetchall()
+        for fk_name, t_name in fks:
+            try:
+                cur.execute(f"ALTER TABLE [{t_name}] DROP CONSTRAINT [{fk_name}]")
+            except Exception: pass
+        conn.commit()
+    except Exception as e:
+        print(f"  ! Error listing constraints: {e}")
+
+    # 2. Drop all tables
+    print("[site_config] Dropping all tables...")
+    try:
+        cur.execute("SELECT name FROM sys.tables WHERE type='U'")
+        all_tables = [r[0] for r in cur.fetchall()]
+        for t in all_tables:
+            try:
+                cur.execute(f"DROP TABLE [{t}]")
+                print(f"  - Dropped table {t}")
+            except Exception as e:
+                print(f"  ! Error dropping {t}: {e}")
+        conn.commit()
+    except Exception as e:
+        print(f"  ! Error listing tables: {e}")
             
-    conn.commit()
     conn.close()
-    print("[site_config] Database wipe complete.")
+    print("[site_config] Database wipe complete. Onboarding will trigger on next launch.")

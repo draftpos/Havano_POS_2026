@@ -32,6 +32,13 @@ _EXTRA_COLS = {
 
 def _ensure_perm_cols(cur, conn):
     """Add permission + extra columns to users table if they don't exist yet."""
+    try:
+        cur.execute("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='users'")
+        if not cur.fetchone():
+            return # Table wiped or not yet created
+    except Exception:
+        return
+
     for col in _PERM_COLS:
         try:
             cur.execute(f"""

@@ -2215,6 +2215,26 @@ def run():
             add_col("customers", col, defn)
     
     # ==================================================================
+    # 7b. user_roles
+    # ==================================================================
+    if not table_exists("user_roles"):
+        cur.execute("""
+            CREATE TABLE [dbo].[user_roles] (
+                [id]   INT IDENTITY(1,1) PRIMARY KEY,
+                [role] NVARCHAR(50) NOT NULL UNIQUE
+            )
+        """)
+        # Seed default roles
+        for r in ["admin", "cashier", "manager"]:
+            try:
+                cur.execute("INSERT INTO [dbo].[user_roles] (role) VALUES (?)", (r,))
+            except: pass
+        conn.commit()
+        ok("user_roles")
+    else:
+        skip("user_roles")
+
+    # ==================================================================
     # 8. users
     # ==================================================================
     if not table_exists("users"):

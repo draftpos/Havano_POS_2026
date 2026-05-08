@@ -20,12 +20,13 @@ BORDER = "#E2E8F0"
 MUTED = "#64748B"
 SUCCESS = "#10B981"
 DANGER = "#EF4444"
+DARK_TEXT = "#0F172A"
 
 class OnboardingDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Havano POS Onboarding")
-        self.setFixedSize(720, 580)
+        self.setFixedSize(520, 600)
         self.setModal(True)
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -83,8 +84,8 @@ class OnboardingDialog(QDialog):
     def _create_mode_selection_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(30)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
         
         intro_lbl = QLabel("Welcome to Havano POS")
         intro_lbl.setAlignment(Qt.AlignCenter)
@@ -126,7 +127,7 @@ class OnboardingDialog(QDialog):
 
     def _create_mode_card(self, title, description, icon_name, color):
         btn = QPushButton()
-        btn.setFixedHeight(220)
+        btn.setFixedHeight(180)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setStyleSheet(f"""
             QPushButton {{
@@ -139,6 +140,9 @@ class OnboardingDialog(QDialog):
             QPushButton:hover {{
                 border: 2px solid {color};
                 background-color: {OFF_WHITE};
+            }}
+            QPushButton:pressed {{
+                background-color: {BORDER};
             }}
         """)
         
@@ -167,41 +171,88 @@ class OnboardingDialog(QDialog):
     def _create_company_setup_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(50, 30, 50, 30)
-        layout.setSpacing(15)
+        layout.setContentsMargins(30, 20, 30, 20)
+        layout.setSpacing(10)
         
         title = QLabel("Company Information")
-        title.setStyleSheet(f"color: {NAVY}; font-size: 20px; font-weight: bold; background: transparent;")
+        title.setStyleSheet(f"color: {NAVY}; font-size: 20px; font-weight: 800; background: transparent;")
+        
+        subtitle = QLabel("Please provide your business details for the receipt.")
+        subtitle.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
+        
         layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addSpacing(10)
+
+        # Company Group
+        comp_group = QFrame()
+        comp_group.setStyleSheet(f"background: {OFF_WHITE}; border-radius: 8px; border: 1px solid {BORDER};")
+        comp_l = QVBoxLayout(comp_group)
+        comp_l.setContentsMargins(15, 10, 15, 10)
         
-        desc = QLabel("Enter your business details for receipts and reports.")
-        desc.setStyleSheet(f"color: {MUTED}; font-size: 13px; background: transparent;")
-        layout.addWidget(desc)
-        
-        form_frame = QFrame()
-        form_frame.setStyleSheet(f"background-color: {OFF_WHITE}; border: 1px solid {BORDER}; border-radius: 8px;")
-        form_layout = QFormLayout(form_frame)
-        form_layout.setContentsMargins(20, 20, 20, 20)
-        form_layout.setSpacing(12)
+        comp_title = QLabel("BUSINESS DETAILS")
+        comp_title.setStyleSheet("font-size: 11px; font-weight: bold; color: #64748B; border: none;")
+        comp_l.addWidget(comp_title)
+
+        form = QFormLayout()
+        form.setSpacing(15)
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setVerticalSpacing(12)
         
         self.comp_name = QLineEdit()
-        self.comp_name.setPlaceholderText("e.g. Havano General Store")
-        self.comp_addr1 = QLineEdit()
-        self.comp_addr2 = QLineEdit()
+        self.comp_name.setPlaceholderText("e.g. Havano Coffee")
+        
+        self.comp_addr = QLineEdit()
+        self.comp_addr.setPlaceholderText("e.g. 123 Main St, Harare")
+        
         self.comp_phone = QLineEdit()
+        self.comp_phone.setPlaceholderText("e.g. +263 77 000 0000")
+        
         self.comp_email = QLineEdit()
-        self.comp_vat = QLineEdit()
-        self.comp_tin = QLineEdit()
+        self.comp_email.setPlaceholderText("e.g. hello@havano.cloud")
+
+        form.addRow("Company Name", self.comp_name)
+        form.addRow("Address", self.comp_addr)
+        form.addRow("Phone", self.comp_phone)
+        form.addRow("Email", self.comp_email)
         
-        form_layout.addRow("Business Name:", self.comp_name)
-        form_layout.addRow("Address Line 1:", self.comp_addr1)
-        form_layout.addRow("Address Line 2:", self.comp_addr2)
-        form_layout.addRow("Phone Number:", self.comp_phone)
-        form_layout.addRow("Email Address:", self.comp_email)
-        form_layout.addRow("VAT Number:", self.comp_vat)
-        form_layout.addRow("TIN Number:", self.comp_tin)
+        comp_l.addLayout(form)
+        layout.addWidget(comp_group)
+        layout.addSpacing(10)
+
+        # User Group
+        user_group = QFrame()
+        user_group.setStyleSheet(f"background: {OFF_WHITE}; border-radius: 8px; border: 1px solid {BORDER};")
+        user_l = QVBoxLayout(user_group)
+        user_l.setContentsMargins(15, 10, 15, 10)
         
-        layout.addWidget(form_frame)
+        user_title = QLabel("ADMIN ACCOUNT")
+        user_title.setStyleSheet("font-size: 11px; font-weight: bold; color: #64748B; border: none;")
+        user_l.addWidget(user_title)
+
+        uform = QFormLayout()
+        uform.setSpacing(12)
+        uform.setVerticalSpacing(8)
+        
+        self.admin_user = QLineEdit()
+        self.admin_user.setPlaceholderText("Admin username")
+        self.admin_user.setText("Administrator")
+        
+        self.admin_pass = QLineEdit()
+        self.admin_pass.setPlaceholderText("Password")
+        self.admin_pass.setEchoMode(QLineEdit.Password)
+        
+        self.admin_pin = QLineEdit()
+        self.admin_pin.setPlaceholderText("4-digit PIN")
+        self.admin_pin.setMaxLength(4)
+
+        uform.addRow("Username", self.admin_user)
+        uform.addRow("Password", self.admin_pass)
+        uform.addRow("Login PIN", self.admin_pin)
+        
+        user_l.addLayout(uform)
+        layout.addWidget(user_group)
+        layout.addStretch()
         
         btn_row = QHBoxLayout()
         back_btn = QPushButton("Back")
@@ -210,9 +261,19 @@ class OnboardingDialog(QDialog):
         
         next_btn = QPushButton("Finish Setup")
         next_btn.setFixedSize(140, 40)
-        next_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {ACCENT}; color: {WHITE}; font-weight: bold; border: none; border-radius: 6px; }}
-            QPushButton:hover {{ background-color: {ACCENT_HOVER}; }}
+        self.setStyleSheet(f"""
+            QDialog {{ background: white; border-radius: 12px; }}
+            #MainFrame {{ background: white; border: 1px solid {BORDER}; border-radius: 12px; }}
+            QLabel {{ color: {DARK_TEXT}; background: transparent; }}
+            QLineEdit {{
+                background-color: {WHITE};
+                color: {DARK_TEXT};
+                border: 1.5px solid {BORDER};
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 14px;
+            }}
+            QLineEdit:focus {{ border: 2px solid {ACCENT}; background-color: #f0f7ff; }}
         """)
         next_btn.clicked.connect(self._save_offline_settings)
         
@@ -226,8 +287,8 @@ class OnboardingDialog(QDialog):
     def _create_success_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(40, 60, 40, 40)
-        layout.setSpacing(20)
+        layout.setContentsMargins(30, 40, 30, 30)
+        layout.setSpacing(15)
         
         icon_lbl = QLabel()
         icon_lbl.setPixmap(qta.icon("fa5s.check-circle", color=SUCCESS).pixmap(QSize(80, 80)))
@@ -262,7 +323,11 @@ class OnboardingDialog(QDialog):
     def _select_standard(self):
         self.mode = "standard"
         self._save_mode_setting("0")
-        self.success_msg.setText("You have chosen Standard Mode.\nYour system will stay in sync with Havano Cloud.")
+        self.success_msg.setText(
+            "You have chosen Standard Mode.\n"
+            "Your system will stay in sync with Havano Cloud.\n\n"
+            "Tip: You can switch to Offline-Only mode at any time from the Login screen."
+        )
         self.stack.setCurrentIndex(2)
 
     def _select_offline(self):
@@ -286,8 +351,15 @@ class OnboardingDialog(QDialog):
 
     def _save_offline_settings(self):
         name = self.comp_name.text().strip()
+        user = self.admin_user.text().strip()
+        pwd  = self.admin_pass.text().strip()
+        pin  = self.admin_pin.text().strip()
+
         if not name:
             QMessageBox.warning(self, "Required Field", "Please enter your Business Name.")
+            return
+        if not user or not pwd:
+            QMessageBox.warning(self, "Required Field", "Please provide Admin credentials.")
             return
             
         try:
@@ -296,31 +368,40 @@ class OnboardingDialog(QDialog):
             conn = get_connection()
             cur = conn.cursor()
             
-            # Update company_defaults
+            # Update company_defaults (use first available row)
             cur.execute("""
                 UPDATE company_defaults
                 SET company_name = ?,
                     address_1 = ?,
-                    address_2 = ?,
                     phone = ?,
-                    email = ?,
-                    vat_number = ?,
-                    tin_number = ?
+                    email = ?
                 WHERE id = (SELECT TOP 1 id FROM company_defaults ORDER BY id ASC)
             """, (
                 name,
-                self.comp_addr1.text().strip(),
-                self.comp_addr2.text().strip(),
+                self.comp_addr.text().strip(),
                 self.comp_phone.text().strip(),
-                self.comp_email.text().strip(),
-                self.comp_vat.text().strip(),
-                self.comp_tin.text().strip()
+                self.comp_email.text().strip()
             ))
             
             conn.commit()
+            
+            # Create the Admin User
+            from models.user import create_user
+            create_user(
+                username=user,
+                password=pwd,
+                role="admin",
+                pin=pin,
+                full_name="System Administrator"
+            )
+            
             conn.close()
             
-            self.success_msg.setText(f"Offline Mode configured for {name}.\nYour system is ready for standalone operation.")
+            self.success_msg.setText(
+                f"Offline Mode configured for {name}.\n"
+                "Your system is ready for standalone operation.\n\n"
+                "Tip: You can switch back to Standard Mode at any time from the Login screen."
+            )
             self.stack.setCurrentIndex(2)
             
         except Exception as e:

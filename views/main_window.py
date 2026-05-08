@@ -7445,6 +7445,8 @@ class POSView(QWidget):
                 "Check your database for sales with fiscal_status = 'pending' or 'failed'")
     
     def _refresh_unsynced_badge(self):
+        if getattr(self, "is_offline_mode", False):
+            return
         """Kick off a background thread to fetch counts — never blocks the UI."""
         if getattr(self, "_badge_worker_running", False):
             return
@@ -8356,6 +8358,18 @@ class POSView(QWidget):
         self.current_discount_percent = 0.0   # ← Discount state (Change 1)
         self.current_discount_amount  = 0.0
         self._quotation_mode = False           # ← Quotation mode flag
+        
+        # Check Offline Mode
+        self.is_offline_mode = False
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'offline_mode'")
+            row = cur.fetchone()
+            if row: self.is_offline_mode = (str(row[0]) == "1")
+            conn.close()
+        except: pass
+
         self._build_ui()
         QTimer.singleShot(0, self._ensure_default_customer)
 
@@ -8515,6 +8529,8 @@ class POSView(QWidget):
         self._q_badge = _make_badge("Q : 0", "All records synced", lambda: UnsyncedPopup("", self).exec())
         self._q_badge.setStyleSheet(_nav_style(SUCCESS, SUCCESS_H))
         layout.addWidget(self._q_badge)
+        if getattr(self, "is_offline_mode", False):
+            self._q_badge.hide()
         layout.addSpacing(2)
 
         # ── Z-badge (fiscalization errors) ────────────────────────────────────
@@ -12584,7 +12600,21 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1280, 820)
         self.setStyleSheet(GLOBAL_STYLE)
         
-        self.quotation_sync_thread = start_quotation_sync_thread()
+        # Read Offline Mode for MainWindow
+        self.is_offline_mode = False
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'offline_mode'")
+            row = cur.fetchone()
+            if row: self.is_offline_mode = (str(row[0]) == "1")
+            conn.close()
+        except: pass
+
+        if not self.is_offline_mode:
+            self.quotation_sync_thread = start_quotation_sync_thread()
+        else:
+            self.quotation_sync_thread = None
 
         # ── KDS WebSocket Server ───────────────────────────────────────────
         try:
@@ -13165,8 +13195,11 @@ class MainWindow(QMainWindow):
 
                 log.info("[startup-sync] ✅ All startup syncs complete.")
 
-        self._startup_sync_thread = _StartupSyncWorker(self)
-        self._startup_sync_thread.start()
+        if not getattr(self, "is_offline_mode", False):
+            self._startup_sync_thread = _StartupSyncWorker(self)
+            self._startup_sync_thread.start()
+        else:
+            print("[MainWindow] Offline Mode: skipping startup sync worker thread.")
 
     # =========================================================================
     # OPEN SHIFT REPRINT DIALOG

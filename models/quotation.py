@@ -276,17 +276,39 @@ def create_quotations_table():
             uom            NVARCHAR(20) NOT NULL DEFAULT 'Nos',
             product_id     INT NULL,
             part_no        NVARCHAR(50) NULL,
+            is_pharmacy    BIT NOT NULL DEFAULT 0,
+            dosage         NVARCHAR(MAX) NULL,
+            batch_no       NVARCHAR(100) NULL,
+            expiry_date    NVARCHAR(20) NULL,
             FOREIGN KEY (quotation_id) REFERENCES quotations(id) ON DELETE CASCADE
         )
     """)
     
+    # Migrations for existing tables
+    try:
+        cur.execute("IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('quotation_items') AND name = 'is_pharmacy') ALTER TABLE quotation_items ADD is_pharmacy BIT NOT NULL DEFAULT 0")
+        cur.execute("IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('quotation_items') AND name = 'dosage') ALTER TABLE quotation_items ADD dosage NVARCHAR(MAX) NULL")
+        cur.execute("IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('quotation_items') AND name = 'batch_no') ALTER TABLE quotation_items ADD batch_no NVARCHAR(100) NULL")
+        cur.execute("IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('quotation_items') AND name = 'expiry_date') ALTER TABLE quotation_items ADD expiry_date NVARCHAR(20) NULL")
+    except Exception as e:
+        print(f"[Quotation] Migration warning: {e}")
+
     conn.commit()
     conn.close()
     print("[Quotation] ✅ Tables created/verified.")
 
 
-def save_quotation(quotation: Quotation) -> int:
-    """Save a quotation to local database with product linking"""
+def save_quotation(quotation: Quotation, print_labels: bool = True) -> int:
+    """Save a quotation to local database with product linking.
+
+    Args:
+        quotation:     The Quotation object to persist.
+        print_labels:  When True (default), pharmacy labels are sent to the
+                       ZPL printer after saving — correct for the cashier UI
+                       path.  Pass False for background sync paths so that
+                       re-syncing existing quotations from Frappe does not
+                       re-fire label jobs.
+    """
     conn = get_connection()
     cur = conn.cursor()
 
@@ -461,12 +483,18 @@ def save_quotation(quotation: Quotation) -> int:
     print(f"[DEBUG] save_quotation() completed for ID={quotation_id}")
     print(f"[DEBUG] Total items: {len(quotation.items)}, Pharmacy items: {pharmacy_count}")
     
-    if pharmacy_count > 0:
+    # Only fire the label printer when the caller explicitly wants it.
+    # The sync path passes print_labels=False so re-syncing from Frappe
+    # does not spam the printer with repeat jobs.
+    if print_labels and pharmacy_count > 0:
         print(f"[DEBUG] *** CALLING ZPL PRINTER for {pharmacy_count} pharmacy items ***")
         result = auto_print_pharmacy_labels_for_quotation(quotation_id, silent=True)
         print(f"[DEBUG] ZPL printer returned: {result} labels printed")
     else:
-        print(f"[DEBUG] No pharmacy items, skipping ZPL print")
+        if pharmacy_count > 0:
+            print(f"[DEBUG] Pharmacy items present but label printing suppressed (sync path)")
+        else:
+            print(f"[DEBUG] No pharmacy items, skipping ZPL print")
     
     return quotation_id
 
@@ -960,13 +988,15 @@ def sync_quotations_from_frappe() -> dict:
             "total": 0
         }
     
-    # Save all quotations to database
+    # Save all quotations to database.
+    # print_labels=False: syncing from Frappe must never fire label jobs —
+    # these quotations already exist locally and the pharmacist already got
+    # their labels when the quote was first saved from the UI.
     saved_count = 0
     for quotation in response.quotations:
         try:
-            # Mark as synced since we just fetched it
             quotation.synced = True
-            save_quotation(quotation)
+            save_quotation(quotation, print_labels=False)
             saved_count += 1
         except Exception as e:
             print(f"[ERROR] Failed to save {quotation.name}: {e}")
