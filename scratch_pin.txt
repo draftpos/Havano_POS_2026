@@ -1,0 +1,100 @@
+            self._block_signals = True
+            item = self.invoice_table.item(self._active_row, self._active_col)
+            if item: item.setText("")
+            self._block_signals = False
+            if self._active_col in (2, 3, 4):
+                self._recalc_row(self._active_row)
+
+    def _numpad_del_line(self):
+        """
+        Requirement 8: Clears the row, resets the input buffer,
+        and jumps the cursor back to the LAST column (Total $)
+        to signal the line is empty and deleted.
+        """
+        row = self.invoice_table.currentRow()
+        if row < 0:
+            row = self._last_filled_row
+
+        if row < 0:
+            return
+
+        # Pharmacy lock: cashiers cannot delete pharmacy rows
+        if self._is_pharmacy_row_locked(row):
+            self._notify_pharmacy_locked(row)
+            return
+            
+        # 0. POS Rule Check: Require PIN for Item Removal
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key='require_pin_to_remove'")
+            row_setting = cur.fetchone()
+            conn.close()
+            
+            if row_setting and str(row_setting[0]) == "1":
+                user_role = (self.user.get("role") or "").lower() if hasattr(self, "user") and self.user else ""
+                if user_role not in ("admin", "administrator", "manager", "supervisor"):
+                    from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
+                    pin, ok = QInputDialog.getText(
+                        self,
+                        "Supervisor PIN Required",
+                        "Item removal is restricted by POS Rules.\n\nEnter Supervisor PIN to remove item:",
+                        QLineEdit.Password,
+                    )
+                    if not ok or not pin:
+                        return
+                    
+                    from models.user import authenticate_by_pin
+                    manager = authenticate_by_pin(pin)
+                    if not manager or (manager.get("role") or "").lower() not in ("admin", "administrator", "manager", "supervisor"):
+                        QMessageBox.warning(self, "Access Denied", "Invalid PIN or insufficient privileges.")
+                        return
+        except Exception as e:
+            print(f"Error checking require_pin_to_remove rule: {e}")
+
+        # 1. Clear the typing buffer so new typing doesn't include old character data
+        self._numpad_buffer = ""
+
+        self._block_signals = True
+        # 2. Wipe every cell in the row and clear hidden UserRole data (product IDs)
+        for col in range(self.invoice_table.columnCount()):
+            item = self.invoice_table.item(row, col)
+            if item:
+                item.setText("")
+                item.setData(Qt.UserRole, None)
+        
+        # 3. Compact the invoice: shift all filled rows below this one upward
+        for shift in range(row, self.invoice_table.rowCount() - 1):
+            try:
+                next_item = self.invoice_table.item(shift + 1, 1)
+                next_name = next_item.text().strip() if next_item else ""
+            except AttributeError:
+                next_name = ""
+            
+            if not next_name:
+                break
+                
+            # Copy data from the row below to the current row
+            for col in range(self.INVOICE_COL_COUNT):
+                src = self.invoice_table.item(shift + 1, col)
+                dst = self.invoice_table.item(shift, col)
+                if src and dst:
+                    dst.setText(src.text())
+                    dst.setTextAlignment(src.textAlignment())
+                    dst.setData(Qt.UserRole, src.data(Qt.UserRole))
+            
+            # Reset the row we just copied from so it's fresh for new data
+            self._init_row(shift + 1)
+            
+        self._block_signals = False
+
+        # 4. Update financial totals (subtotals and grand total)
+        self._recalc_totals()
+        
+        # 5. After deletion: jump cursor to the first empty row, column 0, and open inline search
+        first_empty = self._find_next_empty_row()
+        self._active_row = first_empty
+        self._active_col = 0
+
+        self.invoice_table.setCurrentCell(first_empty, 0)

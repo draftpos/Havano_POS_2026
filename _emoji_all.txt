@@ -1,0 +1,264 @@
+648: U+2500 (─) -> # ── Page 2: Cashier Breakdown Detail Page ──────────────────────────────
+722: U+2500 (─) -> # ── Page 3: Cashier Mode Detail Page ───────────────────────────────────
+803: U+2500 (─) -> # ── Page 4: Modified/Overridden Reconciliations Page ──────────────────
+2429: U+2500 (─) -> # ── Header ────────────────────────────────────────────────────────────
+2453: U+2500 (─) -> # ── Body ──────────────────────────────────────────────────────────────
+2514: U+2500 (─) -> # ── handlers ──────────────────────────────────────────────────────────────
+2938: U+2500 (─) -> # ── Header ───────────────────────────────────────────────────────
+2965: U+2500 (─) -> # ── Body ─────────────────────────────────────────────────────────
+2997: U+2500 (─) -> # ── Digit format sub-option (only relevant for Weight Based Scale) ───
+3329: U+2500 (─) -> # ── UI ────────────────────────────────────────────────────────────────────
+3488: U+2500 (─) -> # ── Data ──────────────────────────────────────────────────────────────────
+3812: U+2500 (─) -> # ── Smart tab selection ───────────────────────────────────────────────────
+3827: U+2500 (─) -> # ── Copy error ────────────────────────────────────────────────────────────
+3899: U+2500 (─) -> # ── Retry ─────────────────────────────────────────────────────────────────
+3910: U+2500 (─) -> # ── STEP 1: Release all stale locks for this kind ──────────────
+3970: U+2500 (─) -> # ── STEP 1.5: Refresh UI immediately so user sees errors clear ──
+3978: U+2500 (─) -> # ── STEP 2: Trigger the sync service ──────────────────────────
+4508: U+2500 (─) -> # ── Permission check - mirrors discount PIN flow exactly ───────────
+4589: U+2500 (─) -> # ── 1. Collect cart ──────────────────────────────────────────────────
+4604: U+2500 (─) -> # ── 2. CUSTOMER SELECTION - Already selected in _on_laybye, but verify ──
+4616: U+2500 (─) -> # ── 3. Deposit dialog (Direct jump to payment) ────────────────────────
+4665: U+2500 (─) -> # ── 4. Save Sales Order ─────────────────────────────────────────────
+4700: U+2500 (─) -> # ── 6. Print receipt ────────────────────────────────────────────────
+4708: U+2500 (─) -> # ── 7. Feedback & UI Reset ──────────────────────────────────────────
+4846: U+2500 (─) -> # ── 0. SHIFT GUARD ─────────────────────────────────────────────────────────────
+4850: U+2500 (─) -> # ── 0a. QUOTE MODE REROUTE ────────────────────────────────────────────
+4872: U+2500 (─) -> # ── 0b. REDIRECTION LOGIC (Laybye & Restaurant Check) ─────────────────────────────
+4900: U+2500 (─) -> # ── 1. PERMISSION & VALIDATION ──────────────────────────────────────
+4913: U+2500 (─) -> # ── 2. CUSTOMER REQUIREMENT ─────────────────────────────────────────
+4929: U+2500 (─) -> # ── 3. COLLECT INVOICE ITEMS ─────────────────────────────────────────
+4957: U+2500 (─) -> # ── FIX: discount_amount is tracked directly in _on_discount_clicked
+4963: U+2500 (─) -> # ── 4. OPEN PAYMENT DIALOG WITH ITEMS ──────────────────────────────────
+5041: U+2500 (─) -> # ── Work out real vs On Account amounts ─────────────────────────
+5049: U+2500 (─) -> # ── 5. POST-SALE ACTIONS (Payment entries already created in PaymentDialog) ──
+5059: U+2500 (─) -> # ── 6. UI FEEDBACK & CLEANUP ──────────────────────────────────
+5066: U+2500 (─) -> # ── FISCALIZATION WAIT (SMART LOADER) ──
+5076: U+2500 (─) -> # ── PRINT AFTER WAIT (Ensures 6s wait is respected) ──
+5087: U+2500 (─) -> # ── PRINT IMMEDIATELY (if fiscalization is off or already has QR) ──
+5162: U+2500 (─) -> # ── FISCALIZATION WAIT (SMART LOADER) ──
+5174: U+2500 (─) -> # ── MANUAL PRINT ──
+5542: U+274C (❌) -> print("[Quotation] ❌ Print failed")
+5547: U+274C (❌) -> print(f"[Quotation] ❌ Printing failed: {e}")
+5681: U+2190 (←) -> synced=False,  # ← NOT SYNCED YET - local only
+5713: U+274C (❌) -> print(f"[Quotation] ❌ Error saving: {e}")
+5772: U+2500 (─) -> # ── Brand + Logo ──────────────────────────────────────────────────────
+5778: U+2500 (─) -> # ── Uniform nav button spec ──
+5793: U+2500 (─) -> # ── Helper: uniform nav button ────────────────────────────────────────
+5804: U+2500 (─) -> # ── Fetch Mode and Toggles ─────────────────────────────────────────────
+5823: U+2500 (─) -> # ── Sales button ──────────────────────────────────────────────────────
+5836: U+2500 (─) -> # ── Reporting submenu ───────────────────────────────────────────────────────
+5846: U+2500 (─) -> # ── Admin Check ───────────────────────────────────────────────────────
+5855: U+2500 (─) -> # ── Inventory button (admin only) ─────────────────────────────────────
+5868: U+2500 (─) -> # ── All maintenance functions are in the Admin Dashboard ─────────────
+5871: U+2500 (─) -> # ── Customer selector ─────────────────────────────────────────────────
+5882: U+2500 (─) -> # ── Sync Badges ───────────────────────────────────────────────────────
+5893: U+2500 (─) -> # ── Q-badge (sync errors) ─────────────────────────────────────────────
+5905: U+2500 (─) -> # ── Z-badge (fiscalization errors) ────────────────────────────────────
+5933: U+2500 (─) -> # ── Cart Mode (Sales vs Quote) - default by role ──────────────────────
+5985: U+2500 (─) -> # ── Laybye Switcher ───────────────────────────────────────────────────
+6026: U+2500 (─) -> # ── Payments button ───────────────────────────────────────────────────
+6033: U+2500 (─) -> # ── Quotation button ──────────────────────────────────────────────────
+6043: U+2500 (─) -> # ── Options dropdown (replaces right-panel Options button) ───────────────
+6062: U+2500 (─) -> # ── Return mode indicator ─────────────────────────────────────────────
+6063: U+21A9 (↩) -> self._return_btn = _nb("↩   Return", self._process_return, color=DANGER, hov=DANGER_H)
+6077: U+2500 (─) -> # ── Orders Button (Floor Management) ─────────────────────────────────
+6090: U+2500 (─) -> # ── Dashboard button (admin only) ─────────────────────────────────────
+6096: U+2500 (─) -> # ── Logout ────────────────────────────────────────────────────────────
+6109: U+2500 (─) -> # ── Load predefined notes from restaurant settings ────────────────
+6117: U+2500 (─) -> # ── Build compact single-line dialog ──────────────────────────────
+6165: U+2713 (✓) -> ok_btn = QPushButton("✓")
+6179: U+2328 (⌨) -> osk_btn = QPushButton("⌨")
+6198: U+2715 (✕) -> clr_btn = QPushButton("✕")
+6271: U+2500 (─) -> # ── Q-badge: hidden only in offline mode ─────────────────────────────
+6308: U+2500 (─) -> # ── Update Z-badge (fiscalization errors) ───────────────────────────────
+6449: U+2500 (─) -> # ── Highlighted autocomplete popup stylesheet ──────────────────────
+6722: U+2500 (─) -> # ── Always close any open inline search before we touch the table ─────
+6725: U+2500 (─) -> # ── #0 Require a running shift ───────────────────────────────────────────
+6729: U+2500 (─) -> # ── Pharmacist: prompt customer selection on first cart add ────────────
+6776: U+2500 (─) -> # ── Pharmacy gate + dosage/batch capture ─────────────────────────────────
+6811: U+2500 (─) -> # ── Butchery Amount Prompt ───────────────────────────────────────────────
+6827: U+2500 (─) -> # ── #3 Block zero-price ───────────────────────────────────────────────
+6838: U+2500 (─) -> # ── #4 Block zero/negative stock ─────────────────────────────────────
+6879: U+2500 (─) -> # ── #7 Apply Frappe pricing rules ─────────────────────────────────────
+6883: U+2500 (─) -> # ── GET TAX INFORMATION FROM PRODUCT ───────────────────────────────────
+6942: U+2500 (─) -> # ── Collect this row's data so we can move it ─────────────────
+6960: U+1F58A (🖊) -> if saved_notes.startswith("🖊"):
+6961: U+1F58A (🖊) -> saved_notes = saved_notes.lstrip("🖊").strip()
+6962: U+1F4CC (📌) -> if saved_notes == "📌":
+6965: U+2500 (─) -> # ── Remove this row and compact upward ────────────────────────
+6988: U+2500 (─) -> # ── Find last filled row after compaction ─────────────────────
+7000: U+2500 (─) -> # ── Write to destination row with tax info ─────────────────────
+7047: U+2500 (─) -> # ── New row with tax info ─────────────────────────────────────────────
+7133: U+1F58A (🖊) -> _raw_note    = _raw_note.lstrip("🖊").strip() if _raw_note.startswith("🖊") else _raw_note
+7134: U+1F4CC (📌) -> notes        = "" if _raw_note == "📌" else _raw_note
+7310: U+2500 (─) -> # ── Increment offline sync counter ──────────────────────────────
+7316: U+2500 (─) -> # ── Badge refresh: immediately after DB write, before UI reset ──
+7337: U+2500 (─) -> # ── Previous transaction info ─────────────────────────────────────────
+7354: U+2190 (←) -> self.current_discount_percent = 0.0   # ← Discount state
+7356: U+2190 (←) -> self._quotation_mode = False           # ← Quotation mode flag
+7415: U+2500 (─) -> # ── Previous transaction info ─────────────────────────────────────────
+7432: U+2190 (←) -> self.current_discount_percent = 0.0   # ← Discount state
+7434: U+2190 (←) -> self._quotation_mode = False           # ← Quotation mode flag
+7493: U+2500 (─) -> # ── Brand + Logo ──────────────────────────────────────────────────────
+7499: U+2500 (─) -> # ── Uniform nav button spec ──
+7514: U+2500 (─) -> # ── Helper: uniform nav button ────────────────────────────────────────
+7525: U+2500 (─) -> # ── Fetch Mode and Toggles ─────────────────────────────────────────────
+7539: U+2500 (─) -> # ── Sales button ──────────────────────────────────────────────────────
+7553: U+2500 (─) -> # ── Admin Check ───────────────────────────────────────────────────────
+7562: U+2500 (─) -> # ── Inventory button (admin only) ─────────────────────────────────────
+7572: U+2500 (─) -> # ── All maintenance functions are in the Admin Dashboard ─────────────
+7575: U+2500 (─) -> # ── Customer selector ─────────────────────────────────────────────────
+7586: U+2500 (─) -> # ── Sync Badges ───────────────────────────────────────────────────────
+7597: U+2500 (─) -> # ── Single unified Q-badge (replaces SI / CN / SO individual badges) ──
+7609: U+2500 (─) -> # ── Z-badge (fiscalization errors) ────────────────────────────────────
+7635: U+2500 (─) -> # ── Laybye Switcher ───────────────────────────────────────────────────
+7671: U+2500 (─) -> # ── Restaurant / Orders Switcher ──────────────────────────────────────
+7711: U+2500 (─) -> # ── Payments button ───────────────────────────────────────────────────
+7718: U+2500 (─) -> # ── Quotation button ──────────────────────────────────────────────────
+7729: U+2500 (─) -> # ── Options dropdown ──────────────────────────────────────────────────────
+7747: U+2500 (─) -> # ── Return mode indicator ─────────────────────────────────────────────
+7748: U+21A9 (↩) -> self._return_btn = _nb("↩   Return", self._process_return, color=DANGER, hov=DANGER_H)
+7764: U+2500 (─) -> # ── Dashboard button (admin only) ─────────────────────────────────────
+7770: U+2500 (─) -> # ── Logout ────────────────────────────────────────────────────────────
+7903: U+1F58A (🖊) -> existing   = raw.lstrip("🖊").strip() if raw.startswith("🖊") else raw
+7906: U+2500 (─) -> # ── Load predefined notes ─────────────────────────────────────────
+7914: U+2500 (─) -> # ── Build compact dialog ──────────────────────────────────────────
+7927: U+1F58A (🖊) -> header = QLabel(f"🖊  {name_item.text().strip()}")
+7965: U+2713 (✓) -> ok_btn = QPushButton("✓")
+7979: U+2328 (⌨) -> osk_btn = QPushButton("⌨")
+7998: U+2715 (✕) -> clr_btn = QPushButton("✕")
+8026: U+1F58A (🖊) -> notes_item.setText("🖊" if not new_note else f"🖊  {new_note}")
+8184: U+2500 (─) -> # ── Invoice table ─────────────────────────────────────────────────────────
+8198: U+2500 (─) -> # ── Invoice column labels - edit here to rename ──────────────────────────
+8227: U+2500 (─) -> # ── No native cell editor - all input goes through numpad / inline search
+8286: U+1F58A (🖊) -> item.setText("🖊" if not note_val else f"🖊  {note_val}")
+8332: U+2500 (─) -> # ── Calculation engine ────────────────────────────────────────────────────
+8420: U+2500 (─) -> # ── What text is already in this row? show it as placeholder ─────────
+8516: U+2500 (─) -> # ── ALWAYS place popup BELOW the current row ──────────────────────────
+8557: U+2500 (─) -> # ── Alternative barcode lookup (fetches specific UOM) ────────────────
+8592: U+2500 (─) -> # ── Weight-based scale barcode fallback ──────────────────────────────
+8612: U+2500 (─) -> # ── Weight-based scale: accumulate on existing row ────────────
+8658: U+2500 (─) -> # ── Override qty for weight-based scale (and lock it) ────────────
+8773: U+2500 (─) -> # ── Global Up/Down -> cart navigation ─────────────────────────────────
+8808: U+2500 (─) -> # ── inline search edit ────────────────────────────────────────────────
+8828: U+2500 (─) -> # ── invoice table ─────────────────────────────────────────────────────
+9457: U+2500 (─) -> # ── Invoice footer - Items | Paid | Change+InvoiceNo | TOTAL ─────────────
+9575: U+2500 (─) -> # ── DYNAMIC SHIFT LOGIC ──────────────────────────────────────────────
+9624: U+2500 (─) -> # ─────────────────────────────────────────────────────────────────────
+9688: U+2500 (─) -> # ── Determine if current user is a pharmacist (live check) ─────────
+10102: U+25C0 (◀) -> self._cat_prev_btn = QPushButton("◀")
+10118: U+25B6 (▶) -> self._cat_next_btn = QPushButton("▶")
+10144: U+2500 (─) -> # ── Pagination bar ─────────────────────────────────────────────────────
+10159: U+25C0 (◀) -> self._grid_prev_btn = QPushButton("◀ Prev")
+10170: U+25B6 (▶) -> self._grid_next_btn = QPushButton("Next ▶")
+10268: U+2500 (─) -> # ── Overlay price-list prices ────────────────────────────────
+10285: U+26A0 (⚠) -> print("[grid] ⚠ no active price list - grid will show 0.00 "
+10288: U+2500 (─) -> # ── Build tuple list + per-part meta map for tap handler ─────
+10787: U+2500 (─) -> lines.append(f"  {'─'*20}  ${line_tot:.2f}")
+10795: U+2500 (─) -> # ── Discount Rules Section ────────────────────────────────────────────
+11087: U+1F3AF (🎯) -> print(f"[pos] 🎯 Login default customer resolved: {name}")
+11089: U+26A0 (⚠) -> print(f"[pos] ⚠ Login default customer '{name}' not in local DB")
+11128: U+2500 (─) -> # ── Frappe fix: price_list_name may be NULL in the local DB even
+11129: U+2500 (─) -> #    though default_price_list_id is set.  Resolve the name here. ──
+11149: U+2500 (─) -> # ── Last resort: use the first available selling price list ────────
+11297: U+2713 (✓) -> #     When all three counts are zero   -> show a single green "✓ All Synced" badge.
+11300: U+2265 (≥) -> #                                        coloured amber (< 5) or red (≥ 5).
+11312: U+26A0 (⚠) -> #         prefix = "⚠ " if count >= 5 else ""
+11436: U+21A9 (↩) -> self._cust_btn.setText(f"↩  {cust}  (RETURN)")
+11532: U+2500 (─) -> # ── Step 2: Create Refund Payment Entry (Pay to Customer) ─────────────
+11539: U+2500 (─) -> # ── Fiscalize synchronously so QR is ready before printing ───────────
+11561: U+2500 (─) -> # ── Print credit note receipt ─────────────────────────────────────────
+11565: U+2500 (─) -> # ── Badge refresh: immediately after DB write, before UI reset ──
+11580: U+2500 (─) -> # ── Resolve printer ──────────────────────────────────────────────────
+11599: U+2500 (─) -> # ── Build ReceiptData ────────────────────────────────────────────────
+11644: U+2500 (─) -> # ── Print ────────────────────────────────────────────────────────────
+11671: U+2190 (←) -> self.current_discount_percent = 0.0   # ← Reset discount for next customer
+11673: U+2190 (←) -> self._pharmacist_customer_prompted = False  # ← Re-prompt pharmacist on next cart
+11701: U+2500 (─) -> # ── 1. Find which row to discount ────────────────────────────────────
+11709: U+2500 (─) -> # ── 2. Validate the row has a product ────────────────────────────────
+11722: U+2500 (─) -> # ── 3. Get current user ───────────────────────────────────────────────
+11730: U+2500 (─) -> # ── 3b. Check discount expiry date ────────────────────────────────────
+11753: U+2500 (─) -> # ── 4. Permission / admin PIN bypass ─────────────────────────────────
+11769: U+2500 (─) -> # ── 5. Read existing value to pre-fill ───────────────────────────────
+11780: U+2500 (─) -> # ── 6. Get line total for conversion ─────────────────────────────────
+11788: U+2500 (─) -> # ── 7. Custom discount dialog ─────────────────────────────────────────
+11817: U+2500 (─) -> # ── Rules banner ─────────────────────────────────────────────────────
+11984: U+2500 (─) -> # ── HARD ENFORCE the user's max_discount_percent ──────────────────
+12018: U+2500 (─) -> # ── 8. Write plain amount to col 4 and recalc ────────────────────────
+12032: U+2500 (─) -> # ── FIX: Recompute discount_amount and discount_percent from GROSS line
+12077: U+2500 (─) -> # ── Permission check ─────────────────────────────────────────────────
+12081: U+2500 (─) -> # ── Step 1: Clear the cart ────────────────────────────────────────────
+12094: U+2500 (─) -> # ── Step 2: Force customer selection ─────────────────────────────────
+12107: U+203A (›) -> f"Quotation mode - Customer: {cname}  - Add items then use Options › Save Quotation")
+12109: U+2500 (─) -> # ── Step 3: Set quotation mode flag and flip the PAY button label ────
+13276: U+2500 (─) -> # ── Page 1: Shift History List ──
+15650: U+2556 (╖) -> "WWWW = weight in grams Clear╖ 1000 -> qty in kg (locked)."
+18425: U+2229 (∩) -> print(f"[Quotation] ΓÜá∩╕Å {qtn_name} will be synced later by background worker")
+18430: U+2229 (∩) -> print(f"[Quotation] ΓÜá∩╕Å Failed to save to database")
+18783: U+2310 (⌐) -> self._return_btn = _nb("Γå⌐   Return", self._process_return, color=DANGER, hov=DANGER_H)
+19540: U+2500 (─) -> # ── Butchery Amount Prompt ───────────────────────────────────────────────
+19685: U+2261 (≡) -> if saved_notes.startswith("≡ƒûè"):
+19686: U+2261 (≡) -> saved_notes = saved_notes.lstrip("≡ƒûè").strip()
+19687: U+2261 (≡) -> if saved_notes == "≡ƒôî":
+19790: U+252C (┬) -> # cell as "<name>  ┬╖  <dosage>". Full metadata still lives in
+19794: U+252C (┬) -> _display_name = f"{name}  ┬╖  {str(pharmacy_meta['dosage']).strip()}"
+19845: U+252C (┬) -> # Name cell may be decorated with " ┬╖ <dosage>" for pharmacy rows;
+19848: U+252C (┬) -> product_name = _name_cell.split("  ┬╖  ", 1)[0].strip()
+19858: U+2261 (≡) -> _raw_note    = _raw_note.lstrip("≡ƒûè").strip() if _raw_note.startswith("≡ƒûè") else _raw_note
+19859: U+2261 (≡) -> notes        = "" if _raw_note == "≡ƒôî" else _raw_note
+20432: U+2310 (⌐) -> self._return_btn = _nb("Γå⌐   Return", self._process_return, color=DANGER, hov=DANGER_H)
+20580: U+2261 (≡) -> existing   = raw.lstrip("≡ƒûè").strip() if raw.startswith("≡ƒûè") else raw
+20603: U+2261 (≡) -> header = QLabel(f"≡ƒûè  {name_item.text().strip()}")
+20702: U+2261 (≡) -> notes_item.setText("≡ƒûè" if not new_note else f"≡ƒûè  {new_note}")
+20962: U+2261 (≡) -> item.setText("≡ƒûè" if not note_val else f"≡ƒûè  {note_val}")
+21680: U+252C (┬) -> base_name = name_text.split("  ┬╖  ")[0]
+21682: U+252C (┬) -> name_item.setText(f"{base_name}  ┬╖  {str(new_meta['dosage']).strip()}")
+22786: U+2562 (╢) -> self._cat_next_btn = QPushButton("╢")
+22838: U+2562 (╢) -> self._grid_next_btn = QPushButton("Next ╢")
+23755: U+2261 (≡) -> print(f"[pos] ≡ƒÄ» Login default customer resolved: {name}")
+24104: U+2310 (⌐) -> self._cust_btn.setText(f"Γå⌐  {cust}  (RETURN)")
+24113: U+252C (┬) -> f"RETURN MODE  ┬╖  Return: {cn.get('invoice_no', '')}")
+24227: U+252C (┬) -> f"Return processed  ┬╖  {cn.get('invoice_no', '')}  ┬╖  ${total:.2f}")
+24774: U+2551 (║) -> f"Quotation mode - Customer: {cname}  - Add items then use Options ΓÇ║ Save Quotation")
+25086: U+2500 (─) -> # ── KDS WebSocket Server ───────────────────────────────────────────
+25103: U+2500 (─) -> # ── 1. Init Status Bar FIRST so views can find it ──────────────────
+25129: U+2500 (─) -> # ── 2. Views ──────────────────────────────────────────────────────
+25158: U+2500 (─) -> # ── 3. Finalize UI ────────────────────────────────────────────────
+25177: U+2500 (─) -> # ── Background sync services ──────────────────────────────────────────
+25269: U+2500 (─) -> # ── Ensure sync_errors table exists ────────────────────────────────────
+25276: U+2500 (─) -> # ── Sync error bus - route background sync errors to the GUI ─────────────
+25394: U+2500 (─) -> # ── 1. Kitchen station slips (existing behaviour, unchanged) ──────
+25411: U+2500 (─) -> # ── 2. Full summary receipt -> main invoice printer ─────────────────
+25501: U+2500 (─) -> # ── Fetch order header ─────────────────────────────────────────
+25517: U+2500 (─) -> # ── Fetch items ────────────────────────────────────────────────
+25523: U+2500 (─) -> # ── Build ReceiptData ──────────────────────────────────────────
+25562: U+2500 (─) -> # ── Resolve invoice printer ────────────────────────────────────
+25587: U+274C (❌) -> print(f"❌ _print_main_sales_order error: {e}\n{traceback.format_exc()}")
+25665: U+2713 (✓) -> reason = self._show_cancel_reason_dialog(order_data["id"], predefined_reasons, title="Modify Reason", action_text="✓  Modify KOT",
+25690: U+2500 (─) -> # ── Rich cancel-reason dialog (predefined chips + autocomplete) ──────────
+25760: U+2713 (✓) -> def _show_cancel_reason_dialog(self, order_id: int, predefined: list, title: str = "Cancel Reason", action_text: str = "✓  Cancel 
+25877: U+2500 (─) -> # ── Input row ──────────────────────────────────────────────────────
+26009: U+2715 (✕) -> dismiss_btn = QPushButton("✕")
+26388: U+2500 (─) -> # ── POS ───────────────────────────────────────────────────────────────
+26403: U+2500 (─) -> # ── Sales ─────────────────────────────────────────────────────────────
+26420: U+2500 (─) -> # ── Inventory (admin only) ─────────────────────────────────────────────
+26424: U+2500 (─) -> # ── Restaurant (admin only) ────────────────────────────────────────────
+26450: U+2500 (─) -> # ── Maintenance menu dissolved into Dashboard apps grid ────────────────
+26452: U+2500 (─) -> # ── Menubar action helpers ─────────────────────────────────────────────────
+26658: U+2500 (─) -> # ── Smart Loader: show while MainWindow initializes ──
+27545: U+23F3 (⏳) -> self.icon_lbl = QLabel("⏳")
+27632: U+2500 (─) -> # ── data stores ───────────────────────────────────────────────────────
+27639: U+2500 (─) -> # ── debounce timers ───────────────────────────────────────────────────
+27648: U+2500 (─) -> # ── preload ───────────────────────────────────────────────────────────────
+27669: U+2500 (─) -> # ── build UI ──────────────────────────────────────────────────────────────
+27675: U+2500 (─) -> # ── header ────────────────────────────────────────────────────────────
+27686: U+2500 (─) -> # ── tabs ──────────────────────────────────────────────────────────────
+27791: U+2500 (─) -> # ── Sales Invoice search / select / reprint ───────────────────────────────
+27837: U+2500 (─) -> # ── Load full item list from DB ───────────────────────────────────────
+27855: U+2500 (─) -> # ── Build ReceiptData and send via printing_service.reprint ──────────
+27940: U+2500 (─) -> # ── Sales Order search / select / reprint ─────────────────────────────────
+28003: U+2500 (─) -> # ── keyboard navigation ───────────────────────────────────────────────────
+28506: U+2500 (─) -> # ── Fonts ─────────────────────────────────────────────────────
+28523: U+2500 (─) -> # ── Layout ────────────────────────────────────────────────────
+28531: U+2500 (─) -> # ── LOGO - FIXED VERSION ──────────────────────────────────────

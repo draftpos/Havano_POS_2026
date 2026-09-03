@@ -1,0 +1,5 @@
+8:     QSpinBox, QDoubleSpinBox, QTabWidget, QFileDialog, QCheckBox, QMenu,
+11491:                 from PySide6.QtWidgets import QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox
+11497:                 elif isinstance(fw, (QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox)):
+18160:             size_sb = QSpinBox(); size_sb.setRange(6, 30); size_sb.setValue(max(6, int(size_val or 0)))
+18195:         self.sb_chars = QSpinBox()

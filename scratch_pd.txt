@@ -1,0 +1,55 @@
+                self.accepted_customer     = self._customer
+                self.accepted_company      = self._company
+                self.accepted_company_name = (
+                    self._company.get("name", "") if self._company else "")
+                self.accept()
+        except Exception as e:
+            QMessageBox.warning(self, "Split Error", str(e))
+
+    # =========================================================================
+    # Keyboard
+    # =========================================================================
+
+    def keyPressEvent(self, event):
+        k = event.key()
+        if k == Qt.Key_F2:
+            if self._get_tendered() >= self.total - 0.005 and self._get_tendered() > 0:
+                self._save()
+            return
+        if k == Qt.Key_F3:
+            return
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            self._save()
+            return
+        if k == Qt.Key_Escape:
+            self.reject()
+            return
+
+        # Up/Down arrows cycle through payment methods regardless of focus —
+        # arrows don't conflict with numeric entry in QLineEdits.
+        if k in (Qt.Key_Up, Qt.Key_Down) and self._methods:
+            try:
+                cur_idx = next(
+                    i for i, m in enumerate(self._methods)
+                    if m.get("label") == self._active_method
+                )
+            except StopIteration:
+                cur_idx = 0
+            step = -1 if k == Qt.Key_Up else 1
+            new_idx = (cur_idx + step) % len(self._methods)
+            self._activate_method(self._methods[new_idx]["label"])
+            return
+
+        focused = self.focusWidget()
+        is_editing = isinstance(focused, QLineEdit) and bool(focused.text())
+        if not is_editing:
+            idx_map = {
+                Qt.Key_1:0, Qt.Key_2:1, Qt.Key_3:2, Qt.Key_4:3,
+                Qt.Key_5:4, Qt.Key_6:5, Qt.Key_7:6, Qt.Key_8:7, Qt.Key_9:8,
+            }
+            if k in idx_map and idx_map[k] < len(self._methods):
+                self._activate_method(self._methods[idx_map[k]]["label"])
+                return
+        super().keyPressEvent(event)
+
+    def showEvent(self, event):

@@ -1,0 +1,26 @@
+^XA
+
+^PW400
+^LL410
+
+^FO0,0^GB400,60,60,B^FS
+^FO15,12^A0N,35,35^FR^FDShowline Solutions^FS
+
+^FO15,72^A0N,20,20^FDPharmacy Products^FS
+^FO15,96^GB370,2,2^FS
+
+^FO15,110^A0N,22,22^FD01  Amoxicillin 500mg^FS
+^FO15,140^A0N,22,22^FD02  Paracetamol 1000mg^FS
+^FO15,170^A0N,22,22^FD03  Ibuprofen 400mg^FS
+^FO15,200^A0N,22,22^FD04  Metformin 850mg^FS
+^FO15,230^A0N,22,22^FD05  Omeprazole 20mg^FS
+
+^FO15,270^GB370,2,2^FS
+
+^FO15,282^BCN,60,N,N,N^FDSSL-PHARM-001^FS
+
+^FO15,370^GB370,2,2^FS
+
+^FO15,380^A0N,18,18^FDShowline Solutions (Pvt) Ltd  |  Harare, Zimbabwe^FS
+
+^XZ

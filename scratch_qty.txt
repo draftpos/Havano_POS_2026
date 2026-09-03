@@ -1,0 +1,100 @@
+        self._highlight_active_row(first_empty)
+
+        # 6. Close any open search popups then reopen at the new empty row
+        self._close_inline_search()
+        self._open_inline_search(first_empty, 0)
+
+        # Provide status feedback in the main window status bar
+        if self.parent_window:
+            self.parent_window._set_status("Line deleted — ready for next item.")
+
+    def _numpad_enter(self):
+        """#6 Enter always advances to next cart line.
+        Cols 0/1/2 (Code/Details/Price) → land on Qty.
+        Col 3+ (Qty/Disc/Tax/Total)     → finalise, open search on next row.
+        """
+        if self._active_row < 0:
+            return
+        self._numpad_buffer = ""
+
+        if self._active_col in (0, 1, 2):
+            self._active_col = 3
+            self.invoice_table.setCurrentCell(self._active_row, 3)
+            self._close_inline_search()
+            self._highlight_active_row(self._active_row)
+        else:
+            self._recalc_row(self._active_row)
+            self._recalc_totals()
+            next_row = self._find_next_empty_row()
+            self._active_row = next_row
+            self._active_col = 0
+            self.invoice_table.setCurrentCell(next_row, 0)
+            self.invoice_table.scrollToItem(
+                self.invoice_table.item(next_row, 0),
+                QAbstractItemView.EnsureVisible)
+            self._highlight_active_row(next_row)
+            self._open_inline_search(next_row, 0)
+        
+    def _open_qty_popup(self):
+        row = self._last_filled_row
+        if row < 0: row = self._active_row
+        if row < 0: row = self.invoice_table.currentRow()
+        if row < 0: return
+
+        # Pharmacy lock: cashiers cannot change qty on pharmacy rows
+        if self._is_pharmacy_row_locked(row):
+            self._notify_pharmacy_locked(row)
+            return
+
+        name_item = self.invoice_table.item(row, 1)
+        product_name = name_item.text().strip() if name_item else ""
+        if not product_name: return
+
+        qty_item = self.invoice_table.item(row, 3)
+        try:
+            current_qty = float(qty_item.text() or "1") if qty_item else 1.0
+        except ValueError:
+            current_qty = 1.0
+
+        self._close_inline_search()
+
+        popup = QuantityPopup(self, product_name=product_name, current_qty=current_qty)
+        if popup.exec() == QDialog.Accepted:
+            new_qty = popup.entered_qty
+            self._block_signals = True
+            if not qty_item:
+                qty_item = QTableWidgetItem("")
+                self.invoice_table.setItem(row, 3, qty_item)
+            qty_item.setText(f"{new_qty:.4g}")
+            qty_item.setTextAlignment(Qt.AlignCenter)
+            self._block_signals = False
+            self._recalc_row(row)
+            self._active_row = row; self._active_col = 3; self._last_filled_row = row
+            self.invoice_table.setCurrentCell(row, 3)
+            self._highlight_active_row(row)
+            if self.parent_window:
+                self.parent_window._set_status(f"Qty updated: {product_name}  ×{new_qty:.4g}")
+
+   # =========================================================================
+    # BOTTOM GRID — category tabs + product cards
+    # =========================================================================
+    def _build_bottom_grid(self):
+        container = QWidget(); container.setStyleSheet(f"background-color: {WHITE};")
+        outer = QVBoxLayout(container); outer.setSpacing(0); outer.setContentsMargins(0, 0, 0, 0)
+
+        try:
+            from models.product import get_categories
+            self._category_names = get_categories()
+        except Exception:
+            self._category_names = []
+
+        # Filter out categories that have been disabled in Settings → Category Visibility
+        _disabled = load_disabled_categories()
+        if _disabled:
+            self._category_names = [c for c in self._category_names if c not in _disabled]
+
+        # Always ensure "All" tab exists — products synced from server have no category
+        if "All" not in self._category_names:
+            self._category_names = ["All"] + self._category_names
+        if not self._category_names:
+            self._category_names = ["All"]

@@ -1,0 +1,880 @@
+# services/fiscalization_service.py - PRODUCTION READY (FINAL - NO CONVERSION FOR ZIG)
+
+import threading
+import time
+from typing import Optional, List
+from dataclasses import dataclass
+import xml.etree.ElementTree as ET
+import json
+from datetime import datetime
+
+from models.fiscal_settings import FiscalSettingsRepository
+from services.zimra_api_service import get_zimra_service
+from database.db import get_connection, fetchone_dict, fetchall_dicts
+
+HS_CODE_DEFAULT = "99999999"
+
+
+@dataclass
+class FiscalInvoiceItem:
+    line_number: int
+    item_code:   str
+    item_name:   str
+    item_name2:  str
+    quantity:    float
+    price:       float
+    total:       float
+    vat:         float
+    vat_rate:    float
+    vat_name:    str
+
+    @staticmethod
+    def build_items_xml(items: List["FiscalInvoiceItem"]) -> str:
+        root = ET.Element("ITEMS")
+        for item in items:
+            item_elem = ET.SubElement(root, "ITEM")
+            ET.SubElement(item_elem, "HH").text       = str(item.line_number)
+            ET.SubElement(item_elem, "ITEMCODE").text = str(item.item_code)
+            ET.SubElement(item_elem, "ITEMNAME").text  = str(item.item_name)[:100]
+            ET.SubElement(item_elem, "ITEMNAME2").text = str(item.item_name2)[:100]
+            ET.SubElement(item_elem, "QTY").text       = f"{item.quantity:.2f}"
+            ET.SubElement(item_elem, "PRICE").text     = f"{item.price:.2f}"
+            ET.SubElement(item_elem, "TOTAL").text     = f"{item.total:.2f}"
+            ET.SubElement(item_elem, "VAT").text       = f"{item.vat:.2f}"
+            ET.SubElement(item_elem, "VATR").text      = f"{item.vat_rate:.3f}"
+            ET.SubElement(item_elem, "VNAME").text     = str(item.vat_name)[:20]
+        return ET.tostring(root, encoding="unicode")
+
+
+@dataclass
+class FiscalizationBatchResult:
+    total_count:   int = 0
+    success_count: int = 0
+    failed_count:  int = 0
+    errors: List[str] = None
+
+    def __post_init__(self):
+        if self.errors is None:
+            self.errors = []
+
+
+class FiscalizationService:
+
+    def __init__(self):
+        self._settings_repo = FiscalSettingsRepository()
+        self._zimra_service = get_zimra_service()
+
+    def is_fiscalization_enabled(self) -> bool:
+        settings = self._settings_repo.get_settings()
+        return settings is not None and settings.enabled
+
+    # =========================================================================
+    # SALE FISCALIZATION - NO CONVERSION EVER
+    # =========================================================================
+
+    def process_sale_fiscalization(self, sale_id: int, skip_sync: bool = False) -> bool:
+        try:
+            settings = self._settings_repo.get_settings()
+
+            if not settings or not settings.enabled:
+                print(f"ℹ️ Fiscalization disabled, skipping for sale {sale_id}")
+                self._update_sale_fiscal_status(sale_id, "not_required")
+                return True
+
+            sale = self._get_sale_by_id(sale_id)
+            if not sale:
+                raise Exception(f"Sale not found: {sale_id}")
+
+            if sale.get("fiscal_status") == "fiscalized":
+                print(f"✓ Sale {sale_id} is already fiscalized")
+                return True
+
+            print(f"📝 Starting fiscalization for sale {sale_id}")
+            self._update_sale_fiscal_status(sale_id, "pending")
+
+            sale_items = self._get_sale_items(sale_id)
+            if not sale_items:
+                print(f"[!] No items found for sale {sale_id}")
+                self._update_sale_fiscal_status(sale_id, "failed")
+                return False
+
+            # Get currency from sale record - USE AS IS, NO CONVERSION
+            fiscal_currency = sale.get("currency", "USD").upper()
+            fiscal_tendered = abs(float(sale.get("tendered") or 0))
+            
+            # Map Zimbabwe currencies to ZWG for ZIMRA
+            if fiscal_currency in ("ZWD", "ZWL", "ZIG"):
+                fiscal_currency = "ZWG"
+            
+            # Build items using values as-is from database (already in correct currency)
+            fiscal_items = self._build_fiscal_items(sale_items)
+            items_xml = FiscalInvoiceItem.build_items_xml(fiscal_items)
+
+            invoice_number = str(sale.get("invoice_no", sale_id))
+            customer_name = sale.get("customer_name", "Cash Customer") or "Cash Customer"
+            
+            buyer_tin = ""
+            buyer_vat = ""
+            buyer_email = ""
+            buyer_phone = ""
+            buyer_city = ""
+            buyer_street = ""
+            buyer_house_no = ""
+            buyer_province = ""
+
+            buyer_trade_name = customer_name
+
+            if customer_name and customer_name.lower() not in ("walk-in", "walk in customer", "default customer", "Cash Customer"):
+                try:
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT custom_customer_tin, custom_customer_vat, custom_email_address, "
+                        "custom_telephone_number, custom_city, custom_house_no, custom_street, custom_province, custom_trade_name "
+                        "FROM customers WHERE customer_name = ?", (customer_name,)
+                    )
+                    row = cursor.fetchone()
+                    conn.close()
+                    if row:
+                        buyer_tin = row[0] or ""
+                        buyer_vat = row[1] or ""
+                        buyer_email = row[2] or ""
+                        buyer_phone = row[3] or ""
+                        buyer_city = row[4] or ""
+                        buyer_house_no = row[5] or ""
+                        buyer_street = row[6] or ""
+                        buyer_province = row[7] or ""
+                        if row[8]:
+                            buyer_trade_name = row[8]
+                except Exception as e:
+                    print(f"Error fetching customer details for fiscalization: {e}")
+
+            buyer_tin = str(buyer_tin).strip() if buyer_tin else ""
+            
+
+            buyer_vat = str(buyer_vat).strip() if buyer_vat else ""
+            
+
+            print(f"\n{'='*60}")
+            print(f"SALE FISCALIZATION PAYLOAD:")
+            print(f"{'='*60}")
+            print(f"  provider: {getattr(settings, 'provider', 'frappe')}")
+            print(f"  invoice_flag: 0")
+            print(f"  currency: {fiscal_currency}")
+            print(f"  invoice_number: {invoice_number}")
+            print(f"  tendered: {fiscal_tendered:.2f}")
+            if buyer_tin: print(f"  buyer_tin: {buyer_tin}")
+            if buyer_vat: print(f"  buyer_vat: {buyer_vat}")
+            print(f"{'='*60}\n")
+
+            if getattr(settings, "provider", "frappe") == "axis":
+                from services.axis_api_service import get_axis_api_service
+                axis_service = get_axis_api_service()
+                
+                # Format datetime for Axis (YYYY-MM-DDTHH:MM:SS)
+                # Sales from DB typically have 'date' (YYYY-MM-DD) and 'time' (HH:MM:SS)
+                sale_date = str(sale.get("date", "")).split(" ")[0]
+                sale_time = str(sale.get("time", "")).strip()
+                if sale_time == "":
+                    sale_time = "00:00:00"
+                formatted_receipt_date = f"{sale_date}T{sale_time}" if sale_date else ""
+
+                result = axis_service.send_invoice(
+                    settings=settings,
+                    invoice_number=invoice_number,
+                    currency=fiscal_currency,
+                    customer_name=customer_name,
+                    trade_name=buyer_trade_name,
+                    fiscal_items=fiscal_items,
+                    tendered=fiscal_tendered,
+                    receipt_date=formatted_receipt_date,
+                    buyer_tin=buyer_tin,
+                    buyer_vat=buyer_vat,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    buyer_city=buyer_city,
+                    buyer_street=buyer_street,
+                    buyer_house_no=buyer_house_no,
+                    buyer_province=buyer_province,
+                )
+            elif getattr(settings, "provider", "frappe") == "revmax":
+                from services.revmax_api_service import get_revmax_api_service
+                revmax_service = get_revmax_api_service()
+                
+                result = revmax_service.send_invoice(
+                    settings=settings,
+                    invoice_number=invoice_number,
+                    currency=fiscal_currency,
+                    customer_name=customer_name,
+                    trade_name=buyer_trade_name,
+                    fiscal_items=fiscal_items,
+                    tendered=fiscal_tendered,
+                    invoice_flag=0,
+                    buyer_tin=buyer_tin,
+                    buyer_vat=buyer_vat,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    buyer_city=buyer_city,
+                    buyer_street=buyer_street,
+                    buyer_house_no=buyer_house_no,
+                    buyer_province=buyer_province,
+                )
+            else:
+                result = self._zimra_service.send_invoice(
+                    settings=settings,
+                    invoice_number=invoice_number,
+                    currency=fiscal_currency,
+                    customer_name=customer_name,
+                    trade_name=buyer_trade_name,
+                    items_xml=items_xml,
+                    tendered=fiscal_tendered,
+                    buyer_tin=buyer_tin,
+                    buyer_vat=buyer_vat,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    buyer_city=buyer_city,
+                    buyer_street=buyer_street,
+                    buyer_house_no=buyer_house_no,
+                    buyer_province=buyer_province,
+                )
+
+            if not result.is_success:
+                print(f"[!] API error: {result.error}. Falling back to offline mode.")
+                return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
+                
+            if result.data is None:
+                print(f"[!] No data returned. Falling back to offline mode.")
+                return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
+
+            fd = result.data
+            self._update_sale_fiscal_data(
+                sale_id=sale_id,
+                fiscal_status="fiscalized",
+                qr_code=fd.qr_code,
+                verification_code=fd.verification_code,
+                receipt_counter=fd.receipt_counter,
+                global_no=str(fd.receipt_global_no),
+                device_id=getattr(fd, "device_id", ""),
+                device_sn=getattr(fd, "device_serial", getattr(fd, "efd_serial", "")),
+                fiscal_day=getattr(fd, "fiscal_day", "")
+            )
+
+            print(f"[OK] Sale {sale_id} fiscalized - Global No: {fd.receipt_global_no}")
+            return True
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Fiscalization exception for sale {sale_id}: {error_msg}. Attempting offline fallback.")
+            try:
+                # Try offline fallback even on exception (e.g. timeout)
+                settings = self._settings_repo.get_settings()
+                sale = self._get_sale_by_id(sale_id)
+                fiscal_currency = sale.get("currency", "USD").upper()
+                if fiscal_currency in ("ZWD", "ZWL", "ZIG"):
+                    fiscal_currency = "ZWG"
+                return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
+            except Exception as e2:
+                print(f"❌ Critical failure: {e2}")
+                self._update_sale_fiscal_error(sale_id, f"Both online and offline modes failed: {error_msg}")
+                return False
+
+    # =========================================================================
+    # OFFLINE FISCALIZATION HELPERS
+    # =========================================================================
+
+    def _process_offline_sale(self, sale_id: int, settings, sale, currency: str) -> bool:
+        """
+        Processes a sale in offline mode by generating a dynamic ZIMRA URL locally.
+        Marks the sale as PENDING_SYNC for later background upload.
+        """
+        try:
+            from services.fiscal import FiscalLogic
+            
+            # 1. Use the sale's own invoice sequence as the temporary global number
+            # This ensures that the receipt number and the database invoice number match offline.
+            global_no = int(sale.get("invoice_number", 0))
+            if global_no == 0:
+                global_no = FiscalLogic.get_next_global_no()
+            else:
+                # Sync the global counter to match this invoice number
+                FiscalLogic.repo = self._settings_repo # Ensure repo is set
+                from models.fiscal_settings import FiscalSettingsRepository
+                FiscalSettingsRepository.update_last_global_no(global_no)
+            
+            # 2. Generate signature (hash)
+            date = datetime.now()
+            total = float(sale.get("total") or 0)
+            sig = FiscalLogic.generate_offline_signature(settings.device_sn, date, global_no, total)
+            
+            # 3. Construct URL
+            url = FiscalLogic.construct_url(settings.device_sn, date, global_no, sig)
+            
+            # 4. Update sale with offline data
+            self._update_sale_fiscal_data(
+                sale_id=sale_id,
+                fiscal_status="PENDING_SYNC",
+                qr_code=url,
+                verification_code=sig[:16].upper(), # Match the 16 chars used in the URL
+                receipt_counter=0, # Unknown until synced
+                global_no=str(global_no),
+                device_sn=settings.device_sn
+            )
+            
+            print(f"[OK] Sale {sale_id} processed OFFLINE - Local Global No: {global_no}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Critical failure in offline fiscalization for sale {sale_id}: {e}")
+            self._update_sale_fiscal_error(sale_id, f"Offline mode failure: {e}")
+            return False
+
+    # =========================================================================
+    # CREDIT NOTE FISCALIZATION - NO CONVERSION EVER
+    # =========================================================================
+
+    def process_credit_note_fiscalization(self, cn_id: int) -> bool:
+        try:
+            settings = self._settings_repo.get_settings()
+
+            if not settings or not settings.enabled:
+                print(f"ℹ️ Fiscalization disabled - skipping credit note {cn_id}")
+                self._update_cn_fiscal_status(cn_id, "not_required")
+                return True
+
+            cn = self._get_cn_by_id(cn_id)
+            if not cn:
+                raise Exception(f"Credit note not found: {cn_id}")
+
+            if cn.get("fiscal_status") == "fiscalized":
+                print(f"✓ Credit note {cn_id} already fiscalized")
+                return True
+
+            cn_number = cn.get("cn_number", str(cn_id))
+            original_inv_no = cn.get("original_invoice_no", "")
+            original_sale_id = cn.get("original_sale_id")
+            
+            original_global_no = ""
+            if original_sale_id:
+                original_sale = self._get_sale_by_id(original_sale_id)
+                if original_sale:
+                    original_global_no = original_sale.get("fiscal_global_no", "")
+                    print(f"📋 Original sale {original_sale_id} fiscal_global_no: {original_global_no}")
+            
+            # USE CREDIT NOTE'S OWN CURRENCY - NO CONVERSION
+            fiscal_currency = cn.get("currency", "USD").upper()
+            fiscal_tendered = abs(float(cn.get("total") or 0))
+            customer_name = cn.get("customer_name", "Cash Customer") or "Cash Customer"
+            
+            # Map Zimbabwe currencies to ZWG for ZIMRA
+            if fiscal_currency in ("ZWD", "ZWL", "ZIG"):
+                fiscal_currency = "ZWG"
+
+            print(f"📝 Credit note: {cn_number}")
+            print(f"   Original invoice: {original_inv_no}")
+            print(f"   Original global_no: {original_global_no}")
+            print(f"   Currency: {fiscal_currency}")
+            print(f"   Tendered: {fiscal_tendered:.2f}")
+            
+            self._update_cn_fiscal_status(cn_id, "pending")
+
+            cn_items = self._get_cn_items(cn_id)
+            if not cn_items:
+                raise Exception(f"No items found for credit note {cn_id}")
+
+            # Build items - USE EXACT VALUES, NO CONVERSION
+            fiscal_items = []
+            for idx, item in enumerate(cn_items, 1):
+                qty = abs(float(item.get("qty", 0)))
+                price = abs(float(item.get("price", 0)))
+                total = abs(float(item.get("total", qty * price)))
+                tax_amount = abs(float(item.get("tax_amount", 0)))
+                tax_rate = float(item.get("tax_rate", 0))
+                tax_type = str(item.get("tax_type", "")).upper()
+
+                if tax_amount <= 0.005 or tax_rate <= 0:
+                    vat_name = "EXEMPT"
+                elif tax_type in ("VAT", "STANDARD VAT"):
+                    vat_name = "VAT"
+                elif tax_type in ("ZERO", "ZERO RATED"):
+                    vat_name = "ZERO RATED"
+                else:
+                    vat_name = "VAT" if tax_rate > 0 else "EXEMPT"
+
+                # Fix tax rate if it's stored as a decimal (e.g. 0.155 instead of 15.5)
+                if 0 < tax_rate < 1:
+                    tax_rate = tax_rate * 100
+
+                # Recalculate VAT to satisfy strict Axis inclusive VAT validation
+                if vat_name == "VAT" and tax_rate > 0:
+                    tax_amount = round(total - (total / (1 + (tax_rate / 100))), 2)
+
+                print(f"   CN Item {idx}: {item.get('product_name')}  "
+                      f"qty={qty}  price={price:.2f}  total={total:.2f}  "
+                      f"vat={tax_amount:.2f}  rate={tax_rate}%")
+
+                hs_code = str(item.get("hs_code", "")).strip()
+                if not hs_code:
+                    hs_code = HS_CODE_DEFAULT
+
+                fiscal_items.append(FiscalInvoiceItem(
+                    line_number=idx,
+                    item_code=hs_code,
+                    item_name=str(item.get("product_name", ""))[:100],
+                    item_name2=str(item.get("product_name", ""))[:100],
+                    quantity=qty,
+                    price=price,
+                    total=total,
+                    vat=tax_amount,
+                    vat_rate=tax_rate / 100,
+                    vat_name=vat_name,
+                ))
+            
+            items_xml = FiscalInvoiceItem.build_items_xml(fiscal_items)
+            
+            buyer_tin = ""
+            buyer_vat = ""
+            buyer_email = ""
+            buyer_phone = ""
+            buyer_city = ""
+            buyer_street = ""
+            buyer_house_no = ""
+            buyer_province = ""
+
+            buyer_trade_name = customer_name
+
+            if customer_name and customer_name.lower() not in ("walk-in", "walk in customer", "default customer", "Cash Customer"):
+                try:
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT custom_customer_tin, custom_customer_vat, custom_email_address, "
+                        "custom_telephone_number, custom_city, custom_house_no, custom_street, custom_province, custom_trade_name "
+                        "FROM customers WHERE customer_name = ?", (customer_name,)
+                    )
+                    row = cursor.fetchone()
+                    conn.close()
+                    if row:
+                        buyer_tin = row[0] or ""
+                        buyer_vat = row[1] or ""
+                        buyer_email = row[2] or ""
+                        buyer_phone = row[3] or ""
+                        buyer_city = row[4] or ""
+                        buyer_house_no = row[5] or ""
+                        buyer_street = row[6] or ""
+                        buyer_province = row[7] or ""
+                        if row[8]:
+                            buyer_trade_name = row[8]
+                except Exception as e:
+                    print(f"Error fetching customer details for fiscalization: {e}")
+
+            buyer_tin = str(buyer_tin).strip() if buyer_tin else ""
+            
+
+            buyer_vat = str(buyer_vat).strip() if buyer_vat else ""
+            
+
+            print(f"\n{'='*60}")
+            print(f"CREDIT NOTE PAYLOAD:")
+            print(f"{'='*60}")
+            print(f"  provider: {getattr(settings, 'provider', 'frappe')}")
+            print(f"  invoice_flag: 1")
+            print(f"  currency: {fiscal_currency}")
+            print(f"  invoice_number: {cn_number}")
+            print(f"  original_invoice_no: {original_inv_no}")
+            print(f"  global_invoice_no: {original_global_no}")
+            print(f"  tendered: {fiscal_tendered:.2f}")
+            if buyer_tin: print(f"  buyer_tin: {buyer_tin}")
+            if buyer_vat: print(f"  buyer_vat: {buyer_vat}")
+            print(f"{'='*60}\n")
+
+            if getattr(settings, "provider", "frappe") == "axis":
+                from services.axis_api_service import get_axis_api_service
+                axis_service = get_axis_api_service()
+                result = axis_service.send_invoice(
+                    settings=settings,
+                    invoice_number=cn_number,
+                    currency=fiscal_currency,
+                    customer_name=customer_name,
+                    trade_name=buyer_trade_name,
+                    fiscal_items=fiscal_items,
+                    invoice_flag=1,
+                    original_invoice_no=original_inv_no,
+                    global_invoice_no=original_global_no,
+                    tendered=fiscal_tendered,
+                    buyer_tin=buyer_tin,
+                    buyer_vat=buyer_vat,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    buyer_city=buyer_city,
+                    buyer_street=buyer_street,
+                    buyer_house_no=buyer_house_no,
+                    buyer_province=buyer_province,
+                )
+            elif getattr(settings, "provider", "frappe") == "revmax":
+                from services.revmax_api_service import get_revmax_api_service
+                revmax_service = get_revmax_api_service()
+                result = revmax_service.send_invoice(
+                    settings=settings,
+                    invoice_number=cn_number,
+                    currency=fiscal_currency,
+                    customer_name=customer_name,
+                    trade_name=buyer_trade_name,
+                    fiscal_items=fiscal_items,
+                    invoice_flag=1,
+                    original_invoice_no=original_inv_no,
+                    global_invoice_no=original_global_no,
+                    tendered=fiscal_tendered,
+                    buyer_tin=buyer_tin,
+                    buyer_vat=buyer_vat,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    buyer_city=buyer_city,
+                    buyer_street=buyer_street,
+                    buyer_house_no=buyer_house_no,
+                    buyer_province=buyer_province,
+                )
+            else:
+                result = self._zimra_service.send_invoice(
+                    settings=settings,
+                    invoice_number=cn_number,
+                    currency=fiscal_currency,
+                    customer_name=customer_name,
+                    trade_name=buyer_trade_name,
+                    items_xml=items_xml,
+                    invoice_flag=1,
+                    original_invoice_no=original_inv_no,
+                    global_invoice_no=original_global_no,
+                    tendered=fiscal_tendered,
+                    buyer_tin=buyer_tin,
+                    buyer_vat=buyer_vat,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    buyer_city=buyer_city,
+                    buyer_street=buyer_street,
+                    buyer_house_no=buyer_house_no,
+                    buyer_province=buyer_province,
+                )
+
+            if not result.is_success:
+                if result.error and "already exist" in result.error.lower():
+                    print(f"[!] CN {cn_id} already exists - marking fiscalized")
+                    self._update_cn_fiscal_status(cn_id, "fiscalized")
+                    return True
+                raise Exception(f"API error: {result.error}")
+            
+            if result.data is None:
+                raise Exception("No data returned")
+
+            fd = result.data
+            self._update_cn_fiscal_data(
+                cn_id=cn_id,
+                fiscal_status="fiscalized",
+                qr_code=fd.qr_code,
+                verification_code=fd.verification_code,
+                receipt_counter=fd.receipt_counter,
+                global_no=str(fd.receipt_global_no),
+            )
+
+            print(f"[OK] Credit note {cn_number} fiscalized successfully")
+            print(f"   New Global No: {fd.receipt_global_no}")
+            return True
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Credit note fiscalization failed for {cn_id}: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            self._update_cn_fiscal_error(cn_id, error_msg)
+            return False
+
+    def trigger_credit_note_fiscalization_background(self, cn_id: int):
+        def _run():
+            retry_delay = 30
+            attempt = 0
+            time.sleep(5)
+            while True:
+                attempt += 1
+                try:
+                    if not self.is_fiscalization_enabled():
+                        self._update_cn_fiscal_status(cn_id, "not_required")
+                        return
+                    cn = self._get_cn_by_id(cn_id)
+                    if cn and cn.get("fiscal_status") == "fiscalized":
+                        print(f"[CN] CN {cn_id} already fiscalized - stopping")
+                        return
+                    print(f"[CN] Attempt {attempt} for CN {cn_id}")
+                    if self.process_credit_note_fiscalization(cn_id):
+                        print(f"[CN] [OK] CN {cn_id} done")
+                        return
+                    print(f"[CN] ❌ CN {cn_id} failed, retry in {retry_delay}s")
+                    time.sleep(retry_delay)
+                except Exception as e:
+                    print(f"[CN] Error CN {cn_id}: {e}, retry in {retry_delay}s")
+                    time.sleep(retry_delay)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    # =========================================================================
+    # ITEM BUILDERS - NO CONVERSION, USE VALUES AS-IS
+    # =========================================================================
+
+    def _build_fiscal_items(self, sale_items: list) -> List[FiscalInvoiceItem]:
+        """Build fiscal items using values as-is from database (already correct currency)."""
+        fiscal_items = []
+        for idx, item in enumerate(sale_items, 1):
+            price = abs(float(item.get("price", 0)))
+            qty = abs(float(item.get("qty", 1)))
+            total = abs(float(item.get("total", 0)))
+            tax_rate = float(item.get("tax_rate", 0))
+            vat_amount = abs(float(item.get("tax_amount", 0)))
+            tax_type = str(item.get("tax_type", "")).upper()
+
+            if vat_amount <= 0.005 or tax_rate <= 0:
+                vat_name = "EXEMPT"
+            elif tax_type in ("VAT", "STANDARD VAT"):
+                vat_name = "VAT"
+            else:
+                vat_name = "VAT" if tax_rate > 0 else "EXEMPT"
+
+            # Fix tax rate if it's stored as a decimal (e.g. 0.155 instead of 15.5)
+            if 0 < tax_rate < 1:
+                tax_rate = tax_rate * 100
+
+            # Recalculate VAT to satisfy strict Axis inclusive VAT validation
+            if vat_name == "VAT" and tax_rate > 0:
+                vat_amount = round(total - (total / (1 + (tax_rate / 100))), 2)
+
+            hs_code = str(item.get("hs_code", "")).strip()
+            if not hs_code:
+                hs_code = HS_CODE_DEFAULT
+
+            fiscal_items.append(FiscalInvoiceItem(
+                line_number=idx,
+                item_code=hs_code,
+                item_name=str(item.get("product_name", ""))[:100],
+                item_name2=str(item.get("product_name", ""))[:100],
+                quantity=qty,
+                price=price,
+                total=total,
+                vat=vat_amount,
+                vat_rate=tax_rate / 100,
+                vat_name=vat_name,
+            ))
+        return fiscal_items
+
+    # =========================================================================
+    # DATABASE HELPERS
+    # =========================================================================
+
+    def _get_sale_by_id(self, sale_id: int) -> Optional[dict]:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT id, invoice_no, invoice_number, total, tendered, method,
+                       currency, customer_name, frappe_ref, created_at,
+                       fiscal_status, fiscal_qr_code, fiscal_verification_code,
+                       fiscal_receipt_counter, fiscal_global_no, fiscal_sync_date,
+                       fiscal_error
+                FROM sales WHERE id = ?
+            """, (sale_id,))
+            return fetchone_dict(cursor)
+        finally:
+            conn.close()
+
+    def _get_sale_items(self, sale_id: int) -> List[dict]:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT s.id, s.part_no, s.product_name, s.qty, s.price, s.discount,
+                       s.tax, s.total, s.tax_type, s.tax_rate, s.tax_amount, s.remarks,
+                       COALESCE(p.hs_code, '') as hs_code
+                FROM sale_items s
+                LEFT JOIN products p ON s.part_no = p.part_no
+                WHERE s.sale_id = ?
+                ORDER BY s.id
+            """, (sale_id,))
+            return fetchall_dicts(cursor)
+        finally:
+            conn.close()
+
+    def _update_sale_fiscal_status(self, sale_id: int, status: str) -> bool:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE sales SET fiscal_status = ? WHERE id = ?", (status, sale_id))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def _update_sale_fiscal_data(self, sale_id: int, fiscal_status: str, qr_code: str = None,
+                                  verification_code: str = None, receipt_counter: int = None,
+                                  global_no: str = None, device_id: str = None, device_sn: str = None,
+                                  fiscal_day: str = None) -> bool:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE sales
+                SET fiscal_status = ?, fiscal_qr_code = ?, fiscal_verification_code = ?,
+                    fiscal_receipt_counter = ?, fiscal_global_no = ?,
+                    fiscal_device_id = ?, fiscal_device_serial = ?, fiscal_day = ?,
+                    fiscal_sync_date = SYSDATETIME(), fiscal_error = NULL
+                WHERE id = ?
+            """, (fiscal_status, qr_code, verification_code, receipt_counter, global_no, device_id, device_sn, fiscal_day, sale_id))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def _update_sale_fiscal_error(self, sale_id: int, error: str) -> bool:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE sales SET fiscal_status = 'failed', fiscal_error = ?,
+                fiscal_sync_date = SYSDATETIME() WHERE id = ?
+            """, (error[:500], sale_id))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def _get_cn_by_id(self, cn_id: int) -> Optional[dict]:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT id, cn_number, original_sale_id, original_invoice_no,
+                       frappe_ref, total, currency, cashier_name, customer_name, cn_status,
+                       COALESCE(fiscal_status, 'pending') AS fiscal_status,
+                       COALESCE(fiscal_qr_code, '') AS fiscal_qr_code,
+                       COALESCE(fiscal_verification_code,'') AS fiscal_verification_code,
+                       fiscal_receipt_counter, COALESCE(fiscal_global_no, '') AS fiscal_global_no,
+                       fiscal_error
+                FROM credit_notes WHERE id = ?
+            """, (cn_id,))
+            return fetchone_dict(cursor)
+        finally:
+            conn.close()
+
+    def _get_cn_items(self, cn_id: int) -> List[dict]:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT c.part_no, c.product_name, c.qty, c.price, c.total, c.reason,
+                       c.tax_amount, c.tax_rate, c.tax_type,
+                       COALESCE(p.hs_code, '') as hs_code
+                FROM credit_note_items c
+                LEFT JOIN products p ON c.part_no = p.part_no
+                WHERE c.credit_note_id = ?
+                ORDER BY c.id
+            """, (cn_id,))
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, r)) for r in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def _update_cn_fiscal_status(self, cn_id: int, status: str) -> bool:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE credit_notes SET fiscal_status = ? WHERE id = ?", (status, cn_id))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def _update_cn_fiscal_data(self, cn_id: int, fiscal_status: str, qr_code: str = None,
+                                verification_code: str = None, receipt_counter: int = None,
+                                global_no: str = None) -> bool:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE credit_notes
+                SET fiscal_status = ?, fiscal_qr_code = ?, fiscal_verification_code = ?,
+                    fiscal_receipt_counter = ?, fiscal_global_no = ?,
+                    fiscal_sync_date = SYSDATETIME(), fiscal_error = NULL
+                WHERE id = ?
+            """, (fiscal_status, qr_code, verification_code, receipt_counter, global_no, cn_id))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def _update_cn_fiscal_error(self, cn_id: int, error: str) -> bool:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE credit_notes SET fiscal_status = 'failed', fiscal_error = ?,
+                fiscal_sync_date = SYSDATETIME() WHERE id = ?
+            """, (error[:500], cn_id))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def retry_fiscalization(self, sale_id: int) -> bool:
+        return self.process_sale_fiscalization(sale_id, skip_sync=True)
+
+    def get_pending_fiscalization_count(self) -> int:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT COUNT(*) FROM sales WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC')")
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+
+    def process_all_pending(self) -> FiscalizationBatchResult:
+        result = FiscalizationBatchResult()
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT id FROM sales WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC') ORDER BY id")
+            pending = cursor.fetchall()
+            result.total_count = len(pending)
+        finally:
+            conn.close()
+
+        for row in pending:
+            try:
+                if self.process_sale_fiscalization(row[0], skip_sync=True):
+                    result.success_count += 1
+                else:
+                    result.failed_count += 1
+                    result.errors.append(f"Sale {row[0]}: Failed")
+            except Exception as e:
+                result.failed_count += 1
+                result.errors.append(f"Sale {row[0]}: {e}")
+        return result
+
+    def get_pending_z_details(self) -> List[dict]:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT tax_type, tax_rate, SUM(tax_amount) AS total_vat,
+                       SUM(total) AS total_gross, SUM(total - tax_amount) AS total_net
+                FROM sale_items
+                WHERE sale_id IN (SELECT id FROM sales WHERE fiscal_status IN ('pending', 'failed'))
+                GROUP BY tax_type, tax_rate ORDER BY tax_rate DESC
+            """)
+            return fetchall_dicts(cursor)
+        finally:
+            conn.close()
+
+
+_fiscalization_service = None
+
+def get_fiscalization_service() -> FiscalizationService:
+    global _fiscalization_service
+    if _fiscalization_service is None:
+        _fiscalization_service = FiscalizationService()
+    return _fiscalization_service
