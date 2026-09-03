@@ -1,0 +1,10 @@
+6165: '✓' -> ok_btn = QPushButton("✓")
+7965: '✓' -> ok_btn = QPushButton("✓")
+11297: '✓' -> #     When all three counts are zero   -> show a single green "✓ All Synced" badge.
+25665: '✓' -> reason = self._show_cancel_reason_dialog(order_data["id"], predefined_reasons, title="Modify Reason", action_text="✓  Mo
+25760: '✓' -> def _show_cancel_reason_dialog(self, order_id: int, predefined: list, title: str = "Cancel Reason", action_text: str = "
+6198: '✕' -> clr_btn = QPushButton("✕")
+7998: '✕' -> clr_btn = QPushButton("✕")
+26009: '✕' -> dismiss_btn = QPushButton("✕")
+6179: '⌨' -> osk_btn = QPushButton("⌨")
+7979: '⌨' -> osk_btn = QPushButton("⌨")

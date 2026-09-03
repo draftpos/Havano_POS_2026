@@ -1,0 +1,525 @@
+﻿{
+    "openapi":  "3.0.1",
+    "info":  {
+                 "title":  "Axis.VirtualDevice",
+                 "version":  "1.0"
+             },
+    "paths":  {
+                  "/api/Auth/login":  {
+                                          "post":  {
+                                                       "tags":  [
+                                                                    "Auth"
+                                                                ],
+                                                       "requestBody":  {
+                                                                           "content":  {
+                                                                                           "application/json":  "@{schema=}",
+                                                                                           "text/json":  "@{schema=}",
+                                                                                           "application/*+json":  "@{schema=}"
+                                                                                       }
+                                                                       },
+                                                       "responses":  {
+                                                                         "200":  {
+                                                                                     "description":  "Success"
+                                                                                 }
+                                                                     }
+                                                   }
+                                      },
+                  "/api/VirtualDevice/GetConfig":  {
+                                                       "get":  {
+                                                                   "tags":  [
+                                                                                "VirtualDevice"
+                                                                            ],
+                                                                   "responses":  {
+                                                                                     "200":  {
+                                                                                                 "description":  "Success"
+                                                                                             }
+                                                                                 }
+                                                               }
+                                                   },
+                  "/api/VirtualDevice/GetStatus":  {
+                                                       "get":  {
+                                                                   "tags":  [
+                                                                                "VirtualDevice"
+                                                                            ],
+                                                                   "responses":  {
+                                                                                     "200":  {
+                                                                                                 "description":  "Success"
+                                                                                             }
+                                                                                 }
+                                                               }
+                                                   },
+                  "/api/VirtualDevice/OpenFiscalDay":  {
+                                                           "get":  {
+                                                                       "tags":  [
+                                                                                    "VirtualDevice"
+                                                                                ],
+                                                                       "responses":  {
+                                                                                         "200":  {
+                                                                                                     "description":  "Success"
+                                                                                                 }
+                                                                                     }
+                                                                   }
+                                                       },
+                  "/api/VirtualDevice/CloseFiscalDay":  {
+                                                            "get":  {
+                                                                        "tags":  [
+                                                                                     "VirtualDevice"
+                                                                                 ],
+                                                                        "responses":  {
+                                                                                          "200":  {
+                                                                                                      "description":  "Success"
+                                                                                                  }
+                                                                                      }
+                                                                    }
+                                                        },
+                  "/api/VirtualDevice/GetInvoice/{invoiceNumber}":  {
+                                                                        "get":  {
+                                                                                    "tags":  [
+                                                                                                 "VirtualDevice"
+                                                                                             ],
+                                                                                    "parameters":  [
+                                                                                                       {
+                                                                                                           "name":  "invoiceNumber",
+                                                                                                           "in":  "path",
+                                                                                                           "required":  true,
+                                                                                                           "schema":  "@{type=string}"
+                                                                                                       }
+                                                                                                   ],
+                                                                                    "responses":  {
+                                                                                                      "200":  {
+                                                                                                                  "description":  "Success"
+                                                                                                              }
+                                                                                                  }
+                                                                                }
+                                                                    },
+                  "/api/VirtualDevice/GetUnProcessedInvoicesSummary":  {
+                                                                           "get":  {
+                                                                                       "tags":  [
+                                                                                                    "VirtualDevice"
+                                                                                                ],
+                                                                                       "parameters":  [
+                                                                                                          {
+                                                                                                              "name":  "fiscalDayNumber",
+                                                                                                              "in":  "query",
+                                                                                                              "schema":  "@{type=string}"
+                                                                                                          },
+                                                                                                          {
+                                                                                                              "name":  "fiscalDate",
+                                                                                                              "in":  "query",
+                                                                                                              "schema":  "@{type=string}"
+                                                                                                          }
+                                                                                                      ],
+                                                                                       "responses":  {
+                                                                                                         "200":  {
+                                                                                                                     "description":  "Success"
+                                                                                                                 }
+                                                                                                     }
+                                                                                   }
+                                                                       },
+                  "/api/VirtualDevice/GetUnProcessedInvoices/{fiscalDayNumber}":  {
+                                                                                      "get":  {
+                                                                                                  "tags":  [
+                                                                                                               "VirtualDevice"
+                                                                                                           ],
+                                                                                                  "parameters":  [
+                                                                                                                     {
+                                                                                                                         "name":  "fiscalDayNumber",
+                                                                                                                         "in":  "path",
+                                                                                                                         "required":  true,
+                                                                                                                         "schema":  "@{type=string}"
+                                                                                                                     },
+                                                                                                                     {
+                                                                                                                         "name":  "page",
+                                                                                                                         "in":  "query",
+                                                                                                                         "schema":  "@{type=integer; format=int32; default=1}"
+                                                                                                                     },
+                                                                                                                     {
+                                                                                                                         "name":  "pageSize",
+                                                                                                                         "in":  "query",
+                                                                                                                         "schema":  "@{type=integer; format=int32; default=50}"
+                                                                                                                     }
+                                                                                                                 ],
+                                                                                                  "responses":  {
+                                                                                                                    "200":  {
+                                                                                                                                "description":  "Success"
+                                                                                                                            }
+                                                                                                                }
+                                                                                              }
+                                                                                  },
+                  "/api/VirtualDevice/GetUnProcessedInvoicesByDate/{fiscalDate}":  {
+                                                                                       "get":  {
+                                                                                                   "tags":  [
+                                                                                                                "VirtualDevice"
+                                                                                                            ],
+                                                                                                   "parameters":  [
+                                                                                                                      {
+                                                                                                                          "name":  "fiscalDate",
+                                                                                                                          "in":  "path",
+                                                                                                                          "required":  true,
+                                                                                                                          "schema":  "@{type=string}"
+                                                                                                                      },
+                                                                                                                      {
+                                                                                                                          "name":  "page",
+                                                                                                                          "in":  "query",
+                                                                                                                          "schema":  "@{type=integer; format=int32; default=1}"
+                                                                                                                      },
+                                                                                                                      {
+                                                                                                                          "name":  "pageSize",
+                                                                                                                          "in":  "query",
+                                                                                                                          "schema":  "@{type=integer; format=int32; default=50}"
+                                                                                                                      }
+                                                                                                                  ],
+                                                                                                   "responses":  {
+                                                                                                                     "200":  {
+                                                                                                                                 "description":  "Success"
+                                                                                                                             }
+                                                                                                                 }
+                                                                                               }
+                                                                                   },
+                  "/api/VirtualDevice/ClearUnprocessedInvoices/{fiscalDayNumber}":  {
+                                                                                        "post":  {
+                                                                                                     "tags":  [
+                                                                                                                  "VirtualDevice"
+                                                                                                              ],
+                                                                                                     "parameters":  [
+                                                                                                                        {
+                                                                                                                            "name":  "fiscalDayNumber",
+                                                                                                                            "in":  "path",
+                                                                                                                            "required":  true,
+                                                                                                                            "schema":  "@{type=string}"
+                                                                                                                        }
+                                                                                                                    ],
+                                                                                                     "responses":  {
+                                                                                                                       "200":  {
+                                                                                                                                   "description":  "Success"
+                                                                                                                               }
+                                                                                                                   }
+                                                                                                 }
+                                                                                    },
+                  "/api/VirtualDevice/ClearUnprocessedInvoicesByDate/{fiscalDate}":  {
+                                                                                         "post":  {
+                                                                                                      "tags":  [
+                                                                                                                   "VirtualDevice"
+                                                                                                               ],
+                                                                                                      "parameters":  [
+                                                                                                                         {
+                                                                                                                             "name":  "fiscalDate",
+                                                                                                                             "in":  "path",
+                                                                                                                             "required":  true,
+                                                                                                                             "schema":  "@{type=string}"
+                                                                                                                         }
+                                                                                                                     ],
+                                                                                                      "responses":  {
+                                                                                                                        "200":  {
+                                                                                                                                    "description":  "Success"
+                                                                                                                                }
+                                                                                                                    }
+                                                                                                  }
+                                                                                     },
+                  "/api/VirtualDevice/SubmitReceipt":  {
+                                                           "post":  {
+                                                                        "tags":  [
+                                                                                     "VirtualDevice"
+                                                                                 ],
+                                                                        "requestBody":  {
+                                                                                            "content":  {
+                                                                                                            "application/json":  "@{schema=}",
+                                                                                                            "text/json":  "@{schema=}",
+                                                                                                            "application/*+json":  "@{schema=}"
+                                                                                                        }
+                                                                                        },
+                                                                        "responses":  {
+                                                                                          "200":  {
+                                                                                                      "description":  "Success"
+                                                                                                  }
+                                                                                      }
+                                                                    }
+                                                       },
+                  "/api/VirtualDevice/SubmitReceiptExt":  {
+                                                              "post":  {
+                                                                           "tags":  [
+                                                                                        "VirtualDevice"
+                                                                                    ],
+                                                                           "requestBody":  {
+                                                                                               "content":  {
+                                                                                                               "application/json":  "@{schema=}",
+                                                                                                               "text/json":  "@{schema=}",
+                                                                                                               "application/*+json":  "@{schema=}"
+                                                                                                           }
+                                                                                           },
+                                                                           "responses":  {
+                                                                                             "200":  {
+                                                                                                         "description":  "Success"
+                                                                                                     }
+                                                                                         }
+                                                                       }
+                                                          }
+              },
+    "components":  {
+                       "schemas":  {
+                                       "LoginRequest":  {
+                                                            "type":  "object",
+                                                            "properties":  {
+                                                                               "email":  {
+                                                                                             "type":  "string",
+                                                                                             "nullable":  true
+                                                                                         },
+                                                                               "password":  {
+                                                                                                "type":  "string",
+                                                                                                "nullable":  true
+                                                                                            }
+                                                                           },
+                                                            "additionalProperties":  false
+                                                        },
+                                       "ReceiptLines":  {
+                                                            "type":  "object",
+                                                            "properties":  {
+                                                                               "receiptLineType":  {
+                                                                                                       "type":  "string",
+                                                                                                       "nullable":  true
+                                                                                                   },
+                                                                               "receiptLineNo":  {
+                                                                                                     "type":  "integer",
+                                                                                                     "format":  "int32"
+                                                                                                 },
+                                                                               "receiptLineHSCode":  {
+                                                                                                         "type":  "string",
+                                                                                                         "nullable":  true
+                                                                                                     },
+                                                                               "receiptLineName":  {
+                                                                                                       "type":  "string",
+                                                                                                       "nullable":  true
+                                                                                                   },
+                                                                               "receiptLinePrice":  {
+                                                                                                        "type":  "number",
+                                                                                                        "format":  "double"
+                                                                                                    },
+                                                                               "receiptLineQuantity":  {
+                                                                                                           "type":  "number",
+                                                                                                           "format":  "double"
+                                                                                                       },
+                                                                               "receiptLineTotal":  {
+                                                                                                        "type":  "number",
+                                                                                                        "format":  "double"
+                                                                                                    },
+                                                                               "taxCode":  {
+                                                                                               "type":  "string",
+                                                                                               "nullable":  true
+                                                                                           },
+                                                                               "taxPercent":  {
+                                                                                                  "type":  "number",
+                                                                                                  "format":  "double"
+                                                                                              }
+                                                                           },
+                                                            "additionalProperties":  false
+                                                        },
+                                       "SubmitReceipt":  {
+                                                             "type":  "object",
+                                                             "properties":  {
+                                                                                "receiptType":  {
+                                                                                                    "type":  "string",
+                                                                                                    "nullable":  true
+                                                                                                },
+                                                                                "receiptCurrency":  {
+                                                                                                        "type":  "string",
+                                                                                                        "nullable":  true
+                                                                                                    },
+                                                                                "invoiceNo":  {
+                                                                                                  "type":  "string",
+                                                                                                  "nullable":  true
+                                                                                              },
+                                                                                "referenceNumber":  {
+                                                                                                        "type":  "string",
+                                                                                                        "nullable":  true
+                                                                                                    },
+                                                                                "invoiceAmount":  {
+                                                                                                      "type":  "number",
+                                                                                                      "format":  "double"
+                                                                                                  },
+                                                                                "invoiceTaxAmount":  {
+                                                                                                         "type":  "number",
+                                                                                                         "format":  "double"
+                                                                                                     },
+                                                                                "receiptNotes":  {
+                                                                                                     "type":  "string",
+                                                                                                     "nullable":  true
+                                                                                                 },
+                                                                                "receiptLinesTaxInclusive":  {
+                                                                                                                 "type":  "boolean"
+                                                                                                             },
+                                                                                "moneyTypeCode":  {
+                                                                                                      "type":  "string",
+                                                                                                      "nullable":  true
+                                                                                                  },
+                                                                                "receiptPrintForm":  {
+                                                                                                         "type":  "string",
+                                                                                                         "nullable":  true
+                                                                                                     },
+                                                                                "buyerRegisterName":  {
+                                                                                                          "type":  "string",
+                                                                                                          "nullable":  true
+                                                                                                      },
+                                                                                "buyerTradeName":  {
+                                                                                                       "type":  "string",
+                                                                                                       "nullable":  true
+                                                                                                   },
+                                                                                "vatNumber":  {
+                                                                                                  "type":  "string",
+                                                                                                  "nullable":  true
+                                                                                              },
+                                                                                "buyerTIN":  {
+                                                                                                 "type":  "string",
+                                                                                                 "nullable":  true
+                                                                                             },
+                                                                                "buyerPhoneNo":  {
+                                                                                                     "type":  "string",
+                                                                                                     "nullable":  true
+                                                                                                 },
+                                                                                "buyerEmail":  {
+                                                                                                   "type":  "string",
+                                                                                                   "nullable":  true
+                                                                                               },
+                                                                                "buyerProvince":  {
+                                                                                                      "type":  "string",
+                                                                                                      "nullable":  true
+                                                                                                  },
+                                                                                "buyerStreet":  {
+                                                                                                    "type":  "string",
+                                                                                                    "nullable":  true
+                                                                                                },
+                                                                                "buyerHouseNo":  {
+                                                                                                     "type":  "string",
+                                                                                                     "nullable":  true
+                                                                                                 },
+                                                                                "buyerCity":  {
+                                                                                                  "type":  "string",
+                                                                                                  "nullable":  true
+                                                                                              },
+                                                                                "receiptLines":  {
+                                                                                                     "type":  "array",
+                                                                                                     "items":  "@{$ref=#/components/schemas/ReceiptLines}",
+                                                                                                     "nullable":  true
+                                                                                                 }
+                                                                            },
+                                                             "additionalProperties":  false
+                                                         },
+                                       "SubmitReceiptExt":  {
+                                                                "type":  "object",
+                                                                "properties":  {
+                                                                                   "receiptType":  {
+                                                                                                       "type":  "string",
+                                                                                                       "nullable":  true
+                                                                                                   },
+                                                                                   "receiptCurrency":  {
+                                                                                                           "type":  "string",
+                                                                                                           "nullable":  true
+                                                                                                       },
+                                                                                   "invoiceNo":  {
+                                                                                                     "type":  "string",
+                                                                                                     "nullable":  true
+                                                                                                 },
+                                                                                   "referenceNumber":  {
+                                                                                                           "type":  "string",
+                                                                                                           "nullable":  true
+                                                                                                       },
+                                                                                   "invoiceAmount":  {
+                                                                                                         "type":  "number",
+                                                                                                         "format":  "double"
+                                                                                                     },
+                                                                                   "invoiceTaxAmount":  {
+                                                                                                            "type":  "number",
+                                                                                                            "format":  "double"
+                                                                                                        },
+                                                                                   "receiptNotes":  {
+                                                                                                        "type":  "string",
+                                                                                                        "nullable":  true
+                                                                                                    },
+                                                                                   "receiptLinesTaxInclusive":  {
+                                                                                                                    "type":  "boolean"
+                                                                                                                },
+                                                                                   "moneyTypeCode":  {
+                                                                                                         "type":  "string",
+                                                                                                         "nullable":  true
+                                                                                                     },
+                                                                                   "receiptPrintForm":  {
+                                                                                                            "type":  "string",
+                                                                                                            "nullable":  true
+                                                                                                        },
+                                                                                   "buyerRegisterName":  {
+                                                                                                             "type":  "string",
+                                                                                                             "nullable":  true
+                                                                                                         },
+                                                                                   "buyerTradeName":  {
+                                                                                                          "type":  "string",
+                                                                                                          "nullable":  true
+                                                                                                      },
+                                                                                   "vatNumber":  {
+                                                                                                     "type":  "string",
+                                                                                                     "nullable":  true
+                                                                                                 },
+                                                                                   "buyerTIN":  {
+                                                                                                    "type":  "string",
+                                                                                                    "nullable":  true
+                                                                                                },
+                                                                                   "buyerPhoneNo":  {
+                                                                                                        "type":  "string",
+                                                                                                        "nullable":  true
+                                                                                                    },
+                                                                                   "buyerEmail":  {
+                                                                                                      "type":  "string",
+                                                                                                      "nullable":  true
+                                                                                                  },
+                                                                                   "buyerProvince":  {
+                                                                                                         "type":  "string",
+                                                                                                         "nullable":  true
+                                                                                                     },
+                                                                                   "buyerStreet":  {
+                                                                                                       "type":  "string",
+                                                                                                       "nullable":  true
+                                                                                                   },
+                                                                                   "buyerHouseNo":  {
+                                                                                                        "type":  "string",
+                                                                                                        "nullable":  true
+                                                                                                    },
+                                                                                   "buyerCity":  {
+                                                                                                     "type":  "string",
+                                                                                                     "nullable":  true
+                                                                                                 },
+                                                                                   "refDeviceID":  {
+                                                                                                       "type":  "string",
+                                                                                                       "nullable":  true
+                                                                                                   },
+                                                                                   "refReceiptGlobalnumber":  {
+                                                                                                                  "type":  "string",
+                                                                                                                  "nullable":  true
+                                                                                                              },
+                                                                                   "refFiscalDay":  {
+                                                                                                        "type":  "string",
+                                                                                                        "nullable":  true
+                                                                                                    },
+                                                                                   "receiptLines":  {
+                                                                                                        "type":  "array",
+                                                                                                        "items":  "@{$ref=#/components/schemas/ReceiptLines}",
+                                                                                                        "nullable":  true
+                                                                                                    }
+                                                                               },
+                                                                "additionalProperties":  false
+                                                            }
+                                   },
+                       "securitySchemes":  {
+                                               "Bearer":  {
+                                                              "type":  "http",
+                                                              "description":  "Please enter a valid token",
+                                                              "scheme":  "bearer",
+                                                              "bearerFormat":  "JWT"
+                                                          }
+                                           }
+                   },
+    "security":  [
+                     {
+                         "Bearer":  [
+
+                                    ]
+                     }
+                 ]
+}

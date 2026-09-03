@@ -1,0 +1,119 @@
+# models/advance_settings.py
+from dataclasses import dataclass, asdict, field
+from typing import Optional
+import json
+from pathlib import Path
+
+@dataclass
+class AdvanceSettings:
+    """
+    Advanced printing & font settings.
+    Exact mirror of your C# AdvanceSettings.cs + new receipt layout options
+    """
+
+    # Font settings (unchanged)
+    contentFontName: str = "Arial"
+    contentFontSize: int = 8
+    contentFontStyle: str = "Regular"
+
+    contentHeaderFontName: str = "Arial"
+    contentHeaderSize: int = 10
+    contentHeaderStyle: str = "Bold"
+
+    subheaderFontName: str = "Times New Roman"
+    subheaderSize: int = 9
+    subheaderStyle: str = "bolditalic"
+
+    orderContentFontName: str = "Arial"
+    orderContentFontSize: int = 10
+    orderContentStyle: str = "Bold"
+
+    # Kitchen (KOT) font sizes - independent of the receipt fonts so a
+    # change to the receipt never accidentally shrinks/enlarges the
+    # kitchen slip. Header is used for the big "Order #N" line; body is
+    # used for the item lines. Consumed by
+    # services/printing_service.print_kitchen_order.
+    kitchenHeaderSize: int = 14
+    kitchenBodySize:   int = 10
+
+    # Logo
+    logoDirectory: str = ""
+
+    # Other settings
+    charactersPerLine: int = 48
+
+    # ── NEW RECEIPT LAYOUT CHECKBOXES ──
+    showSubtotalExclusive: bool = True      # Show Subtotal line (exclusive of VAT)
+    showInclusive: bool = False             # Show Inclusive VAT total
+    showDescriptionLabel: bool = True       # Show "Description" / product name label
+    showPayment: bool = True                # Show Paid / Change / Payment Mode
+
+    # UI Toggles
+    enableLaybyes: bool = False
+    enableQuotes: bool = False
+    enablePayments: bool = False
+    enableERPModules: bool = True
+    
+    # Menus and Badges
+    showMenuPOS: bool = True
+    showMenuSales: bool = True
+    showMenuRestaurant: bool = False
+    
+    # Backoffice App Grid Toggles
+    showAppSales: bool = True
+    showAppSuppliers: bool = False
+    showAppMaintenance: bool = False
+    showAppFinance: bool = True
+    showAppInventory: bool = False
+    showAppExpenses: bool = False
+    
+    showSalesReport: bool = False
+    showSalesList: bool = False
+    
+    showBadgeQ: bool = True
+    showBadgeZ: bool = True
+    systemModeOverride: str = ""  # "frappe", "odoo", "offline", or ""
+    capitalizeItemNames: bool = False
+
+    @classmethod
+    def load_from_file(cls, file_path: str = None) -> "AdvanceSettings":
+        settings = cls()
+        if file_path is None:
+            import os
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _root = os.path.normpath(os.path.join(_here, ".."))
+            file_path = os.path.join(_root, "settings", "advance_settings.json")
+            
+        path = Path(file_path)
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            settings.save_to_file(file_path)
+            return settings
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for key, value in data.items():
+                if hasattr(settings, key) and value is not None:
+                    setattr(settings, key, value)
+        except Exception as e:
+            print(f"[AdvanceSettings] Load error: {e} - using defaults")
+
+        return settings
+
+    def save_to_file(self, file_path: str = None) -> None:
+        if file_path is None:
+            import os
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _root = os.path.normpath(os.path.join(_here, ".."))
+            file_path = os.path.join(_root, "settings", "advance_settings.json")
+            
+        path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = asdict(self)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        print(f"[AdvanceSettings] Saved -> LogoDirectory = {self.logoDirectory}")
+
+    def to_dict(self) -> dict:
+        return asdict(self)

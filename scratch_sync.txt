@@ -1,0 +1,60 @@
+                        last_product_sync = _time.time()
+
+                    if now - last_gl_sync >= GL_MOP_SYNC_INTERVAL_SECONDS:
+                        # ── 2. GL + MOP + exchange rates ──────
+                        try:
+                            from services.credentials import has_credentials, get_credentials
+                            from models.company_defaults import get_defaults
+
+                            if not has_credentials():
+                                log.warning("[sync] No credentials available.")
+                            else:
+                                api_key, api_secret = get_credentials()
+                                host    = _get_host()
+                                company = (get_defaults() or {}).get("server_company", "")
+
+                                if api_key and api_secret:
+                                    gl_count   = sync_gl_accounts(api_key, api_secret, host, company)
+                                    mop_count  = sync_modes_of_payment(api_key, api_secret, host, company)
+                                    rate_count = sync_exchange_rates(api_key, api_secret, host, _force=True)
+                                    log.info("[sync] Periodic GL/MOP/Rates sync complete")
+                        except Exception as e:
+                            log.error("[sync] GL/MOP/rates sync error: %s", e)
+                        last_gl_sync = _time.time()
+
+                    # ── 3. Transaction Pushes ──────────────────────────────────
+                    try:
+                        from services.pos_upload_service import push_unsynced_sales
+                        push_unsynced_sales()
+                    except Exception as e:
+                        log.error("[sync] Auto-recovery upload trigger failed: %s", e)
+
+                    try:
+                        from services.credit_note_sync_service import push_unsynced_credit_notes
+                        push_unsynced_credit_notes()
+                    except Exception as e:
+                        log.error("[sync] Credit note auto-sync failed: %s", e)
+
+                    # ── 4. Process pending fiscalizations (offline fallback) 
+                    try:
+                        from services.fiscalization_service import FiscalizationService
+                        fiscal_service = FiscalizationService()
+                        res = fiscal_service.process_all_pending()
+                        if res.success_count > 0:
+                            log.info(f"[sync] ✅ Fiscalized {res.success_count} pending sales")
+                    except Exception as e:
+                        log.error("[sync] Background fiscalization failed: %s", e)
+
+                except Exception as e:
+                    log.error("[sync] Unexpected error in SyncWorker loop: %s", e)
+
+                _time.sleep(PRODUCT_SYNC_INTERVAL_SECONDS)
+
+except ImportError:
+    class SyncWorker:          # type: ignore[no-redef]
+        """Stub used when PySide6 is unavailable."""
+        def run(self) -> None:
+            pass
+
+
+# =============================================================================
