@@ -1,0 +1,6 @@
+1316: #     def keyPressEvent(self, event):
+1324: #         if k in (Qt.Key_Return, Qt.Key_Enter):
+1356: #         super().keyPressEvent(event)
+2753:     def keyPressEvent(self, event):
+2761:         if k in (Qt.Key_Return, Qt.Key_Enter):
+2793:         super().keyPressEvent(event)

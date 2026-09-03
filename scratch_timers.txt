@@ -1,0 +1,6 @@
+9040:         self._unsynced_timer.setInterval(10000)
+10471:             self._unsynced_timer.setInterval(3000)
+15144:         self._price_list_timer.setInterval(60000) # every 1 minute
+17455:         self._inv_timer = QTimer(self); self._inv_timer.setSingleShot(True); self._inv_timer.setInterval(200)
+17456:         self._so_timer  = QTimer(self); self._so_timer.setSingleShot(True);  self._so_timer.setInterval(200)
+17858:         self._stimer.setInterval(200)

@@ -1,0 +1,30 @@
+        reply = QMessageBox.question(
+            self, "Confirm Return",
+            f"Process return for {cn.get('invoice_no', '')}?\n"
+            f"Customer: {cn.get('customer_name', 'Walk-in')}\n"
+            f"Items: {len(items)}   Credit: ${total:.2f}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        cashier_name = self.user.get("username", "") if isinstance(self.user, dict) else ""
+        cn_result = cn
+
+        # ── Step 2: Create Refund Payment Entry (Pay to Customer) ─────────────
+        try:
+            from services.cn_payment_entry_service import create_cn_payment_entry
+            create_cn_payment_entry(cn_result)
+        except Exception as pe_err:
+            print(f"Refund creation failed (non-blocking): {pe_err}")
+
+        # ── Fiscalize synchronously so QR is ready before printing ───────────
+        fiscal_qr   = ""
+        fiscal_vc   = ""
+        try:
+            from services.fiscalization_service import get_fiscalization_service
+            _fs = get_fiscalization_service()
+            if _fs.is_fiscalization_enabled():
+                _fs.process_credit_note_fiscalization(cn_result["id"])
+                # Read the QR/VC back from DB now that it's committed
+                from models.credit_note import get_credit_note_by_id
+                _saved = get_credit_note_by_id(cn_result["id"])

@@ -1,0 +1,1 @@
+import sys; sys.path.append('c:/Users/DELL/New_POS/Havano_POS_2026'); from database.db import get_connection; conn=get_connection(); cur=conn.cursor(); cur.execute('SELECT top 1 part_no, is_product_bundle, bundle_lines FROM products WHERE is_product_bundle=1 ORDER BY id DESC'); print(cur.fetchall())

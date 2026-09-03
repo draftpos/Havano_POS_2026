@@ -1,0 +1,11 @@
+320: # ── 8. restaurant_predefined_notes ───────────────────────────────────────
+321: if not _table_exists(cur, "restaurant_predefined_notes"):
+323: CREATE TABLE [dbo].[restaurant_predefined_notes] (
+329: print("[Migrate] Created table: restaurant_predefined_notes")
+331: # Prepopulate restaurant_predefined_notes if empty
+332: cur.execute("SELECT COUNT(*) FROM restaurant_predefined_notes")
+339: cur.execute("INSERT INTO restaurant_predefined_notes (note) VALUES (?)", (note,))
+954: def get_predefined_notes() -> list[str]:
+957: cur.execute("SELECT note FROM restaurant_predefined_notes ORDER BY id DESC")
+968: cur.execute("INSERT INTO restaurant_predefined_notes (note) VALUES (?)", (note,))
+977: cur.execute("DELETE FROM restaurant_predefined_notes WHERE note = ?", (note,))

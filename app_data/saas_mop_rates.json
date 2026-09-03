@@ -1,0 +1,148 @@
+{
+  "mops": [
+    {
+      "id": 1072,
+      "name": "Cash",
+      "account_name": "Cash",
+      "type": "Cash",
+      "currency": "USD",
+      "currency_id": 238,
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "USD"
+    },
+    {
+      "id": 1081,
+      "name": "Innbucks",
+      "account_name": "Innbucks",
+      "type": "Cash",
+      "currency": "USD",
+      "currency_id": 238,
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "USD"
+    },
+    {
+      "id": 1082,
+      "name": "Eco Cash",
+      "account_name": "Eco Cash",
+      "type": "Cash",
+      "currency": "USD",
+      "currency_id": 238,
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "USD"
+    },
+    {
+      "id": 1083,
+      "name": "One Money",
+      "account_name": "One Money",
+      "type": "Cash",
+      "currency": "USD",
+      "currency_id": 238,
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "USD"
+    },
+    {
+      "id": 1084,
+      "name": "Omari",
+      "account_name": "Omari",
+      "type": "Cash",
+      "currency": "USD",
+      "currency_id": 238,
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "USD"
+    },
+    {
+      "id": 1656,
+      "name": "Cash ZIG",
+      "account_name": "Cash ZIG",
+      "type": "Cash",
+      "currency": "ZWG",
+      "currency_id": 236,
+      "exchange_rate": 100.0,
+      "rate": 100.0,
+      "inverse_rate": 0.01,
+      "symbol": "ZWG"
+    },
+    {
+      "id": 1708,
+      "name": "Test",
+      "account_name": "Test",
+      "type": "Cash",
+      "currency": "AMD",
+      "currency_id": 239,
+      "exchange_rate": 40.0,
+      "rate": 40.0,
+      "inverse_rate": 0.025,
+      "symbol": "AMD"
+    },
+    {
+      "id": 1709,
+      "name": "CBZ Rands",
+      "account_name": "CBZ Rands",
+      "type": "Bank",
+      "currency": "ZAR",
+      "currency_id": 194,
+      "exchange_rate": 2.0,
+      "rate": 2.0,
+      "inverse_rate": 0.5,
+      "symbol": "R"
+    },
+    {
+      "id": 1935,
+      "name": "KEKESH",
+      "account_name": "KEKESH",
+      "type": "Cash",
+      "currency": "USD",
+      "currency_id": 238,
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "USD"
+    },
+    {
+      "id": 2227,
+      "name": "No Currency Acc Test",
+      "account_name": "No Currency Acc Test",
+      "type": "Cash",
+      "currency": "AMD",
+      "currency_id": 239,
+      "exchange_rate": 40.0,
+      "rate": 40.0,
+      "inverse_rate": 0.025,
+      "symbol": "AMD"
+    },
+    {
+      "id": 2228,
+      "name": "Acc Test No Curr",
+      "account_name": "Acc Test No Curr",
+      "type": "Cash",
+      "currency": "USD",
+      "currency_id": 1,
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "USD"
+    },
+    {
+      "id": 2229,
+      "name": "Test 33",
+      "account_name": "Test 33",
+      "type": "Bank",
+      "currency": "AFN",
+      "currency_id": 47,
+      "exchange_rate": 40.0,
+      "rate": 40.0,
+      "inverse_rate": 0.025,
+      "symbol": "Afs"
+    }
+  ]
+}

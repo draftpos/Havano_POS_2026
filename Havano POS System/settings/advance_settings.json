@@ -1,0 +1,20 @@
+{
+    "contentFontName": "Arial",
+    "contentFontSize": 8,
+    "contentFontStyle": "Regular",
+    "contentHeaderFontName": "Arial",
+    "contentHeaderSize": 10,
+    "contentHeaderStyle": "Bold",
+    "subheaderFontName": "Times New Roman",
+    "subheaderSize": 9,
+    "subheaderStyle": "bolditalic",
+    "orderContentFontName": "Arial",
+    "orderContentFontSize": 10,
+    "orderContentStyle": "Bold",
+    "logoDirectory": "",
+    "charactersPerLine": 48,
+    "showSubtotalExclusive": true,
+    "showInclusive": false,
+    "showDescriptionLabel": true,
+    "showPayment": true
+}

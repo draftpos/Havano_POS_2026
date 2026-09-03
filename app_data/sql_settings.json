@@ -1,0 +1,18 @@
+{
+    "auth_mode": "windows",
+    "server": ".\\SQLEXPRESS",
+    "database": "havano_posop07978808",
+    "username": "",
+    "password": "",
+    "system_mode": "saas",
+    "api_url": "https://backoffice.havano.pro",
+    "active_user_email": "abc4@gmail.com",
+    "user_email": "abc4@gmail.com",
+    "last_logged_in_user": "abc4@gmail.com",
+    "email": "abc4@gmail.com",
+    "sale_id_prefix": "ZWGU",
+    "server_shop_id": "227",
+    "server_terminal_id": "58",
+    "default_pricelist_id": "131",
+    "default_pricelist_name": "Retail"
+}

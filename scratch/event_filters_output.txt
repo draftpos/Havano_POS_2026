@@ -1,0 +1,815 @@
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\more.py:5686 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+
+        # ── inline search edit ────────────────────────────────────────────────
+        if obj is self._inline_edit and event.type() == QEvent.KeyPress:
+            key   = event.key()
+            popup = self._inline_popup
+            if key == Qt.Key_Down:
+                if popup and popup.isVisible():
+                    popup.setCurrentRow(min(popup.currentRow() + 1, popup.count() - 1))
+                return True
+            if key == Qt.Key_Up:
+                if popup and popup.isVisible():
+                    popup.setCurrentRow(max(popup.currentRow() - 1, 0))
+                return True
+            if key == Qt.Key_Escape:
+                self._close_inline_search()
+                self.invoice_table.setFocus()
+                return True
+            if key == Qt.Key_Tab:
+                self._inline_on_enter()
+                return True
+
+        # ── invoice table ─────────────────────────────────────────────────────
+        if obj is self.invoice_table and event.type() == QEvent.KeyPress:
+            key  = event.key()
+            mods = event.modifiers()
+
+            # #6 Enter/Return — always advance to next cart line
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                if self._inline_edit is not None:
+                    self._inline_on_enter()
+                    return True
+                self._numpad_enter()
+                return True
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\more.py:6635 ---
+            def eventFilter(self, obj, event):
+                from PySide6.QtCore import QEvent
+                if event.type() == QEvent.Resize:
+                    QTimer.singleShot(0, _pos_self._render_product_page)
+                return False
+        self._grid_resize_filter = _GridResizeFilter()
+        self._product_grid_widget.installEventFilter(self._grid_resize_filter)
+
+        # ── Pagination bar ─────────────────────────────────────────────────────
+        page_bar = QWidget(); page_bar.setFixedHeight(22)
+        page_bar.setStyleSheet(f"background-color: #f0e8d0; border-top: 1px solid {BORDER};")
+        page_bar_h = QHBoxLayout(page_bar)
+        page_bar_h.setContentsMargins(0, 0, 0, 0); page_bar_h.setSpacing(4)
+
+        page_bar_h.addStretch(1)
+
+        _btn_style = f"""
+            QPushButton {{ background-color: {NAVY}; color: {WHITE}; border: none;
+                border-radius: 3px; font-size: 9px; font-weight: bold; padding: 0 6px; }}
+            QPushButton:hover {{ background-color: {NAVY_2}; }}
+            QPushButton:disabled {{ background-color: {BORDER}; color: {MUTED}; }}
+        """
+
+        self._grid_prev_btn = QPushButton("◀ Prev")
+        self._grid_prev_btn.setFixedSize(52, 16)
+        self._grid_prev_btn.setCursor(Qt.PointingHandCursor)
+        self._grid_prev_btn.setStyleSheet(_btn_style)
+        self._grid_prev_btn.clicked.connect(lambda: self._grid_turn_page(-1))
+
+        self._grid_page_lbl = QLabel("Page 1 / 1")
+        self._grid_page_lbl.setAlignment(Qt.AlignCenter)
+        self._grid_page_lbl.setStyleSheet(f"color: {NAVY}; font-size: 9px; background: transparent;")
+        self._grid_page_lbl.setFixedWidth(80)
+
+        self._grid_next_btn = QPushButton("Next ▶")
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\Havano POS System\_internal\views\main_window.py:9136 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+
+        # ── Global Up/Down → cart navigation ─────────────────────────────────
+        # When the cashier is on the POS screen but focus is on a button / the
+        # product grid / anywhere that isn't a text input, Up/Down should move
+        # through the cart rows. The per-widget branches below still own the
+        # specific behaviours (inline-search popup, table's own edit triggers).
+        if event.type() == QEvent.KeyPress and getattr(self, "_global_cart_nav_ready", False):
+            _k = event.key()
+            if _k in (Qt.Key_Up, Qt.Key_Down):
+                from PySide6.QtWidgets import QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox
+                fw = QApplication.focusWidget()
+                # Skip if the invoice_table or inline search already handle Up/Down
+                # (their own branches below fire with the correct context).
+                if fw is self.invoice_table or fw is getattr(self, "_inline_edit", None):
+                    pass  # fall through to specific branches
+                elif isinstance(fw, (QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox)):
+                    pass  # let text inputs handle Up/Down themselves
+                elif hasattr(self, "invoice_table") and self.invoice_table is not None:
+                    delta = -1 if _k == Qt.Key_Up else 1
+                    cur_r = getattr(self, "_active_row", 0)
+                    cur_r = cur_r if cur_r >= 0 else 0
+                    target = max(0, min(cur_r + delta, self.invoice_table.rowCount() - 1))
+                    self._active_row = target
+                    col = getattr(self, "_active_col", self.COL_PART_NO)
+                    col = col if col >= 0 else self.COL_PART_NO
+                    self.invoice_table.setCurrentCell(target, col)
+                    self._highlight_active_row(target)
+                    try:
+                        self.invoice_table.scrollToItem(
+                            self.invoice_table.item(target, col),
+                            QAbstractItemView.EnsureVisible)
+                    except Exception:
+                        pass
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\Havano POS System\_internal\views\dialogs\company_settings.py:2449 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if obj is self._inline_edit and self._inline_popup:
+            if event.type() == QEvent.KeyPress:
+                key = event.key()
+                popup = self._inline_popup
+                if key == Qt.Key_Down:
+                    if popup.isVisible():
+                        cur = popup.currentRow()
+                        popup.setCurrentRow(min(cur + 1, popup.count() - 1))
+                    return True
+                elif key == Qt.Key_Up:
+                    if popup.isVisible():
+                        cur = popup.currentRow()
+                        popup.setCurrentRow(max(cur - 1, 0))
+                    return True
+                elif key == Qt.Key_Escape:
+                    self._close_inline_search()
+                    self.invoice_table.setFocus()
+                    return True
+                elif key == Qt.Key_Tab:
+                    self._inline_on_enter()
+                    return True
+        if obj is self.invoice_table and event.type().__class__.__name__ != "type":
+            from PySide6.QtCore import QEvent
+            if event.type() == QEvent.KeyPress:
+                key = event.key()
+                if key in (Qt.Key_Return, Qt.Key_Enter):
+                    self._numpad_enter(); return True
+                if key == Qt.Key_Delete:
+                    self._numpad_del_line(); return True
+                if key == Qt.Key_Asterisk:
+                    self._open_qty_popup(); return True
+                if key == Qt.Key_F2:
+                    self._save_sale(); return True
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\Havano POS System\_internal\views\reports\test.py:4788 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+
+        # ── inline search edit ────────────────────────────────────────────────
+        if obj is self._inline_edit and event.type() == QEvent.KeyPress:
+            key   = event.key()
+            popup = self._inline_popup
+            if key == Qt.Key_Down:
+                if popup and popup.isVisible():
+                    popup.setCurrentRow(min(popup.currentRow() + 1, popup.count() - 1))
+                return True
+            if key == Qt.Key_Up:
+                if popup and popup.isVisible():
+                    popup.setCurrentRow(max(popup.currentRow() - 1, 0))
+                return True
+            if key == Qt.Key_Escape:
+                self._close_inline_search()
+                self.invoice_table.setFocus()
+                return True
+            if key == Qt.Key_Tab:
+                self._inline_on_enter()
+                return True
+
+        # ── invoice table ─────────────────────────────────────────────────────
+        if obj is self.invoice_table and event.type() == QEvent.KeyPress:
+            key  = event.key()
+            mods = event.modifiers()
+
+            # #6 Enter/Return — always advance to next cart line
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                if self._inline_edit is not None:
+                    self._inline_on_enter()
+                    return True
+                self._numpad_enter()
+                return True
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\Havano POS System\_internal\views\reports\test.py:5736 ---
+            def eventFilter(self, obj, event):
+                from PySide6.QtCore import QEvent
+                if event.type() == QEvent.Resize:
+                    QTimer.singleShot(0, _pos_self._render_product_page)
+                return False
+        self._grid_resize_filter = _GridResizeFilter()
+        self._product_grid_widget.installEventFilter(self._grid_resize_filter)
+
+        # ── Pagination bar ─────────────────────────────────────────────────────
+        page_bar = QWidget(); page_bar.setFixedHeight(22)
+        page_bar.setStyleSheet(f"background-color: #f0e8d0; border-top: 1px solid {BORDER};")
+        page_bar_h = QHBoxLayout(page_bar)
+        page_bar_h.setContentsMargins(0, 0, 0, 0); page_bar_h.setSpacing(4)
+
+        page_bar_h.addStretch(1)
+
+        _btn_style = f"""
+            QPushButton {{ background-color: {NAVY}; color: {WHITE}; border: none;
+                border-radius: 3px; font-size: 9px; font-weight: bold; padding: 0 6px; }}
+            QPushButton:hover {{ background-color: {NAVY_2}; }}
+            QPushButton:disabled {{ background-color: {BORDER}; color: {MUTED}; }}
+        """
+
+        self._grid_prev_btn = QPushButton("◀ Prev")
+        self._grid_prev_btn.setFixedSize(52, 16)
+        self._grid_prev_btn.setCursor(Qt.PointingHandCursor)
+        self._grid_prev_btn.setStyleSheet(_btn_style)
+        self._grid_prev_btn.clicked.connect(lambda: self._grid_turn_page(-1))
+
+        self._grid_page_lbl = QLabel("Page 1 / 1")
+        self._grid_page_lbl.setAlignment(Qt.AlignCenter)
+        self._grid_page_lbl.setStyleSheet(f"color: {NAVY}; font-size: 9px; background: transparent;")
+        self._grid_page_lbl.setFixedWidth(80)
+
+        self._grid_next_btn = QPushButton("Next ▶")
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\scratch\find_event_filters.py:14 ---
+                if "def eventFilter" in content:
+                    lines = content.splitlines()
+                    for idx, line in enumerate(lines):
+                        if "def eventFilter" in line:
+                            # Extract 25 lines of the function
+                            func_lines = lines[idx:idx+35]
+                            print(f"--- File: {filepath}:{idx+1} ---")
+                            print("\n".join(func_lines))
+                            print("="*60)
+            except Exception as e:
+                pass
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\scratch\find_event_filters.py:17 ---
+                        if "def eventFilter" in line:
+                            # Extract 25 lines of the function
+                            func_lines = lines[idx:idx+35]
+                            print(f"--- File: {filepath}:{idx+1} ---")
+                            print("\n".join(func_lines))
+                            print("="*60)
+            except Exception as e:
+                pass
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\scratch\find_event_filters_to_file.py:16 ---
+                    if "def eventFilter" in content:
+                        lines = content.splitlines()
+                        for idx, line in enumerate(lines):
+                            if "def eventFilter" in line:
+                                func_lines = lines[idx:idx+35]
+                                out.write(f"--- File: {filepath}:{idx+1} ---\n")
+                                out.write("\n".join(func_lines))
+                                out.write("\n" + "="*60 + "\n")
+                except Exception as e:
+                    pass
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\scratch\find_event_filters_to_file.py:19 ---
+                            if "def eventFilter" in line:
+                                func_lines = lines[idx:idx+35]
+                                out.write(f"--- File: {filepath}:{idx+1} ---\n")
+                                out.write("\n".join(func_lines))
+                                out.write("\n" + "="*60 + "\n")
+                except Exception as e:
+                    pass
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\utils\title_bar.py:48 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtWidgets import QWidget
+        if getattr(self, "_in_filter", False):
+            return super().eventFilter(obj, event)
+        self._in_filter = True
+        try:
+            if event.type() == QEvent.Show and isinstance(obj, QWidget):
+                obj_id = id(obj)
+                if obj.isWindow() and obj_id not in self._processing:
+                    self._processing.add(obj_id)
+                    try:
+                        hwnd = int(obj.winId())
+                        _set_window_title_bar_color(hwnd, "#1a5fb4", "#ffffff")
+                    except Exception:
+                        pass
+                    finally:
+                        self._processing.discard(obj_id)
+        finally:
+            self._in_filter = False
+        return super().eventFilter(obj, event)
+
+
+def install_global_title_bar_hook(app):
+    """Installs global Havano Blue title bar hook for all windows and dialogs."""
+    try:
+        app._title_bar_filter = _TitleBarEventFilter(app)
+        app.installEventFilter(app._title_bar_filter)
+    except Exception as e:
+        print(f"[title_bar] Failed to install title bar hook: {e}")
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\admin_dashboard.py:5578 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+
+        # ── Global Up/Down -> cart navigation ─────────────────────────────────
+        # When the cashier is on the POS screen but focus is on a button / the
+        # product grid / anywhere that isn't a text input, Up/Down should move
+        # through the cart rows. The per-widget branches below still own the
+        # specific behaviours (inline-search popup, table's own edit triggers).
+        if event.type() == QEvent.KeyPress and getattr(self, "_global_cart_nav_ready", False):
+            _k = event.key()
+            if _k in (Qt.Key_Up, Qt.Key_Down):
+                from PySide6.QtWidgets import QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox
+                fw = QApplication.focusWidget()
+                # Skip if the invoice_table or inline search already handle Up/Down
+                # (their own branches below fire with the correct context).
+                if fw is self.invoice_table or fw is getattr(self, "_inline_edit", None):
+                    pass  # fall through to specific branches
+                elif isinstance(fw, (QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox)):
+                    pass  # let text inputs handle Up/Down themselves
+                elif hasattr(self, "invoice_table") and self.invoice_table is not None:
+                    delta = -1 if _k == Qt.Key_Up else 1
+                    cur_r = getattr(self, "_active_row", 0)
+                    cur_r = cur_r if cur_r >= 0 else 0
+                    target = max(0, min(cur_r + delta, self.invoice_table.rowCount() - 1))
+                    self._active_row = target
+                    col = getattr(self, "_active_col", self.COL_PART_NO)
+                    col = col if col >= 0 else self.COL_PART_NO
+                    self.invoice_table.setCurrentCell(target, col)
+                    self._highlight_active_row(target)
+                    try:
+                        self.invoice_table.scrollToItem(
+                            self.invoice_table.item(target, col),
+                            QAbstractItemView.EnsureVisible)
+                    except Exception:
+                        pass
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\login_dialog.py:847 ---
+    def eventFilter(self, obj, event):
+        try:
+            from PySide6.QtGui import QKeyEvent
+            if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+                key = event.key()
+
+                # PIN setup overlay
+                if self._pin_setup_overlay and self._pin_setup_overlay.isVisible():
+                    if key in (Qt.Key_Return, Qt.Key_Enter):
+                        self._pin_setup_confirm(); return True
+                    elif key in (Qt.Key_Backspace, Qt.Key_Delete):
+                        self._pin_setup_backspace(); return True
+                    elif key == Qt.Key_Escape:
+                        self._pin_setup_buf = ""
+                        self._pin_setup_dots.set_filled(0); return True
+                    elif Qt.Key_0 <= key <= Qt.Key_9:
+                        self._pin_setup_press(str(key - Qt.Key_0)); return True
+                    elif hasattr(event, "text") and event.text().isdigit():
+                        self._pin_setup_press(event.text()); return True
+                    return False
+
+                # Normal PIN tab
+                if hasattr(self, "_stack") and self._stack.currentIndex() == 0:
+                    # Ignore if another modal dialog is active
+                    active = QApplication.activeModalWidget()
+                    if active and active != self:
+                        return False
+                    if key in (Qt.Key_Return, Qt.Key_Enter):
+                        self._login_pin(); return True
+                    elif key in (Qt.Key_Backspace, Qt.Key_Delete):
+                        self._pin_backspace(); return True
+                    elif key == Qt.Key_Escape:
+                        self._pin_clear(); return True
+                    elif Qt.Key_0 <= key <= Qt.Key_9:
+                        self._pin_press(str(key - Qt.Key_0)); return True
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\main_window.py:9206 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if event.type() != QEvent.KeyPress:
+            return super().eventFilter(obj, event)
+        if getattr(self, "_in_event_filter", False):
+            return super().eventFilter(obj, event)
+        self._in_event_filter = True
+        try:
+            res = self._event_filter_body_1(obj, event)
+            if res is True:
+                return True
+        except Exception:
+            pass
+        finally:
+            self._in_event_filter = False
+        return super().eventFilter(obj, event)
+
+    def _event_filter_body_1(self, obj, event):
+        from PySide6.QtCore import QEvent
+
+        # ── Global Up/Down -> cart navigation ─────────────────────────────────
+        # When the cashier is on the POS screen but focus is on a button / the
+        # product grid / anywhere that isn't a text input, Up/Down should move
+        # through the cart rows. The per-widget branches below still own the
+        # specific behaviours (inline-search popup, table's own edit triggers).
+        if event.type() == QEvent.KeyPress and getattr(self, "_global_cart_nav_ready", False):
+            _k = event.key()
+            if _k in (Qt.Key_Up, Qt.Key_Down):
+                from PySide6.QtWidgets import QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox
+                fw = QApplication.focusWidget()
+                # Skip if the invoice_table or inline search already handle Up/Down
+                # (their own branches below fire with the correct context).
+                if fw in (self.invoice_table, self.invoice_table.viewport()) or fw is getattr(self, "_inline_edit", None):
+                    pass  # fall through to specific branches
+                elif isinstance(fw, (QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox)):
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\main_window.py:22389 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if event.type() != QEvent.KeyPress:
+            return super().eventFilter(obj, event)
+        if getattr(self, "_in_event_filter", False):
+            return super().eventFilter(obj, event)
+        self._in_event_filter = True
+        try:
+            res = self._event_filter_body_2(obj, event)
+            if res is True:
+                return True
+        except Exception:
+            pass
+        finally:
+            self._in_event_filter = False
+        return super().eventFilter(obj, event)
+
+    def _event_filter_body_2(self, obj, event):
+        from PySide6.QtCore import QEvent
+
+        if getattr(self, "_block_signals", False):
+            return False
+        # When the cashier is on the POS screen but focus is on a button / the
+        # product grid / anywhere that isn't a text input, Up/Down should move
+        # through the cart rows. The per-widget branches below still own the
+        # specific behaviours (inline-search popup, table's own edit triggers).
+        if event.type() == QEvent.KeyPress and getattr(self, "_global_cart_nav_ready", False):
+            _k = event.key()
+            if _k in (Qt.Key_Up, Qt.Key_Down):
+                from PySide6.QtWidgets import QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox
+                fw = QApplication.focusWidget()
+                # Skip if the invoice_table or inline search already handle Up/Down
+                # (their own branches below fire with the correct context).
+                if fw in (self.invoice_table, self.invoice_table.viewport()) or fw is getattr(self, "_inline_edit", None):
+                    pass  # fall through to specific branches
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\new_d.py:8770 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+
+        # ── Global Up/Down -> cart navigation ─────────────────────────────────
+        # When the cashier is on the POS screen but focus is on a button / the
+        # product grid / anywhere that isn't a text input, Up/Down should move
+        # through the cart rows. The per-widget branches below still own the
+        # specific behaviours (inline-search popup, table's own edit triggers).
+        if event.type() == QEvent.KeyPress and getattr(self, "_global_cart_nav_ready", False):
+            _k = event.key()
+            if _k in (Qt.Key_Up, Qt.Key_Down):
+                from PySide6.QtWidgets import QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox
+                fw = QApplication.focusWidget()
+                # Skip if the invoice_table or inline search already handle Up/Down
+                # (their own branches below fire with the correct context).
+                if fw is self.invoice_table or fw is getattr(self, "_inline_edit", None):
+                    pass  # fall through to specific branches
+                elif isinstance(fw, (QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox)):
+                    pass  # let text inputs handle Up/Down themselves
+                elif hasattr(self, "invoice_table") and self.invoice_table is not None:
+                    delta = -1 if _k == Qt.Key_Up else 1
+                    cur_r = getattr(self, "_active_row", 0)
+                    cur_r = cur_r if cur_r >= 0 else 0
+                    target = max(0, min(cur_r + delta, self.invoice_table.rowCount() - 1))
+                    self._active_row = target
+                    col = getattr(self, "_active_col", self.COL_PART_NO)
+                    col = col if col >= 0 else self.COL_PART_NO
+                    self.invoice_table.setCurrentCell(target, col)
+                    self._highlight_active_row(target)
+                    try:
+                        self.invoice_table.scrollToItem(
+                            self.invoice_table.item(target, col),
+                            QAbstractItemView.EnsureVisible)
+                    except Exception:
+                        pass
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\dialogs\bundle_dialog.py:515 ---
+                    def eventFilter(self, obj, event):
+                        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                            self.enter_cb()
+                            return True
+                        return super().eventFilter(obj, event)
+                
+                qef = QtyEventFilter(on_qty_enter, qty_edit)
+                qty_edit.installEventFilter(qef)
+                qty_edit._filter = qef
+                
+                qty_wrap = QWidget()
+                ql = QHBoxLayout(qty_wrap)
+                ql.setContentsMargins(0, 0, 0, 0)
+                ql.addWidget(qty_edit)
+                self.table.setCellWidget(row, 1, qty_wrap)
+
+                # Price
+                price_edit = QLineEdit(f"{item['rate']:.2f}")
+                price_edit.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                price_edit.setStyleSheet(f"border: none; background: transparent; color: {DARK_TEXT}; font-size: 13px;")
+                price_edit.textChanged.connect(lambda t, r=row: self._update_price(r, float(t) if t else 0.0))
+                
+                price_wrap = QWidget()
+                pl = QHBoxLayout(price_wrap)
+                pl.setContentsMargins(0, 0, 8, 0)
+                pl.addWidget(price_edit)
+                self.table.setCellWidget(row, 2, price_wrap)
+
+                # Remove button
+                rm_btn = QPushButton()
+                import qtawesome as qta
+                rm_btn.setIcon(qta.icon("fa5s.trash", color="#c0392b"))
+                rm_btn.setFixedSize(28, 28)
+                rm_btn.setCursor(Qt.PointingHandCursor)
+                rm_btn.setStyleSheet("background: transparent; border: none;")
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\dialogs\company_settings.py:2473 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if obj is self._inline_edit and self._inline_popup:
+            if event.type() == QEvent.KeyPress:
+                key = event.key()
+                popup = self._inline_popup
+                if key == Qt.Key_Down:
+                    if popup.isVisible():
+                        cur = popup.currentRow()
+                        popup.setCurrentRow(min(cur + 1, popup.count() - 1))
+                    return True
+                elif key == Qt.Key_Up:
+                    if popup.isVisible():
+                        cur = popup.currentRow()
+                        popup.setCurrentRow(max(cur - 1, 0))
+                    return True
+                elif key == Qt.Key_Escape:
+                    self._close_inline_search()
+                    self.invoice_table.setFocus()
+                    return True
+                elif key == Qt.Key_Tab:
+                    self._inline_on_enter()
+                    return True
+        if obj is self.invoice_table and event.type().__class__.__name__ != "type":
+            from PySide6.QtCore import QEvent
+            if event.type() == QEvent.KeyPress:
+                key = event.key()
+                if key in (Qt.Key_Return, Qt.Key_Enter):
+                    self._numpad_enter(); return True
+                if key == Qt.Key_Delete:
+                    self._numpad_del_line(); return True
+                if key == Qt.Key_Asterisk:
+                    self._open_qty_popup(); return True
+                if key == Qt.Key_F2:
+                    self._save_sale(); return True
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\dialogs\purchase_invoice_dialog.py:295 ---
+    def eventFilter(self, obj, event):
+        if getattr(self, "_block_popup", False):
+            return super().eventFilter(obj, event)
+
+        # Delete key on the table -> remove selected product row
+        if (obj is self.table or obj is self.table.viewport()) and event.type() == QEvent.KeyPress:
+            if self.is_read_only: return super().eventFilter(obj, event)
+            if event.key() == Qt.Key_Delete:
+                row = self.table.currentRow()
+                if row >= 0:
+                    # Skip the inline search row
+                    c0 = self.table.cellWidget(row, 0)
+                    if not (c0 and getattr(c0, "is_inline_search", False)):
+                        if row < len(self.items):
+                            self._remove_item(row)
+                return True
+
+        if event.type() == QEvent.FocusIn:
+            combos = [self.sup_combo, self.wh_combo]
+            if hasattr(self, "search_edit"):       combos.append(self.search_edit)
+            if hasattr(self, "inline_search_edit"): combos.append(self.inline_search_edit)
+            for combo in combos:
+                target = combo.lineEdit() if hasattr(combo, "lineEdit") else combo
+                if obj == target:
+                    completer = (
+                        combo.completer()
+                        if hasattr(combo, "completer")
+                        else getattr(obj, "completer", lambda: None)()
+                    )
+                    if completer and not completer.popup().isVisible():
+                        QTimer.singleShot(100, completer.complete)
+        return super().eventFilter(obj, event)
+
+    # ── UI build ─────────────────────────────────────────────────────────────
+    def _build_ui(self):
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\dialogs\purchase_order_dialog.py:41 ---
+    def eventFilter(self, obj, event):
+        if getattr(self, "_block_popup", False):
+            return super().eventFilter(obj, event)
+
+        if event.type() == QEvent.FocusIn:
+            combos = [self.sup_combo, self.wh_combo, self.cc_combo]
+            if hasattr(self, "inline_search_edit"):
+                combos.append(self.inline_search_edit)
+            for combo in combos:
+                target = combo.lineEdit() if hasattr(combo, "lineEdit") else combo
+                if obj == target:
+                    completer = combo.completer() if hasattr(combo, "completer") else getattr(obj, "completer", lambda: None)()
+                    if completer and not completer.popup().isVisible():
+                        QTimer.singleShot(100, completer.complete)
+        return super().eventFilter(obj, event)
+
+    def _build_ui(self):
+        main_lay = QVBoxLayout(self)
+        main_lay.setContentsMargins(0, 0, 0, 0)
+
+        card = QFrame()
+        card.setObjectName("poCard")
+        card.setStyleSheet(f"""
+            QFrame#poCard {{
+                background:{WHITE}; border-radius:0px;
+                border: none;
+            }}
+        """)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(15); shadow.setXOffset(0); shadow.setYOffset(5)
+        shadow.setColor(QColor(0, 0, 0, 30))
+        card.setGraphicsEffect(shadow)
+        main_lay.addWidget(card)
+
+        cl = QVBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\dialogs\stock_file_dialog.py:729 ---
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                    on_qty_enter()
+                    return True
+                return super().eventFilter(obj, event)
+                
+        
+        qef = QtyEventFilter(qty_edit)
+        qty_edit.installEventFilter(qef)
+        qty_edit._filter = qef
+        
+        del_lay = QHBoxLayout()
+        del_lay.setContentsMargins(0,0,0,0)
+        del_lay.addWidget(btn_del)
+        w = QWidget()
+        w.setLayout(del_lay)
+        self.comp_table.setCellWidget(r, 3, w)
+        
+        self.comp_search.clear()
+        self.comp_search.hide()
+        
+        qty_edit.setFocus()
+        qty_edit.selectAll()
+        
+        self._update_bundle_totals()
+
+
+    def _remove_comp_row(self, item_ref):
+        if not item_ref: return
+        row = item_ref.row()
+        if row >= 0 and row < self.comp_table.rowCount():
+            self.comp_table.removeRow(row)
+            self._update_bundle_totals()
+            
+            # Append a new empty row at the bottom to maintain the table height/grid
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\dialogs\stock_file_dialog.py:1082 ---
+    def eventFilter(self, obj, event):
+        """Auto-popup completers on focus or click."""
+        if obj in (self.f_cat,):
+            if event.type() == QEvent.FocusIn:
+                if event.reason() == Qt.TabFocusReason:
+                    QTimer.singleShot(100, lambda: self._show_completer(obj))
+            elif event.type() == QEvent.MouseButtonRelease:
+                self._show_completer(obj)
+        return super().eventFilter(obj, event)
+
+    def _on_completer_activated(self, widget):
+        """Explicitly hide and move focus after selection."""
+        if widget.completer():
+            widget.completer().popup().hide()
+        # Move focus to next logical widget to prevent re-triggering
+        self.focusNextChild()
+
+    def _show_completer(self, widget):
+        if widget.completer() and not widget.completer().popup().isVisible():
+            widget.completer().complete()
+
+    def _style_completer(self, completer):
+        """Apply clean white theme to the popup list."""
+        popup = completer.popup()
+        popup.setStyleSheet(f"""
+            QListView {{
+                background: {WHITE}; border: 2px solid {ACCENT};
+                border-radius: 0px; font-size: 13px; color: {DARK_TEXT}; outline: none;
+            }}
+            QListView::item           {{ padding: 6px 10px; min-height: 28px; color: {DARK_TEXT}; }}
+            QListView::item:selected  {{ background-color: {ACCENT}; color: {WHITE}; }}
+            QListView::item:selected:!active {{ background-color: {ACCENT}; color: {WHITE}; }}
+            QListView::item:hover     {{ background-color: {LIGHT}; color: {NAVY}; }}
+        """)
+
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\reports\report_template.py:587 ---
+    def eventFilter(self, obj, event):
+        if obj == self.global_search and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Down:
+                self.table.setFocus()
+                if self.table.rowCount() > 0 and not self.table.selectedItems():
+                    self.table.selectRow(0)
+                return True
+            elif event.key() == Qt.Key_Up:
+                self.table.setFocus()
+                if self.table.rowCount() > 0 and not self.table.selectedItems():
+                    self.table.selectRow(self.table.rowCount() - 1)
+                return True
+        return False
+
+    def get_table_stylesheet(self):
+        return '''
+            QTableWidget { gridline-color: #b0bec5; border: 1px solid #c8d8ec; background-color: white; font-size: 13px; color: #333333; }
+            QHeaderView::section { background-color: #fdfbf7; padding: 8px 30px 8px 8px; border: none; border-bottom: 2px solid #e4eaf4; border-right: 1px solid #e4eaf4; font-weight: bold; font-size: 13px; color: #1a5fb4; }
+            QTableWidget::item { padding: 6px; border-bottom: 1px solid #f0f4f8; }
+            QTableWidget::item:selected { background-color: #e8f1f8; color: #1a5fb4; }
+        '''
+
+    def _export_pdf(self):
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtCore import QStandardPaths
+        from PySide6.QtPrintSupport import QPrinter
+        from PySide6.QtGui import QTextDocument, QPageSize, QPageLayout
+        from models.company_defaults import get_defaults
+        from views.dialogs.pdf_preview_dialog import PdfPreviewDialog
+        import os
+        
+        if not hasattr(self, 'table') or self.table is None or self.table.rowCount() <= 1:
+            QMessageBox.information(self, "Empty", "No data to export.")
+            return
+
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\reports\test.py:4832 ---
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+
+        # ── inline search edit ────────────────────────────────────────────────
+        if obj is self._inline_edit and event.type() == QEvent.KeyPress:
+            key   = event.key()
+            popup = self._inline_popup
+            if key == Qt.Key_Down:
+                if popup and popup.isVisible():
+                    popup.setCurrentRow(min(popup.currentRow() + 1, popup.count() - 1))
+                return True
+            if key == Qt.Key_Up:
+                if popup and popup.isVisible():
+                    popup.setCurrentRow(max(popup.currentRow() - 1, 0))
+                return True
+            if key == Qt.Key_Escape:
+                self._close_inline_search()
+                self.invoice_table.setFocus()
+                return True
+            if key == Qt.Key_Tab:
+                self._inline_on_enter()
+                return True
+
+        # ── invoice table ─────────────────────────────────────────────────────
+        if obj is self.invoice_table and event.type() == QEvent.KeyPress:
+            key  = event.key()
+            mods = event.modifiers()
+
+            # #6 Enter/Return - always advance to next cart line
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                if self._inline_edit is not None:
+                    self._inline_on_enter()
+                    return True
+                self._numpad_enter()
+                return True
+============================================================
+--- File: c:\Users\DELL\New_POS\Havano_POS_2026\views\reports\test.py:5780 ---
+            def eventFilter(self, obj, event):
+                from PySide6.QtCore import QEvent
+                if event.type() == QEvent.Resize:
+                    QTimer.singleShot(0, _pos_self._render_product_page)
+                return False
+        self._grid_resize_filter = _GridResizeFilter()
+        self._product_grid_widget.installEventFilter(self._grid_resize_filter)
+
+        # ── Pagination bar ─────────────────────────────────────────────────────
+        page_bar = QWidget(); page_bar.setFixedHeight(22)
+        page_bar.setStyleSheet(f"background-color: #f0e8d0; border-top: 1px solid {BORDER};")
+        page_bar_h = QHBoxLayout(page_bar)
+        page_bar_h.setContentsMargins(0, 0, 0, 0); page_bar_h.setSpacing(4)
+
+        page_bar_h.addStretch(1)
+
+        _btn_style = f"""
+            QPushButton {{ background-color: {NAVY}; color: {WHITE}; border: none;
+                border-radius: 3px; font-size: 9px; font-weight: bold; padding: 0 6px; }}
+            QPushButton:hover {{ background-color: {NAVY_2}; }}
+            QPushButton:disabled {{ background-color: {BORDER}; color: {MUTED}; }}
+        """
+
+        self._grid_prev_btn = QPushButton("◀ Prev")
+        self._grid_prev_btn.setFixedSize(52, 16)
+        self._grid_prev_btn.setCursor(Qt.PointingHandCursor)
+        self._grid_prev_btn.setStyleSheet(_btn_style)
+        self._grid_prev_btn.clicked.connect(lambda: self._grid_turn_page(-1))
+
+        self._grid_page_lbl = QLabel("Page 1 / 1")
+        self._grid_page_lbl.setAlignment(Qt.AlignCenter)
+        self._grid_page_lbl.setStyleSheet(f"color: {NAVY}; font-size: 9px; background: transparent;")
+        self._grid_page_lbl.setFixedWidth(80)
+
+        self._grid_next_btn = QPushButton("Next ▶")
+============================================================

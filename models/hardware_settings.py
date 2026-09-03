@@ -1,0 +1,1 @@
+from database.hardware_settings_db import load_hw as get_hardware_settings

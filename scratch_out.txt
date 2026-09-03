@@ -1,0 +1,127 @@
+            self.quote_mode_btn.setVisible(False)
+        
+        
+
+        # ── Laybye Switcher ───────────────────────────────────────────────────
+        self.laybye_btn = QPushButton("Laybye")
+        self.laybye_btn.setCheckable(True)
+        self.laybye_btn.setFixedHeight(NAV_H)
+        self.laybye_btn.setMinimumWidth(110)
+        self.laybye_btn.setCursor(Qt.PointingHandCursor)
+
+        self.laybye_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {AMBER};
+                color: {WHITE};
+                border: none;
+                border-radius: {NAV_R}px;
+                font-size: {NAV_FS}px;
+                font-weight: bold;
+                text-align: center;
+                padding: 0px 5px;
+                outline: none;
+            }}
+            QPushButton:hover {{
+                background-color: {ORANGE};
+            }}
+            QPushButton:pressed {{
+                background-color: {NAVY_3};
+                color: {WHITE};
+            }}
+            QPushButton:checked {{
+                background-color: {AMBER};
+            }}
+            QPushButton:checked:hover {{
+                background-color: {ORANGE};
+            }}
+        """)
+
+        self.laybye_btn.setToolTip("Toggle Laybye Mode")
+        self.laybye_btn.clicked.connect(self._on_laybye)
+        layout.addWidget(self.laybye_btn)
+        layout.addSpacing(4)
+        if not adv_settings.enableLaybyes:
+            self.laybye_btn.setVisible(False)
+
+        # ── Payments button ───────────────────────────────────────────────────
+        self.payments_btn = _nb("Payments", self._open_customer_payment_entry, color=ACCENT, hov=ACCENT_H)
+        layout.addWidget(self.payments_btn)
+        layout.addSpacing(4)
+        if not adv_settings.enablePayments:
+
+---
+        # old badges doesn't crash at runtime.
+        self._all_synced_badge = self._q_badge   # backward compat alias
+        self._si_badge = self._q_badge
+        self._cn_badge = self._q_badge
+        self._so_badge = self._q_badge
+
+        # ── Laybye Switcher ───────────────────────────────────────────────────
+        self.laybye_btn = QPushButton("Laybye")
+        self.laybye_btn.setCheckable(True)
+        self.laybye_btn.setFixedHeight(NAV_H)
+        self.laybye_btn.setMinimumWidth(110)
+        self.laybye_btn.setCursor(Qt.PointingHandCursor)
+
+        self.laybye_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {AMBER}; 
+                color: {WHITE}; 
+                border: none;
+                border-radius: {NAV_R}px; 
+                font-size: {NAV_FS}px; 
+                font-weight: bold;
+                text-align: center;
+                padding: 0px 5px; 
+                outline: none;
+            }}
+            QPushButton:hover {{ 
+                background-color: {ORANGE}; 
+            }}
+            /* Matches the standard nav button behavior for the click action */
+            QPushButton:pressed {{ 
+                background-color: {NAVY_3}; 
+                color: {WHITE};
+            }}
+            /* Ensures that once 'Checked', it returns to the AMBER color scheme */
+            QPushButton:checked {{ 
+                background-color: {AMBER}; 
+            }}
+            QPushButton:checked:hover {{ 
+                background-color: {ORANGE}; 
+            }}
+        """)
+
+        # ── Restaurant / Orders Switcher ──────────────────────────────────────
+        self.orders_btn = QPushButton("Orders")
+        self.orders_btn.setCheckable(True)
+        self.orders_btn.setFixedHeight(NAV_H)
+        self.orders_btn.setMinimumWidth(110)
+        self.orders_btn.setCursor(Qt.PointingHandCursor)
+        self.orders_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {SUCCESS}; color: {WHITE}; border: none;
+                border-radius: {NAV_R}px; font-size: {NAV_FS}px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {SUCCESS_H}; }}
+            QPushButton:checked {{ background-color: {ACCENT}; }}
+        """)
+        self.orders_btn.clicked.connect(self._on_orders)
+
+        # Show button only if feature is enabled in settings
+        try:
+            from models.restaurant_order import is_restaurant_enabled
+            self.orders_btn.setVisible(is_restaurant_enabled())
+        except Exception:
+            self.orders_btn.setVisible(False)
+            
+        layout.addWidget(self.orders_btn)
+        layout.addSpacing(4)
+
+        self.laybye_btn.setToolTip("Toggle Laybye Mode")
+
+        self.laybye_btn.clicked.connect(self._on_laybye)
+        layout.addWidget(self.laybye_btn)
+        layout.addSpacing(4)
+
+        # ── Payments button ───────────────────────────────────────────────────

@@ -1,0 +1,1283 @@
+from __future__ import annotations
+
+import sys
+import os
+import time
+import json
+import logging
+import threading
+import urllib.error
+from services.network_utils import safe_urlopen
+
+# ── Project root on path ─────────────────────────────────────────────────────
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+_LOG_PATH = os.path.join(_ROOT, "logs", "product_sync_service.log")
+os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+
+# Build the handler list defensively - when this process is a PyInstaller
+# --windowed --onefile build, sys.stdout is None and sys.stdout.fileno()
+# throws AttributeError at module import time, which bricks the EXE. Only
+# attach a StreamHandler when a real stdout is available.
+_log_handlers: list = [logging.FileHandler(_LOG_PATH, encoding="utf-8")]
+try:
+    if sys.stdout is not None and hasattr(sys.stdout, "fileno"):
+        _fd = sys.stdout.fileno()  # may raise OSError if redirected to NUL
+        _log_handlers.append(
+            logging.StreamHandler(open(_fd, mode="w", encoding="utf-8", closefd=False))
+        )
+except (AttributeError, OSError, ValueError):
+    # Windowed EXE / redirected stream - file handler alone is fine
+    pass
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  [%(levelname)s]  %(message)s",
+    handlers=_log_handlers,
+)
+log = logging.getLogger("ProductSyncService")
+
+# ── Config ───────────────────────────────────────────────────────────────────
+SYNC_INTERVAL   = 300       # 5 minutes background sync
+PAGE_SIZE       = 100       # records per Frappe page request (reduced from 250 to prevent API timeouts)
+REQUEST_TIMEOUT = 60        # increased to 60 to avoid timeouts on heavy api calls
+
+
+# =============================================================================
+# CREDENTIALS / HOST
+# =============================================================================
+
+def _load_credentials() -> tuple[str, str]:
+    """
+    Load credentials with correct fallback chain:
+      1. In-memory session (fastest - covers mid-session calls)
+      2. DB read - queries MIN(id) so it works regardless of the actual id value
+      3. Environment variables (CI / headless fallback)
+    """
+
+    # ── 1. In-memory session ─────────────────────────────────────────────────
+    try:
+        from services.credentials import get_credentials
+        api_key, api_secret = get_credentials()
+        if api_key:
+            log.debug("Credentials loaded from credentials module")
+            return api_key, api_secret
+    except Exception as e:
+        log.warning("Could not load from credentials module: %s", e)
+
+    # ── 2. Direct DB read using MIN(id) - fixes WHERE id=1 bug ──────────────
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT api_key, api_secret
+            FROM   company_defaults
+            WHERE  id = (SELECT MIN(id) FROM company_defaults)
+        """)
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            k = str(row[0] or "").strip()
+            s = str(row[1] or "").strip()
+            if k:
+                log.debug("Credentials loaded directly from DB (MIN id): %s...", k[:8])
+                return k, s
+            else:
+                log.warning("api_key/api_secret columns exist but are empty in DB - "
+                            "login with username+password once to populate them.")
+    except Exception as e:
+        log.error("DB credential read failed: %s", e)
+
+    # ── 3. Environment variables ─────────────────────────────────────────────
+    env_key    = os.environ.get("HAVANO_API_KEY",    "").strip()
+    env_secret = os.environ.get("HAVANO_API_SECRET", "").strip()
+    if env_key:
+        log.debug("Credentials loaded from environment variables")
+        return env_key, env_secret
+
+    log.error("No credentials found - login via the POS app or set "
+              "HAVANO_API_KEY / HAVANO_API_SECRET environment variables.")
+    return "", ""
+
+
+def _get_host() -> str:
+    # Primary: read api_url from sql_settings.json (always present)
+    try:
+        from database.db import get_api_url
+        host = get_api_url()
+        if host:
+            if not (host.startswith('http://') or host.startswith('https://')):
+                host = 'https://' + host
+            return host
+    except Exception as e:
+        log.warning("Could not read api_url from sql_settings: %s", e)
+
+    # Fallback: try site_config module
+    try:
+        from services.site_config import get_host
+        h=get_host();
+        if h:
+            return h
+    except Exception:
+        pass
+
+    # Last resort: try server_api_host column in DB
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT server_api_host
+            FROM   company_defaults
+            WHERE  id = (SELECT MIN(id) FROM company_defaults)
+        """)
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            host = str(row[0]).strip().rstrip("/")
+            if host:
+                if not (host.startswith('http://') or host.startswith('https://')):
+                    host = 'https://' + host
+                return host
+    except Exception:
+        pass
+    return None
+
+# =============================================================================
+# FETCH
+# =============================================================================
+
+def _get(url: str, api_key: str, api_secret: str) -> dict:
+    print(f"[sync] Fetching Product Catalogue URL (Windows Service): {url}", flush=True)
+    from services.credentials import build_auth_header
+    req = urllib.request.Request(url)
+    auth_hdr = build_auth_header(api_key, api_secret)
+    if auth_hdr:
+        req.add_header("Authorization", auth_hdr)
+    with safe_urlopen(req, timeout=REQUEST_TIMEOUT) as r:
+        return json.loads(r.read().decode())
+
+
+def _fetch_all_pages(api_key: str, api_secret: str, host: str) -> list[dict]:
+    """Pages through the API using the real pagination structure."""
+    products: list[dict] = []
+    page = 1
+    
+    # Select base_endpoint according to system mode
+    try:
+        from services.credentials import get_system_mode
+        sys_mode = get_system_mode().lower()
+    except Exception:
+        sys_mode = "frappe"
+
+    if sys_mode == "frappe":
+        base_endpoint = f"{host}/api/method/havano_pos_integration.api.get_products"
+        fallback_endpoint = f"{host}/api/method/saas_api.www.api.get_my_products"
+    else:
+        base_endpoint = f"{host}/api/method/saas_api.www.api.get_my_products"
+        fallback_endpoint = f"{host}/api/method/havano_pos_integration.api.get_products"
+    use_fallback = False
+
+    while True:
+        endpoint = fallback_endpoint if use_fallback else base_endpoint
+        url = f"{endpoint}?page={page}&limit={PAGE_SIZE}"
+        log.info("[sync] Fetching page %d (limit=%d)...", page, PAGE_SIZE)
+
+        try:
+            data        = _get(url, api_key, api_secret)
+            msg         = data.get("message", {})
+            page_items  = msg.get("products", []) if isinstance(msg, dict) else []
+            pagination  = msg.get("pagination", {}) if isinstance(msg, dict) else {}
+            total_pages = pagination.get("total_pages", 1)
+            has_next    = pagination.get("has_next_page", False)
+        except urllib.error.HTTPError as e:
+            if not use_fallback:
+                log.info(f"[sync] Endpoint {endpoint} failed with {e.code}, trying fallback.")
+                use_fallback = True
+                continue
+            raise e
+        except Exception as e:
+            log.error("[sync] Page %d fetch failed: %s", page, e)
+            break
+
+        # TAX DEBUG: log a sample raw product on first page
+        if page == 1 and page_items:
+            sample       = page_items[0]
+            sample_taxes = sample.get("taxes", [])
+            log.info(
+                "[TAX FIELD DEBUG] Sample product '%s' taxes raw: %s",
+                sample.get("itemcode", "?"),
+                json.dumps(sample_taxes, default=str),
+            )
+
+        products.extend(page_items)
+        log.info("[sync]   %d products on page %d/%d", len(page_items), page, total_pages)
+
+        if not has_next:
+            break
+        page += 1
+
+    return products
+
+
+# =============================================================================
+# FIELD EXTRACTORS
+# =============================================================================
+
+def _extract_cost_price(prices: list, stock_uom: str = "Nos") -> float:
+    buying = [p for p in (prices or []) if str(p.get("type", "")).lower() == "buying"]
+    if not buying:
+        return 0.0
+    for p in buying:
+        if str(p.get("uom") or "").strip().lower() == stock_uom.strip().lower():
+            try:
+                return float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                pass
+    for p in buying:
+        if "standard buying" in str(p.get("priceName") or "").lower():
+            try:
+                return float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                pass
+    try:
+        return float(buying[0].get("price") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def _extract_selling_price(prices: list, stock_uom: str = "Nos") -> float:
+    """
+    Find the best selling price from the prices array.
+    Priority:
+      1. Standard Selling for the stock UOM (e.g. Nos, Kg)
+      2. Any Standard Selling price
+      3. Any selling type price
+    """
+    selling = [p for p in (prices or []) if str(p.get("type", "selling")).lower() == "selling"]
+    if not selling:
+        return 0.0
+    for p in selling:
+        if str(p.get("uom") or "").strip().lower() == stock_uom.strip().lower():
+            return float(p.get("price") or 0)
+    for p in selling:
+        if "standard selling" in str(p.get("priceName") or "").lower():
+            return float(p.get("price") or 0)
+    return float(selling[0].get("price") or 0)
+
+def _get_company_warehouse() -> str:
+    """
+    Retrieve the company's default warehouse from company defaults.
+    
+    Returns:
+        Warehouse name or empty string if not found
+    """
+    try:
+        from models.company_defaults import get_defaults
+        defaults = get_defaults() or {}
+        warehouse = defaults.get("server_warehouse", "").strip()
+        if warehouse:
+            log.debug(f"[STOCK] Using company warehouse: {warehouse}")
+            return warehouse
+        else:
+            log.debug("[STOCK] No company warehouse configured")
+            return ""
+    except Exception as e:
+        log.warning(f"[STOCK] Failed to get company warehouse: {e}")
+        return ""
+
+
+def _extract_stock(warehouses: list) -> float:
+    """
+    Sum qtyOnHand ONLY for the company's configured warehouse.
+    
+    If no company warehouse is configured, falls back to summing all warehouses.
+    """
+    target_warehouse = _get_company_warehouse()
+    
+    if not warehouses:
+        return 0.0
+    
+    # If no target warehouse specified, sum all (fallback behavior)
+    if not target_warehouse:
+        total = 0.0
+        for w in warehouses:
+            try:
+                total += float(w.get("qtyOnHand") or 0)
+            except (TypeError, ValueError):
+                pass
+        return total
+    
+    # Filter for the specific warehouse
+    target_warehouse_upper = target_warehouse.strip().upper()
+    for w in warehouses:
+        warehouse_name = str(w.get("warehouse") or "").strip().upper()
+        if warehouse_name == target_warehouse_upper:
+            try:
+                qty = float(w.get("qtyOnHand") or 0)
+                log.debug(f"[STOCK] Found stock for warehouse '{target_warehouse}': {qty}")
+                return qty
+            except (TypeError, ValueError):
+                return 0.0
+    
+    # Warehouse not found in the list
+    log.debug(f"[STOCK] Warehouse '{target_warehouse}' not found in product warehouses")
+    return 0.0
+
+
+def _extract_tax_info(taxes: list, part_no: str = "") -> dict | None:
+    """
+    Extract tax information from the taxes array.
+
+    Matches the Flutter/Android POS's behaviour: `maximum_net_rate` on the
+    product's tax row is the authoritative rate. Everything else just mirrors
+    what Frappe already ships in the payload - no extra HTTP calls, no
+    hardcoded VAT fallback. If Frappe sends 0 the rate is 0; fix it upstream
+    (in the Item Tax Template / Tax Rule) instead of papering over it here.
+    """
+    if not taxes:
+        log.debug("[TAX] %s - no taxes array, will default to ZERO RATED", part_no)
+        return None
+
+    tax = taxes[0]
+
+    # Log the raw tax object for every product
+    log.info("[TAX RAW] %s -> %s", part_no or "?", json.dumps(tax, default=str))
+
+    # Single authoritative rate source - same as Android
+    # (lib/core/services/products_service.dart:865 -> `taxRate: t.maximumNetRate`).
+    tax_rate = float(tax.get("maximum_net_rate") or 0)
+
+    tax_category      = str(tax.get("tax_category")      or "").strip()
+    item_tax_template = str(tax.get("item_tax_template") or "").strip()
+
+    # Infer category from template name when blank
+    if not tax_category:
+        tmpl_upper = item_tax_template.upper()
+        if "VAT" in tmpl_upper:
+            tax_category = "VAT"
+            log.debug("[TAX] %s - inferred category=VAT from template '%s'",
+                      part_no, item_tax_template)
+        elif "EXEMPT" in tmpl_upper:
+            tax_category = "EXEMPT"
+            log.debug("[TAX] %s - inferred category=EXEMPT from template '%s'",
+                      part_no, item_tax_template)
+        elif "ZERO" in tmpl_upper:
+            tax_category = "ZERO RATED"
+            log.debug("[TAX] %s - inferred category=ZERO RATED from template '%s'",
+                      part_no, item_tax_template)
+
+    log.info(
+        "[TAX RESOLVED] %s -> rate=%.4f  category='%s'  template='%s'",
+        part_no or "?", tax_rate, tax_category, item_tax_template,
+    )
+
+    return {
+        "tax_rate":          tax_rate,
+        "tax_category":      tax_category,
+        "item_tax_template": item_tax_template,
+    }
+
+
+def _extract_price_list_rows(prices: list) -> list[dict]:
+    """
+    Normalise the `prices` array from get_products into rows suitable for the
+    local `item_prices` table. One row per (price_list, uom, price_type).
+
+    Mirrors the Android client's bulk-cache approach (see
+    lib/core/services/products_service.dart) - the server ships every price
+    list a product belongs to, and the POS filters by the *active* price
+    list at cart time.
+    """
+    rows: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for p in prices or []:
+        price_list = str(p.get("priceName") or "").strip()
+        if not price_list:
+            continue
+        uom        = str(p.get("uom")  or "nos").strip() or "nos"
+        price_type = str(p.get("type") or "selling").strip().lower() or "selling"
+        try:
+            price = float(p.get("price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+
+        key = (price_list, uom, price_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "price_list": price_list,
+            "uom":        uom,
+            "price":      price,
+            "price_type": price_type,
+        })
+    return rows
+
+
+def _extract_variant_info(p: dict) -> dict:
+    """
+    Pull variant fields from the get_products payload. The backend returns
+    (see pos_intergration_latest api.py):
+        has_variants  : BIT  - this is a template item
+        variant_of    : str  - parent template part_no (variants only)
+        attributes    : list[{attribute, attribute_value}]
+    Missing keys -> safe defaults (all zero / empty).
+    """
+    has_variants = bool(p.get("has_variants") or 0)
+    variant_of   = str(p.get("variant_of") or "").strip().upper()
+    attrs_raw    = p.get("attributes") or []
+
+    # Always json.dumps - even empty list - so downstream callers can parse
+    # without guarding for None.
+    try:
+        attrs_json = json.dumps(attrs_raw, default=str)
+    except Exception:
+        attrs_json = "[]"
+
+    return {
+        "has_variants": 1 if has_variants else 0,
+        "is_template":  1 if has_variants else 0,
+        "variant_of":   variant_of or None,
+        "attributes":   attrs_json,
+    }
+
+
+def _parse_product(p: dict) -> dict | None:
+    """
+    Maps the real API product object to a clean local dict including tax info.
+    Returns None if the product should be skipped.
+    """
+    part_no   = str(p.get("itemcode") or "").strip().upper()
+    name      = str(p.get("itemname") or "").strip()
+    stock_uom = str((p.get("uom") or {}).get("stock_uom") or "Nos").strip()
+    price     = _extract_selling_price(p.get("prices", []), stock_uom)
+
+    _ROOT_GROUPS = {"all item groups", "all"}
+    raw_group = str(p.get("groupname") or "").strip()
+    category  = "" if raw_group.lower() in _ROOT_GROUPS else raw_group
+
+    if raw_group and raw_group.lower() in _ROOT_GROUPS:
+        log.debug("[sync] %s - groupname '%s' is a root group, stored as uncategorised.",
+                  part_no, raw_group)
+
+    stock = _extract_stock(p.get("warehouses", []))
+
+    taxes    = p.get("taxes", [])
+    tax_info = _extract_tax_info(taxes, part_no=part_no)
+
+    barcodes = p.get("barcodes", [])
+
+    # is_sales_item filter.
+    # Templates (has_variants=1) are often flagged is_sales_item=0 in Frappe
+    # - you sell the variants, not the template itself. We still need the
+    # template row locally so it can appear as a tile on the POS grid and
+    # open the variant picker; without it, the variants would look like
+    # unrelated products. Skip only when both conditions hold:
+    #   (a) is_sales_item is falsy (and present), AND
+    #   (b) has_variants is also falsy (not a template).
+    is_sales    = p.get("is_sales_item")
+    is_template = bool(p.get("has_variants"))
+    
+    # If the custom backend omits is_sales_item entirely, assume it's for sale
+    not_sellable = False
+    if is_sales is not None:
+        not_sellable = str(is_sales).strip() in ("0", "false", "False", "no")
+
+    if not_sellable and not is_template:
+        log.info("[sync] Warning: %s - %s is marked as not a sales item, but syncing it anyway to prevent missing items.", part_no, name)
+        # return None (Removed to allow aggressive sync of all fetched items)
+    if not_sellable and is_template:
+        log.info("[sync] Kept non-sales template: %s - %s (for variant picker)",
+                 part_no, name)
+
+    if not part_no:
+        return None
+
+    # Build UOM prices list
+    raw_prices = p.get("prices", [])
+    uom_prices = []
+    seen_uoms  = set()
+    for rp in raw_prices:
+        if str(rp.get("type", "selling")).lower() != "selling":
+            continue
+        uom_name = str(rp.get("uom") or "Nos").strip()
+        rp_price = float(rp.get("price") or 0)
+        if uom_name not in seen_uoms and rp_price > 0:
+            uom_prices.append({"uom": uom_name, "price": rp_price})
+            seen_uoms.add(uom_name)
+
+    # Batches from the server - list of {batch_no, expiry_date, qty}.
+    # Safe default to empty list; the sync writer wipes + rewrites per product.
+    raw_batches = p.get("batches") or []
+
+    # Every price-list row for this item (multi-currency / multi-list aware).
+    # Used below to populate the `item_prices` cache so the POS can look up
+    # the right price for the active customer's price list.
+    price_list_rows = _extract_price_list_rows(raw_prices)
+
+    # Variant metadata - template flag, parent pointer, attribute blob.
+    variant_info = _extract_variant_info(p)
+
+    result = {
+        "part_no":             part_no,
+        "name":                name,
+        "description":         str(p.get("description") or ""),
+        "category":            category,
+        "price":               price,
+        "cost_price":          float(p.get("valuation_rate") or p.get("standard_rate") or p.get("cost_price") or 0.0),
+        "reorder_level":       float(p.get("reorder_level") or 0.0),
+        "stock":               stock,
+        "uom":                 stock_uom,
+        "conversion_factor":   float(p.get("conversion_factor") or 1.0),
+        "track_stock":         1 if str(p.get("maintainstock") if p.get("maintainstock") is not None else p.get("is_stock_item") if p.get("is_stock_item") is not None else p.get("track_stock") or "1").strip().lower() in ("1", "true", "yes", "t", "y") else 0,
+        "uom_prices":          uom_prices,
+        "price_list_rows":     price_list_rows,
+        "is_pharmacy_product": bool(p.get("is_pharmacy_product") or 0),
+        "is_butchery_product": bool(p.get("is_butchery_product") or 0),
+        "is_product_bundle":   bool(p.get("is_product_bundle") or p.get("is_combo") or 0),
+        "batches":             raw_batches,
+        "raw_warehouses":      p.get("warehouses", []),
+        "raw_batches":         p.get("batches", []),
+        "hs_code":             str(p.get("hscode") or p.get("hs_code") or "").strip(),
+        "raw_barcodes":        barcodes,
+        # Variant fields flattened for the UPDATE/INSERT below
+        "has_variants":        variant_info["has_variants"],
+        "is_template":         variant_info["is_template"],
+        "variant_of":          variant_info["variant_of"],
+        "attributes":          variant_info["attributes"],
+    }
+
+    # Kitchen-printer routing flags from Frappe (custom_is_order_item_1..6)
+    # Stored locally as order_1..6 on the products table; used later to fan
+    # out KOTs to Order 1–6 printers (services/product_sync_windows_service ->
+    # products.order_N -> sale_items.order_N -> models/sale.print_kitchen_orders).
+    for i in range(1, 7):
+        result[f"order_{i}"] = 1 if p.get(f"custom_is_order_item_{i}") else 0
+
+    if tax_info:
+        result["tax_rate"]          = tax_info["tax_rate"]
+        result["tax_type"]          = tax_info["tax_category"] if tax_info["tax_category"] else "VAT"
+        result["item_tax_template"] = tax_info["item_tax_template"]
+    else:
+        result["tax_rate"]          = 0.0
+        result["tax_type"]          = "ZERO RATED"
+        result["item_tax_template"] = ""
+        log.debug("[TAX] %s - no tax_info returned, defaulting to ZERO RATED", part_no)
+
+    return result
+
+
+# =============================================================================
+# CORE SYNC
+# =============================================================================
+
+def _upsert_item_prices(cur, part_no: str, rows: list[dict]) -> int:
+    """
+    MERGE the full price-list cache for a single item. One MERGE per row -
+    the row count is small (usually 1–3 per item) so batching via a table
+    variable isn't worth the complexity. Returns the number of rows upserted.
+    """
+    count = 0
+    for r in rows:
+        try:
+            cur.execute("""
+                IF NOT EXISTS (SELECT 1 FROM price_lists WHERE name = ?)
+                BEGIN
+                    INSERT INTO price_lists (name, selling) VALUES (?, 1)
+                END
+            """, (r["price_list"], r["price_list"]))
+            
+            cur.execute("""
+                MERGE item_prices AS target
+                USING (SELECT ? AS part_no, ? AS price_list,
+                              ? AS uom,     ? AS price_type) AS src
+                    ON target.part_no    = src.part_no
+                   AND target.price_list = src.price_list
+                   AND target.uom        = src.uom
+                   AND target.price_type = src.price_type
+                WHEN MATCHED THEN
+                    UPDATE SET price      = ?,
+                               updated_at = GETDATE()
+                WHEN NOT MATCHED THEN
+                    INSERT (part_no, price_list, uom, price, price_type)
+                    VALUES (?, ?, ?, ?, ?);
+            """, (
+                part_no, r["price_list"], r["uom"], r["price_type"],
+                r["price"],
+                part_no, r["price_list"], r["uom"], r["price"], r["price_type"],
+            ))
+            count += 1
+        except Exception as e:
+            log.warning("[sync] item_prices upsert failed %s/%s/%s: %s",
+                        part_no, r.get("price_list"), r.get("uom"), e)
+    return count
+
+
+def _get_local_part_nos() -> set[str]:
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("SELECT part_no FROM products")
+        rows = cur.fetchall()
+        conn.close()
+        return {r[0].strip().upper() for r in rows if r[0]}
+    except Exception as e:
+        log.error("Could not read local part_nos: %s", e)
+        return set()
+
+
+def _ensure_schema(cur) -> None:
+    """
+    Make sure all required tables and columns exist before we start writing.
+    Safe to call every sync cycle - all DDL is guarded with IF NOT EXISTS.
+    """
+
+    # product_uom_prices table
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = 'product_uom_prices'
+        )
+        CREATE TABLE product_uom_prices (
+            id       INT           IDENTITY(1,1) PRIMARY KEY,
+            part_no  NVARCHAR(50)  NOT NULL,
+            uom      NVARCHAR(40)  NOT NULL,
+            price    DECIMAL(24,6) NOT NULL DEFAULT 0,
+            CONSTRAINT UQ_product_uom UNIQUE (part_no, uom)
+        )
+    """)
+
+    # product_taxes table
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = 'product_taxes'
+        )
+        CREATE TABLE product_taxes (
+            id                INT           IDENTITY(1,1) PRIMARY KEY,
+            part_no           NVARCHAR(50)  NOT NULL,
+            item_tax_template NVARCHAR(100),
+            tax_category      NVARCHAR(50),
+            valid_from        DATE,
+            minimum_net_rate  DECIMAL(24,6),
+            maximum_net_rate  DECIMAL(24,6),
+            created_at        DATETIME2     DEFAULT SYSDATETIME(),
+            updated_at        DATETIME2     DEFAULT SYSDATETIME(),
+            CONSTRAINT UQ_product_taxes UNIQUE (part_no, tax_category)
+        )
+    """)
+
+    # tax_rate column on products
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'products' AND COLUMN_NAME = 'tax_rate'
+        )
+        ALTER TABLE products ADD tax_rate DECIMAL(24,6) DEFAULT 0
+    """)
+
+    # tax_type column on products
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'products' AND COLUMN_NAME = 'tax_type'
+        )
+        ALTER TABLE products ADD tax_type NVARCHAR(50) DEFAULT 'VAT'
+    """)
+
+    # item_tax_template column on products (so we store the Frappe template name too)
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'products' AND COLUMN_NAME = 'item_tax_template'
+        )
+        ALTER TABLE products ADD item_tax_template NVARCHAR(100) DEFAULT ''
+    """)
+
+    # hs_code column on products
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'products' AND COLUMN_NAME = 'hs_code'
+        )
+        ALTER TABLE products ADD hs_code NVARCHAR(100) NULL
+    """)
+
+    # -----------------------------------------------------------------
+    # Variant columns - mirrors the DDL in setup_database.py. Defensive
+    # because this service can run standalone (Windows Service mode)
+    # where setup_database.py may not have executed recently.
+    # -----------------------------------------------------------------
+    for col, defn in [
+        ("is_template",  "BIT           NOT NULL DEFAULT 0"),
+        ("variant_of",   "NVARCHAR(50)  NULL"),
+        ("attributes",   "NVARCHAR(MAX) NULL"),
+        ("has_variants", "BIT           NOT NULL DEFAULT 0"),
+    ]:
+        cur.execute(f"""
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = 'products' AND COLUMN_NAME = '{col}'
+            )
+            ALTER TABLE products ADD {col} {defn}
+        """)
+
+    # -----------------------------------------------------------------
+    # item_prices table - same structure as setup_database.py. Created
+    # here too so a fresh Windows-Service install can sync prices even
+    # before the desktop app first launches.
+    # -----------------------------------------------------------------
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = 'item_prices'
+        )
+        CREATE TABLE item_prices (
+            id          INT           IDENTITY(1,1) PRIMARY KEY,
+            part_no     NVARCHAR(50)  NOT NULL,
+            price_list  NVARCHAR(120) NOT NULL,
+            uom         NVARCHAR(20)  NOT NULL DEFAULT 'nos',
+            price       DECIMAL(24,6) NOT NULL DEFAULT 0,
+            currency    NVARCHAR(10)  NULL,
+            price_type  NVARCHAR(20)  NOT NULL DEFAULT 'selling',
+            updated_at  DATETIME      NOT NULL DEFAULT GETDATE(),
+            CONSTRAINT UQ_item_prices UNIQUE (part_no, price_list, uom, price_type)
+        )
+    """)
+
+
+def sync_products_smart(api_key: str, api_secret: str) -> dict:
+    result = {
+        "inserted":            0,
+        "updated":             0,
+        "skipped_no_code":     0,
+        "skipped_not_sales":   0,
+        "root_group_stripped": 0,
+        "taxes_updated":       0,
+        "errors":              0,
+        "total_api":           0,
+        "deleted_stale":       0,
+    }
+
+    host       = _get_host()
+    remote_raw = _fetch_all_pages(api_key, api_secret, host)
+    result["total_api"] = len(remote_raw)
+
+    if not remote_raw:
+        log.info("[sync] No products returned from API.")
+        return result
+
+    # ── Parse and filter ─────────────────────────────────────────────────────
+    remote = []
+    for p in remote_raw:
+        parsed = _parse_product(p)
+        if parsed is None:
+            part_no = str(p.get("itemcode") or "").strip()
+            if not part_no:
+                result["skipped_no_code"] += 1
+            else:
+                result["skipped_not_sales"] += 1
+        else:
+            raw_group = str(p.get("groupname") or "").strip()
+            if raw_group.lower() in {"all item groups", "all"} and parsed["category"] == "":
+                result["root_group_stripped"] += 1
+            remote.append(parsed)
+
+    # Build set of part_nos explicitly rejected as non-sales items
+    non_sales_part_nos: set[str] = set()
+    for p in remote_raw:
+        part_no  = str(p.get("itemcode") or "").strip().upper()
+        is_sales = p.get("is_sales_item")
+        
+        # Only explicitly reject if it is explicitly marked not for sale
+        if part_no and is_sales is not None and str(is_sales).strip() in ("0", "false", "False", "no"):
+            non_sales_part_nos.add(part_no)
+
+    local_part_nos = _get_local_part_nos()
+
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur  = conn.cursor()
+    except Exception as e:
+        log.error("DB connection failed: %s", e)
+        return result
+
+    # ── Ensure schema ────────────────────────────────────────────────────────
+    try:
+        _ensure_schema(cur)
+        conn.commit()
+    except Exception as e:
+        log.warning("[sync] Schema check failed: %s", e)
+
+    # ── Load Warehouse Map ───────────────────────────────────────────────────
+    try:
+        cur.execute("SELECT id, name FROM warehouses")
+        wh_map = {row[1].strip().upper(): row[0] for row in cur.fetchall() if row[1]}
+    except Exception:
+        wh_map = {}
+
+    # ── Deactivate non-sales items ───────────────────────────────────────────
+    deactivated = 0
+    for part_no in non_sales_part_nos:
+        if part_no in local_part_nos:
+            try:
+                cur.execute("UPDATE products SET active=0 WHERE part_no=?", (part_no,))
+                deactivated += 1
+            except Exception:
+                pass
+    if deactivated:
+        log.info("[sync] Deactivated %d non-sales items in local DB.", deactivated)
+
+    # ── Upsert each product ──────────────────────────────────────────────────
+    try:
+        from services.sync_service import product_sync_notifier
+    except Exception:
+        product_sync_notifier = None
+
+    total_rem = len(remote)
+    for idx, p in enumerate(remote, 1):
+        if product_sync_notifier and (total_rem <= 50 or idx % max(1, total_rem // 50) == 0 or idx == total_rem or idx == 1):
+            try:
+                product_sync_notifier.progress.emit(idx, total_rem, f"Syncing products: {idx}/{total_rem}")
+            except Exception:
+                pass
+        try:
+            tax_rate          = p.get("tax_rate",          0)
+            tax_type          = p.get("tax_type",          "VAT")
+            item_tax_template = p.get("item_tax_template", "")
+            hs_code_val       = p.get("hs_code",           "")
+
+            is_pharm = 1 if p.get("is_pharmacy_product") else 0
+
+            order_flags = tuple(int(p.get(f"order_{i}", 0) or 0) for i in range(1, 7))
+
+            # Variant fields (default-safe so existing products get flags=0)
+            is_template  = int(p.get("is_template")  or 0)
+            has_variants = int(p.get("has_variants") or 0)
+            variant_of   = p.get("variant_of")  # may be None
+            attributes   = p.get("attributes") or "[]"
+
+            if p["part_no"] in local_part_nos:
+                cur.execute("""
+                    UPDATE products
+                    SET    name                = ?,
+                           description         = ?,
+                           price               = ?,
+                           cost_price          = ?,
+                           reorder_level       = ?,
+                           stock               = ?,
+                           track_stock         = ?,
+                           category            = ?,
+                           tax_rate            = ?,
+                           tax_type            = ?,
+                           item_tax_template   = ?,
+                           hs_code             = ?,
+                           is_pharmacy_product = ?,
+                           is_butchery_product = ?,
+                           is_product_bundle   = ?,
+                           conversion_factor   = ?,
+                           uom                 = ?,
+                           order_1             = ?,
+                           order_2             = ?,
+                           order_3             = ?,
+                           order_4             = ?,
+                           order_5             = ?,
+                           order_6             = ?,
+                           is_template         = ?,
+                           has_variants        = ?,
+                           variant_of          = ?,
+                           attributes          = ?
+                    WHERE  part_no = ?
+                """, (
+                    p["name"], p["description"], p["price"], p["cost_price"], p["reorder_level"],
+                    p["stock"], p["track_stock"], p["category"],
+                    tax_rate, tax_type, item_tax_template, hs_code_val, is_pharm,
+                    int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
+                    p.get("uom") or None,
+                    *order_flags,
+                    is_template, has_variants, variant_of, attributes,
+                    p["part_no"],
+                ))
+                result["updated"] += 1
+                log.debug("[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  pharmacy=%d  orders=%s  tmpl=%d var_of=%s",
+                          p["part_no"], tax_rate, tax_type, is_pharm, order_flags,
+                          is_template, variant_of)
+            else:
+                cur.execute("""
+                    INSERT INTO products
+                        (part_no, name, description, price, cost_price, reorder_level, stock, track_stock, category,
+                         tax_rate, tax_type, item_tax_template, hs_code, is_pharmacy_product, is_butchery_product, is_product_bundle, conversion_factor,
+                         uom,
+                         order_1, order_2, order_3, order_4, order_5, order_6,
+                         is_template, has_variants, variant_of, attributes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    p["part_no"], p["name"], p["description"], p["price"], p["cost_price"], p["reorder_level"],
+                    p["stock"], p["track_stock"], p["category"],
+                    tax_rate, tax_type, item_tax_template, hs_code_val, is_pharm,
+                    int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
+                    p.get("uom") or None,
+                    *order_flags,
+                    is_template, has_variants, variant_of, attributes,
+                ))
+                local_part_nos.add(p["part_no"])
+                result["inserted"] += 1
+                log.debug("[sync] Inserted: %s  tax_rate=%.4f  tax_type=%s  orders=%s  tmpl=%d var_of=%s",
+                          p["part_no"], tax_rate, tax_type, order_flags,
+                          is_template, variant_of)
+
+            # ── Upsert full price-list cache for this item ───────────────────
+            # Templates have no prices of their own - variants carry them.
+            pl_rows = p.get("price_list_rows") or []
+            if pl_rows:
+                n = _upsert_item_prices(cur, p["part_no"], pl_rows)
+                if n:
+                    log.debug("[sync] %s - %d price-list row(s) cached", p["part_no"], n)
+
+            # ── Upsert product_warehouse_stock ───────────────────────────────
+            try:
+                cur.execute("DELETE FROM product_warehouse_stock WHERE product_id = (SELECT id FROM products WHERE part_no = ?)", (p["part_no"],))
+                for w in p.get("raw_warehouses", []):
+                    w_name_raw = str(w.get("warehouse") or "").strip()
+                    w_name = w_name_raw.upper()
+                    if not w_name:
+                        continue
+                    if w_name not in wh_map:
+                        try:
+                            cur.execute("SELECT TOP 1 id FROM companies ORDER BY id ASC")
+                            c_row = cur.fetchone()
+                            comp_id = c_row[0] if c_row else 1
+                            cur.execute("INSERT INTO warehouses (name, company_id) VALUES (?, ?)", (w_name_raw, comp_id))
+                            cur.execute("SELECT @@IDENTITY")
+                            r_new = cur.fetchone()
+                            if r_new and r_new[0]:
+                                wh_map[w_name] = int(r_new[0])
+                        except Exception as _we:
+                            log.warning("Could not auto-create warehouse '%s': %s", w_name_raw, _we)
+
+                    if w_name in wh_map:
+                        try:
+                            w_qty = float(w.get("qtyOnHand") or 0)
+                        except (TypeError, ValueError):
+                            w_qty = 0.0
+                        cur.execute("""
+                            INSERT INTO product_warehouse_stock (product_id, warehouse_id, stock)
+                            VALUES ((SELECT id FROM products WHERE part_no = ?), ?, ?)
+                        """, (p["part_no"], wh_map[w_name], w_qty))
+            except Exception as e:
+                log.warning("Error upserting warehouse stock for %s: %s", p["part_no"], e)
+
+            # ── Upsert product barcodes ───────────────────────────────
+            try:
+                cur.execute("DELETE FROM product_barcodes WHERE part_no = ?", (p["part_no"],))
+                for b in p.get("raw_barcodes", []):
+                    bc = str(b.get("barcode") or "").strip()
+                    if bc:
+                        cur.execute("""
+                            INSERT INTO product_barcodes (part_no, barcode, uom, barcode_type)
+                            VALUES (?, ?, ?, ?)
+                        """, (
+                            p["part_no"], 
+                            bc, 
+                            str(b.get("uom") or "").strip() or None, 
+                            str(b.get("barcode_type") or "").strip() or None
+                        ))
+            except Exception as e:
+                log.warning("Error upserting barcodes for %s: %s", p["part_no"], e)
+
+            # ── Upsert batches (pharmacy expiry tracking) ────────────────────
+            # Wipe + insert fresh per product using the outer transaction's
+            # cursor. Do NOT open a separate connection here - the outer
+            # UPDATE/INSERT above has not yet been committed, so SQL Server
+            # holds an exclusive row lock; a second connection's SELECT on
+            # the same row would deadlock and hang the whole login sync.
+            try:
+                cur.execute(
+                    "DELETE FROM product_batches "
+                    "WHERE product_id IN (SELECT id FROM products WHERE part_no = ?)",
+                    (p["part_no"],),
+                )
+                raw_batches = p.get("batches") or []
+                for b in raw_batches:
+                    bn = (b.get("batch_no") or "").strip()
+                    if not bn:
+                        continue
+                    cur.execute(
+                        "INSERT INTO product_batches "
+                        "    (product_id, batch_no, expiry_date, qty, synced) "
+                        "SELECT id, ?, ?, ?, 1 FROM products WHERE part_no = ?",
+                        (bn, b.get("expiry_date"), float(b.get("qty") or 0),
+                         p["part_no"]),
+                    )
+                if raw_batches:
+                    log.debug("[sync] %s - %d batch(es) synced",
+                              p["part_no"], len(raw_batches))
+            except Exception as _be:
+                log.warning("[sync] batch upsert failed for %s: %s",
+                            p.get("part_no"), _be)
+
+            # ── Upsert UOM prices ────────────────────────────────────────────
+            for up in (p.get("uom_prices") or []):
+                try:
+                    cur.execute("""
+                        MERGE product_uom_prices AS target
+                        USING (SELECT ? AS part_no, ? AS uom) AS src
+                            ON target.part_no = src.part_no
+                           AND target.uom     = src.uom
+                        WHEN MATCHED THEN
+                            UPDATE SET price = ?
+                        WHEN NOT MATCHED THEN
+                            INSERT (part_no, uom, price) VALUES (?, ?, ?);
+                    """, (
+                        p["part_no"], up["uom"], up["price"],
+                        p["part_no"], up["uom"], up["price"],
+                    ))
+                except Exception as e:
+                    log.warning("Error upserting UOM price for %s/%s: %s",
+                                p["part_no"], up.get("uom"), e)
+
+            # ── Upsert product_taxes ─────────────────────────────────────────
+            # Always write the tax record - even ZERO RATED items should have
+            # a row so downstream code never has to guess.
+            try:
+                cur.execute("""
+                    MERGE product_taxes AS target
+                    USING (SELECT ? AS part_no, ? AS tax_category) AS src
+                        ON target.part_no      = src.part_no
+                       AND target.tax_category = src.tax_category
+                    WHEN MATCHED THEN
+                        UPDATE SET
+                            item_tax_template = ?,
+                            minimum_net_rate  = ?,
+                            maximum_net_rate  = ?,
+                            updated_at        = SYSDATETIME()
+                    WHEN NOT MATCHED THEN
+                        INSERT (part_no, tax_category, item_tax_template,
+                                minimum_net_rate, maximum_net_rate)
+                        VALUES (?, ?, ?, ?, ?);
+                """, (
+                    p["part_no"], tax_type,
+                    item_tax_template, tax_rate, tax_rate,
+                    p["part_no"], tax_type, item_tax_template, tax_rate, tax_rate,
+                ))
+                result["taxes_updated"] += 1
+                log.debug("[sync] Tax upserted: %s  rate=%.4f  type=%s",
+                          p["part_no"], tax_rate, tax_type)
+            except Exception as e:
+                log.warning("Error upserting tax for %s: %s", p["part_no"], e)
+
+        except Exception as e:
+            log.error("Error processing product '%s': %s", p["part_no"], e)
+            result["errors"] += 1
+
+    # ── Cleanup Stale Products ───────────────────────────────────────────────
+    remote_part_nos = {p["part_no"] for p in remote}
+    stale_part_nos = local_part_nos - remote_part_nos
+
+    # Guard: If API returns very few products compared to local DB (e.g. < 10%), 
+    # it might be a pagination error. Skip cleanup to be safe unless DB is small.
+    if stale_part_nos and len(remote) > 0:
+        if len(stale_part_nos) < len(local_part_nos) * 0.9 or len(local_part_nos) < 50:
+            log.info("[sync] Cleaning up %d stale products that are no longer on the server...", len(stale_part_nos))
+            stale_list = list(stale_part_nos)
+            chunk_size = 900
+            for i in range(0, len(stale_list), chunk_size):
+                chunk = stale_list[i:i + chunk_size]
+                placeholders = ",".join(["?"] * len(chunk))
+                
+                try:
+                    cur.execute(f"DELETE FROM product_batches WHERE product_id IN (SELECT id FROM products WHERE part_no IN ({placeholders}))", chunk)
+                    cur.execute(f"DELETE FROM product_uom_prices WHERE part_no IN ({placeholders})", chunk)
+                    cur.execute(f"DELETE FROM product_taxes WHERE part_no IN ({placeholders})", chunk)
+                    cur.execute(f"DELETE FROM item_prices WHERE part_no IN ({placeholders})", chunk)
+                    cur.execute(f"DELETE FROM products WHERE part_no IN ({placeholders})", chunk)
+                except Exception as e:
+                    log.warning("[sync] Error cleaning up stale chunk: %s", e)
+                    
+            result["deleted_stale"] = len(stale_part_nos)
+        else:
+            log.warning("[sync] Aborted stale cleanup: too many deletions (API might have failed partially).")
+
+    conn.commit()
+    conn.close()
+
+    log.info(
+        "[sync] Done -- %d inserted, %d updated, %d deleted, %d skipped (no code), "
+        "%d skipped (not sales item), %d root-group stripped -> uncategorised, "
+        "%d taxes updated, %d errors  (%d total API records)",
+        result["inserted"], result["updated"], result["deleted_stale"], result["skipped_no_code"],
+        result["skipped_not_sales"], result["root_group_stripped"],
+        result["taxes_updated"], result["errors"], result["total_api"],
+    )
+    try:
+        from services.stock_cache import init_stock_cache
+        init_stock_cache()
+        log.info("[sync] Stock cache refreshed after product sync")
+    except Exception as e:
+        log.warning("[sync] Failed to refresh stock cache: %s", e)
+        
+    return result
+
+
+# =============================================================================
+# BACKGROUND DAEMON THREAD
+# =============================================================================
+
+_sync_lock:   threading.Lock          = threading.Lock()
+_sync_thread: threading.Thread | None = None
+
+
+def _sync_loop():
+    log.info("Product sync daemon started (interval=%ds, page_size=%d).",
+             SYNC_INTERVAL, PAGE_SIZE)
+    while True:
+        if _sync_lock.acquire(blocking=False):
+            try:
+                api_key, api_secret = _load_credentials()
+                if api_key:
+                    sync_products_smart(api_key, api_secret)
+                else:
+                    log.warning("[sync] No credentials -- skipping cycle.")
+            except Exception as e:
+                log.error("[sync] Cycle error: %s", e)
+            finally:
+                _sync_lock.release()
+        else:
+            log.info("[sync] Previous sync still running -- skipping cycle.")
+        time.sleep(SYNC_INTERVAL)
+
+
+def start_sync_daemon() -> threading.Thread:
+    """Non-blocking - safe to call from MainWindow.__init__."""
+    global _sync_thread
+    if _sync_thread and _sync_thread.is_alive():
+        return _sync_thread
+    t = threading.Thread(target=_sync_loop, daemon=True, name="ProductSyncDaemon")
+    t.start()
+    _sync_thread = t
+    return t
+
+
+# =============================================================================
+# WINDOWS SERVICE CLASS
+# =============================================================================
+
+try:
+    import servicemanager
+    import win32event
+    import win32service
+    import win32serviceutil
+
+    class ProductSyncService(win32serviceutil.ServiceFramework):
+        _svc_name_         = "HavanoProductSync"
+        _svc_display_name_ = "Havano POS -- Product Sync Service"
+        _svc_description_  = (
+            "Periodically syncs product catalogue from Frappe "
+            "into the local SQL Server database. Skips non-sales items."
+        )
+
+        def __init__(self, args):
+            win32serviceutil.ServiceFramework.__init__(self, args)
+            self._stop_event = win32event.CreateEvent(None, 0, 0, None)
+            self._running    = True
+
+        def SvcStop(self):
+            log.info("Stop signal received.")
+            self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+            self._running = False
+            win32event.SetEvent(self._stop_event)
+
+        def SvcDoRun(self):
+            servicemanager.LogMsg(
+                servicemanager.EVENTLOG_INFORMATION_TYPE,
+                servicemanager.PYS_SERVICE_STARTED,
+                (self._svc_name_, ""),
+            )
+            log.info("Havano Product Sync Service started.")
+            self._main_loop()
+
+        def _main_loop(self):
+            log.info("Sync interval: %ds (%d min)  page_size: %d",
+                     SYNC_INTERVAL, SYNC_INTERVAL // 60, PAGE_SIZE)
+            self._run_sync()
+            while self._running:
+                rc = win32event.WaitForSingleObject(self._stop_event, SYNC_INTERVAL * 1000)
+                if rc == win32event.WAIT_OBJECT_0:
+                    break
+                if self._running:
+                    self._run_sync()
+            log.info("Havano Product Sync Service stopped.")
+
+        def _run_sync(self):
+            if not _sync_lock.acquire(blocking=False):
+                log.info("[sync] Previous sync still running -- skipping.")
+                return
+            try:
+                api_key, api_secret = _load_credentials()
+                if api_key:
+                    sync_products_smart(api_key, api_secret)
+                else:
+                    log.warning("[sync] No credentials -- skipping cycle.")
+            except Exception as e:
+                log.error("[sync] Cycle error: %s", e, exc_info=True)
+            finally:
+                _sync_lock.release()
+
+except ImportError:
+    log.debug("pywin32 not available -- Windows Service class disabled.")
+    ProductSyncService = None  # type: ignore
+
+
+# =============================================================================
+# DEBUG / INTERACTIVE
+# =============================================================================
+
+def _run_debug():
+    log.info("=== DEBUG MODE -- one sync cycle ===")
+    try:
+        api_key, api_secret = _load_credentials()
+    except Exception as e:
+        log.error("Credential error: %s", e)
+        sys.exit(1)
+
+    if not api_key:
+        log.error("No credentials found. Login via the POS app first, or set "
+                  "HAVANO_API_KEY / HAVANO_API_SECRET environment variables.")
+        sys.exit(1)
+
+    result = sync_products_smart(api_key, api_secret)
+    print(
+        f"\nResult: {result['inserted']} inserted, {result['updated']} updated, "
+        f"{result['skipped_no_code']} skipped (no code), "
+        f"{result['skipped_not_sales']} skipped (not sales item), "
+        f"{result['root_group_stripped']} root-group stripped -> uncategorised, "
+        f"{result['taxes_updated']} taxes updated, "
+        f"{result['errors']} errors  (of {result['total_api']} API records)"
+    )
+    print(
+        f"\nCheck logs at: {_LOG_PATH}"
+        f"\nSearch for '[TAX RAW]'        to see raw API tax objects."
+        f"\nSearch for '[TAX RESOLVED]'   to see what was actually saved."
+        f"\nSearch for '[TAX FIELD DEBUG]' for the first-page sample."
+    )
+
+
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
+
+if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1].lower() == "debug":
+        _run_debug()
+    elif ProductSyncService:
+        win32serviceutil.HandleCommandLine(ProductSyncService)
+    else:
+        log.error("pywin32 not installed. Run 'pip install pywin32' to use as a Windows Service.")

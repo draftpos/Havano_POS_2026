@@ -1,0 +1,32 @@
+{
+  "main_printer": "POS-80C (copy 2)",
+  "paper_size": "A4",
+  "kitchen_printing_enabled": true,
+  "pharmacy_label_printer": "(None)",
+  "orders": {
+    "Order 1": {
+      "active": true,
+      "printer": "POS-80C (copy 2)"
+    },
+    "Order 2": {
+      "active": true,
+      "printer": "POS-80C (copy 2)"
+    },
+    "Order 3": {
+      "active": true,
+      "printer": "POS-80C (copy 2)"
+    },
+    "Order 4": {
+      "active": false,
+      "printer": "(None)"
+    },
+    "Order 5": {
+      "active": false,
+      "printer": "(None)"
+    },
+    "Order 6": {
+      "active": false,
+      "printer": "(None)"
+    }
+  }
+}

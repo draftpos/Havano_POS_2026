@@ -1,0 +1,50 @@
+# =============================================================================
+# services/sync_service.py
+# Product + GL Account + Mode of Payment + Exchange Rate + Tax Sync
+# =============================================================================
+#
+# MERGE NOTES
+# ───────────
+# Tax logic is now taken entirely from product_sync_windows_service.py:
+#   • _extract_tax_info()   — uses maximum_net_rate as the authoritative rate
+#   • _parse_product()      — maps raw API → clean dict with full tax fields
+#   • _ensure_schema()      — creates product_taxes with the correct columns
+#   • _upsert_product_taxes — MERGE on (part_no, tax_category) with full cols
+#
+# Every section is wrapped in try/except so a single failure never crashes
+# login or the background SyncWorker loop.
+# =============================================================================
+
+import json
+import logging
+import time as _time
+import urllib.error
+import urllib.parse
+import urllib.request
+from services.network_utils import safe_urlopen
+
+from database.db import get_connection, fetchone_dict
+from services.site_config import get_host as _get_host
+
+log = logging.getLogger("SyncService")
+
+API_BASE_URL      = _get_host()
+PRODUCTS_ENDPOINT = f"{API_BASE_URL}/api/method/havano_pos_integration.api.get_products"
+PAGE_SIZE         = 100
+MAX_PAGES         = 200
+
+# Background-sync intervals
+PRODUCT_SYNC_INTERVAL_SECONDS = 5    # aggressively sync products stock and prices
+GL_MOP_SYNC_INTERVAL_SECONDS  = 60   # GL / MOP / exchange rates every 1 min
+
+
+# =============================================================================
+# PUBLIC — called on login and by SyncWorker
+# =============================================================================
+
+def _has_local_products() -> bool:
+    """Returning-user detection: do we already have a catalogue on disk?
+
+    When True, the login flow should NOT block on a full inline sync —
+    the BackgroundSyncWorker (started from login_dialog._accept_user)
+    will refresh products, taxes, GL, MOP, and exchange rates without
