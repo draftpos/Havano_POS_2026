@@ -189,7 +189,7 @@ class Quotation:
         Cancelled quotes and already-Converted quotes are blocked."""
         if self.is_cancelled:
             return False
-        if (self.status or "").lower() in ("converted", "invoiced", "ordered", "lost"):
+        if (self.status or "").lower() in ("converted", "invoiced", "ordered", "lost", "paid"):
             return False
         return True
 

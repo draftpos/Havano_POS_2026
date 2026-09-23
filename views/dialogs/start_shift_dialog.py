@@ -167,12 +167,14 @@ class StartShiftDialog(QDialog):
             opening_floats[base_mop_name.upper()] = start_amount
 
             shift_num = get_next_shift_number()
+            from models.shift import get_current_station_name
             shift_data = start_shift(
                 station=1,
                 shift_number=shift_num,
                 cashier_id=cashier_id,
                 date=_date.today().strftime("%Y-%m-%d"),
-                opening_floats=opening_floats
+                opening_floats=opening_floats,
+                station_name=get_current_station_name()
             )
 
             if shift_data:

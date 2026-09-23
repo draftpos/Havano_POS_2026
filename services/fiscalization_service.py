@@ -1,5 +1,4 @@
-# services/fiscalization_service.py - PRODUCTION READY (FINAL - NO CONVERSION FOR ZIG)
-
+import logging
 import threading
 import time
 from typing import Optional, List
@@ -11,6 +10,8 @@ from datetime import datetime
 from models.fiscal_settings import FiscalSettingsRepository
 from services.zimra_api_service import get_zimra_service
 from database.db import get_connection, fetchone_dict, fetchall_dicts
+
+log = logging.getLogger("FiscalizationService")
 
 HS_CODE_DEFAULT = "99999999"
 
@@ -89,8 +90,12 @@ class FiscalizationService:
                 print(f"✓ Sale {sale_id} is already fiscalized")
                 return True
 
-            print(f"📝 Starting fiscalization for sale {sale_id}")
-            self._update_sale_fiscal_status(sale_id, "pending")
+            current_status = (sale.get("fiscal_status") or "").upper()
+            is_offline_signed = bool(sale.get("fiscal_verification_code") or current_status in ("PENDING_SYNC", "OFFLINE_SIGNED"))
+
+            print(f"📝 Starting fiscalization for sale {sale_id} (offline_signed={is_offline_signed})")
+            if not is_offline_signed:
+                self._update_sale_fiscal_status(sale_id, "pending")
 
             sale_items = self._get_sale_items(sale_id)
             if not sale_items:
@@ -219,6 +224,27 @@ class FiscalizationService:
                     buyer_house_no=buyer_house_no,
                     buyer_province=buyer_province,
                 )
+            elif getattr(settings, "provider", "frappe") in ("havano_zimra_offline", "offline_zimra"):
+                from services.havano_zimra_offline_service import get_havano_zimra_offline_service
+                offline_service = get_havano_zimra_offline_service()
+                result = offline_service.send_invoice(
+                    settings=settings,
+                    invoice_number=invoice_number,
+                    currency=fiscal_currency,
+                    customer_name=customer_name,
+                    trade_name=buyer_trade_name,
+                    items_xml=items_xml,
+                    tendered=fiscal_tendered,
+                    invoice_flag=0,
+                    buyer_tin=buyer_tin,
+                    buyer_vat=buyer_vat,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    buyer_city=buyer_city,
+                    buyer_street=buyer_street,
+                    buyer_house_no=buyer_house_no,
+                    buyer_province=buyer_province,
+                )
             else:
                 result = self._zimra_service.send_invoice(
                     settings=settings,
@@ -238,13 +264,28 @@ class FiscalizationService:
                     buyer_province=buyer_province,
                 )
 
-            if not result.is_success:
-                print(f"[!] API error: {result.error}. Falling back to offline mode.")
-                return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
-                
-            if result.data is None:
-                print(f"[!] No data returned. Falling back to offline mode.")
-                return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
+            if not result.is_success or result.data is None:
+                err_msg = result.error if (result and result.error) else "No data returned from ZIMRA API"
+                print(f"[!] Online fiscalization error for sale {sale_id}: {err_msg}")
+                log.error(f"Online fiscalization error for sale {sale_id} (Inv: {invoice_number}): {err_msg}")
+                if is_offline_signed:
+                    print(f"ℹ️ Sale {sale_id} already has local offline signature. Keeping PENDING_SYNC in queue.")
+                    try:
+                        conn = get_connection()
+                        cur = conn.cursor()
+                        cur.execute("""
+                            UPDATE sales 
+                            SET fiscal_status = 'PENDING_SYNC', fiscal_error = ?, fiscal_sync_date = SYSDATETIME() 
+                            WHERE id = ?
+                        """, (f"ZIMRA server pending: {err_msg}"[:500], sale_id))
+                        conn.commit()
+                        conn.close()
+                    except Exception as _e:
+                        print(f"Error updating fiscal_error: {_e}")
+                    return False
+                else:
+                    print(f"[!] Falling back to offline mode for sale {sale_id}.")
+                    return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
 
             fd = result.data
             self._update_sale_fiscal_data(
@@ -259,12 +300,28 @@ class FiscalizationService:
                 fiscal_day=getattr(fd, "fiscal_day", "")
             )
 
-            print(f"[OK] Sale {sale_id} fiscalized - Global No: {fd.receipt_global_no}")
+            print(f"[OK] Sale {sale_id} official ZIMRA fiscalization complete - Global No: {fd.receipt_global_no}, Verification: {fd.verification_code}")
             return True
 
         except Exception as e:
             error_msg = str(e)
-            print(f"❌ Fiscalization exception for sale {sale_id}: {error_msg}. Attempting offline fallback.")
+            print(f"❌ Fiscalization exception for sale {sale_id}: {error_msg}")
+            log.error(f"Fiscalization exception for sale {sale_id} (Inv: {invoice_number if 'invoice_number' in locals() else sale_id}): {error_msg}")
+            if is_offline_signed:
+                print(f"ℹ️ Sale {sale_id} already has local offline signature. Retaining PENDING_SYNC.")
+                try:
+                    conn = get_connection()
+                    cur = conn.cursor()
+                    cur.execute("""
+                        UPDATE sales 
+                        SET fiscal_status = 'PENDING_SYNC', fiscal_error = ?, fiscal_sync_date = SYSDATETIME() 
+                        WHERE id = ?
+                    """, (f"Sync error: {error_msg}"[:500], sale_id))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+                return False
             try:
                 # Try offline fallback even on exception (e.g. timeout)
                 settings = self._settings_repo.get_settings()
@@ -275,6 +332,7 @@ class FiscalizationService:
                 return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
             except Exception as e2:
                 print(f"❌ Critical failure: {e2}")
+                log.error(f"Critical failure: Both online and offline fiscalization failed for sale {sale_id}: {e2} (Original: {error_msg})")
                 self._update_sale_fiscal_error(sale_id, f"Both online and offline modes failed: {error_msg}")
                 return False
 
@@ -284,47 +342,81 @@ class FiscalizationService:
 
     def _process_offline_sale(self, sale_id: int, settings, sale, currency: str) -> bool:
         """
-        Processes a sale in offline mode by generating a dynamic ZIMRA URL locally.
-        Marks the sale as PENDING_SYNC for later background upload.
+        Processes a sale in offline mode using havanozimrapackage (HavanoZimraOfflineService).
+        Computes the receipt hash, signs it with the local device private key,
+        updates havanoconfig.ini counters, and generates official ZIMRA QR and verification code.
         """
         try:
-            from services.fiscal import FiscalLogic
+            from services.havano_zimra_offline_service import get_havano_zimra_offline_service
+            offline_service = get_havano_zimra_offline_service()
+
+            invoice_number = sale.get("invoice_no") or str(sale.get("invoice_number") or sale_id)
+            customer_name = sale.get("customer_name") or "Walk-in"
+            fiscal_tendered = float(sale.get("tendered") or sale.get("total") or 0.0)
+
+            # Build XML items
+            sale_items = sale.get("items") or []
+            if not sale_items:
+                sale_items = self._get_sale_items(sale_id)
             
-            # 1. Use the sale's own invoice sequence as the temporary global number
-            # This ensures that the receipt number and the database invoice number match offline.
-            global_no = int(sale.get("invoice_number", 0))
-            if global_no == 0:
-                global_no = FiscalLogic.get_next_global_no()
-            else:
-                # Sync the global counter to match this invoice number
-                FiscalLogic.repo = self._settings_repo # Ensure repo is set
-                from models.fiscal_settings import FiscalSettingsRepository
-                FiscalSettingsRepository.update_last_global_no(global_no)
-            
-            # 2. Generate signature (hash)
-            date = datetime.now()
-            total = float(sale.get("total") or 0)
-            sig = FiscalLogic.generate_offline_signature(settings.device_sn, date, global_no, total)
-            
-            # 3. Construct URL
-            url = FiscalLogic.construct_url(settings.device_sn, date, global_no, sig)
-            
-            # 4. Update sale with offline data
-            self._update_sale_fiscal_data(
-                sale_id=sale_id,
-                fiscal_status="PENDING_SYNC",
-                qr_code=url,
-                verification_code=sig[:16].upper(), # Match the 16 chars used in the URL
-                receipt_counter=0, # Unknown until synced
-                global_no=str(global_no),
-                device_sn=settings.device_sn
+            fiscal_items = self._build_fiscal_items(sale_items)
+            items_xml = FiscalInvoiceItem.build_items_xml(fiscal_items)
+
+            # Buyer details
+            buyer_tin = sale.get("customer_tin") or ""
+            buyer_vat = sale.get("customer_vat") or ""
+            buyer_trade_name = sale.get("customer_trade_name") or ""
+            buyer_email = sale.get("customer_email") or ""
+            buyer_phone = sale.get("customer_phone") or ""
+            buyer_city = sale.get("customer_city") or ""
+            buyer_street = sale.get("customer_street") or ""
+            buyer_house_no = sale.get("customer_house_no") or ""
+            buyer_province = sale.get("customer_province") or ""
+
+            result = offline_service.send_invoice(
+                settings=settings,
+                invoice_number=invoice_number,
+                currency=currency,
+                customer_name=customer_name,
+                trade_name=buyer_trade_name,
+                items_xml=items_xml,
+                tendered=fiscal_tendered,
+                invoice_flag=0,
+                buyer_tin=buyer_tin,
+                buyer_vat=buyer_vat,
+                buyer_email=buyer_email,
+                buyer_phone=buyer_phone,
+                buyer_city=buyer_city,
+                buyer_street=buyer_street,
+                buyer_house_no=buyer_house_no,
+                buyer_province=buyer_province,
             )
-            
-            print(f"[OK] Sale {sale_id} processed OFFLINE - Local Global No: {global_no}")
-            return True
-            
+
+            if result.is_success and result.data:
+                fd = result.data
+                self._update_sale_fiscal_data(
+                    sale_id=sale_id,
+                    fiscal_status="PENDING_SYNC",
+                    qr_code=fd.qr_code,
+                    verification_code=fd.verification_code,
+                    receipt_counter=fd.receipt_counter,
+                    global_no=str(fd.receipt_global_no),
+                    device_id=getattr(fd, "device_id", ""),
+                    device_sn=getattr(fd, "device_serial", getattr(fd, "efd_serial", "")),
+                    fiscal_day=getattr(fd, "fiscal_day", "")
+                )
+                print(f"[OK] Sale {sale_id} offline-fiscalized with HavanoZimra - Global No: {fd.receipt_global_no}, Verification: {fd.verification_code} (Status: PENDING_SYNC)")
+                return True
+            else:
+                error_msg = result.error if result else "Unknown offline signing error"
+                print(f"❌ HavanoZimra offline signing returned error for sale {sale_id}: {error_msg}")
+                log.error(f"HavanoZimra offline signing failed for sale {sale_id} (Inv: {invoice_number}): {error_msg}")
+                self._update_sale_fiscal_error(sale_id, f"Offline signing failed: {error_msg}")
+                return False
+
         except Exception as e:
             print(f"❌ Critical failure in offline fiscalization for sale {sale_id}: {e}")
+            log.error(f"Critical failure in offline fiscalization for sale {sale_id}: {e}")
             self._update_sale_fiscal_error(sale_id, f"Offline mode failure: {e}")
             return False
 
@@ -533,6 +625,29 @@ class FiscalizationService:
                     buyer_house_no=buyer_house_no,
                     buyer_province=buyer_province,
                 )
+            elif getattr(settings, "provider", "frappe") in ("havano_zimra_offline", "offline_zimra"):
+                from services.havano_zimra_offline_service import get_havano_zimra_offline_service
+                offline_service = get_havano_zimra_offline_service()
+                result = offline_service.send_invoice(
+                    settings=settings,
+                    invoice_number=cn_number,
+                    currency=fiscal_currency,
+                    customer_name=customer_name,
+                    trade_name=buyer_trade_name,
+                    items_xml=items_xml,
+                    invoice_flag=1,
+                    original_invoice_no=original_inv_no,
+                    global_invoice_no=original_global_no,
+                    tendered=fiscal_tendered,
+                    buyer_tin=buyer_tin,
+                    buyer_vat=buyer_vat,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    buyer_city=buyer_city,
+                    buyer_street=buyer_street,
+                    buyer_house_no=buyer_house_no,
+                    buyer_province=buyer_province,
+                )
             else:
                 result = self._zimra_service.send_invoice(
                     settings=settings,
@@ -560,7 +675,38 @@ class FiscalizationService:
                     print(f"[!] CN {cn_id} already exists - marking fiscalized")
                     self._update_cn_fiscal_status(cn_id, "fiscalized")
                     return True
-                raise Exception(f"API error: {result.error}")
+
+                # Offline failover for credit notes using HavanoZimra
+                try:
+                    from services.havano_zimra_offline_service import get_havano_zimra_offline_service
+                    offline_service = get_havano_zimra_offline_service()
+                    off_res = offline_service.send_invoice(
+                        settings=settings,
+                        invoice_number=cn_number,
+                        currency=fiscal_currency,
+                        customer_name=customer_name,
+                        trade_name=buyer_trade_name,
+                        items_xml=items_xml,
+                        invoice_flag=1,
+                        original_invoice_no=original_inv_no,
+                        global_invoice_no=original_global_no,
+                        tendered=fiscal_tendered,
+                        buyer_tin=buyer_tin,
+                        buyer_vat=buyer_vat,
+                        buyer_email=buyer_email,
+                        buyer_phone=buyer_phone,
+                        buyer_city=buyer_city,
+                        buyer_street=buyer_street,
+                        buyer_house_no=buyer_house_no,
+                        buyer_province=buyer_province,
+                    )
+                    if off_res.is_success and off_res.data:
+                        result = off_res
+                except Exception as _oe:
+                    print(f"[CN] Offline fallback failed: {_oe}")
+
+                if not result.is_success:
+                    raise Exception(f"API error: {result.error}")
             
             if result.data is None:
                 raise Exception("No data returned")
@@ -730,6 +876,7 @@ class FiscalizationService:
             conn.close()
 
     def _update_sale_fiscal_error(self, sale_id: int, error: str) -> bool:
+        log.error(f"[Fiscalization] Sale {sale_id} failed: {error}")
         conn = get_connection()
         cursor = conn.cursor()
         try:
@@ -807,6 +954,7 @@ class FiscalizationService:
             conn.close()
 
     def _update_cn_fiscal_error(self, cn_id: int, error: str) -> bool:
+        log.error(f"[Fiscalization] Credit note {cn_id} failed: {error}")
         conn = get_connection()
         cursor = conn.cursor()
         try:
@@ -826,7 +974,7 @@ class FiscalizationService:
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT COUNT(*) FROM sales WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC')")
+            cursor.execute("SELECT COUNT(*) FROM sales WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC', 'pending_sync', 'offline_signed')")
             row = cursor.fetchone()
             return int(row[0]) if row else 0
         finally:
@@ -837,7 +985,7 @@ class FiscalizationService:
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT id FROM sales WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC') ORDER BY id")
+            cursor.execute("SELECT id FROM sales WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC', 'pending_sync', 'offline_signed') ORDER BY id")
             pending = cursor.fetchall()
             result.total_count = len(pending)
         finally:
@@ -863,7 +1011,7 @@ class FiscalizationService:
                 SELECT tax_type, tax_rate, SUM(tax_amount) AS total_vat,
                        SUM(total) AS total_gross, SUM(total - tax_amount) AS total_net
                 FROM sale_items
-                WHERE sale_id IN (SELECT id FROM sales WHERE fiscal_status IN ('pending', 'failed'))
+                WHERE sale_id IN (SELECT id FROM sales WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC', 'pending_sync', 'offline_signed'))
                 GROUP BY tax_type, tax_rate ORDER BY tax_rate DESC
             """)
             return fetchall_dicts(cursor)

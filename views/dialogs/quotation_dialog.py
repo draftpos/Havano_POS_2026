@@ -240,7 +240,7 @@ class QuotationDialog(QDialog):
         status_lbl.setStyleSheet("font-weight: 600; color: #475569; font-size: 12px; margin-left: 10px;")
         
         self.status_filter = QComboBox()
-        self.status_filter.addItems(["All", "Submitted", "Draft", "Cancelled"])
+        self.status_filter.addItems(["All", "Dispensed", "Paid", "Submitted", "Draft", "Cancelled"])
         self.status_filter.setFixedWidth(130)
         self.status_filter.currentTextChanged.connect(self._apply_search)
         
@@ -619,6 +619,8 @@ class QuotationDialog(QDialog):
             "Submitted": ("SUBMITTED", "#16a34a", "white"),
             "Draft":     ("DRAFT",     "#f59e0b", "white"),
             "Cancelled": ("CANCELLED", "#ef4444", "white"),
+            "Dispensed": ("DISPENSED", "#0284c7", "white"),
+            "Paid":      ("PAID",      "#10b981", "white"),
         }
         text, bg, fg = STATUS_BADGE.get(quotation.status, (quotation.status, "#e2e8f0", "#64748b"))
         self.status_badge.setText(text)

@@ -281,7 +281,14 @@ def _upsert_products(items: list[dict]):
                 
             active = 1 if item.get("active", True) else 0
             is_pharmacy = 1 if item.get("is_pharmacy_product") or item.get("is_pharmacy") else 0
-            order_flags = [1 if item.get(f"custom_is_order_item_{i}") else 0 for i in range(1, 7)]
+            order_flags = [
+                1 if (
+                    str(item.get(f"kitchen_order_{i}") if item.get(f"kitchen_order_{i}") is not None else item.get(f"custom_is_order_item_{i}")).strip().lower() in ("1", "true", "yes", "t", "y")
+                    or item.get(f"kitchen_order_{i}") is True or item.get(f"kitchen_order_{i}") == 1
+                    or item.get(f"custom_is_order_item_{i}") is True or item.get(f"custom_is_order_item_{i}") == 1
+                ) else 0
+                for i in range(1, 7)
+            ]
 
             # Taxes
             taxes = item.get("taxes") or []
