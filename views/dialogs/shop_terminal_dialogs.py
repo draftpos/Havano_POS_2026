@@ -223,12 +223,25 @@ class TerminalSelectionDialog(QDialog):
             t_name = str(term.get("name") or f"Terminal {term.get('id')}")
             is_taken = bool(term.get("is_taken") or term.get("taken_by"))
             taken_by = str(term.get("taken_by_user_name") or term.get("taken_by_user_email") or term.get("taken_by") or "").strip()
-            term_device = str(term.get("device_hardware_id") or "").strip().lower()
+            term_device = str(term.get("device_hardware_id") or "").strip()
+            from utils.hardware import is_same_device
+            is_this_machine = is_same_device(term_device, self.current_device_id)
+            if not is_this_machine:
+                try:
+                    from models.company_defaults import get_defaults
+                    d = get_defaults() or {}
+                    if str(d.get("server_terminal_id") or "") == str(term.get("id")):
+                        is_this_machine = True
+                except Exception:
+                    pass
 
             status_str = "🟢 Available"
             if is_taken:
-                status_str = f"🟠 Taken by {taken_by}"
-            if term_device and term_device == self.current_device_id:
+                if is_this_machine:
+                    status_str = "🟢 Active (This Machine)"
+                else:
+                    status_str = f"🟠 Taken by {taken_by}"
+            elif is_this_machine:
                 status_str += " (This Machine)"
 
             item = QListWidgetItem(f"🖥️  {t_name}  |  {status_str}")

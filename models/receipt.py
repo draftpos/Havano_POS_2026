@@ -227,17 +227,8 @@ class ReceiptData:
     deliveryDate: str = ""
 
     # salesOrderTerms - printed as a "Terms & Conditions" block at the bottom
-    # of every Sales Order / Laybye receipt.  Populate from company_defaults
-    # (sales_order_terms column) or fall back to the hard-coded default below.
-    # Each line is separated by "\n"; the C# template should split and render
-    # each line as a separate paragraph.
-    salesOrderTerms: str = (
-        "1. This Sales Order is not a tax invoice.\n"
-        "2. Goods remain the property of the seller until paid in full.\n"
-        "3. Laybye items are held for 30 days from order date.\n"
-        "4. Deposits are non-refundable unless goods are unavailable.\n"
-        "5. Full payment is required before goods are released."
-    )
+    # of every Sales Order / Laybye / Invoice receipt. Populate from company_defaults.
+    salesOrderTerms: str = ""
 
     # orderStatus - "Draft" | "Confirmed" | "Completed" | "Cancelled"
     # Shown as a status badge on the printed slip so staff can see at a glance

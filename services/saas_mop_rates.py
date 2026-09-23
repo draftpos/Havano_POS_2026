@@ -136,14 +136,29 @@ def fetch_and_cache(timeout: int = 15) -> list[dict]:
         log.warning("[saas_mop_rates] Fetch failed (%s): %s", url, e)
         return _mem_cache or _load_from_disk()
 
-    # Parse response
+    # Parse response — handle multiple API response shapes:
+    #   Old:  {"message": [ {mop}, {mop}, ... ]}
+    #   New:  {"message": {"accounts": [...], "status": 200}, "data": [...]}
     message = raw.get("message", [])
-    if not isinstance(message, list):
-        log.warning("[saas_mop_rates] Unexpected response shape: %s", type(message))
+    entries: list = []
+
+    if isinstance(message, list):
+        # Old shape: message is directly a list of MOPs
+        entries = message
+    elif isinstance(message, dict):
+        # New shape: message is a dict with an "accounts" key
+        entries = message.get("accounts") or message.get("data") or []
+    
+    # Also check top-level "data" key as fallback
+    if not entries and isinstance(raw.get("data"), list):
+        entries = raw["data"]
+
+    if not entries:
+        log.warning("[saas_mop_rates] No account entries found in response (keys=%s)", list(raw.keys()))
         return _mem_cache or _load_from_disk()
 
     mops: list[dict] = []
-    for entry in message:
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         mops.append({
@@ -151,12 +166,13 @@ def fetch_and_cache(timeout: int = 15) -> list[dict]:
             "name":          str(entry.get("name") or "").strip(),
             "account_name":  str(entry.get("account_name") or "").strip(),
             "type":          str(entry.get("type") or "Cash").strip(),
-            "currency":      str(entry.get("currency") or "USD").upper().strip(),
+            "currency":      str(entry.get("currency") or entry.get("account_currency") or "USD").upper().strip(),
             "currency_id":   entry.get("currency_id"),
-            "exchange_rate": float(entry.get("exchange_rate") or 1.0),
-            "rate":          float(entry.get("rate") or 1.0),
+            "exchange_rate": float(entry.get("exchange_rate") or entry.get("rate") or 1.0),
+            "rate":          float(entry.get("rate") or entry.get("exchange_rate") or 1.0),
             "inverse_rate":  float(entry.get("inverse_rate") or 1.0),
             "symbol":        str(entry.get("symbol") or "").strip(),
+            "on_account":    bool(entry.get("on_account") or entry.get("is_on_account") or False),
         })
 
     # ── Save to disk (full replace — stale MOPs purged automatically) ─────────

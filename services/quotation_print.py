@@ -53,7 +53,7 @@ def _build_receipt(quotation) -> ReceiptData:
     # customerRef line to print "Valid Till" so it shows prominently.
     customer_ref = f"Valid Till:  {valid_till}" if valid_till else ""
 
-    so_terms = (co.get("terms_and_conditions") or "").strip() or (
+    so_terms = (co.get("quotation_terms") or co.get("terms_and_conditions") or "").strip() or (
         "1. This is a quotation - not a tax invoice.\n"
         "2. Prices are indicative and subject to change.\n"
         "3. Quotation is valid until the date shown above."

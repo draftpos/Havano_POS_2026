@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "dsn": "https://54ee3e24f4bd4da79ecd8336094a8312@bugsink.havano.cloud/4",
+  "environment": "production",
+  "sample_rate": 1.0,
+  "max_queue_size": 200
+}
