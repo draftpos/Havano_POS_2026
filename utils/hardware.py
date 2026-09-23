@@ -2,11 +2,19 @@ import subprocess
 import hashlib
 import platform
 
+_CACHED_SYSTEM_UUID = None
+_CACHED_MACHINE_ID = None
+
 def get_system_uuid() -> str:
     """Gets a stable hardware UUID that doesn't change with network interfaces."""
+    global _CACHED_SYSTEM_UUID
+    if _CACHED_SYSTEM_UUID:
+        return _CACHED_SYSTEM_UUID
+
     if platform.system() != "Windows":
         import uuid
-        return str(uuid.getnode()) # Fallback for non-windows
+        _CACHED_SYSTEM_UUID = str(uuid.getnode())
+        return _CACHED_SYSTEM_UUID
     
     try:
         # 1. Try BIOS UUID (Extremely stable hardware ID)
@@ -15,6 +23,7 @@ def get_system_uuid() -> str:
         if len(lines) > 1:
             serial = lines[1]
             if serial and serial.lower() not in ["ffffffff-ffff-ffff-ffff-ffffffffffff", "03000200-0400-0500-0006-000700080009"]:
+                _CACHED_SYSTEM_UUID = serial
                 return serial
     except Exception:
         pass
@@ -26,18 +35,24 @@ def get_system_uuid() -> str:
         val, _ = winreg.QueryValueEx(key, "MachineGuid")
         winreg.CloseKey(key)
         if val:
+            _CACHED_SYSTEM_UUID = str(val)
             return str(val)
     except Exception:
         pass
         
     # 3. Final fallback
     import uuid
-    return str(uuid.getnode())
+    _CACHED_SYSTEM_UUID = str(uuid.getnode())
+    return _CACHED_SYSTEM_UUID
 
 def get_machine_id() -> str:
     """
     Creates a clean, 16-character Machine ID string based on stable system UUIDs.
     """
+    global _CACHED_MACHINE_ID
+    if _CACHED_MACHINE_ID:
+        return _CACHED_MACHINE_ID
+
     stable_id = get_system_uuid()
     
     hashed = hashlib.sha256(stable_id.encode('utf-8')).hexdigest().upper()
@@ -45,6 +60,7 @@ def get_machine_id() -> str:
     # Return a 16-character chunk formatted with dashes for readability
     chunk = hashed[:16]
     formatted_id = f"{chunk[:4]}-{chunk[4:8]}-{chunk[8:12]}-{chunk[12:16]}"
+    _CACHED_MACHINE_ID = formatted_id
     return formatted_id
 
 def is_same_device(dev1: str, dev2: str) -> bool:
