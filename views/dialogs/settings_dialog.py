@@ -1493,6 +1493,29 @@ class SettingsDialog(QDialog):
 
         # Pharmacy Mode toggle moved to Company Defaults -> Payment Settings card.
 
+        # ── CONFIGURATIONS ─────────────────────────────────────────────────────
+        def _open_backup_restore():
+            try:
+                from views.dialogs.backup_settings_dialog import BackupSettingsView
+                from PySide6.QtWidgets import QDialog as _D, QVBoxLayout as _VL
+                dlg = _D(self)
+                dlg.setWindowTitle("Backup & Restore")
+                dlg.setMinimumSize(900, 620)
+                dlg.setStyleSheet(f"QDialog {{ background: {WHITE}; }}")
+                dlg.closeEvent = lambda event: (dlg.accept(), event.accept())
+                lay = _VL(dlg)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.addWidget(BackupSettingsView(dlg))
+                dlg.exec()
+            except Exception as e:
+                from PySide6.QtWidgets import QMessageBox as _MB
+                _MB.warning(self, "Error", f"Could not open Backup & Restore:\n{e}")
+
+        ml.addWidget(_section_divider("CONFIGURATIONS"))
+        _add_items([
+            ("fa5s.database",   "Backup & Restore",  _open_backup_restore),
+        ])
+
         scroll_area.setWidget(menu)
         root.addWidget(scroll_area, 1)
 
@@ -1776,6 +1799,7 @@ class POSRulesDialog(QDialog):
         body_layout.addWidget(self._section_header("DINING & WORKFLOW"))
         dining_rules = [
             ("takeaway_or_sitin",         "TAKE AWAY / SIT IN PROMPT",         "Ask cashier to pick dining option before payment."),
+            ("takeaway_monitors",          "TAKEAWAY MONITORS",                 "Automatically push Take Away sales invoices as orders to Kitchen & Dispatch Monitors."),
             ("enable_kds_websocket",       "KITCHEN DISPLAY SYSTEM",            "Live sync to KDS screens."),
             ("enable_double_printing",     "DOUBLE PRINTING",                   "Print two copies of every sales receipt."),
         ]
@@ -2051,6 +2075,12 @@ class POSRulesDialog(QDialog):
             
             conn.commit(); conn.close()
             
+            try:
+                from views.dialogs.dining_option_dialog import set_dining_prompt_hidden
+                set_dining_prompt_hidden(False)
+            except Exception:
+                pass
+
             self.save_btn.setText("SAVED")
             self.save_btn.setIcon(qta.icon("fa5s.check", color="white"))
             QTimer.singleShot(1500, self._reset_btn)
@@ -2066,8 +2096,8 @@ class POSRulesDialog(QDialog):
     def _load_existing_rules(self):
         # Default ALL to True first (Consistency with _get_pos_rule)
         for k, t in self._toggles.items():
-            # auto_print_quotations, require_pin_to_remove, takeaway_or_sitin, show_tax_on_invoice should be OFF by default
-            default = (k not in ("show_tax_on_invoice", "auto_print_quotations", "require_pin_to_remove", "takeaway_or_sitin", "enable_kds_websocket"))
+            # auto_print_quotations, require_pin_to_remove, takeaway_or_sitin, auto_kds_takeaway_orders, show_tax_on_invoice should be OFF by default
+            default = (k not in ("show_tax_on_invoice", "auto_print_quotations", "require_pin_to_remove", "takeaway_or_sitin", "auto_kds_takeaway_orders", "takeaway_monitors", "enable_kds_websocket"))
             t.setChecked(default)
             t.position = 1.0 if default else 0.0
 

@@ -4,6 +4,10 @@ from PyInstaller.utils.hooks import collect_all
 datas = [('assets', 'assets')]
 binaries = []
 hiddenimports = [
+    'PySide6.QtPdf',
+    'PySide6.QtPdfWidgets',
+    'PySide6.QtWebEngineWidgets',
+    'PySide6.QtWebEngineCore',
     'et_xmlfile',
     'cryptography',
     'cryptography.fernet',
@@ -31,9 +35,8 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineQuick',
         'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtOpenGL', 'PySide6.QtQuick3D',
-        'PySide6.QtPdf', 'PySide6.QtGraphs', 'PySide6.Qt3DRender', 'PySide6.Qt3DCore',
+        'PySide6.QtGraphs', 'PySide6.Qt3DRender', 'PySide6.Qt3DCore',
         'PyQt6', 'PyQt5', 'pandas', 'numpy', 'matplotlib', 'scipy',
         'tensorflow', 'keras', 'torch', 'IPython', 'jupyter', 'notebook', 'cv2'
     ],
