@@ -70,10 +70,21 @@ class KDSClientThread(QThread):
         self._connected = False
 
     def run(self):
-        asyncio.run(self._listen())
+        try:
+            import websockets
+        except ImportError:
+            print("[KDSClientThread] websockets module not installed - KDS real-time client listener disabled.")
+            return
+        try:
+            asyncio.run(self._listen())
+        except Exception as e:
+            print(f"[KDSClientThread] Exception in run loop: {e}")
 
     async def _listen(self):
-        import websockets
+        try:
+            import websockets
+        except ImportError:
+            return
         while self._running:
             try:
                 async with websockets.connect(
@@ -286,7 +297,13 @@ class OrderCard(QFrame):
         hdr.addWidget(num)
         hdr.addStretch()
 
-        tbl = QLabel(f"T{self.data.get('table_number', '?')}")
+        t_num = str(self.data.get("table_number") or "").strip()
+        t_name = str(self.data.get("table_name") or "").strip()
+        if t_name and t_num:
+            t_display = f"{t_name} ({t_num})"
+        else:
+            t_display = t_name or (f"T{t_num}" if t_num else "?")
+        tbl = QLabel(t_display)
         tbl.setStyleSheet(f"""
             background: {ACCENT_SOFT}; color: {ACCENT};
             font-size: 10px; font-weight: 700;
@@ -382,7 +399,7 @@ class OrderCard(QFrame):
                 )
         elif self.mode == "dispatch":
             self._action_btn(
-                lay, "Deliver to table", SUCCESS, SUCCESS_BG, SUCCESS_BORDER,
+                lay, "Close Order", SUCCESS, SUCCESS_BG, SUCCESS_BORDER,
                 lambda: self.status_changed.emit(self.order_id, "ALL", "Delivered")
             )
 
@@ -692,9 +709,21 @@ class KDSWindow(QWidget):
         self._resize_tmr.setSingleShot(True)
         self._resize_tmr.timeout.connect(self._refresh)
 
+        # Auto-ensure KDS broadcaster server is running
+        try:
+            from services.kds_service import kds_service
+            kds_service.start_server()
+        except Exception:
+            pass
+
         self._build_ui()
         self._start_ws()
         self._refresh()
+
+        # Fallback periodic database polling timer (every 2.5s) to guarantee continuous synchronization
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._refresh)
+        self._poll_timer.start(2500)
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -810,6 +839,11 @@ class KDSWindow(QWidget):
 
     # ── WebSocket ─────────────────────────────────────────────────────────────
     def closeEvent(self, event):
+        if hasattr(self, '_poll_timer') and self._poll_timer:
+            try:
+                self._poll_timer.stop()
+            except Exception:
+                pass
         if hasattr(self, 'ws') and self.ws:
             self.ws.stop()
         event.accept()
@@ -913,7 +947,7 @@ class KDSWindow(QWidget):
     def _on_status(self, order_id: int, item_name: str, status: str):
         try:
             from models.restaurant_order import (
-                update_order_prep_status, update_item_prep_status
+                update_order_prep_status, update_item_prep_status, print_kds_order_if_required
             )
             from services.kds_service import kds_service
 
@@ -923,9 +957,13 @@ class KDSWindow(QWidget):
             elif item_name == "ALL":
                 update_order_prep_status(order_id, status)
                 self._local_ticks.pop(order_id, None)
+                if status == "Ready":
+                    print_kds_order_if_required(order_id)
             else:
                 self._local_ticks.setdefault(order_id, set()).add(item_name)
                 update_item_prep_status(order_id, item_name, status)
+                if status == "Ready":
+                    print_kds_order_if_required(order_id)
 
             kds_service.broadcast_sync({"type": "refresh", "order_id": order_id})
         except Exception as e:

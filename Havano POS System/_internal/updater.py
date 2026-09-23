@@ -15,6 +15,7 @@ import os
 import sys
 import ssl
 import json
+import threading
 import subprocess
 import tempfile
 import urllib.request
@@ -54,7 +55,7 @@ def _nc_download_url(filename: str) -> str:
 def _fetch_version_info() -> dict:
     url = _nc_download_url("version.json")
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-    with urllib.request.urlopen(req, context=_SSL_CONTEXT, timeout=10.0) as resp:
+    with urllib.request.urlopen(req, context=_SSL_CONTEXT, timeout=2.0) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -506,20 +507,27 @@ class UpdateDialog(QDialog):
         self.skip_btn.setEnabled(True)
 
     def _launch_installer(self):
-        try:
-            if sys.platform == "win32":
-                import ctypes
-                # "runas" requests administrator privileges (UAC prompt)
-                params = "/SILENT /SP- /SUPPRESSMSGBOXES /FORCECLOSEAPPLICATIONS"
-                ctypes.windll.shell32.ShellExecuteW(None, "runas", self._installer_path, params, None, 1)
-            else:
-                import subprocess
-                subprocess.Popen([self._installer_path, "/SILENT", "/SP-", "/SUPPRESSMSGBOXES"])
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not launch installer:\n{e}")
-            return
-        QApplication.quit()
-        os._exit(0)
+        launch_installer(self._installer_path, self)
+
+
+def launch_installer(installer_path: str, parent: QWidget = None) -> bool:
+    """Launch the installer executable and exit the POS application."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            # "runas" requests administrator privileges (UAC prompt)
+            params = "/SILENT /SP- /SUPPRESSMSGBOXES /FORCECLOSEAPPLICATIONS"
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", installer_path, params, None, 1)
+        else:
+            import subprocess
+            subprocess.Popen([installer_path, "/SILENT", "/SP-", "/SUPPRESSMSGBOXES"])
+    except Exception as e:
+        if parent:
+            QMessageBox.critical(parent, "Error", f"Could not launch installer:\n{e}")
+        return False
+    QApplication.quit()
+    os._exit(0)
+    return True
 
 
 _global_update_dialog = None
@@ -536,10 +544,43 @@ update_notifier = _UpdateNotifier()
 
 def check_for_updates(current_version: str, parent: QWidget = None, silent: bool = True) -> None:
     """
-    Call this once on POS startup.
-        from updater import check_for_updates
-        check_for_updates(current_version=APP_VERSION)
+    Call this on POS startup (silent=True) or from settings (silent=False).
+    When silent=True, the network check is offloaded to a background daemon thread
+    to guarantee zero UI blocking on the main Qt thread.
     """
+    if silent:
+        def _bg_check():
+            try:
+                info = _fetch_version_info()
+                if not info or "version" not in info:
+                    return
+                is_newer = Version(info["version"]) > Version(current_version)
+                if not is_newer:
+                    return
+                is_mandatory = bool(info.get("mandatory", False) or info.get("is_mandatory", False))
+                if not is_mandatory:
+                    return
+
+                from PySide6.QtCore import QTimer
+                def _show_dialog():
+                    global _global_update_dialog
+                    loaders = [w for w in QApplication.topLevelWidgets() if w.__class__.__name__ == "SleekLoaderOverlay"]
+                    for loader in loaders:
+                        loader.hide_loading()
+
+                    _global_update_dialog = UpdateDialog(current_version, info, parent=parent)
+                    _global_update_dialog.exec()
+
+                    for loader in loaders:
+                        loader.show_loading()
+
+                QTimer.singleShot(0, _show_dialog)
+            except Exception:
+                pass
+
+        threading.Thread(target=_bg_check, daemon=True, name="SilentUpdateCheckThread").start()
+        return
+
     global _global_update_dialog
     try:
         info = _fetch_version_info()

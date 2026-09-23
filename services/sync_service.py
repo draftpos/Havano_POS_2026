@@ -34,7 +34,13 @@ def _get_products_endpoint() -> str:
     host = _get_host()
     if not host:
         return ""
-    return f"{host.rstrip('/')}/api/method/havano_pos_integration.api.get_products"
+    try:
+        from services.credentials import get_system_mode
+        mode = get_system_mode().lower()
+    except Exception:
+        mode = "saas"
+    method = "saas_api.www.api.get_my_products" if mode == "saas" else "havano_pos_integration.api.get_products"
+    return f"{host.rstrip('/')}/api/method/{method}"
 
 PAGE_SIZE         = 250
 MAX_PAGES         = 200
@@ -468,7 +474,7 @@ def _extract_stock(warehouses: list) -> float:
     return 0.0
 
 
-def _parse_product(p: dict) -> dict | None:
+def _parse_product(p: dict, active_store: str = "") -> dict | None:
     """
     Maps a raw API product dict -> clean local dict with full tax fields.
     Stock is filtered by the company's default warehouse.
@@ -477,6 +483,18 @@ def _parse_product(p: dict) -> dict | None:
     part_no   = str(p.get("itemcode") or "").strip().upper()
     name      = _clean_text(str(p.get("itemname") or "")).strip()[:255]
     stock_uom = str((p.get("uom") or {}).get("stock_uom") or "Nos").strip()
+
+    if not part_no:
+        return None
+
+    # Filter out products that do not belong to active store if specified
+    if active_store:
+        raw_whs = p.get("warehouses") or []
+        if raw_whs:
+            matching_wh = [w for w in raw_whs if str(w.get("warehouse") or w.get("warehouse_name") or "").strip().lower() == active_store.strip().lower()]
+            if not matching_wh:
+                log.debug("[sync] Skipping %s - not assigned to active store '%s'", part_no, active_store)
+                return None
 
     raw_group = str(p.get("groupname") or "").strip()
     category  = "" if raw_group.lower() in _ROOT_GROUPS else raw_group[:100]
@@ -487,9 +505,6 @@ def _parse_product(p: dict) -> dict | None:
 
     # Tax - full extraction using maximum_net_rate
     tax_info = _extract_tax_info(p.get("taxes") or [], part_no=part_no)
-
-    if not part_no:
-        return None
 
     # Item prices (both selling and buying, per price list and uom)
     item_prices = []
@@ -517,12 +532,14 @@ def _parse_product(p: dict) -> dict | None:
         "track_stock":         1 if str(p.get("maintainstock") if p.get("maintainstock") is not None else p.get("is_stock_item") if p.get("is_stock_item") is not None else p.get("track_stock") or "1").strip().lower() in ("1", "true", "yes", "t", "y") else 0,
         "hs_code":              str(p.get("hscode") or p.get("hs_code") or "").strip(),
         "active":              1 if not p.get("disabled") else 0,
+        "print_after_order":   1 if (p.get("print_after_order") or p.get("print_after_order_item") or p.get("custom_print_after_order")) else 0,
         "batches":             p.get("batches") or [],
     }
 
-    # Kitchen-printer routing flags (custom_is_order_item_1..6 -> order_1..6)
+    # Kitchen-printer routing flags (kitchen_order_1..6 for SaaS / custom_is_order_item_1..6 for Frappe)
     for i in range(1, 7):
-        result[f"order_{i}"] = 1 if p.get(f"custom_is_order_item_{i}") else 0
+        val = p.get(f"kitchen_order_{i}") if p.get(f"kitchen_order_{i}") is not None else p.get(f"custom_is_order_item_{i}")
+        result[f"order_{i}"] = 1 if (str(val).strip().lower() in ("1", "true", "yes", "t", "y") or val is True or val == 1) else 0
 
     if tax_info:
         result["tax_rate"]          = tax_info["tax_rate"]
@@ -846,6 +863,14 @@ def sync_products(api_key: str = "", api_secret: str = "",
         log.warning("[sync] Could not load local part_nos: %s", e)
         local_part_nos = set()
  
+    try:
+        from models.company_defaults import get_defaults
+        co_defs = get_defaults() or {}
+        active_store_name = (co_defs.get("server_store_name") or co_defs.get("server_warehouse") or co_defs.get("store_name") or "").strip()
+    except Exception:
+        active_store_name = ""
+
+    synced_part_nos = set()
     for idx, raw in enumerate(all_raw, start=1):
         part_no_raw = str(raw.get("itemcode") or "").strip()
         if not part_no_raw:
@@ -868,12 +893,13 @@ def sync_products(api_key: str = "", api_secret: str = "",
             )
  
         try:
-            parsed = _parse_product(raw)
+            parsed = _parse_product(raw, active_store=active_store_name)
             if parsed is None:
                 result["skipped"] += 1
                 continue
  
             inserted = _upsert_parsed_product(cur, conn, parsed, local_part_nos)
+            synced_part_nos.add(parsed["part_no"])
             result["products_synced"] += 1
             if inserted:
                 result["products_inserted"] += 1
@@ -940,6 +966,7 @@ def _upsert_parsed_product(cur, conn, p: dict, local_part_nos: set) -> bool:
     is_pharm          = p.get("is_pharmacy_product", 0)
     track_stock       = p.get("track_stock", 1)
     active            = p.get("active", 1)
+    print_after_order = int(p.get("print_after_order", 0) or 0)
     order_flags       = tuple(int(p.get(f"order_{i}", 0) or 0) for i in range(1, 7))
     cost_price        = p.get("cost_price", 0.0)
 
@@ -955,15 +982,15 @@ def _upsert_parsed_product(cur, conn, p: dict, local_part_nos: set) -> bool:
                     (part_no, name, price, cost_price, stock, category,
                      uom, conversion_factor,
                      tax_rate, tax_type, item_tax_template, hs_code,
-                     is_pharmacy_product, track_stock, active,
+                     is_pharmacy_product, track_stock, active, print_after_order,
                      order_1, order_2, order_3, order_4, order_5, order_6)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     part_no, p["name"], p["price"], cost_price, p["stock"], p["category"],
                     p.get("uom", "Nos"),
                     tax_rate, tax_type, item_tax_template, hs_code,
-                    is_pharm, track_stock, active,
+                    is_pharm, track_stock, active, print_after_order,
                     *order_flags,
                 ),
             )
@@ -979,7 +1006,7 @@ def _upsert_parsed_product(cur, conn, p: dict, local_part_nos: set) -> bool:
                 SET name = ?, price = ?, cost_price = ?, stock = ?, category = ?,
                     uom = ?, conversion_factor = 1.0,
                     tax_rate = ?, tax_type = ?, item_tax_template = ?, hs_code = ?,
-                    is_pharmacy_product = ?, track_stock = ?, active = ?,
+                    is_pharmacy_product = ?, track_stock = ?, active = ?, print_after_order = ?,
                     order_1 = ?, order_2 = ?, order_3 = ?, order_4 = ?, order_5 = ?, order_6 = ?
                 WHERE part_no = ?
                 """,
@@ -987,7 +1014,7 @@ def _upsert_parsed_product(cur, conn, p: dict, local_part_nos: set) -> bool:
                     p["name"], p["price"], cost_price, p["stock"], p["category"],
                     p.get("uom", "Nos"),
                     tax_rate, tax_type, item_tax_template, hs_code,
-                    is_pharm, track_stock, active,
+                    is_pharm, track_stock, active, print_after_order,
                     *order_flags,
                     part_no,
                 ),
@@ -1712,6 +1739,12 @@ try:
                         push_unsynced_credit_notes()
                     except Exception as e:
                         log.error("[sync] Credit note auto-sync failed: %s", e)
+
+                    try:
+                        from services.expense_sync_service import push_unsynced_expenses
+                        push_unsynced_expenses()
+                    except Exception as e:
+                        log.error("[sync] Expense auto-sync failed: %s", e)
 
                     # ── 4. Process pending fiscalizations (offline fallback) 
                     try:

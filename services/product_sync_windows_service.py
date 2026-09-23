@@ -76,8 +76,8 @@ def _load_credentials() -> tuple[str, str]:
         cur  = conn.cursor()
         cur.execute("""
             SELECT api_key, api_secret
-            FROM   company_defaults
-            WHERE  id = (SELECT MIN(id) FROM company_defaults)
+            FROM   company_defaults WITH (NOLOCK)
+            WHERE  id = (SELECT MIN(id) FROM company_defaults WITH (NOLOCK))
         """)
         row = cur.fetchone()
         conn.close()
@@ -133,8 +133,8 @@ def _get_host() -> str:
         cur  = conn.cursor()
         cur.execute("""
             SELECT server_api_host
-            FROM   company_defaults
-            WHERE  id = (SELECT MIN(id) FROM company_defaults)
+            FROM   company_defaults WITH (NOLOCK)
+            WHERE  id = (SELECT MIN(id) FROM company_defaults WITH (NOLOCK))
         """)
         row = cur.fetchone()
         conn.close()
@@ -173,14 +173,14 @@ def _fetch_all_pages(api_key: str, api_secret: str, host: str) -> list[dict]:
         from services.credentials import get_system_mode
         sys_mode = get_system_mode().lower()
     except Exception:
-        sys_mode = "frappe"
+        sys_mode = "saas"
 
-    if sys_mode == "frappe":
-        base_endpoint = f"{host}/api/method/havano_pos_integration.api.get_products"
-        fallback_endpoint = f"{host}/api/method/saas_api.www.api.get_my_products"
-    else:
+    if sys_mode == "saas" or sys_mode != "frappe":
         base_endpoint = f"{host}/api/method/saas_api.www.api.get_my_products"
         fallback_endpoint = f"{host}/api/method/havano_pos_integration.api.get_products"
+    else:
+        base_endpoint = f"{host}/api/method/havano_pos_integration.api.get_products"
+        fallback_endpoint = f"{host}/api/method/saas_api.www.api.get_my_products"
     use_fallback = False
 
     while True:
@@ -448,13 +448,19 @@ def _extract_variant_info(p: dict) -> dict:
     }
 
 
-def _parse_product(p: dict) -> dict | None:
+def _parse_product(p: dict, active_store: str = "") -> dict | None:
     """
     Maps the real API product object to a clean local dict including tax info.
-    Returns None if the product should be skipped.
+    Returns None if the product should be skipped or does not belong to active store.
     """
     part_no   = str(p.get("itemcode") or "").strip().upper()
     name      = str(p.get("itemname") or "").strip()
+
+    if not part_no:
+        return None
+
+    # Synchronize all catalogue items; do not skip products if warehouse is not matched
+    # (Stock extraction already resolves the specific warehouse stock appropriately)
     stock_uom = str((p.get("uom") or {}).get("stock_uom") or "Nos").strip()
     price     = _extract_selling_price(p.get("prices", []), stock_uom)
 
@@ -545,6 +551,7 @@ def _parse_product(p: dict) -> dict | None:
         "raw_warehouses":      p.get("warehouses", []),
         "raw_batches":         p.get("batches", []),
         "hs_code":             str(p.get("hscode") or p.get("hs_code") or "").strip(),
+        "print_after_order":   1 if (p.get("print_after_order") or p.get("print_after_order_item") or p.get("custom_print_after_order")) else 0,
         "raw_barcodes":        barcodes,
         # Variant fields flattened for the UPDATE/INSERT below
         "has_variants":        variant_info["has_variants"],
@@ -553,12 +560,10 @@ def _parse_product(p: dict) -> dict | None:
         "attributes":          variant_info["attributes"],
     }
 
-    # Kitchen-printer routing flags from Frappe (custom_is_order_item_1..6)
-    # Stored locally as order_1..6 on the products table; used later to fan
-    # out KOTs to Order 1–6 printers (services/product_sync_windows_service ->
-    # products.order_N -> sale_items.order_N -> models/sale.print_kitchen_orders).
+    # Kitchen-printer routing flags (kitchen_order_1..6 for SaaS / custom_is_order_item_1..6 for Frappe)
     for i in range(1, 7):
-        result[f"order_{i}"] = 1 if p.get(f"custom_is_order_item_{i}") else 0
+        val = p.get(f"kitchen_order_{i}") if p.get(f"kitchen_order_{i}") is not None else p.get(f"custom_is_order_item_{i}")
+        result[f"order_{i}"] = 1 if (str(val).strip().lower() in ("1", "true", "yes", "t", "y") or val is True or val == 1) else 0
 
     if tax_info:
         result["tax_rate"]          = tax_info["tax_rate"]
@@ -587,7 +592,7 @@ def _upsert_item_prices(cur, part_no: str, rows: list[dict]) -> int:
     for r in rows:
         try:
             cur.execute("""
-                IF NOT EXISTS (SELECT 1 FROM price_lists WHERE name = ?)
+                IF NOT EXISTS (SELECT 1 FROM price_lists WITH (NOLOCK) WHERE name = ?)
                 BEGIN
                     INSERT INTO price_lists (name, selling) VALUES (?, 1)
                 END
@@ -624,7 +629,7 @@ def _get_local_part_nos() -> set[str]:
         from database.db import get_connection
         conn = get_connection()
         cur  = conn.cursor()
-        cur.execute("SELECT part_no FROM products")
+        cur.execute("SELECT part_no FROM products WITH (NOLOCK)")
         rows = cur.fetchall()
         conn.close()
         return {r[0].strip().upper() for r in rows if r[0]}
@@ -775,9 +780,16 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
         return result
 
     # ── Parse and filter ─────────────────────────────────────────────────────
+    try:
+        from models.company_defaults import get_defaults
+        co_defs = get_defaults() or {}
+        active_store_name = (co_defs.get("server_store_name") or co_defs.get("server_warehouse") or co_defs.get("store_name") or "").strip()
+    except Exception:
+        active_store_name = ""
+
     remote = []
     for p in remote_raw:
-        parsed = _parse_product(p)
+        parsed = _parse_product(p, active_store=active_store_name)
         if parsed is None:
             part_no = str(p.get("itemcode") or "").strip()
             if not part_no:
@@ -819,22 +831,13 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
 
     # ── Load Warehouse Map ───────────────────────────────────────────────────
     try:
-        cur.execute("SELECT id, name FROM warehouses")
+        cur.execute("SELECT id, name FROM warehouses WITH (NOLOCK)")
         wh_map = {row[1].strip().upper(): row[0] for row in cur.fetchall() if row[1]}
     except Exception:
         wh_map = {}
 
-    # ── Deactivate non-sales items ───────────────────────────────────────────
-    deactivated = 0
-    for part_no in non_sales_part_nos:
-        if part_no in local_part_nos:
-            try:
-                cur.execute("UPDATE products SET active=0 WHERE part_no=?", (part_no,))
-                deactivated += 1
-            except Exception:
-                pass
-    if deactivated:
-        log.info("[sync] Deactivated %d non-sales items in local DB.", deactivated)
+    # ── Non-sales items auto-deactivation disabled per user configuration ───
+    # Products remain active in local DB unless explicitly disabled by user.
 
     # ── Upsert each product ──────────────────────────────────────────────────
     try:
@@ -858,6 +861,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
             is_pharm = 1 if p.get("is_pharmacy_product") else 0
 
             order_flags = tuple(int(p.get(f"order_{i}", 0) or 0) for i in range(1, 7))
+            print_after_order = int(p.get("print_after_order", 0) or 0)
 
             # Variant fields (default-safe so existing products get flags=0)
             is_template  = int(p.get("is_template")  or 0)
@@ -885,6 +889,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                            is_product_bundle   = ?,
                            conversion_factor   = ?,
                            uom                 = ?,
+                           print_after_order   = ?,
                            order_1             = ?,
                            order_2             = ?,
                            order_3             = ?,
@@ -894,7 +899,8 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                            is_template         = ?,
                            has_variants        = ?,
                            variant_of          = ?,
-                           attributes          = ?
+                           attributes          = ?,
+                           active              = 1
                     WHERE  part_no = ?
                 """, (
                     p["name"], p["description"], p["price"], p["cost_price"], p["reorder_level"],
@@ -902,6 +908,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                     tax_rate, tax_type, item_tax_template, hs_code_val, is_pharm,
                     int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
                     p.get("uom") or None,
+                    print_after_order,
                     *order_flags,
                     is_template, has_variants, variant_of, attributes,
                     p["part_no"],
@@ -915,16 +922,17 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                     INSERT INTO products
                         (part_no, name, description, price, cost_price, reorder_level, stock, track_stock, category,
                          tax_rate, tax_type, item_tax_template, hs_code, is_pharmacy_product, is_butchery_product, is_product_bundle, conversion_factor,
-                         uom,
+                         uom, print_after_order,
                          order_1, order_2, order_3, order_4, order_5, order_6,
-                         is_template, has_variants, variant_of, attributes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         is_template, has_variants, variant_of, attributes, active)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 """, (
                     p["part_no"], p["name"], p["description"], p["price"], p["cost_price"], p["reorder_level"],
                     p["stock"], p["track_stock"], p["category"],
                     tax_rate, tax_type, item_tax_template, hs_code_val, is_pharm,
                     int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
                     p.get("uom") or None,
+                    print_after_order,
                     *order_flags,
                     is_template, has_variants, variant_of, attributes,
                 ))
@@ -936,15 +944,15 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
 
             # ── Upsert full price-list cache for this item ───────────────────
             # Templates have no prices of their own - variants carry them.
-            pl_rows = p.get("price_list_rows") or []
-            if pl_rows:
-                n = _upsert_item_prices(cur, p["part_no"], pl_rows)
+            price_rows = p.get("item_prices") or []
+            if price_rows:
+                n = _upsert_item_prices(cur, p["part_no"], price_rows)
                 if n:
                     log.debug("[sync] %s - %d price-list row(s) cached", p["part_no"], n)
 
             # ── Upsert product_warehouse_stock ───────────────────────────────
             try:
-                cur.execute("DELETE FROM product_warehouse_stock WHERE product_id = (SELECT id FROM products WHERE part_no = ?)", (p["part_no"],))
+                cur.execute("DELETE FROM product_warehouse_stock WHERE product_id = (SELECT id FROM products WITH (NOLOCK) WHERE part_no = ?)", (p["part_no"],))
                 for w in p.get("raw_warehouses", []):
                     w_name_raw = str(w.get("warehouse") or "").strip()
                     w_name = w_name_raw.upper()
@@ -952,7 +960,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                         continue
                     if w_name not in wh_map:
                         try:
-                            cur.execute("SELECT TOP 1 id FROM companies ORDER BY id ASC")
+                            cur.execute("SELECT TOP 1 id FROM companies WITH (NOLOCK) ORDER BY id ASC")
                             c_row = cur.fetchone()
                             comp_id = c_row[0] if c_row else 1
                             cur.execute("INSERT INTO warehouses (name, company_id) VALUES (?, ?)", (w_name_raw, comp_id))
@@ -970,7 +978,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                             w_qty = 0.0
                         cur.execute("""
                             INSERT INTO product_warehouse_stock (product_id, warehouse_id, stock)
-                            VALUES ((SELECT id FROM products WHERE part_no = ?), ?, ?)
+                            VALUES ((SELECT id FROM products WITH (NOLOCK) WHERE part_no = ?), ?, ?)
                         """, (p["part_no"], wh_map[w_name], w_qty))
             except Exception as e:
                 log.warning("Error upserting warehouse stock for %s: %s", p["part_no"], e)
@@ -1002,7 +1010,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
             try:
                 cur.execute(
                     "DELETE FROM product_batches "
-                    "WHERE product_id IN (SELECT id FROM products WHERE part_no = ?)",
+                    "WHERE product_id IN (SELECT id FROM products WITH (NOLOCK) WHERE part_no = ?)",
                     (p["part_no"],),
                 )
                 raw_batches = p.get("batches") or []
@@ -1013,7 +1021,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                     cur.execute(
                         "INSERT INTO product_batches "
                         "    (product_id, batch_no, expiry_date, qty, synced) "
-                        "SELECT id, ?, ?, ?, 1 FROM products WHERE part_no = ?",
+                        "SELECT id, ?, ?, ?, 1 FROM products WITH (NOLOCK) WHERE part_no = ?",
                         (bn, b.get("expiry_date"), float(b.get("qty") or 0),
                          p["part_no"]),
                     )
@@ -1078,33 +1086,10 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
             log.error("Error processing product '%s': %s", p["part_no"], e)
             result["errors"] += 1
 
-    # ── Cleanup Stale Products ───────────────────────────────────────────────
-    remote_part_nos = {p["part_no"] for p in remote}
-    stale_part_nos = local_part_nos - remote_part_nos
-
-    # Guard: If API returns very few products compared to local DB (e.g. < 10%), 
-    # it might be a pagination error. Skip cleanup to be safe unless DB is small.
-    if stale_part_nos and len(remote) > 0:
-        if len(stale_part_nos) < len(local_part_nos) * 0.9 or len(local_part_nos) < 50:
-            log.info("[sync] Cleaning up %d stale products that are no longer on the server...", len(stale_part_nos))
-            stale_list = list(stale_part_nos)
-            chunk_size = 900
-            for i in range(0, len(stale_list), chunk_size):
-                chunk = stale_list[i:i + chunk_size]
-                placeholders = ",".join(["?"] * len(chunk))
-                
-                try:
-                    cur.execute(f"DELETE FROM product_batches WHERE product_id IN (SELECT id FROM products WHERE part_no IN ({placeholders}))", chunk)
-                    cur.execute(f"DELETE FROM product_uom_prices WHERE part_no IN ({placeholders})", chunk)
-                    cur.execute(f"DELETE FROM product_taxes WHERE part_no IN ({placeholders})", chunk)
-                    cur.execute(f"DELETE FROM item_prices WHERE part_no IN ({placeholders})", chunk)
-                    cur.execute(f"DELETE FROM products WHERE part_no IN ({placeholders})", chunk)
-                except Exception as e:
-                    log.warning("[sync] Error cleaning up stale chunk: %s", e)
-                    
-            result["deleted_stale"] = len(stale_part_nos)
-        else:
-            log.warning("[sync] Aborted stale cleanup: too many deletions (API might have failed partially).")
+    # ── Soft-Deactivate Stale Products ─────────────────────────────────────────
+    # ── Auto-deactivation of stale products disabled per user configuration ───
+    # Local products remain active and visible even if omitted from cloud payload.
+    result["deleted_stale"] = 0
 
     conn.commit()
     conn.close()

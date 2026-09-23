@@ -21,7 +21,13 @@ BASE_DATE = datetime(2024, 1, 1)
 # ==============================================================================
 # HARDWARE & CRYPTO LOGIC
 # ==============================================================================
+_CACHED_MACHINE_ID = None
+
 def get_machine_id() -> str:
+    global _CACHED_MACHINE_ID
+    if _CACHED_MACHINE_ID:
+        return _CACHED_MACHINE_ID
+
     mac = uuid.getnode()
     mac_str = ':'.join(['{:02x}'.format((mac >> e) & 0xff) for e in range(0,12,2)][::-1]).upper()
     
@@ -38,7 +44,9 @@ def get_machine_id() -> str:
     raw = f"{mac_str}-{board}"
     hashed = hashlib.sha256(raw.encode('utf-8')).hexdigest().upper()
     ch = hashed[:16]
-    return f"{ch[:4]}-{ch[4:8]}-{ch[8:12]}-{ch[12:16]}"
+    formatted = f"{ch[:4]}-{ch[4:8]}-{ch[8:12]}-{ch[12:16]}"
+    _CACHED_MACHINE_ID = formatted
+    return formatted
 
 def generate_short_license(machine_id: str, days: int) -> str:
     """

@@ -1,556 +1,3 @@
-# # =============================================================================
-# # views/dialogs/sales_list_dialog.py
-# # =============================================================================
-
-# from PySide6.QtWidgets import (
-#     QWidget, QVBoxLayout, QHBoxLayout,
-#     QPushButton, QLabel, QTableWidget, QTableWidgetItem,
-#     QHeaderView, QFrame, QAbstractItemView, QMessageBox,
-#     QMainWindow, QScrollArea, QStackedWidget
-# )
-# from PySide6.QtCore import Qt, QThread, Signal, QObject
-# from PySide6.QtGui  import QColor
-
-# from models.sale import get_all_sales, delete_sale, get_sale_items
-
-# NAVY      = "#0d1f3c"
-# NAVY_2    = "#162d52"
-# NAVY_3    = "#1e3d6e"
-# ACCENT    = "#1a5fb4"
-# ACCENT_H  = "#1c6dd0"
-# WHITE     = "#ffffff"
-# OFF_WHITE = "#f5f8fc"
-# LIGHT     = "#e4eaf4"
-# BORDER    = "#c8d8ec"
-# DARK_TEXT = "#0d1f3c"
-# MUTED     = "#5a7a9a"
-# DANGER    = "#b02020"
-# DANGER_H  = "#cc2828"
-# ROW_ALT   = "#edf3fb"
-# GREEN     = "#1e8449"
-# AMBER     = "#b7770d"
-# AMBER_BG  = "#fef9ec"
-
-# # ── Column definitions ────────────────────────────────────────────────────────
-# # (header, sale_dict_key, fixed_width, alignment, stretch)
-# # width=0 + stretch=True → column stretches to fill space
-# _COLUMNS = [
-#     ("Invoice No.",   "number",        100, Qt.AlignCenter,                   False),
-#     ("Date",          "date",          100, Qt.AlignCenter,                   False),
-#     ("Time",          "time",           75, Qt.AlignCenter,                   False),
-#     ("Cashier",       "user",           90, Qt.AlignCenter,                   False),
-#     ("Customer",      "customer_name",   0, Qt.AlignLeft | Qt.AlignVCenter,   True),
-#     ("Company",       "company_name",    0, Qt.AlignLeft | Qt.AlignVCenter,   True),
-#     ("Method",        "method",          85, Qt.AlignCenter,                  False),
-#     ("Currency",      "currency",        75, Qt.AlignCenter,                  False),
-#     ("Items",         "total_items",     60, Qt.AlignCenter,                  False),
-#     ("Amount $",      "amount",         105, Qt.AlignRight | Qt.AlignVCenter, False),
-#     ("Tendered $",    "tendered",       105, Qt.AlignRight | Qt.AlignVCenter, False),
-#     ("Change $",      "change_amount",  105, Qt.AlignRight | Qt.AlignVCenter, False),
-#     ("Sync",          "synced",          90, Qt.AlignCenter,                  False),
-#     ("Frappe Ref",    "frappe_ref",     160, Qt.AlignLeft  | Qt.AlignVCenter, False),
-# ]
-
-
-# def _hr():
-#     ln = QFrame(); ln.setFrameShape(QFrame.HLine)
-#     ln.setStyleSheet(f"background:{BORDER};border:none;"); ln.setFixedHeight(1)
-#     return ln
-
-# def _vr():
-#     ln = QFrame(); ln.setFrameShape(QFrame.VLine)
-#     ln.setStyleSheet(f"background:{BORDER};border:none;"); ln.setFixedWidth(1)
-#     return ln
-
-# def _toolbar_btn(text, bg, hov, size=(130, 36)):
-#     b = QPushButton(text); b.setFixedSize(*size)
-#     b.setCursor(Qt.PointingHandCursor); b.setFocusPolicy(Qt.NoFocus)
-#     b.setStyleSheet(f"""
-#         QPushButton {{ background-color:{bg};color:{WHITE};border:none;
-#                        border-radius:6px;font-size:12px;font-weight:bold; }}
-#         QPushButton:hover    {{ background-color:{hov}; }}
-#         QPushButton:pressed  {{ background-color:{NAVY_3}; }}
-#         QPushButton:disabled {{ background-color:{LIGHT};color:{MUTED}; }}
-#     """)
-#     return b
-
-# def _build_toolbar(title, left_widget=None, right_widgets=None):
-#     toolbar = QWidget(); toolbar.setFixedHeight(56)
-#     toolbar.setStyleSheet(f"background-color:{NAVY};")
-#     tl = QHBoxLayout(toolbar); tl.setContentsMargins(20,0,20,0); tl.setSpacing(10)
-#     if left_widget: tl.addWidget(left_widget)
-#     if title:
-#         lbl = QLabel(title)
-#         lbl.setStyleSheet(f"color:{WHITE};font-size:17px;font-weight:bold;background:transparent;")
-#         tl.addWidget(lbl)
-#     tl.addStretch()
-#     for w in (right_widgets or []): tl.addWidget(w)
-#     return toolbar
-
-
-# # =============================================================================
-# # BACKGROUND SYNC WORKER
-# # =============================================================================
-
-# class _SyncWorker(QObject):
-#     finished = Signal(int, int)
-
-#     def run(self):
-#         try:
-#             from services.pos_upload_service import push_unsynced_sales
-#             r = push_unsynced_sales()
-#             self.finished.emit(r.get("pushed", 0), r.get("failed", 0))
-#         except Exception:
-#             self.finished.emit(0, -1)
-
-
-# # =============================================================================
-# # SALES LIST PAGE
-# # =============================================================================
-
-# class SalesListPage(QWidget):
-
-#     def __init__(self, on_recall, on_close, parent=None):
-#         super().__init__(parent)
-#         self.on_recall           = on_recall
-#         self.on_close            = on_close
-#         self._all_sales          = []
-#         self._show_unsynced_only = False
-#         self._sync_thread        = None
-#         self._build_ui()
-#         self._load_data()
-
-#     def _build_ui(self):
-#         root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
-
-#         self.print_btn  = _toolbar_btn("🖨  Print (F3)",  NAVY_2, NAVY_3)
-#         self.recall_btn = _toolbar_btn("⟵  Recall",      ACCENT, ACCENT_H, size=(100,36))
-#         self.delete_btn = _toolbar_btn("🗑  Delete (F4)", DANGER, DANGER_H)
-#         self.sync_btn   = _toolbar_btn("⟳  Sync Now",    ACCENT, ACCENT_H, size=(120,36))
-#         self.filter_btn = _toolbar_btn("⏳ Unsynced",    "#7d6608","#a07d0a", size=(110,36))
-#         close_btn       = _toolbar_btn("✕  Close (Esc)", DANGER, DANGER_H)
-
-#         self.print_btn.setEnabled(False)
-#         self.recall_btn.setEnabled(False)
-#         self.delete_btn.setVisible(False)
-
-#         self.print_btn.clicked.connect(self._on_print)
-#         self.recall_btn.clicked.connect(self._on_recall)
-#         self.delete_btn.clicked.connect(self._on_delete)
-#         self.sync_btn.clicked.connect(self._on_sync_now)
-#         self.filter_btn.clicked.connect(self._toggle_unsynced_filter)
-#         close_btn.clicked.connect(self.on_close)
-
-#         root.addWidget(_build_toolbar("🧾  Sales List", right_widgets=[
-#             self.filter_btn, self.sync_btn,
-#             self.recall_btn, self.print_btn, self.delete_btn, close_btn,
-#         ]))
-
-#         # status bar (hidden until used)
-#         self._status_bar = QLabel("")
-#         self._status_bar.setFixedHeight(0)
-#         self._status_bar.setAlignment(Qt.AlignCenter)
-#         self._status_bar.setStyleSheet(
-#             f"background:{NAVY_2};color:{WHITE};font-size:12px;font-weight:bold;"
-#         )
-#         root.addWidget(self._status_bar)
-
-#         body = QWidget(); body.setStyleSheet(f"background-color:{OFF_WHITE};")
-#         bl = QVBoxLayout(body); bl.setContentsMargins(32,20,32,20); bl.setSpacing(12)
-
-#         hint = QLabel("Double-click a row to recall the invoice into the POS table")
-#         hint.setStyleSheet(f"color:{MUTED};font-size:12px;background:transparent;")
-#         bl.addWidget(hint)
-
-#         # main table
-#         self.table = QTableWidget()
-#         self.table.setColumnCount(len(_COLUMNS))
-#         self.table.setHorizontalHeaderLabels([c[0] for c in _COLUMNS])
-
-#         hh = self.table.horizontalHeader()
-#         for i, (_, _, w, _, stretch) in enumerate(_COLUMNS):
-#             if stretch:
-#                 hh.setSectionResizeMode(i, QHeaderView.Stretch)
-#             else:
-#                 hh.setSectionResizeMode(i, QHeaderView.Fixed)
-#                 self.table.setColumnWidth(i, w)
-
-#         self.table.verticalHeader().setVisible(False)
-#         self.table.setAlternatingRowColors(True)
-#         self.table.setShowGrid(True)
-#         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-#         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-#         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-#         self.table.setStyleSheet(f"""
-#             QTableWidget {{
-#                 background-color:{WHITE};color:{DARK_TEXT};
-#                 border:1px solid {BORDER};gridline-color:{LIGHT};
-#                 font-size:13px;outline:none;
-#             }}
-#             QTableWidget::item           {{ padding:8px 10px; }}
-#             QTableWidget::item:selected  {{ background-color:{ACCENT};color:{WHITE}; }}
-#             QTableWidget::item:alternate {{ background-color:{ROW_ALT}; }}
-#             QHeaderView::section {{
-#                 background-color:{NAVY};color:{WHITE};
-#                 padding:10px;border:none;border-right:1px solid {NAVY_2};
-#                 font-size:12px;font-weight:bold;
-#             }}
-#         """)
-#         self.table.doubleClicked.connect(self._on_recall)
-#         self.table.selectionModel().selectionChanged.connect(self._on_selection)
-#         bl.addWidget(self.table, 1)
-
-#         # summary bar
-#         summary = QWidget(); summary.setFixedHeight(44)
-#         summary.setStyleSheet(f"background-color:{WHITE};border:1px solid {BORDER};border-radius:8px;")
-#         sl = QHBoxLayout(summary); sl.setContentsMargins(20,0,20,0); sl.setSpacing(32)
-
-#         self.count_lbl    = QLabel("Sales: 0")
-#         self.total_lbl    = QLabel("Total: $0.00")
-#         self.tendered_lbl = QLabel("Tendered: $0.00")
-#         self.change_lbl   = QLabel("Change: $0.00")
-#         self.sync_lbl     = QLabel("")
-
-#         for lbl, color in [(self.count_lbl, DARK_TEXT),(self.total_lbl, ACCENT),
-#                            (self.tendered_lbl, DARK_TEXT),(self.change_lbl, DARK_TEXT),
-#                            (self.sync_lbl, AMBER)]:
-#             lbl.setStyleSheet(f"font-weight:bold;font-size:13px;color:{color};background:transparent;")
-#             sl.addWidget(lbl)
-#         sl.addStretch()
-#         bl.addWidget(summary)
-#         root.addWidget(body)
-
-#     # ── data ──────────────────────────────────────────────────────────────────
-
-#     def _load_data(self):
-#         self._all_sales = get_all_sales()
-#         self._render_table(self._visible_sales())
-#         self._update_sync_label()
-
-#     def _visible_sales(self):
-#         if self._show_unsynced_only:
-#             return [s for s in self._all_sales if not s.get("synced")]
-#         return self._all_sales
-
-#     def _render_table(self, sales):
-#         PADDING = 6
-#         self.table.setRowCount(len(sales) + PADDING)
-#         total = tendered = change = 0.0
-
-#         for r, sale in enumerate(sales):
-#             self.table.setRowHeight(r, 38)
-#             self._fill_row(r, sale)
-#             total    += sale.get("amount",        0.0)
-#             tendered += sale.get("tendered",      0.0)
-#             change   += sale.get("change_amount", 0.0)
-
-#         for r in range(len(sales), self.table.rowCount()):
-#             self.table.setRowHeight(r, 38)
-#             for c in range(len(_COLUMNS)):
-#                 it = QTableWidgetItem(""); it.setFlags(it.flags() & ~Qt.ItemIsEditable)
-#                 self.table.setItem(r, c, it)
-
-#         self.count_lbl.setText(f"Sales: {len(sales)}")
-#         self.total_lbl.setText(f"Total: ${total:.2f}")
-#         self.tendered_lbl.setText(f"Tendered: ${tendered:.2f}")
-#         self.change_lbl.setText(f"Change: ${change:.2f}")
-
-#     def _fill_row(self, row, sale):
-#         synced     = bool(sale.get("synced"))
-#         frappe_ref = (sale.get("frappe_ref") or "").strip()
-
-#         for c, (_, key, _, align, _) in enumerate(_COLUMNS):
-
-#             if key == "synced":
-#                 # Show Frappe ref in parentheses if available, else plain status
-#                 if synced and frappe_ref:
-#                     text = f"✅ Synced"
-#                 elif synced:
-#                     text = "✅ Synced"
-#                 else:
-#                     text = "⏳ Pending"
-
-#             elif key == "frappe_ref":
-#                 text = frappe_ref if frappe_ref else "—"
-
-#             elif key in ("amount", "tendered", "change_amount"):
-#                 text = f"{float(sale.get(key, 0)):.2f}"
-
-#             elif key == "total_items":
-#                 v = float(sale.get(key, 0))
-#                 text = str(int(v)) if v == int(v) else f"{v:.2f}"
-
-#             else:
-#                 raw = sale.get(key, "")
-#                 text = str(raw) if raw is not None else ""
-
-#             it = QTableWidgetItem(text)
-#             it.setFlags(it.flags() & ~Qt.ItemIsEditable)
-#             it.setTextAlignment(align)
-
-#             # Sync column — green if synced, amber if pending
-#             if key == "synced":
-#                 it.setForeground(QColor(GREEN if synced else AMBER))
-#                 f = it.font(); f.setBold(True); it.setFont(f)
-
-#             # Frappe ref column — muted grey if not yet assigned
-#             elif key == "frappe_ref":
-#                 it.setForeground(QColor(MUTED if not frappe_ref else "#1a5fb4"))
-
-#             # Amber row tint for unsynced rows
-#             elif not synced:
-#                 it.setBackground(QColor(AMBER_BG))
-
-#             if c == 0:
-#                 it.setData(Qt.UserRole, sale["id"])
-#             self.table.setItem(row, c, it)
-
-#     def _update_sync_label(self):
-#         pending    = sum(1 for s in self._all_sales if not s.get("synced"))
-#         total      = len(self._all_sales)
-#         synced     = total - pending
-#         no_ref     = sum(1 for s in self._all_sales if s.get("synced") and not s.get("frappe_ref"))
-
-#         if pending:
-#             text = f"✅ {synced} synced  ⏳ {pending} pending"
-#             color = AMBER
-#         else:
-#             text = f"✅ All {total} synced"
-#             color = GREEN
-
-#         # Warn if some synced sales still have no Frappe ref
-#         if no_ref:
-#             text += f"  ⚠️ {no_ref} missing Frappe ref"
-#             color = AMBER
-
-#         self.sync_lbl.setText(text)
-#         self.sync_lbl.setStyleSheet(f"font-weight:bold;font-size:13px;color:{color};background:transparent;")
-
-#     # ── selection ─────────────────────────────────────────────────────────────
-
-#     def _get_selected_sale(self):
-#         rows = self.table.selectionModel().selectedRows()
-#         if not rows: return None
-#         it = self.table.item(rows[0].row(), 0)
-#         if not it or not it.text().strip(): return None
-#         sale_id = it.data(Qt.UserRole)
-#         return next((s for s in self._all_sales if s["id"] == sale_id), None)
-
-#     def _on_selection(self):
-#         has = self._get_selected_sale() is not None
-#         self.recall_btn.setEnabled(has)
-#         self.print_btn.setEnabled(has)
-#         self.delete_btn.setEnabled(has)
-
-#     # ── recall into POS ───────────────────────────────────────────────────────
-
-#     def _on_recall(self):
-#         sale = self._get_selected_sale()
-#         if not sale:
-#             return
-#         items = get_sale_items(sale["id"])
-#         if not items:
-#             self._show_status("⚠️  No items found for this invoice.", color=AMBER)
-#             return
-#         self.on_recall(sale, items)
-
-#     # ── unsynced filter ───────────────────────────────────────────────────────
-
-#     def _toggle_unsynced_filter(self):
-#         self._show_unsynced_only = not self._show_unsynced_only
-#         if self._show_unsynced_only:
-#             self.filter_btn.setText("📋 Show All")
-#             self.filter_btn.setStyleSheet(f"""
-#                 QPushButton {{ background-color:{AMBER};color:{WHITE};border:none;
-#                                border-radius:6px;font-size:12px;font-weight:bold; }}
-#                 QPushButton:hover {{ background-color:#c8860e; }}
-#             """)
-#         else:
-#             self.filter_btn.setText("⏳ Unsynced")
-#             self.filter_btn.setStyleSheet(f"""
-#                 QPushButton {{ background-color:#7d6608;color:{WHITE};border:none;
-#                                border-radius:6px;font-size:12px;font-weight:bold; }}
-#                 QPushButton:hover {{ background-color:#a07d0a; }}
-#             """)
-#         self._render_table(self._visible_sales())
-
-#     # ── sync now ──────────────────────────────────────────────────────────────
-
-#     def _on_sync_now(self):
-#         if self._sync_thread and self._sync_thread.isRunning(): return
-#         pending = [s for s in self._all_sales if not s.get("synced")]
-#         if not pending:
-#             self._show_status("✅ All sales are already synced.", color=GREEN)
-#             return
-
-#         self.sync_btn.setEnabled(False); self.sync_btn.setText("Syncing…")
-#         self._show_status(f"Pushing {len(pending)} sale(s) to Frappe…")
-
-#         self._sync_thread = QThread()
-#         self._worker      = _SyncWorker()
-#         self._worker.moveToThread(self._sync_thread)
-#         self._sync_thread.started.connect(self._worker.run)
-#         self._worker.finished.connect(self._on_sync_done)
-#         self._worker.finished.connect(self._sync_thread.quit)
-#         self._sync_thread.start()
-
-#     def _on_sync_done(self, pushed, failed):
-#         self.sync_btn.setEnabled(True); self.sync_btn.setText("⟳  Sync Now")
-#         if   failed == -1: self._show_status("❌ Sync error — check logs.", color=DANGER)
-#         elif failed  >  0: self._show_status(f"⚠️  {pushed} pushed, {failed} failed.", color=AMBER)
-#         else:              self._show_status(f"✅ {pushed} sale(s) pushed to Frappe.", color=GREEN)
-#         self._load_data()
-
-#     def _show_status(self, msg, color=WHITE):
-#         self._status_bar.setText(msg)
-#         self._status_bar.setStyleSheet(
-#             f"background:{NAVY_2};color:{color};font-size:12px;font-weight:bold;padding:0 16px;"
-#         )
-#         self._status_bar.setFixedHeight(28)
-
-#     # ── delete / print ────────────────────────────────────────────────────────
-
-#     def _on_print(self):
-#         sale = self._get_selected_sale()
-#         if sale: self._msg("Print", f"Print Sale #{sale['number']}\n\nTODO: utils/printer.py")
-
-#     def _on_delete(self):
-#         sale = self._get_selected_sale()
-#         if not sale: return
-#         confirm = QMessageBox(self)
-#         confirm.setWindowTitle("Confirm Delete")
-#         confirm.setText(f"Delete Sale #{sale['number']}?")
-#         confirm.setInformativeText("This cannot be undone.")
-#         confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-#         confirm.setDefaultButton(QMessageBox.No)
-#         confirm.setStyleSheet(f"""
-#             QMessageBox {{ background-color:{WHITE}; }} QLabel {{ color:{DARK_TEXT}; }}
-#             QPushButton {{ background-color:{ACCENT};color:{WHITE};border:none;
-#                            border-radius:6px;padding:8px 20px;min-width:70px; }}
-#             QPushButton:hover {{ background-color:{ACCENT_H}; }}
-#         """)
-#         if confirm.exec() == QMessageBox.Yes:
-#             delete_sale(sale["id"]); self._load_data()
-
-#     def _msg(self, title, text):
-#         m = QMessageBox(self); m.setWindowTitle(title); m.setText(text)
-#         m.setStyleSheet(f"""
-#             QMessageBox {{ background-color:{WHITE}; }}
-#             QLabel {{ color:{DARK_TEXT};font-size:13px; }}
-#             QPushButton {{ background-color:{ACCENT};color:{WHITE};border:none;
-#                            border-radius:6px;padding:8px 20px;min-width:70px; }}
-#             QPushButton:hover {{ background-color:{ACCENT_H}; }}
-#         """)
-#         m.exec()
-
-#     def keyPressEvent(self, event):
-#         k = event.key()
-#         if   k == Qt.Key_F3:                     self._on_print()
-#         elif k == Qt.Key_F4:                     self._on_delete()
-#         elif k in (Qt.Key_Return, Qt.Key_Enter): self._on_recall()
-#         else: super().keyPressEvent(event)
-
-
-# # =============================================================================
-# # MAIN DIALOG
-# # =============================================================================
-
-# class SalesListDialog(QMainWindow):
-#     """
-#     Usage:
-#         dlg = SalesListDialog(pos_view)   # pass POSView as parent
-#         dlg.show()
-
-#     Double-clicking a row recalls the sale's items into the POS invoice table
-#     and closes this window.
-#     """
-
-#     def __init__(self, parent=None):
-#         super().__init__(parent)
-#         self.setWindowTitle("Sales")
-#         self.showMaximized()
-
-#         self._list_page = SalesListPage(
-#             on_recall=self._recall_into_pos,
-#             on_close=self.close,
-#         )
-#         self.setCentralWidget(self._list_page)
-
-#     def _recall_into_pos(self, sale: dict, items: list[dict]):
-#         pos = self.parent()
-
-#         if not pos or not hasattr(pos, "invoice_table") or not hasattr(pos, "_init_row"):
-#             QMessageBox.warning(self, "Error", "Cannot recall — POS view not available.")
-#             return
-
-#         # Confirm if the table already has items
-#         has_items = any(
-#             pos.invoice_table.item(r, 1) and pos.invoice_table.item(r, 1).text().strip()
-#             for r in range(pos.MAX_ROWS)
-#         )
-#         if has_items:
-#             reply = QMessageBox.question(
-#                 self, "Recall Invoice",
-#                 f"Load invoice #{sale.get('number', '')} into the POS?\n\n"
-#                 "This will clear the current invoice.",
-#                 QMessageBox.Yes | QMessageBox.No,
-#             )
-#             if reply != QMessageBox.Yes:
-#                 return
-
-#         # Clear table
-#         pos._block_signals = True
-#         for r in range(pos.MAX_ROWS):
-#             pos._init_row(r)
-#         pos._block_signals   = False
-#         pos._numpad_buffer   = ""
-#         pos._active_row      = 0
-#         pos._active_col      = 0
-#         pos._last_filled_row = -1
-#         pos._reset_customer_btn()
-
-#         # Load items
-#         for r, item in enumerate(items[:pos.MAX_ROWS]):
-#             pos._init_row(
-#                 r,
-#                 part_no = str(item.get("part_no",      "")),
-#                 details = str(item.get("product_name", "")),
-#                 qty     = str(item.get("qty",          "")),
-#                 amount  = str(item.get("price",        "")),
-#                 disc    = str(item.get("discount",     "0")),
-#                 tax     = str(item.get("tax",          "")),
-#                 total   = str(item.get("total",        "")),
-#             )
-
-#         # Restore customer
-#         cust_name = (sale.get("customer_name") or "").strip()
-#         if cust_name and hasattr(pos, "_cust_btn"):
-#             pos._cust_btn.setText(f"👤  {cust_name}")
-#             try:
-#                 from models.customer import get_customer_by_name
-#                 cust = get_customer_by_name(cust_name)
-#                 if cust:
-#                     pos._selected_customer = cust
-#             except Exception:
-#                 pass
-
-#         pos._recalc_totals()
-#         pos._highlight_active_row(len(items))
-#         pos.invoice_table.setCurrentCell(0, 0)
-#         pos.invoice_table.setFocus()
-
-#         if hasattr(pos, "parent_window") and pos.parent_window:
-#             frappe_ref = sale.get("frappe_ref", "")
-#             ref_info   = f" (Frappe: {frappe_ref})" if frappe_ref else ""
-#             pos.parent_window._set_status(
-#                 f"Recalled invoice #{sale.get('number', '')}{ref_info} — {len(items)} item(s) loaded."
-#             )
-
-#         self.close()
-
-#     def keyPressEvent(self, event):
-#         self._list_page.keyPressEvent(event)
-# =============================================================================
 # views/dialogs/sales_list_dialog.py
 # =============================================================================
 
@@ -559,14 +6,16 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QTableWidget, QTableWidgetItem,
     QHeaderView, QFrame, QAbstractItemView, QMessageBox,
     QMainWindow, QScrollArea, QStackedWidget, QSizePolicy,
-    QTextEdit,
+    QTextEdit, QDialog,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui  import QColor, QFont
+import qtawesome as qta
 
+from datetime import datetime
 from models.sale import get_all_sales, delete_sale, get_sale_items
 
-NAVY      = "#0d1f3c"
+NAVY      = "#1a5fb4"
 NAVY_2    = "#162d52"
 NAVY_3    = "#1e3d6e"
 ACCENT    = "#1a5fb4"
@@ -575,12 +24,12 @@ WHITE     = "#ffffff"
 OFF_WHITE = "#f5f8fc"
 LIGHT     = "#e4eaf4"
 BORDER    = "#c8d8ec"
-DARK_TEXT = "#0d1f3c"
+DARK_TEXT = "#1a5fb4"
 MUTED     = "#5a7a9a"
 DANGER    = "#b02020"
 DANGER_H  = "#cc2828"
 ROW_ALT   = "#edf3fb"
-GREEN     = "#1e8449"
+SUCCESS     = "#1e8449"
 AMBER     = "#b7770d"
 AMBER_BG  = "#fef9ec"
 
@@ -596,6 +45,8 @@ _COLUMNS = [
     ("Currency",      "currency",        75, Qt.AlignCenter,                  False),
     ("Items",         "total_items",     60, Qt.AlignCenter,                  False),
     ("Amount",        "amount",         105, Qt.AlignRight | Qt.AlignVCenter, False),
+    ("Profit",        "profit",         105, Qt.AlignRight | Qt.AlignVCenter, False),
+    ("Gross %",       "gross_percent",  105, Qt.AlignRight | Qt.AlignVCenter, False),
     ("Tendered",      "tendered",       105, Qt.AlignRight | Qt.AlignVCenter, False),
     ("Change",        "change_amount",  105, Qt.AlignRight | Qt.AlignVCenter, False),
     ("Sync",          "synced",          90, Qt.AlignCenter,                  False),
@@ -640,7 +91,7 @@ def _build_toolbar(title, left_widget=None, right_widgets=None):
 
 
 # =============================================================================
-# SYNC RESULT  — structured record for one sale's sync attempt
+# SYNC RESULT  - structured record for one sale's sync attempt
 # =============================================================================
 
 class SyncResult:
@@ -691,11 +142,11 @@ class SyncResult:
         if any(k in name for k in ("ConnectionError", "Timeout", "URLError", "SSLError")):
             return "network", f"{name}: {msg}"
         if any(k in msg.lower() for k in ("401", "403", "unauthorized", "forbidden", "token")):
-            return "auth", f"Authentication/permission error — {msg}"
+            return "auth", f"Authentication/permission error - {msg}"
         if any(k in msg.lower() for k in ("validation", "mandatory", "missing", "required")):
-            return "validation", f"Frappe validation error — {msg}"
+            return "validation", f"Frappe validation error - {msg}"
         if any(k in msg.lower() for k in ("500", "502", "503", "internal server")):
-            return "server", f"Server-side error — {msg}"
+            return "server", f"Server-side error - {msg}"
         return "unknown", f"{name}: {msg}"
 
     @staticmethod
@@ -734,7 +185,7 @@ class SyncResult:
 
 
 # =============================================================================
-# BACKGROUND SYNC WORKER  — per-sale detailed reporting
+# BACKGROUND SYNC WORKER  - per-sale detailed reporting
 # =============================================================================
 
 class _SyncWorker(QObject):
@@ -774,6 +225,13 @@ class _SyncWorker(QObject):
             res.error_message = f"Could not load unsynced sales: {res.error_message}"
             self.finished.emit(0, -1, [res])
             return
+
+        # Trigger credit note sync alongside sales sync
+        try:
+            from services.credit_note_sync_service import push_unsynced_credit_notes
+            push_unsynced_credit_notes()
+        except Exception:
+            pass
 
         if not sales:
             self.finished.emit(0, 0, [])
@@ -822,16 +280,16 @@ class _SyncWorker(QObject):
 
 
 # =============================================================================
-# SYNC ERROR PANEL  — expandable detail view shown below the status bar
+# SYNC ERROR PANEL  - expandable detail view shown below the status bar
 # =============================================================================
 
 class SyncErrorPanel(QFrame):
     """
     Appears below the status bar after a sync attempt.
 
-    • Green pill  → all synced, auto-hides.
-    • Amber/red   → stays visible, click to expand.
-    • Expanded    → scrollable list: one row per failed sale with full detail.
+    • SUCCESS pill  -> all synced, auto-hides.
+    • Amber/red   -> stays visible, click to expand.
+    • Expanded    -> scrollable list: one row per failed sale with full detail.
     """
 
     def __init__(self, parent=None):
@@ -914,7 +372,7 @@ class SyncErrorPanel(QFrame):
             return
 
         if not failures:
-            self._set_pill(f"✅  {pushed} sale(s) synced successfully.", GREEN, "#e8f5e9")
+            self._set_pill(f"{pushed} sale(s) synced successfully.", SUCCESS, "#e8f5e9")
             self.show()
             from PySide6.QtCore import QTimer
             QTimer.singleShot(6000, self.hide)
@@ -922,10 +380,10 @@ class SyncErrorPanel(QFrame):
 
         # Has failures
         if pushed > 0:
-            label = f"⚠️  {pushed} synced, {len(failures)} failed — click to see details"
+            label = f"{pushed} synced, {len(failures)} failed - click to see details"
             color, bg = AMBER, "#fff3e0"
         else:
-            label = f"❌  {len(failures)} sale(s) failed to sync — click to see details"
+            label = f"{len(failures)} sale(s) failed to sync - click to see details"
             color, bg = DANGER, "#fdecea"
 
         self._set_pill(label, color, bg)
@@ -1059,7 +517,7 @@ class SyncErrorPanel(QFrame):
         ml.addWidget(cause_lbl, 1)
 
         # Location (file + line)
-        loc_lbl = QLabel(res.error_location or "—")
+        loc_lbl = QLabel(res.error_location or "-")
         loc_lbl.setFixedWidth(240)
         loc_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         loc_lbl.setWordWrap(True)
@@ -1129,117 +587,201 @@ class SalesListPage(QWidget):
         self._all_sales          = []
         self._show_unsynced_only = False
         self._sync_thread        = None
+        try:
+            from services.network_utils import is_connected
+            self._is_offline = not is_connected()
+        except Exception:
+            self._is_offline = False
+        try:
+            from services.credentials import get_system_mode
+            self._is_saas = (get_system_mode() == "saas")
+        except Exception:
+            self._is_saas = False
+
+        self._columns = [
+            c for c in _COLUMNS
+            if not (self._is_saas and c[1] == "profit")
+        ]
+
         self._build_ui()
         self._load_data()
 
     def _build_ui(self):
         root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
 
-        self.print_btn  = _toolbar_btn("🖨  Print (F3)",  NAVY_2, NAVY_3)
-        self.recall_btn = _toolbar_btn("⟵  Recall",      ACCENT, ACCENT_H, size=(100,36))
-        self.delete_btn = _toolbar_btn("🗑  Delete (F4)", DANGER, DANGER_H)
-        self.sync_btn   = _toolbar_btn("⟳  Sync Now",    ACCENT, ACCENT_H, size=(120,36))
-        self.filter_btn = _toolbar_btn("⏳ Unsynced",    "#7d6608","#a07d0a", size=(110,36))
-        close_btn       = _toolbar_btn("✕  Close (Esc)", DANGER, DANGER_H)
-
-        self.print_btn.setEnabled(False)
-        self.recall_btn.setEnabled(False)
-        self.delete_btn.setVisible(False)
-
-        self.print_btn.clicked.connect(self._on_print)
-        self.recall_btn.clicked.connect(self._on_recall)
-        self.delete_btn.clicked.connect(self._on_delete)
-        self.sync_btn.clicked.connect(self._on_sync_now)
-        self.filter_btn.clicked.connect(self._toggle_unsynced_filter)
-        close_btn.clicked.connect(self.on_close)
-
-        root.addWidget(_build_toolbar("🧾  Sales List", right_widgets=[
-            self.filter_btn, self.sync_btn,
-            self.recall_btn, self.print_btn, self.delete_btn, close_btn,
-        ]))
-
-        # Status bar (shown during / after sync)
-        self._status_bar = QLabel("")
-        self._status_bar.setFixedHeight(0)
-        self._status_bar.setAlignment(Qt.AlignCenter)
-        self._status_bar.setStyleSheet(
-            f"background:{NAVY_2};color:{WHITE};font-size:12px;font-weight:bold;"
-        )
-        root.addWidget(self._status_bar)
-
-        # Sync error panel (hidden until a sync attempt finishes with errors)
-        self._error_panel = SyncErrorPanel()
-        root.addWidget(self._error_panel)
-
-        body = QWidget(); body.setStyleSheet(f"background-color:{OFF_WHITE};")
-        bl = QVBoxLayout(body); bl.setContentsMargins(32,20,32,20); bl.setSpacing(12)
-
-        hint = QLabel("Double-click a row to recall the invoice into the POS table")
-        hint.setStyleSheet(f"color:{MUTED};font-size:12px;background:transparent;")
-        bl.addWidget(hint)
-
-        # main table
-        self.table = QTableWidget()
-        self.table.setColumnCount(len(_COLUMNS))
-        self.table.setHorizontalHeaderLabels([c[0] for c in _COLUMNS])
-
+        from views.reports.report_template import ReportTemplate
+        self.report = ReportTemplate("Sales Invoices", is_report=True, show_date_filter=True, parent=self)
+        self.report.set_headers([c[0] for c in self._columns])
+        
+        self.report.btn_apply.clicked.connect(self._load_data)
+        self.table = self.report.table
+        
         hh = self.table.horizontalHeader()
-        for i, (_, _, w, _, stretch) in enumerate(_COLUMNS):
+        for i, (_, key, w, _, stretch) in enumerate(self._columns):
             if stretch:
                 hh.setSectionResizeMode(i, QHeaderView.Stretch)
             else:
                 hh.setSectionResizeMode(i, QHeaderView.Fixed)
                 self.table.setColumnWidth(i, w)
+                
+            if self._is_offline and key in ("synced", "frappe_ref"):
+                self.table.setColumnHidden(i, True)
 
-        self.table.verticalHeader().setVisible(False)
-        self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(True)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setStyleSheet(f"""
-            QTableWidget {{
-                background-color:{WHITE};color:{DARK_TEXT};
-                border:1px solid {BORDER};gridline-color:{LIGHT};
-                font-size:13px;outline:none;
-            }}
-            QTableWidget::item           {{ padding:8px 10px; }}
-            QTableWidget::item:selected  {{ background-color:{ACCENT};color:{WHITE}; }}
-            QTableWidget::item:alternate {{ background-color:{ROW_ALT}; }}
-            QHeaderView::section {{
-                background-color:{NAVY};color:{WHITE};
-                padding:10px;border:none;border-right:1px solid {NAVY_2};
-                font-size:12px;font-weight:bold;
-            }}
-        """)
-        self.table.doubleClicked.connect(self._on_recall)
+        self.table.doubleClicked.connect(self._on_view_details)
         self.table.selectionModel().selectionChanged.connect(self._on_selection)
-        bl.addWidget(self.table, 1)
 
-        # summary bar
-        summary = QWidget(); summary.setFixedHeight(44)
-        summary.setStyleSheet(f"background-color:{WHITE};border:1px solid {BORDER};border-radius:8px;")
-        sl = QHBoxLayout(summary); sl.setContentsMargins(20,0,20,0); sl.setSpacing(32)
+        # Custom Buttons
+        self.delete_btn = QPushButton(" Delete (F4)")
+        self.delete_btn.setIcon(qta.icon("fa5s.trash", color="white"))
+        self.delete_btn.setFixedHeight(28)
+        self.delete_btn.setStyleSheet(f"QPushButton {{ background-color: {DANGER}; color: white; border: none; border-radius: 4px; padding: 0 12px; font-weight: bold; font-size: 11px; }} QPushButton:hover {{ background-color: {DANGER_H}; }} QPushButton:disabled {{ background-color: {MUTED}; }}")
+        
+        self.sync_btn = QPushButton(" Sync Now")
+        self.sync_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
+        self.sync_btn.setFixedHeight(28)
+        self.sync_btn.setStyleSheet(f"QPushButton {{ background-color: {SUCCESS}; color: white; border: none; border-radius: 4px; padding: 0 12px; font-weight: bold; font-size: 11px; }} QPushButton:hover {{ background-color: #1e824c; }}")
+        
+        self.filter_btn = QPushButton(" Unsynced")
+        self.filter_btn.setFixedHeight(28)
+        self.filter_btn.setStyleSheet(f"QPushButton {{ background-color: #7d6608; color: white; border: none; border-radius: 4px; padding: 0 12px; font-weight: bold; font-size: 11px; }}")
 
-        self.count_lbl    = QLabel("Sales: 0")
-        self.total_lbl    = QLabel("Total: $0.00")
-        self.tendered_lbl = QLabel("Tendered: $0.00")
-        self.change_lbl   = QLabel("Change: $0.00")
-        self.sync_lbl     = QLabel("")
+        if self._is_offline:
+            self.sync_btn.hide()
+            self.filter_btn.hide()
 
-        for lbl, color in [(self.count_lbl, DARK_TEXT),(self.total_lbl, ACCENT),
-                           (self.tendered_lbl, DARK_TEXT),(self.change_lbl, DARK_TEXT),
-                           (self.sync_lbl, AMBER)]:
-            lbl.setStyleSheet(f"font-weight:bold;font-size:13px;color:{color};background:transparent;")
-            sl.addWidget(lbl)
-        sl.addStretch()
-        bl.addWidget(summary)
-        root.addWidget(body)
+        self.delete_btn.setVisible(False)
+
+        self.delete_btn.clicked.connect(self._on_delete)
+        self.sync_btn.clicked.connect(self._on_sync_now)
+        self.filter_btn.clicked.connect(self._toggle_unsynced_filter)
+        
+        try:
+            self.report.btn_excel.clicked.disconnect()
+            self.report.btn_pdf.clicked.disconnect()
+        except:
+            pass
+        self.report.btn_excel.clicked.connect(self._on_export_list)
+        self.report.btn_pdf.clicked.connect(self._on_preview_pdf)
+
+        self.report.filters_layout.addWidget(self.filter_btn)
+        self.report.filters_layout.addWidget(self.sync_btn)
+        self.report.filters_layout.addWidget(self.delete_btn)
+
+        self.report.filters_layout.addWidget(self.delete_btn)
+
+        # Status Bar
+        self._status_bar = QLabel()
+        self._status_bar.setFixedHeight(0) # hidden initially
+
+        self._error_panel = SyncErrorPanel(self)
+        
+        root.addWidget(self.report)
+        root.addWidget(self._status_bar)
+        root.addWidget(self._error_panel)
+
 
     # ── data ──────────────────────────────────────────────────────────────────
 
+    def _get_credit_notes(self, date_from=None, date_to=None) -> list[dict]:
+        from database.db import get_connection, fetchall_dicts
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            query = """
+                SELECT cn.id, cn.cn_number, cn.original_sale_id, cn.original_invoice_no,
+                       cn.frappe_ref, cn.frappe_cn_ref, cn.total, cn.currency, cn.exchange_rate,
+                       cn.cashier_name, cn.customer_name, cn.cn_status, cn.created_at, cn.fiscal_status,
+                       COALESCE(s.method, 'Credit Note') AS method,
+                       COALESCE(C.company_name, '') AS company_name,
+                       COALESCE((SELECT SUM(qty) FROM credit_note_items WHERE credit_note_id = cn.id), 0) AS total_items,
+                       COALESCE((SELECT SUM(cni.qty * p.cost_price) FROM credit_note_items cni LEFT JOIN products p ON p.part_no = cni.part_no WHERE cni.credit_note_id = cn.id), 0) AS total_cost
+                FROM credit_notes cn
+                LEFT JOIN sales s ON s.id = cn.original_sale_id
+                LEFT JOIN company_defaults C ON 1=1
+            """
+            params = []
+            if date_from and date_to:
+                query += " WHERE cn.created_at BETWEEN ? AND ?"
+                params = [date_from, date_to]
+            query += " ORDER BY cn.created_at DESC"
+            cur.execute(query, tuple(params))
+            rows = fetchall_dicts(cur)
+            conn.close()
+        except Exception as e:
+            return []
+
+        cn_records = []
+        for r in rows:
+            raw_dt = r.get("created_at")
+            if isinstance(raw_dt, str):
+                try:
+                    dt = datetime.fromisoformat(raw_dt)
+                except Exception:
+                    dt = None
+            elif hasattr(raw_dt, "strftime"):
+                dt = raw_dt
+            else:
+                dt = None
+
+            amt = float(r.get("total") or 0)
+            items_cnt = float(r.get("total_items") or 0)
+            cost_val = float(r.get("total_cost") or 0)
+            profit_val = amt - cost_val
+
+            orig_no = str(r.get("original_invoice_no") or "").strip()
+            orig_clean = orig_no.split("-")[-1].lstrip("0") if "-" in orig_no else orig_no
+            display_no = f"CN: {orig_clean or orig_no}" if orig_no else f"CN-{r['id']}"
+
+            synced = (r.get("cn_status") == "synced") or bool(r.get("frappe_cn_ref"))
+            f_ref = (r.get("frappe_cn_ref") or r.get("frappe_ref") or "").strip()
+
+            cn_records.append({
+                "id":                  r["id"],
+                "is_credit_note":      True,
+                "cn_number":           r.get("cn_number", ""),
+                "original_invoice_no": orig_no,
+                "number":              display_no,
+                "date":                f"{dt.month}/{dt.day}/{dt.year}" if dt else "",
+                "time":                dt.strftime("%H:%M") if dt else "",
+                "created_at":          raw_dt,
+                "cashier_id":          None,
+                "user":                r.get("cashier_name") or "Admin",
+                "total":               -amt,
+                "amount":              -amt,
+                "tendered":            -amt,
+                "change_amount":       0.0,
+                "method":              f"{r.get('method') or 'Refund'} (CN)",
+                "profit":              -profit_val,
+                "gross_percent":       100.0,
+                "customer_name":       r.get("customer_name") or "Cash Customer",
+                "company_name":        r.get("company_name", ""),
+                "currency":            r.get("currency") or "USD",
+                "total_items":         -items_cnt,
+                "synced":              synced,
+                "frappe_ref":          f_ref,
+            })
+        return cn_records
+
     def _load_data(self):
-        self._all_sales = get_all_sales()
+        date_from = self.report.start_date.date().toString("yyyy-MM-dd") + " 00:00:00"
+        date_to = self.report.end_date.date().toString("yyyy-MM-dd") + " 23:59:59"
+        sales = get_all_sales(date_from=date_from, date_to=date_to)
+        cns = self._get_credit_notes(date_from=date_from, date_to=date_to)
+
+        all_records = sales + cns
+        def _get_sort_key(item):
+            ca = item.get("created_at")
+            if isinstance(ca, datetime):
+                return ca
+            if isinstance(ca, str):
+                try:
+                    return datetime.fromisoformat(ca)
+                except Exception:
+                    pass
+            return datetime.min
+
+        all_records.sort(key=_get_sort_key, reverse=True)
+        self._all_sales = all_records
         self._render_table(self._visible_sales())
         self._update_sync_label()
 
@@ -1249,39 +791,31 @@ class SalesListPage(QWidget):
         return self._all_sales
 
     def _render_table(self, sales):
-        PADDING = 6
-        self.table.setRowCount(len(sales) + PADDING)
-        total = tendered = change = 0.0
+        while self.table.rowCount() > 1:
+            self.table.removeRow(1)
 
-        for r, sale in enumerate(sales):
+        for r, sale in enumerate(sales, start=1):
+            self.table.insertRow(r)
             self.table.setRowHeight(r, 38)
             self._fill_row(r, sale)
-            total    += sale.get("amount",        0.0)
-            tendered += sale.get("tendered",      0.0)
-            change   += sale.get("change_amount", 0.0)
 
-        for r in range(len(sales), self.table.rowCount()):
-            self.table.setRowHeight(r, 38)
-            for c in range(len(_COLUMNS)):
-                it = QTableWidgetItem(""); it.setFlags(it.flags() & ~Qt.ItemIsEditable)
-                self.table.setItem(r, c, it)
-
-        self.count_lbl.setText(f"Sales: {len(sales)}")
-        self.total_lbl.setText(f"Total: ${total:.2f}")
-        self.tendered_lbl.setText(f"Tendered: ${tendered:.2f}")
-        self.change_lbl.setText(f"Change: ${change:.2f}")
+        self.report._update_totals()
 
     def _fill_row(self, row, sale):
+        is_cn      = bool(sale.get("is_credit_note"))
         synced     = bool(sale.get("synced"))
         frappe_ref = (sale.get("frappe_ref") or "").strip()
 
-        for c, (_, key, _, align, _) in enumerate(_COLUMNS):
+        for c, (_, key, _, align, _) in enumerate(self._columns):
             if key == "synced":
-                text = "✅ Synced" if synced else "⏳ Pending"
+                text = "Synced" if synced else "Pending"
             elif key == "frappe_ref":
-                text = frappe_ref if frappe_ref else "—"
-            elif key in ("amount", "tendered", "change_amount"):
-                text = f"{float(sale.get(key, 0)):.2f}"
+                text = frappe_ref if frappe_ref else "-"
+            elif key in ("amount", "tendered", "change_amount", "profit"):
+                val = float(sale.get(key, 0))
+                text = f"{val:.2f}"
+            elif key == "gross_percent":
+                text = f"{float(sale.get(key, 0)):.2f}%"
             elif key == "total_items":
                 v = float(sale.get(key, 0))
                 text = str(int(v)) if v == int(v) else f"{v:.2f}"
@@ -1293,39 +827,33 @@ class SalesListPage(QWidget):
             it.setFlags(it.flags() & ~Qt.ItemIsEditable)
             it.setTextAlignment(align)
 
-            if key == "synced":
-                it.setForeground(QColor(GREEN if synced else AMBER))
-                f = it.font(); f.setBold(True); it.setFont(f)
-            elif key == "frappe_ref":
-                it.setForeground(QColor(MUTED if not frappe_ref else ACCENT))
+            if is_cn:
+                it.setBackground(QColor("#fff2f2"))
+                if key in ("number", "amount", "profit", "tendered", "total_items", "method"):
+                    it.setForeground(QColor(DANGER))
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                if key == "number":
+                    it.setIcon(qta.icon("fa5s.reply", color=DANGER))
+                    if sale.get("cn_number") or sale.get("original_invoice_no"):
+                        it.setToolTip(f"Credit Note: {sale.get('cn_number')}\nOriginal Invoice: {sale.get('original_invoice_no')}")
             elif not synced:
                 it.setBackground(QColor(AMBER_BG))
 
+            if key == "synced":
+                if synced:
+                    it.setIcon(qta.icon("fa5s.check", color=SUCCESS))
+                it.setForeground(QColor(SUCCESS if synced else AMBER))
+                f = it.font(); f.setBold(True); it.setFont(f)
+            elif key == "frappe_ref" and not is_cn:
+                it.setForeground(QColor(MUTED if not frappe_ref else ACCENT))
+
             if c == 0:
                 it.setData(Qt.UserRole, sale["id"])
+                it.setData(Qt.UserRole + 1, is_cn)
             self.table.setItem(row, c, it)
 
     def _update_sync_label(self):
-        pending = sum(1 for s in self._all_sales if not s.get("synced"))
-        total   = len(self._all_sales)
-        synced  = total - pending
-        no_ref  = sum(1 for s in self._all_sales if s.get("synced") and not s.get("frappe_ref"))
-
-        if pending:
-            text  = f"✅ {synced} synced  ⏳ {pending} pending"
-            color = AMBER
-        else:
-            text  = f"✅ All {total} synced"
-            color = GREEN
-
-        if no_ref:
-            text  += f"  ⚠️ {no_ref} missing Frappe ref"
-            color  = AMBER
-
-        self.sync_lbl.setText(text)
-        self.sync_lbl.setStyleSheet(
-            f"font-weight:bold;font-size:13px;color:{color};background:transparent;"
-        )
+        pass
 
     # ── selection ─────────────────────────────────────────────────────────────
 
@@ -1335,39 +863,116 @@ class SalesListPage(QWidget):
         it = self.table.item(rows[0].row(), 0)
         if not it or not it.text().strip(): return None
         sale_id = it.data(Qt.UserRole)
-        return next((s for s in self._all_sales if s["id"] == sale_id), None)
+        is_cn = bool(it.data(Qt.UserRole + 1))
+        return next((s for s in self._all_sales if s["id"] == sale_id and bool(s.get("is_credit_note")) == is_cn), None)
 
     def _on_selection(self):
         has = self._get_selected_sale() is not None
-        self.recall_btn.setEnabled(has)
-        self.print_btn.setEnabled(has)
         self.delete_btn.setEnabled(has)
 
-    # ── recall ────────────────────────────────────────────────────────────────
+    # ── view details ──────────────────────────────────────────────────────────
 
-    def _on_recall(self):
+    def _on_view_details(self):
         sale = self._get_selected_sale()
         if not sale:
             return
+
+        if sale.get("is_credit_note"):
+            self._on_view_cn_details(sale)
+            return
+
         items = get_sale_items(sale["id"])
         if not items:
-            self._show_status("⚠️  No items found for this invoice.", color=AMBER)
+            self._show_status("No items found for this invoice.", color=AMBER)
             return
-        self.on_recall(sale, items)
+            
+        msg_text = f"<b>Sale:</b> {sale['number']}<br>"
+        msg_text += f"<b>Date:</b> {sale.get('date', '')} {sale.get('time', '')}<br>"
+        msg_text += f"<b>Customer:</b> {sale.get('customer_name') or 'Walk-in'}<br><br>"
+        
+        msg_text += "<b>Items:</b><br>"
+        msg_text += "<table width='100%' border='1' cellspacing='0' cellpadding='4'>"
+        msg_text += "<tr bgcolor='#f5f8fc'><th>Item</th><th>Qty</th><th>Amount</th></tr>"
+        
+        for item in items:
+            msg_text += f"<tr><td>{item.get('product_name')}</td>"
+            msg_text += f"<td align='center'>{float(item.get('qty', 0))}</td>"
+            msg_text += f"<td align='right'>${float(item.get('total', 0)):.2f}</td></tr>"
+            
+        msg_text += "</table><br>"
+        msg_text += f"<div align='right'><b>Total: ${float(sale.get('amount', 0)):.2f}</b></div>"
+        
+        m = QMessageBox(self)
+        m.setWindowTitle("Sale Details")
+        m.setText(msg_text)
+        m.setStyleSheet(f"""
+            QMessageBox {{ background-color:{WHITE}; }}
+            QLabel {{ color:{DARK_TEXT};font-size:13px; }}
+            QPushButton {{ background-color:{ACCENT};color:{WHITE};border:none;
+                           border-radius:6px;padding:8px 20px;min-width:70px; }}
+            QPushButton:hover {{ background-color:{ACCENT_H}; }}
+        """)
+        m.exec()
+
+    def _on_view_cn_details(self, cn: dict):
+        from database.db import get_connection, fetchall_dicts
+        try:
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("""
+                SELECT part_no, product_name, qty, price, total, reason
+                FROM credit_note_items
+                WHERE credit_note_id = ?
+            """, (cn["id"],))
+            items = fetchall_dicts(cur)
+            conn.close()
+        except Exception:
+            items = []
+
+        msg_text = f"<b>Credit Note:</b> {cn.get('cn_number') or cn['number']}<br>"
+        msg_text += f"<b>Original Invoice:</b> {cn.get('original_invoice_no') or '-'}<br>"
+        msg_text += f"<b>Date:</b> {cn.get('date', '')} {cn.get('time', '')}<br>"
+        msg_text += f"<b>Customer:</b> {cn.get('customer_name') or 'Walk-in'}<br><br>"
+        
+        msg_text += "<b>Returned Items:</b><br>"
+        msg_text += "<table width='100%' border='1' cellspacing='0' cellpadding='4'>"
+        msg_text += "<tr bgcolor='#f5f8fc'><th>Item</th><th>Qty</th><th>Refund Amount</th><th>Reason</th></tr>"
+        
+        for item in items:
+            msg_text += f"<tr><td>{item.get('product_name')}</td>"
+            msg_text += f"<td align='center'>{float(item.get('qty', 0))}</td>"
+            msg_text += f"<td align='right'>${float(item.get('total', 0)):.2f}</td>"
+            msg_text += f"<td>{item.get('reason') or '-'}</td></tr>"
+            
+        msg_text += "</table><br>"
+        msg_text += f"<div align='right'><b style='color:#b02020;'>Total Refund: ${abs(float(cn.get('amount', 0))):.2f}</b></div>"
+        
+        m = QMessageBox(self)
+        m.setWindowTitle("Credit Note Details")
+        m.setText(msg_text)
+        m.setStyleSheet(f"""
+            QMessageBox {{ background-color:{WHITE}; }}
+            QLabel {{ color:{DARK_TEXT};font-size:13px; }}
+            QPushButton {{ background-color:{ACCENT};color:{WHITE};border:none;
+                           border-radius:6px;padding:8px 20px;min-width:70px; }}
+            QPushButton:hover {{ background-color:{ACCENT_H}; }}
+        """)
+        m.exec()
 
     # ── unsynced filter ───────────────────────────────────────────────────────
 
     def _toggle_unsynced_filter(self):
         self._show_unsynced_only = not self._show_unsynced_only
         if self._show_unsynced_only:
-            self.filter_btn.setText("📋 Show All")
+            self.filter_btn.setText("Show All")
+            self.filter_btn.setIcon(qta.icon("fa5s.clipboard", color="white"))
             self.filter_btn.setStyleSheet(f"""
                 QPushButton {{ background-color:{AMBER};color:{WHITE};border:none;
                                border-radius:6px;font-size:12px;font-weight:bold; }}
                 QPushButton:hover {{ background-color:#c8860e; }}
             """)
         else:
-            self.filter_btn.setText("⏳ Unsynced")
+            self.filter_btn.setText("Unsynced")
+            self.filter_btn.setIcon(qta.icon("fa5s.hourglass-half", color="white"))
             self.filter_btn.setStyleSheet(f"""
                 QPushButton {{ background-color:#7d6608;color:{WHITE};border:none;
                                border-radius:6px;font-size:12px;font-weight:bold; }}
@@ -1382,7 +987,7 @@ class SalesListPage(QWidget):
             return
         pending = [s for s in self._all_sales if not s.get("synced")]
         if not pending:
-            self._show_status("✅ All sales are already synced.", color=GREEN)
+            self._show_status("All sales are already synced.", color=SUCCESS)
             self._error_panel.hide()
             return
 
@@ -1401,17 +1006,18 @@ class SalesListPage(QWidget):
 
     def _on_sync_done(self, pushed: int, failed: int, results: list):
         self.sync_btn.setEnabled(True)
-        self.sync_btn.setText("⟳  Sync Now")
+        self.sync_btn.setText("Sync Now")
+        self.sync_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
 
         if failed == -1:
             # Special: worker itself crashed before processing any sale
-            self._show_status("❌  Sync could not start — see details below.", color=DANGER)
+            self._show_status("Sync could not start - see details below.", color=DANGER)
         elif failed > 0:
             self._show_status(
-                f"⚠️  {pushed} pushed, {failed} failed — see details below.", color=AMBER
+                f"{pushed} pushed, {failed} failed - see details below.", color=AMBER
             )
         else:
-            self._show_status(f"✅  {pushed} sale(s) pushed to Frappe.", color=GREEN)
+            self._show_status(f"{pushed} sale(s) pushed to Frappe.", color=SUCCESS)
 
         # Always pass results to the panel; it decides what to show
         self._error_panel.show_results(results)
@@ -1427,14 +1033,45 @@ class SalesListPage(QWidget):
 
     # ── delete / print ────────────────────────────────────────────────────────
 
-    def _on_print(self):
-        sale = self._get_selected_sale()
-        if sale:
-            self._msg("Print", f"Print Sale #{sale['number']}\n\nTODO: utils/printer.py")
+    def _on_preview_pdf(self):
+        try:
+            from services.browser_print_service import BrowserPrintService
+            import os, subprocess
+            path = BrowserPrintService.print_table(self.table, "Sales List", ["<b>Filter:</b> " + ("Unsynced Only" if self._show_unsynced_only else "All Sales")])
+        except Exception as e:
+            QMessageBox.critical(self, "Print Error", f"Failed to print list: {e}")
+
+    def _on_export_list(self):
+        from services.table_export_service import TableExportService
+        TableExportService.export_to_csv(self.table, "Sales_List.csv", self)
 
     def _on_delete(self):
         sale = self._get_selected_sale()
         if not sale: return
+        if sale.get("is_credit_note"):
+            confirm = QMessageBox(self)
+            confirm.setWindowTitle("Confirm Delete")
+            confirm.setText(f"Delete Credit Note {sale['number']}?")
+            confirm.setInformativeText("This cannot be undone.")
+            confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            confirm.setDefaultButton(QMessageBox.No)
+            confirm.setStyleSheet(f"""
+                QMessageBox {{ background-color:{WHITE}; }} QLabel {{ color:{DARK_TEXT}; }}
+                QPushButton {{ background-color:{ACCENT};color:{WHITE};border:none;
+                               border-radius:6px;padding:8px 20px;min-width:70px; }}
+                QPushButton:hover {{ background-color:{ACCENT_H}; }}
+            """)
+            if confirm.exec() == QMessageBox.Yes:
+                try:
+                    from database.db import get_connection
+                    conn = get_connection(); cur = conn.cursor()
+                    cur.execute("DELETE FROM credit_notes WHERE id = ?", (sale["id"],))
+                    conn.commit(); conn.close()
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", f"Failed to delete credit note: {e}")
+                self._load_data()
+            return
+
         confirm = QMessageBox(self)
         confirm.setWindowTitle("Confirm Delete")
         confirm.setText(f"Delete Sale #{sale['number']}?")
@@ -1463,9 +1100,8 @@ class SalesListPage(QWidget):
 
     def keyPressEvent(self, event):
         k = event.key()
-        if   k == Qt.Key_F3:                     self._on_print()
-        elif k == Qt.Key_F4:                     self._on_delete()
-        elif k in (Qt.Key_Return, Qt.Key_Enter): self._on_recall()
+        if k == Qt.Key_F4:                       self._on_delete()
+        elif k in (Qt.Key_Return, Qt.Key_Enter): self._on_view_details()
         else: super().keyPressEvent(event)
 
 
@@ -1473,29 +1109,36 @@ class SalesListPage(QWidget):
 # MAIN DIALOG
 # =============================================================================
 
-class SalesListDialog(QMainWindow):
+class SalesListDialog(QDialog):
     """
     Usage:
         dlg = SalesListDialog(pos_view)
-        dlg.show()
+        dlg.exec()
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Sales")
-        self.showMaximized()
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self._list_page = SalesListPage(
             on_recall=self._recall_into_pos,
             on_close=self.close,
         )
-        self.setCentralWidget(self._list_page)
+        layout.addWidget(self._list_page)
+        self.showMaximized()
 
     def _recall_into_pos(self, sale: dict, items: list[dict]):
+        if sale.get("is_credit_note"):
+            QMessageBox.information(self, "Credit Note", "Credit notes cannot be recalled as new sales.")
+            return
+
         pos = self.parent()
 
         if not pos or not hasattr(pos, "invoice_table") or not hasattr(pos, "_init_row"):
-            QMessageBox.warning(self, "Error", "Cannot recall — POS view not available.")
+            QMessageBox.warning(self, "Error", "Cannot recall - POS view not available.")
             return
 
         has_items = any(
@@ -1536,7 +1179,7 @@ class SalesListDialog(QMainWindow):
 
         cust_name = (sale.get("customer_name") or "").strip()
         if cust_name and hasattr(pos, "_cust_btn"):
-            pos._cust_btn.setText(f"👤  {cust_name}")
+            pos._cust_btn.setText(f"{cust_name}")
             try:
                 from models.customer import get_customer_by_name
                 cust = get_customer_by_name(cust_name)
@@ -1554,7 +1197,7 @@ class SalesListDialog(QMainWindow):
             frappe_ref = sale.get("frappe_ref", "")
             ref_info   = f" (Frappe: {frappe_ref})" if frappe_ref else ""
             pos.parent_window._set_status(
-                f"Recalled invoice #{sale.get('number', '')}{ref_info} — {len(items)} item(s) loaded."
+                f"Recalled invoice #{sale.get('number', '')}{ref_info} - {len(items)} item(s) loaded."
             )
 
         self.close()

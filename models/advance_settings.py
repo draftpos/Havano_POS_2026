@@ -52,6 +52,7 @@ class AdvanceSettings:
     enableLaybyes: bool = False
     enableQuotes: bool = False
     enablePayments: bool = False
+    enableExpenses: bool = False
     enableERPModules: bool = True
     
     # Menus and Badges

@@ -202,18 +202,31 @@ def login(username: str, password: str) -> dict:
 
                 save_defaults(existing)
                 print("[auth] [OK] Server defaults saved.")
+
+                # ── Sync SaaS Shops & Default Price List (/api/user/shops) ─────────
+                from services.credentials import get_system_mode
+                if get_system_mode() == "saas":
+                    try:
+                        host = str(existing.get("server_api_host") or _site_get_host()).strip()
+                        tok = str(online.get("token") or api_key or "").strip()
+                        _fetch_and_apply_saas_shops(host, tok, user_block)
+                    except Exception as _she:
+                        print(f"[auth_service] Error applying SaaS shops: {_she}")
         except Exception as e:
             print(f"[auth] [!]  Could not save server defaults: {e}")
 
         sync_result = None
         if online.get("raw_data"):
-            try:
-                from services.sync_service import sync_from_login_response
-                sync_result = sync_from_login_response(online["raw_data"])
-                print(f"[auth] Auto-sync: {sync_result.get('products_synced', 0)} products synced.")
-            except Exception as e:
-                print(f"[auth] [!]  Auto-sync failed: {e}")
-                sync_result = {"error": str(e)}
+            import threading
+            def _bg_catalog_sync():
+                try:
+                    from services.sync_service import sync_from_login_response
+                    res = sync_from_login_response(online["raw_data"])
+                    print(f"[auth] Auto-sync: {res.get('products_synced', 0)} products synced in background.")
+                except Exception as _bge:
+                    print(f"[auth] [!] Background auto-sync failed: {_bge}")
+            _sync_th = threading.Thread(target=_bg_catalog_sync, daemon=True, name="LoginAutoSync")
+            _sync_th.start()
 
         # ── PERSIST CREDENTIALS LOCALLY ──────────────────────────────────
         try:
@@ -356,13 +369,11 @@ def set_active_session_user(email: str):
 
     _session["active_user_email"] = email
     
-    # 1. Update sql_settings.json
+    # 1. Update sql_settings.json preserving all database connection keys
     try:
-        cfg_path = os.path.join("app_data", "sql_settings.json")
-        cfg_data = {}
-        if os.path.exists(cfg_path):
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg_data = json.load(f)
+        from database.db import get_app_data_dir, _load_settings
+        cfg_path = get_app_data_dir() / "sql_settings.json"
+        cfg_data = dict(_load_settings())
         cfg_data["active_user_email"] = email
         cfg_data["user_email"] = email
         cfg_data["last_logged_in_user"] = email
@@ -465,7 +476,11 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
         "device_hardware_id": dev_id,
         "app_version": app_ver
     }
-    if resolved_email and "@" in str(resolved_email):
+    # Only pass 'user' when takeover is explicitly True and an email is known.
+    # When takeover is False (heartbeat ping or checking active device binding),
+    # omitting 'user' allows the server to evaluate device binding against tenant
+    # credentials without rejecting cashiers who do not have store assignment rights.
+    if takeover and resolved_email and "@" in str(resolved_email):
         payload_dict["user"] = resolved_email
 
     if takeover:
@@ -477,11 +492,13 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
         "Accept": "application/json",
     }
     auth_hdr = build_auth_header(api_key, api_secret)
+    if not auth_hdr and api_key and api_secret:
+        auth_hdr = f"token {api_key}:{api_secret}"
+    elif not auth_hdr and _session.get("token"):
+        tok = str(_session["token"]).strip()
+        auth_hdr = tok if tok.lower().startswith("token ") or tok.lower().startswith("bearer ") else f"token {tok}"
     if auth_hdr:
         headers["Authorization"] = auth_hdr
-    elif _session.get("token"):
-        tok = str(_session["token"]).strip()
-        headers["Authorization"] = tok if tok.lower().startswith("token ") or tok.lower().startswith("bearer ") else f"token {tok}"
 
     import ssl
     ctx = ssl.create_default_context()
@@ -505,10 +522,20 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
         try:
             res_data = _post_payload(payload_dict)
         except urllib.error.HTTPError as he:
+            # If 403 occurred (e.g. cashier account not assigned to store in SaaS), retry without "user"
+            if he.code == 403 and "user" in payload_dict:
+                retry_payload = dict(payload_dict)
+                retry_payload.pop("user", None)
+                try:
+                    res_data = _post_payload(retry_payload)
+                except Exception:
+                    raise he
             # Fallback: if app_version or extra field caused rejection, retry with clean payload
-            if "app_version" in payload_dict:
+            elif "app_version" in payload_dict:
                 clean_payload = dict(payload_dict)
                 clean_payload.pop("app_version", None)
+                if he.code == 403 and "user" in clean_payload:
+                    clean_payload.pop("user", None)
                 res_data = _post_payload(clean_payload)
             else:
                 raise he
@@ -525,15 +552,10 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
             prefix = res_dict.get("sale_id_prefix") or (res_dict.get("user") or {}).get("sale_id_prefix")
             user_obj = res_dict.get("user") or {}
             
-            # Update sql_settings.json
-            cfg_path = os.path.join("app_data", "sql_settings.json")
-            cfg_data = {}
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        cfg_data = json.load(f)
-                except Exception:
-                    pass
+            # Update sql_settings.json preserving all database connection keys
+            from database.db import get_app_data_dir, _load_settings
+            cfg_path = get_app_data_dir() / "sql_settings.json"
+            cfg_data = dict(_load_settings())
             
             if prefix:
                 old_prefix = cfg_data.get("sale_id_prefix")
@@ -546,9 +568,8 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
                 sel_shop = user_obj.get("selected_shop_id") or user_obj.get("default_shop_id")
                 if sel_shop:
                     cfg_data["server_shop_id"] = str(sel_shop)
-                sel_term = user_obj.get("selected_terminal_id")
-                if sel_term and str(sel_term) != str(sel_shop):
-                    cfg_data["server_terminal_id"] = str(sel_term)
+                if terminal_id and str(terminal_id).strip():
+                    cfg_data["server_terminal_id"] = str(terminal_id).strip()
                 
                 pl_id = user_obj.get("default_pricelist_id")
                 pl_name = user_obj.get("default_pricelist_name")
@@ -556,6 +577,8 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
                     cfg_data["default_pricelist_id"] = str(pl_id)
                 if pl_name:
                     cfg_data["default_pricelist_name"] = str(pl_name)
+
+            cfg_data["bound_device_id"] = str(dev_id).strip()
 
             with open(cfg_path, "w", encoding="utf-8") as f:
                 json.dump(cfg_data, f, indent=4)
@@ -567,12 +590,19 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
                 cur = conn.cursor()
                 if prefix:
                     cur.execute("UPDATE company_defaults SET sale_id_prefix = ? WHERE id = (SELECT MIN(id) FROM company_defaults)", (str(prefix),))
-                if isinstance(user_obj, dict) and user_obj.get("selected_terminal_id") and str(user_obj.get("selected_terminal_id")) != str(sel_shop):
-                    cur.execute("UPDATE company_defaults SET server_terminal_id = ? WHERE id = (SELECT MIN(id) FROM company_defaults)", (str(user_obj["selected_terminal_id"]),))
+                if terminal_id and str(terminal_id).strip():
+                    cur.execute("UPDATE company_defaults SET server_terminal_id = ?, bound_device_id = ? WHERE id = (SELECT MIN(id) FROM company_defaults)", (str(terminal_id).strip(), str(dev_id).strip()))
                 conn.commit()
                 conn.close()
             except Exception as _dbe:
                 pass
+
+            # Initialize write-once terminal reference if empty
+            if terminal_id and str(terminal_id).strip():
+                try:
+                    init_terminal_reference(terminal_id=str(terminal_id).strip(), device_hardware_id=str(dev_id).strip())
+                except Exception as _itre:
+                    print(f"[auth] Error calling init_terminal_reference: {_itre}")
 
         except Exception as _pe:
             print(f"[auth] Warning: Error persisting select_terminal response payload locally: {_pe}")
@@ -592,6 +622,114 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
     except Exception as e:
         print(f"[auth] select_terminal error: {e}")
         return {"success": False, "error": str(e)}
+
+
+def init_terminal_reference(terminal_id: str, terminal_name: str = "", store_id: str = "", store_name: str = "", device_hardware_id: str = ""):
+    """
+    Write-Once Terminal Reference:
+    Stores the initial terminal assignment in terminal_reference table.
+    IF a row already exists, IT IS NEVER OVERWRITTEN OR INSERTED AGAIN.
+    """
+    if not terminal_id or not str(terminal_id).strip():
+        return
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # Ensure schema table exists
+        try:
+            from setup_database import setup_database
+            setup_database()
+        except Exception:
+            pass
+
+        cur.execute("SELECT COUNT(*) FROM terminal_reference")
+        row = cur.fetchone()
+        count = row[0] if row else 0
+
+        if count == 0:
+            cur.execute("""
+                INSERT INTO terminal_reference (terminal_id, terminal_name, store_id, store_name, device_hardware_id)
+                VALUES (?, ?, ?, ?, ?)
+            """, (str(terminal_id).strip(), str(terminal_name or "").strip(), str(store_id or "").strip(), str(store_name or "").strip(), str(device_hardware_id or "").strip()))
+            conn.commit()
+            print(f"[auth_service] Initial terminal reference locked once: terminal_id={terminal_id}, store={store_name}")
+        else:
+            print(f"[auth_service] Terminal reference already exists - write-once policy enforced, skipping write.")
+        conn.close()
+    except Exception as e:
+        print(f"[auth_service] Error in init_terminal_reference: {e}")
+
+
+def verify_terminal_reference() -> dict:
+    """
+    Checks active company_defaults (server_terminal_id, server_store_name) against the immutable terminal_reference row.
+    If a mismatch is detected:
+      1. Dispatches an error alert to Bugsink.
+      2. Auto-restores company_defaults to match the reference terminal_id & store.
+    """
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT TOP 1 terminal_id, terminal_name, store_id, store_name, device_hardware_id FROM terminal_reference ORDER BY id ASC")
+        ref_row = cur.fetchone()
+        if not ref_row:
+            conn.close()
+            return {"status": "ok", "message": "No terminal reference established yet."}
+
+        ref_term_id = str(ref_row[0] or "").strip()
+        ref_term_name = str(ref_row[1] or "").strip()
+        ref_store_id = str(ref_row[2] or "").strip()
+        ref_store_name = str(ref_row[3] or "").strip()
+
+        cur.execute("SELECT TOP 1 server_terminal_id, server_terminal_name, server_shop_id, server_warehouse FROM company_defaults")
+        cd_row = cur.fetchone()
+        if not cd_row:
+            conn.close()
+            return {"status": "ok", "message": "No company defaults found."}
+
+        curr_term_id = str(cd_row[0] or "").strip()
+        curr_store_name = str(cd_row[3] or "").strip()
+
+        mismatches = []
+        if ref_term_id and curr_term_id and ref_term_id != curr_term_id:
+            mismatches.append(f"terminal_id mismatch (Reference={ref_term_id}, Current={curr_term_id})")
+        if ref_store_name and curr_store_name and ref_store_name.lower() != curr_store_name.lower():
+            mismatches.append(f"store_name mismatch (Reference={ref_store_name}, Current={curr_store_name})")
+
+        if mismatches:
+            err_msg = f"SECURITY ALERT: Terminal configuration mismatch detected! " + "; ".join(mismatches) + ". Auto-restoring reference configuration."
+            print(f"[auth_service] {err_msg}")
+
+            # Send error alert to Bugsink
+            try:
+                from services.bugsink_service import capture_message
+                capture_message(err_msg, level="error")
+            except Exception as _bse:
+                print(f"[auth_service] Failed to send Bugsink alert: {_bse}")
+
+            # Auto-restore company_defaults to match original write-once reference
+            cur.execute("""
+                UPDATE company_defaults
+                SET server_terminal_id = COALESCE(?, server_terminal_id),
+                    server_terminal_name = COALESCE(?, server_terminal_name),
+                    server_shop_id = COALESCE(?, server_shop_id),
+                    server_warehouse = COALESCE(?, server_warehouse)
+                WHERE id = (SELECT MIN(id) FROM company_defaults)
+            """, (ref_term_id or None, ref_term_name or None, ref_store_id or None, ref_store_name or None))
+            conn.commit()
+            conn.close()
+
+            return {"status": "mismatch_restored", "mismatches": mismatches, "message": err_msg}
+
+        conn.close()
+        return {"status": "ok", "message": "Terminal reference configuration verified."}
+    except Exception as e:
+        print(f"[auth_service] Error in verify_terminal_reference: {e}")
+        return {"status": "error", "error": str(e)}
 
 
 # =============================================================================
@@ -671,7 +809,11 @@ def _parse_online_success(data: dict, username: str) -> dict:
 
     user_block = data.get("user") or {}
     raw_username = (user_block.get("username") or data.get("full_name") or username)
-    raw_warehouse = (user_block.get("warehouse") or data.get("warehouse") or username)
+    shops_list = user_block.get("shops") or data.get("shops") or []
+    if isinstance(shops_list, list) and len(shops_list) > 0:
+        raw_warehouse = ", ".join([str(s.get("name") or s.get("shop_name") or "").strip() for s in shops_list if (s.get("name") or s.get("shop_name"))])
+    else:
+        raw_warehouse = (user_block.get("warehouse") or data.get("warehouse") or username)
     raw_company   = (user_block.get("company") or data.get("company") or "")
     raw_cost_center= (user_block.get("cost_center") or data.get("cost_center") or "")
     full_name    = user_block.get("full_name") or data.get("full_name") or raw_username
@@ -771,3 +913,114 @@ def _try_offline_login(username: str, password: str) -> dict:
         return {"success": False, "error": "Wrong username or password (offline)."}
     except Exception as e:
         return {"success": False, "error": f"Local DB error: {e}"}
+
+
+def _fetch_and_apply_saas_shops(host: str, auth_token: str, user_block: dict = None):
+    """
+    Fetches shops from /api/user/shops, parses pricelist_names and default_pricelist_name,
+    upserts price lists into local `price_lists` table, and assigns the active shop's
+    default price list to company_defaults and default Cash Customer.
+    """
+    import json, urllib.request, urllib.parse
+    from database.db import get_connection
+    from models.company_defaults import get_defaults, save_defaults
+
+    defaults = get_defaults() or {}
+    active_shop_id = str(defaults.get("server_shop_id") or (user_block or {}).get("selected_shop_id") or (user_block or {}).get("store_id") or "").strip()
+    active_warehouse = str(defaults.get("server_warehouse") or (user_block or {}).get("warehouse") or "").strip().lower()
+
+    shops = []
+    if host:
+        try:
+            from services.network_utils import safe_urlopen
+            endpoint = f"{host.rstrip('/')}/api/user/shops"
+            req = urllib.request.Request(endpoint)
+            if auth_token:
+                if auth_token.startswith("Bearer ") or auth_token.startswith("Basic ") or auth_token.startswith("token "):
+                    req.add_header("Authorization", auth_token)
+                elif ":" in auth_token:
+                    import base64
+                    b64 = base64.b64encode(auth_token.encode()).decode()
+                    req.add_header("Authorization", f"Basic {b64}")
+                else:
+                    req.add_header("Authorization", f"Bearer {auth_token}")
+
+            with safe_urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+                if isinstance(data, list):
+                    shops = data
+                elif isinstance(data, dict):
+                    shops = data.get("data") or data.get("shops") or data.get("message") or []
+        except Exception as e:
+            print(f"[auth] Could not fetch /api/user/shops: {e}")
+
+    if not shops and user_block:
+        shops = user_block.get("shops") or []
+
+    if not shops:
+        return
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        assigned_default_pl_id = None
+        assigned_default_pl_name = None
+
+        for shop in shops:
+            if not isinstance(shop, dict):
+                continue
+            s_id = str(shop.get("id") or "").strip()
+            s_name = str(shop.get("name") or shop.get("shop_name") or "").strip()
+            
+            # Upsert any price lists listed for this shop
+            pl_names = shop.get("pricelist_names") or []
+            def_pl_name = str(shop.get("default_pricelist_name") or shop.get("pricelist_name") or shop.get("price_list") or "").strip()
+            
+            all_pls = list(pl_names)
+            if def_pl_name and def_pl_name not in all_pls:
+                all_pls.append(def_pl_name)
+                
+            for pl_n in all_pls:
+                pl_clean = str(pl_n).strip()
+                if pl_clean:
+                    cur.execute("""
+                        IF NOT EXISTS (SELECT 1 FROM price_lists WHERE LOWER(name) = LOWER(?))
+                        BEGIN
+                            INSERT INTO price_lists (name, selling) VALUES (?, 1)
+                        END
+                    """, (pl_clean, pl_clean))
+
+            # Check if this shop is the active shop
+            is_active_shop = False
+            if active_shop_id and s_id == active_shop_id:
+                is_active_shop = True
+            elif active_warehouse and (active_warehouse == s_name.lower() or active_warehouse in s_name.lower()):
+                is_active_shop = True
+            elif not active_shop_id and not active_warehouse:
+                is_active_shop = True  # Take first if none configured
+
+            if is_active_shop and def_pl_name:
+                cur.execute("SELECT id FROM price_lists WHERE LOWER(name) = LOWER(?)", (def_pl_name,))
+                r = cur.fetchone()
+                if r and r[0]:
+                    assigned_default_pl_id = int(r[0])
+                    assigned_default_pl_name = def_pl_name
+
+        conn.commit()
+
+        if assigned_default_pl_id:
+            defaults["default_price_list_id"] = assigned_default_pl_id
+            save_defaults(defaults)
+            
+            # Update default Cash Customer in DB to point to this default_price_list_id
+            cur.execute("""
+                UPDATE customers 
+                SET default_price_list_id = ? 
+                WHERE LOWER(customer_name) LIKE '%cash%'
+            """, (assigned_default_pl_id,))
+            conn.commit()
+            print(f"[auth] [OK] SaaS Shop default price list set to '{assigned_default_pl_name}' (ID: {assigned_default_pl_id})")
+
+        conn.close()
+    except Exception as e:
+        print(f"[auth] Error applying SaaS shops: {e}")

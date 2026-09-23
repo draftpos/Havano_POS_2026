@@ -7,14 +7,40 @@ from pathlib import Path
 
 from database.db import get_app_data_dir
 
-def _resolve_backup_dir() -> Path:
+import json
+
+log = logging.getLogger(__name__)
+
+
+def _settings_file() -> Path:
+    """Path to sql_settings.json (same logic as database.db uses)."""
+    try:
+        return get_app_data_dir() / "sql_settings.json"
+    except Exception:
+        return Path("app_data") / "sql_settings.json"
+
+
+def get_backup_dir() -> Path:
     """
-    Returns a backup directory accessible to both SQL Server service and local user applications.
+    Returns the active backup directory.
     Priority:
-      1. C:/Users/Public/HavanoPOS_Backups (Shared public directory on Windows)
-      2. C:/ProgramData/HavanoPOS/Backups (Shared application data directory)
-      3. app_data/backups (Local app data folder)
+      1. User-configured path stored in sql_settings.json under "backup_dir"
+      2. C:/Users/Public/HavanoPOS_Backups
+      3. C:/ProgramData/HavanoPOS/Backups
+      4. app_data/backups
     """
+    # 1. User override
+    try:
+        raw = json.loads(_settings_file().read_text(encoding="utf-8"))
+        custom = raw.get("backup_dir", "").strip()
+        if custom:
+            p = Path(custom)
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+    except Exception:
+        pass
+
+    # 2-4. Auto-resolve
     candidates = [
         Path(r"C:\Users\Public\HavanoPOS_Backups"),
         Path(r"C:\ProgramData\HavanoPOS\Backups"),
@@ -30,29 +56,50 @@ def _resolve_backup_dir() -> Path:
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback
 
-BACKUP_DIR = _resolve_backup_dir()
+
+def set_backup_dir(new_path: str) -> None:
+    """
+    Persist a user-chosen backup directory to sql_settings.json.
+    Also refreshes the module-level BACKUP_DIR variable.
+    """
+    global BACKUP_DIR
+    sf = _settings_file()
+    try:
+        raw = json.loads(sf.read_text(encoding="utf-8")) if sf.exists() else {}
+    except Exception:
+        raw = {}
+    raw["backup_dir"] = new_path
+    sf.write_text(json.dumps(raw, indent=4), encoding="utf-8")
+    BACKUP_DIR = Path(new_path)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# Module-level shortcut — evaluated once at import time but can be
+# refreshed by calling set_backup_dir().
+BACKUP_DIR = get_backup_dir()
 
 
 def _get_db_name() -> str:
     from database.db import _load_settings
-    return _load_settings().get("database", "pos_db")
+    return _load_settings().get("database", "havano_posop07978808")
 
 
 def _get_backup_db_connection():
     from database.db import _load_settings, DRIVER
     import pyodbc
     cfg = _load_settings()
-    db_name = cfg.get("database", "pos_db")
+    db_name = cfg.get("database", "havano_posop07978808")
+    server_val = cfg.get("server") or ".\\SQLEXPRESS"
     if cfg.get("auth_mode") == "windows":
         conn_str = (
-            f"DRIVER={{{DRIVER}}};SERVER={cfg['server']};DATABASE={db_name};"
+            f"DRIVER={{{DRIVER}}};SERVER={server_val};DATABASE={db_name};"
             "Trusted_Connection=yes;TrustServerCertificate=yes;Encrypt=no;"
             "Application Name=POS_Backup;"
         )
     else:
         conn_str = (
-            f"DRIVER={{{DRIVER}}};SERVER={cfg['server']};DATABASE={db_name};"
-            f"UID={cfg['username']};PWD={cfg['password']};"
+            f"DRIVER={{{DRIVER}}};SERVER={server_val};DATABASE={db_name};"
+            f"UID={cfg.get('username', '')};PWD={cfg.get('password', '')};"
             "TrustServerCertificate=yes;Encrypt=no;Application Name=POS_Backup;"
         )
     return pyodbc.connect(conn_str, autocommit=True, timeout=5)
@@ -142,16 +189,17 @@ def _get_master_connection():
     # pyrefly: ignore [missing-import]
     import pyodbc
     cfg = _load_settings()
+    server_val = cfg.get("server") or ".\\SQLEXPRESS"
     if cfg.get("auth_mode") == "windows":
         conn_str = (
-            f"DRIVER={{{DRIVER}}};SERVER={cfg['server']};DATABASE=master;"
+            f"DRIVER={{{DRIVER}}};SERVER={server_val};DATABASE=master;"
             "Trusted_Connection=yes;TrustServerCertificate=yes;Encrypt=no;"
             "Application Name=POS_Restore;"
         )
     else:
         conn_str = (
-            f"DRIVER={{{DRIVER}}};SERVER={cfg['server']};DATABASE=master;"
-            f"UID={cfg['username']};PWD={cfg['password']};"
+            f"DRIVER={{{DRIVER}}};SERVER={server_val};DATABASE=master;"
+            f"UID={cfg.get('username', '')};PWD={cfg.get('password', '')};"
             "TrustServerCertificate=yes;Encrypt=no;Application Name=POS_Restore;"
         )
     return pyodbc.connect(conn_str, autocommit=True, timeout=5)
@@ -162,9 +210,12 @@ def restore_database(bak_path: str) -> dict:
     Restore a .bak file over the current database.
     Steps:
       1. Auto-backup the current state first (safety net).
-      2. SET the database to SINGLE_USER to boot everyone out.
-      3. RESTORE DATABASE … WITH REPLACE.
-      4. SET the database back to MULTI_USER.
+      2. Copy .bak into SQL Server's readable backup dir.
+      3. Read logical file list from the backup (RESTORE FILELISTONLY).
+      4. Read the current physical file paths from sys.master_files.
+      5. SET the database to SINGLE_USER to boot everyone out.
+      6. RESTORE DATABASE … WITH REPLACE, MOVE … (maps logical → physical).
+      7. SET the database back to MULTI_USER.
     Returns {"ok": True/False, "error": str}.
     """
     try:
@@ -180,12 +231,11 @@ def restore_database(bak_path: str) -> dict:
             return {"ok": False, "error": f"Pre-restore backup failed: {safety['error']}"}
 
         # Step 2 - Copy the .bak into SQL Server's default backup dir
-        #          so the service account can read it.
         conn = _get_master_connection()
         conn.autocommit = True
         cur = conn.cursor()
 
-        # Find the default backup directory by reading the registry through SQL
+        # Find the default backup directory
         cur.execute("SELECT SERVERPROPERTY('InstanceDefaultBackupPath')")
         row = cur.fetchone()
         if row and row[0]:
@@ -199,21 +249,105 @@ def restore_database(bak_path: str) -> dict:
         sql_bak_path = sql_backup_dir / restore_filename
         shutil.copy2(bak, sql_bak_path)
 
-        # Step 3 - Boot everyone, restore, go back to multi-user
+        # Step 3 - Read logical file names from the backup file
+        print("[Restore] Reading file list from backup ...")
+        cur.execute(f"RESTORE FILELISTONLY FROM DISK = '{sql_bak_path}'")
+        filelist_rows = cur.fetchall()
+        # columns: LogicalName, PhysicalName, Type, ...
+        # Type 'D' = data, 'L' = log
+        logical_data = [r[0] for r in filelist_rows if r[2] == 'D']
+        logical_log  = [r[0] for r in filelist_rows if r[2] == 'L']
+
+        # Step 4 - Read the CURRENT physical paths for this database
+        cur.execute(
+            "SELECT type, physical_name FROM sys.master_files "
+            "WHERE database_id = DB_ID(?)", (db_name,)
+        )
+        phys_rows = cur.fetchall()
+        # type 0 = data, 1 = log
+        phys_data = [r[1] for r in phys_rows if r[0] == 0]
+        phys_log  = [r[1] for r in phys_rows if r[0] == 1]
+
+        # If current paths are unknown, fall back to SQL Server DATA dir
+        if not phys_data:
+            cur.execute("SELECT physical_name FROM sys.master_files WHERE database_id=1 AND type=0")
+            row_m = cur.fetchone()
+            data_dir = Path(row_m[0]).parent if row_m else sql_backup_dir
+            phys_data = [str(data_dir / f"{db_name}.mdf")]
+            phys_log  = [str(data_dir / f"{db_name}_log.ldf")]
+
+        # Build MOVE clauses — pair logical names from backup → physical paths of current DB
+        move_clauses = []
+        for i, lname in enumerate(logical_data):
+            target = phys_data[i] if i < len(phys_data) else phys_data[0]
+            move_clauses.append(f"MOVE '{lname}' TO '{target}'")
+        for i, lname in enumerate(logical_log):
+            target = phys_log[i] if i < len(phys_log) else phys_log[0]
+            move_clauses.append(f"MOVE '{lname}' TO '{target}'")
+
+        move_sql = ", ".join(move_clauses)
+
+        # Step 5 - Boot everyone out
         print(f"[Restore] Restoring '{db_name}' from {bak.name} ...")
         try:
             cur.execute(f"ALTER DATABASE [{db_name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
         except Exception as e:
             print(f"[Restore] Warning during SINGLE_USER: {e}")
 
-        cur.execute(f"RESTORE DATABASE [{db_name}] FROM DISK = '{sql_bak_path}' WITH REPLACE")
+        # Step 6 - Restore with MOVE so file path mismatches don't block it
+        restore_sql = (
+            f"RESTORE DATABASE [{db_name}] FROM DISK = '{sql_bak_path}' "
+            f"WITH REPLACE, {move_sql}"
+        )
+        print(f"[Restore] SQL: {restore_sql}")
+        cur.execute(restore_sql)
         while cur.nextset():
             pass
 
+        # Step 7 - Back to multi-user
         cur.execute(f"ALTER DATABASE [{db_name}] SET MULTI_USER")
+
+        # Step 8 - Re-grant access to the current login.
+        # Restoring from a backup of a DIFFERENT database orphans the user
+        # mappings, so the current login loses access. Fix by making it db_owner.
+        print("[Restore] Re-granting database access to current login ...")
+        try:
+            from database.db import _load_settings, DRIVER
+            cfg = _load_settings()
+            if cfg.get("auth_mode") == "windows":
+                # Windows auth — get the current OS login name from SQL itself
+                cur.execute("SELECT SUSER_SNAME()")
+                login_row = cur.fetchone()
+                current_login = login_row[0] if login_row and login_row[0] else None
+            else:
+                current_login = cfg.get("username", "")
+
+            if current_login:
+                # ALTER AUTHORIZATION makes current_login the owner (db_owner)
+                cur.execute(
+                    f"ALTER AUTHORIZATION ON DATABASE::[{db_name}] TO [{current_login}]"
+                )
+                print(f"[Restore] Access granted to '{current_login}' on '{db_name}'.")
+
+                # Also ensure the login exists as a user inside the restored DB
+                # (in case the backup came from a completely different server)
+                try:
+                    cur.execute(
+                        f"USE [{db_name}]; "
+                        f"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '{current_login}') "
+                        f"  CREATE USER [{current_login}] FOR LOGIN [{current_login}]; "
+                        f"ALTER ROLE db_owner ADD MEMBER [{current_login}];"
+                    )
+                except Exception as _ue:
+                    # Non-fatal — ALTER AUTHORIZATION above already covers this
+                    print(f"[Restore] Note (non-fatal) during user role grant: {_ue}")
+        except Exception as _pe:
+            print(f"[Restore] Warning: could not re-grant permissions: {_pe}")
+
         conn.close()
 
-        # Cleanup the temporary file
+
+        # Cleanup temp file
         try:
             os.remove(sql_bak_path)
         except Exception:
@@ -236,12 +370,35 @@ def restore_database(bak_path: str) -> dict:
 
 
 def list_backups() -> list[dict]:
-    """Return a list of backup files sorted newest-first."""
+    """
+    Return a list of backup files sorted newest-first.
+    Scans ALL candidate backup directories so the UI always shows every
+    .bak file regardless of which folder SQL Server actually wrote to.
+    """
+    from database.db import get_app_data_dir as _app_dir
+    seen_names: set = set()
+    all_files: list = []
+
+    candidate_dirs = [
+        Path(r"C:\Users\Public\HavanoPOS_Backups"),
+        Path(r"C:\ProgramData\HavanoPOS\Backups"),
+        _app_dir() / "backups",
+        BACKUP_DIR,  # always include the resolved dir (may overlap with one above)
+    ]
+
+    for d in candidate_dirs:
+        if not d.exists():
+            continue
+        for f in d.glob("*.bak"):
+            if f.name in seen_names:
+                continue  # skip duplicates (same file in two dirs)
+            seen_names.add(f.name)
+            all_files.append(f)
+
+    all_files.sort(key=os.path.getmtime, reverse=True)
+
     results = []
-    db_name = _get_db_name()
-    if not BACKUP_DIR.exists():
-        return results
-    for f in sorted(BACKUP_DIR.glob("*.bak"), key=os.path.getmtime, reverse=True):
+    for f in all_files:
         stat = f.stat()
         results.append({
             "filename": f.name,

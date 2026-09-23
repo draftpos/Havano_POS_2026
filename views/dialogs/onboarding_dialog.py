@@ -147,4 +147,127 @@ class OnboardingDialog(QDialog):
             "Connects to SaaS ERP for real-time inventory and sales sync.",
             "fa5s.cloud",
             "#8B5CF6" # Purple
-hhhhhhhhhhhhg
+        )
+        self.saas_card.clicked.connect(self._select_saas)
+        cards_layout.addWidget(self.saas_card)
+        
+        # Offline Card
+        self.offline_card = self._create_mode_card(
+            "Offline", 
+            "Standalone operation. No cloud sync required.",
+            "fa5s.plug",
+            SUCCESS
+        )
+        self.offline_card.clicked.connect(self._select_offline)
+        cards_layout.addWidget(self.offline_card)
+        
+        layout.addLayout(cards_layout)
+        layout.addStretch()
+        
+        return page
+
+    def _create_mode_card(self, title, description, icon_name, color):
+        btn = QPushButton()
+        btn.setFixedHeight(220)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {WHITE};
+                border: 2px solid {BORDER};
+                border-radius: 12px;
+                padding: 20px;
+                text-align: center;
+            }}
+            QPushButton:hover {{
+                border: 2px solid {color};
+                background-color: {OFF_WHITE};
+            }}
+        """)
+        
+        l = QVBoxLayout(btn)
+        l.setSpacing(12)
+        
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(qta.icon(icon_name, color=color).pixmap(QSize(48, 48)))
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setStyleSheet("background: transparent;")
+        l.addWidget(icon_lbl)
+        
+        t_lbl = QLabel(title)
+        t_lbl.setAlignment(Qt.AlignCenter)
+        t_lbl.setStyleSheet(f"color: {NAVY}; font-size: 16px; font-weight: bold; background: transparent;")
+        l.addWidget(t_lbl)
+        
+        d_lbl = QLabel(description)
+        d_lbl.setAlignment(Qt.AlignCenter)
+        d_lbl.setWordWrap(True)
+        d_lbl.setStyleSheet(f"color: {MUTED}; font-size: 12px; background: transparent;")
+        l.addWidget(d_lbl)
+        
+        return btn
+
+    def _select_odoo(self):
+        self.mode = "odoo"
+        self._save_mode_setting("odoo")
+        self.accept()
+
+    def _select_frappe(self):
+        self.mode = "frappe"
+        self._save_mode_setting("frappe")
+        self.accept()
+
+    def _select_saas(self):
+        self.mode = "saas"
+        self._save_mode_setting("saas")
+        try:
+            import json
+            from database.db import get_app_data_dir
+            settings_path = get_app_data_dir() / "sql_settings.json"
+            data = {}
+            if settings_path.exists():
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            if not data.get("api_url"):
+                data["api_url"] = "https://backoffice.havano.pro"
+            data["system_mode"] = "saas"
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+            from services.site_config import invalidate_cache
+            invalidate_cache()
+        except Exception as e:
+            print(f"[onboarding] Error setting auto backoffice URL: {e}")
+        self.accept()
+
+    def _select_offline(self):
+        self.mode = "offline"
+        self._save_mode_setting("offline")
+        try:
+            from setup_database import ensure_offline_defaults
+            ensure_offline_defaults()
+        except Exception as _e:
+            print(f"[onboarding] Error ensuring offline defaults: {_e}")
+        self.accept()
+
+    def _save_mode_setting(self, val):
+        try:
+            from services.credentials import set_system_mode
+            set_system_mode(val)
+            
+            if val in ("frappe", "odoo", "saas"):
+                from models.advance_settings import AdvanceSettings
+                import os
+                from pathlib import Path
+                _here = Path(os.path.abspath(__file__)).parent.parent.parent
+                _path = str(_here / "settings" / "advance_settings.json")
+                
+                settings = AdvanceSettings.load_from_file(_path)
+                settings.showAppSales = False
+                settings.showAppSuppliers = False
+                settings.showAppMaintenance = False
+                settings.showAppFinance = False
+                settings.showAppInventory = False
+                settings.save_to_file(_path)
+                
+        except Exception as e:
+            print(f"[onboarding] Error saving mode: {e}")

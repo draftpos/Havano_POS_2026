@@ -291,6 +291,12 @@ def push_unsynced_quotations() -> dict:
 # FETCH QUOTATIONS FROM FRAPPE
 # =============================================================================
 
+def _is_muted_quotation_error(err: str) -> bool:
+    """Return True if the error is the known backend product default_code attribute issue."""
+    err_lower = str(err).lower()
+    return "default_code" in err_lower and "havanoposdesk.product" in err_lower
+
+
 def fetch_quotations_from_frappe(page: int = 1, limit: int = 100) -> dict:
     """
     Fetch quotations from Frappe using GET /api/method/saas_api.www.api.get_quotations
@@ -350,7 +356,10 @@ def fetch_quotations_from_frappe(page: int = 1, limit: int = 100) -> dict:
             msg = e.read().decode("utf-8", errors="replace")
         except Exception:
             msg = f"HTTP {e.code}"
-        log.error("Failed to fetch quotations: %s", msg[:200])
+        if _is_muted_quotation_error(msg):
+            log.debug("Muted quotation fetch error (known backend attribute error): %s", msg[:200])
+        else:
+            log.error("Failed to fetch quotations: %s", msg[:200])
         return {"quotations": [], "total": 0, "page": page, "has_next": False, "error": msg}
         
     except urllib.error.URLError as e:
@@ -385,7 +394,11 @@ def sync_quotations_from_frappe() -> dict:
             response = fetch_quotations_from_frappe(page, limit)
             
             if response.get("error"):
-                log.error(f"Error fetching page {page}: {response['error']}")
+                err_msg = str(response["error"])
+                if _is_muted_quotation_error(err_msg):
+                    log.debug("QuotationSync: Muted known error fetching page %d: %s", page, err_msg[:200])
+                else:
+                    log.error(f"Error fetching page {page}: {response['error']}")
                 result["errors"] += 1
                 break
             
@@ -561,7 +574,7 @@ def sync_quotation_on_create(quotation_id: int, max_retries: int = 3) -> bool:
             log.info(f"Retrying in {wait_time} seconds...")
             time.sleep(wait_time)
     
-    log.error(f"❌ Failed to sync quotation {quotation.name} after {max_retries} attempts")
+    log.warning(f"❌ Failed to sync quotation {quotation.name} after {max_retries} attempts")
     return False
 
 

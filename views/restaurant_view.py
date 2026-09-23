@@ -1588,7 +1588,7 @@ class OrderView(QWidget):
         self._build()
         
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(60000)
+        self._refresh_timer.setInterval(4000)
         self._refresh_timer.timeout.connect(self.refresh)
         self._refresh_timer.start()
 
@@ -2104,9 +2104,39 @@ class OrderView(QWidget):
         mon_menu.setStyleSheet(f"background: {WHITE}; color: {TEXT}; border: 1px solid {BORDER};")
         def _launch(m):
             from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
-            if m == "k": self._kw = KitchenWindow(); self._kw.show()
-            elif m == "d": self._db = ReadyBoardWindow(); self._db.show()
-            elif m == "u": self._um = UnifiedMonitorWindow(); self._um.show()
+            if m == "k":
+                if hasattr(self, "_kw") and self._kw is not None:
+                    try:
+                        if self._kw.isVisible():
+                            self._kw.raise_()
+                            self._kw.activateWindow()
+                            return
+                    except RuntimeError:
+                        self._kw = None
+                self._kw = KitchenWindow()
+                self._kw.show()
+            elif m == "d":
+                if hasattr(self, "_db") and self._db is not None:
+                    try:
+                        if self._db.isVisible():
+                            self._db.raise_()
+                            self._db.activateWindow()
+                            return
+                    except RuntimeError:
+                        self._db = None
+                self._db = ReadyBoardWindow()
+                self._db.show()
+            elif m == "u":
+                if hasattr(self, "_um") and self._um is not None:
+                    try:
+                        if self._um.isVisible():
+                            self._um.raise_()
+                            self._um.activateWindow()
+                            return
+                    except RuntimeError:
+                        self._um = None
+                self._um = UnifiedMonitorWindow()
+                self._um.show()
         mon_menu.addAction("Kitchen Display (KDS)", lambda: _launch("k"))
         mon_menu.addAction("Ready Board (Dispatch)", lambda: _launch("d"))
         mon_menu.addAction("Unified Monitor", lambda: _launch("u"))

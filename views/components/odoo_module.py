@@ -66,18 +66,42 @@ class OdooModuleView(QWidget):
         """Add a horizontal tab that acts as a dropdown menu."""
         self.nav_bar.add_tab(tab_name)
 
-    def add_tab_direct(self, tab_name: str, widget: QWidget):
-        """Add a horizontal tab that directly opens a widget when clicked (like Dashboard)."""
-        idx = self.stack.addWidget(widget)
-        self.nav_bar.add_tab(tab_name, lambda: self.stack.setCurrentIndex(idx))
+    def add_tab_direct(self, tab_name: str, widget_or_factory):
+        """Add a horizontal tab that directly opens a widget when clicked (like Dashboard).
+        Supports lazy factory if widget_or_factory is a callable."""
+        if callable(widget_or_factory) and not isinstance(widget_or_factory, QWidget):
+            def _switch_direct():
+                if not hasattr(self, "_lazy_tabs"):
+                    self._lazy_tabs = {}
+                if tab_name not in self._lazy_tabs:
+                    w = widget_or_factory()
+                    idx = self.stack.addWidget(w)
+                    self._lazy_tabs[tab_name] = idx
+                self.stack.setCurrentIndex(self._lazy_tabs[tab_name])
+            self.nav_bar.add_tab(tab_name, _switch_direct)
+        else:
+            idx = self.stack.addWidget(widget_or_factory)
+            self.nav_bar.add_tab(tab_name, lambda: self.stack.setCurrentIndex(idx))
 
-    def add_dropdown_screen(self, tab_name: str, item_label: str, widget: QWidget):
+    def add_dropdown_screen(self, tab_name: str, item_label: str, widget_or_factory):
         """
         Add a screen to the stacked widget, and a dropdown item to the specified tab 
         that switches to this screen when clicked.
+        Supports lazy-loading if widget_or_factory is a callable.
         """
-        idx = self.stack.addWidget(widget)
-        self.nav_bar.add_dropdown_item(tab_name, item_label, lambda: self.stack.setCurrentIndex(idx))
+        if callable(widget_or_factory) and not isinstance(widget_or_factory, QWidget):
+            def _switch_lazy():
+                if not hasattr(self, "_lazy_screens"):
+                    self._lazy_screens = {}
+                if item_label not in self._lazy_screens:
+                    w = widget_or_factory()
+                    idx = self.stack.addWidget(w)
+                    self._lazy_screens[item_label] = idx
+                self.stack.setCurrentIndex(self._lazy_screens[item_label])
+            self.nav_bar.add_dropdown_item(tab_name, item_label, _switch_lazy)
+        else:
+            idx = self.stack.addWidget(widget_or_factory)
+            self.nav_bar.add_dropdown_item(tab_name, item_label, lambda: self.stack.setCurrentIndex(idx))
 
     def add_dropdown_action(self, tab_name: str, item_label: str, callback):
         """

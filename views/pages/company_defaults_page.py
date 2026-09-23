@@ -4,7 +4,8 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QTextEdit, QPushButton, QFrame, QSizePolicy, QScrollArea,
-    QSpinBox, QMessageBox, QProgressBar, QDialog, QGroupBox, QFileDialog
+    QSpinBox, QMessageBox, QProgressBar, QDialog, QGroupBox, QFileDialog,
+    QTabWidget, QComboBox
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Property as _Prop, QThread, Signal, QDir, QFileInfo
 from PySide6.QtGui  import QPainter, QColor, QLinearGradient, QRadialGradient, QPixmap
@@ -371,11 +372,11 @@ class CompanyDefaultsPage(QWidget):
         external_btn.clicked.connect(self._open_external_site_settings)
 
         # ── PHARMACY MASTERS BUTTON (visible only in pharmacy mode) ──────────
-        pharmacy_btn = QPushButton("Pharmacy Masters")
-        pharmacy_btn.setIcon(qta.icon("fa5s.prescription-bottle-alt", color="white"))
-        pharmacy_btn.setFixedHeight(38)
-        pharmacy_btn.setCursor(Qt.PointingHandCursor)
-        pharmacy_btn.setStyleSheet(f"""
+        self._pharmacy_btn = QPushButton("Pharmacy Masters")
+        self._pharmacy_btn.setIcon(qta.icon("fa5s.prescription-bottle-alt", color="white"))
+        self._pharmacy_btn.setFixedHeight(38)
+        self._pharmacy_btn.setCursor(Qt.PointingHandCursor)
+        self._pharmacy_btn.setStyleSheet(f"""
             QPushButton {{
                 background:{NAVY_2}; color:{WHITE}; border:1px solid #7c3aed;
                 border-radius:6px; font-size:12px; font-weight:bold; padding:0 16px;
@@ -383,14 +384,8 @@ class CompanyDefaultsPage(QWidget):
             QPushButton:hover   {{ background:{NAVY_3}; border:1px solid #9461ff; }}
             QPushButton:pressed {{ background:{NAVY}; }}
         """)
-        pharmacy_btn.clicked.connect(self._open_pharmacy_masters_dialog)
-        try:
-            from settings.pharmacy_settings import get_pharmacy_mode
-            _pharmacy_on = bool(get_pharmacy_mode())
-        except Exception as _e:
-            print(f"[CompanyDefaults] get_pharmacy_mode failed: {_e}")
-            _pharmacy_on = False
-        pharmacy_btn.setVisible(_pharmacy_on)
+        self._pharmacy_btn.clicked.connect(self._open_pharmacy_masters_dialog)
+        self._pharmacy_btn.setVisible(False)
 
         # ── SAVE CHANGES BUTTON ───────────────────────────────────────────────
         save_btn = QPushButton("  Save and Close  ")
@@ -421,13 +416,29 @@ class CompanyDefaultsPage(QWidget):
         """)
         self.restaurant_btn.clicked.connect(self._open_restaurant_settings)
 
+        # ── HELP / WEBSITE BUTTON ─────────────────────────────────────────────
+        help_btn = QPushButton("Help")
+        help_btn.setIcon(qta.icon("fa5s.question-circle", color="white"))
+        help_btn.setFixedHeight(38)
+        help_btn.setCursor(Qt.PointingHandCursor)
+        help_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{NAVY_2}; color:{WHITE}; border:1px solid {MID};
+                border-radius:6px; font-size:12px; font-weight:bold; padding:0 16px;
+            }}
+            QPushButton:hover   {{ background:{NAVY_3}; border:1px solid {WHITE}; }}
+            QPushButton:pressed {{ background:{NAVY}; }}
+        """)
+        help_btn.clicked.connect(self._open_help_url)
+
         hl.addWidget(title)
         hl.addStretch()
         hl.addWidget(self._status_lbl)
         hl.addWidget(self.restaurant_btn) # Added before fiscalization
         hl.addWidget(fiscal_btn)
         hl.addWidget(external_btn)  # External site button after fiscalization
-        hl.addWidget(pharmacy_btn)  # Pharmacy masters (hidden unless pharmacy mode)
+        hl.addWidget(help_btn)      # Help / Website link
+        hl.addWidget(self._pharmacy_btn)  # Pharmacy masters (hidden unless pharmacy mode)
         hl.addWidget(save_btn)
         hl.addSpacing(8)
         hl.addWidget(close_page_btn)  # Close button - closes dialog, NOT the app
@@ -657,7 +668,29 @@ class CompanyDefaultsPage(QWidget):
         _section_header(fcl, "Receipt Header", top_margin=0)
         self._receipt_header = _inp()
         self._receipt_header.setPlaceholderText("*** SALES RECEIPT ***")
-        fcl.addLayout(_field_row("Header", self._receipt_header, lw=70))
+        fcl.addLayout(_field_row("Header", self._receipt_header, lw=110))
+
+        # A4 Document Font Size
+        _section_header(fcl, "A4 Document Typography", top_margin=8)
+        self._a4_font_size = QComboBox()
+        self._a4_font_size.setFixedHeight(FIELD_H)
+        self._a4_font_size.addItem("7.5 pt (Ultra Compact)", "7.5")
+        self._a4_font_size.addItem("8.0 pt (Compact)", "8.0")
+        self._a4_font_size.addItem("8.5 pt (Standard)", "8.5")
+        self._a4_font_size.addItem("9.0 pt (Medium)", "9.0")
+        self._a4_font_size.addItem("9.5 pt (Large)", "9.5")
+        self._a4_font_size.addItem("10.0 pt (Extra Large)", "10.0")
+        self._a4_font_size.addItem("11.0 pt (Huge)", "11.0")
+        self._a4_font_size.addItem("12.0 pt (Maximum)", "12.0")
+        self._a4_font_size.setStyleSheet(f"""
+            QComboBox {{
+                background:{WHITE}; color:{DARK_TEXT};
+                border:1px solid {BORDER}; border-radius:6px;
+                padding:0 12px; font-size:13px; font-weight:bold;
+            }}
+            QComboBox:focus {{ border:2px solid {ACCENT}; }}
+        """)
+        fcl.addLayout(_field_row("A4 Print Font Size", self._a4_font_size, lw=110))
 
         _section_header(fcl, "Footer Text")
         self._footer = QTextEdit()
@@ -759,23 +792,91 @@ class CompanyDefaultsPage(QWidget):
         tcl = QVBoxLayout(tc)
         tcl.setContentsMargins(28, 20, 28, 24)
         tcl.setSpacing(ROW_SP)
-        _section_header(tcl, "Terms & Conditions  (printed on Sales Orders)", top_margin=0)
+        _section_header(tcl, "Terms & Conditions", top_margin=0)
+        
+        self._terms_tabs = QTabWidget()
+        self._terms_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+                background: {WHITE};
+                top: -1px;
+            }}
+            QTabBar::tab {{
+                background: {LIGHT};
+                color: {MUTED};
+                font-size: 11px;
+                font-weight: bold;
+                padding: 6px 12px;
+                border: 1px solid {BORDER};
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 2px;
+            }}
+            QTabBar::tab:selected {{
+                background: {WHITE};
+                color: {NAVY};
+                border-bottom: 2px solid {ACCENT};
+            }}
+            QTabBar::tab:hover:!selected {{
+                background: {OFF_WHITE};
+                color: {DARK_TEXT};
+            }}
+        """)
+
         self._terms = QTextEdit()
-        self._terms.setMinimumHeight(160)
+        self._terms.setMinimumHeight(140)
         self._terms.setPlaceholderText(
-            "Enter your sales order terms & conditions here.\n"
+            "Enter default terms & conditions for Sales Invoices / Orders.\n"
             "Each line will be printed as a separate paragraph."
         )
         self._terms.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._terms.setStyleSheet(f"""
             QTextEdit {{
                 background:{WHITE}; color:{DARK_TEXT};
-                border:1px solid {BORDER}; border-radius:6px;
-                padding:10px 12px; font-size:13px;
+                border:none; border-radius:6px;
+                padding:10px 12px; font-size:12px;
             }}
-            QTextEdit:focus {{ border:2px solid {ACCENT}; }}
+            QTextEdit:focus {{ border:1px solid {ACCENT}; }}
         """)
-        tcl.addWidget(self._terms, 1)
+
+        self._credit_note_terms = QTextEdit()
+        self._credit_note_terms.setMinimumHeight(140)
+        self._credit_note_terms.setPlaceholderText(
+            "Enter return & refund terms for Credit Notes.\n"
+            "If blank, standard return policy terms are printed."
+        )
+        self._credit_note_terms.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._credit_note_terms.setStyleSheet(f"""
+            QTextEdit {{
+                background:{WHITE}; color:{DARK_TEXT};
+                border:none; border-radius:6px;
+                padding:10px 12px; font-size:12px;
+            }}
+            QTextEdit:focus {{ border:1px solid {ACCENT}; }}
+        """)
+
+        self._quotation_terms = QTextEdit()
+        self._quotation_terms.setMinimumHeight(140)
+        self._quotation_terms.setPlaceholderText(
+            "Enter validity & pricing terms for Quotations.\n"
+            "If blank, standard quotation terms are printed."
+        )
+        self._quotation_terms.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._quotation_terms.setStyleSheet(f"""
+            QTextEdit {{
+                background:{WHITE}; color:{DARK_TEXT};
+                border:none; border-radius:6px;
+                padding:10px 12px; font-size:12px;
+            }}
+            QTextEdit:focus {{ border:1px solid {ACCENT}; }}
+        """)
+
+        self._terms_tabs.addTab(self._terms, "Invoices")
+        self._terms_tabs.addTab(self._credit_note_terms, "Credit Notes")
+        self._terms_tabs.addTab(self._quotation_terms, "Quotations")
+        tcl.addWidget(self._terms_tabs, 1)
 
         row2.addWidget(fc,  1)
         row2.addWidget(bc,  1)
@@ -883,6 +984,7 @@ class CompanyDefaultsPage(QWidget):
         from PySide6.QtWidgets import QComboBox
         self._fiscal_provider = QComboBox()
         self._fiscal_provider.addItem("Havano Zimra", "havano_zimra")
+        self._fiscal_provider.addItem("Havano Zimra (Offline Device)", "havano_zimra_offline")
         self._fiscal_provider.addItem("Axis Virtual API", "axis")
         self._fiscal_provider.addItem("Revmax Hardware Integration", "revmax")
         self._fiscal_provider.setCursor(Qt.PointingHandCursor)
@@ -953,6 +1055,7 @@ class CompanyDefaultsPage(QWidget):
             provider = self._fiscal_provider.currentData()
             is_axis = (provider == "axis")
             is_zimra = (provider in ("frappe", "havano_zimra"))
+            is_offline_zimra = (provider == "havano_zimra_offline")
             
             self._frappe_lbl_key.setVisible(is_zimra)
             self._fiscal_api_key.setVisible(is_zimra)
@@ -970,8 +1073,14 @@ class CompanyDefaultsPage(QWidget):
             self._fiscal_axis_password.setVisible(is_axis)
             
             curr_url = self._fiscal_base_url.text().strip()
-            if not curr_url or curr_url == "https://erpfiscal.havano.online":
-                self._fiscal_base_url.setText("https://erpfiscal.havano.online")
+            if is_offline_zimra:
+                self._fiscal_base_url.setPlaceholderText("havanoconfig.ini (Optional path override)")
+                if curr_url == "https://erpfiscal.havano.online":
+                    self._fiscal_base_url.setText("")
+            else:
+                self._fiscal_base_url.setPlaceholderText("https://erpfiscal.havano.online")
+                if not curr_url:
+                    self._fiscal_base_url.setText("https://erpfiscal.havano.online")
                 
             if is_zimra:
                 if not self._fiscal_api_key.text().strip():
@@ -1104,7 +1213,9 @@ class CompanyDefaultsPage(QWidget):
         axis_password = self._fiscal_axis_password.text().strip()
         
         # Validate
-        if not base_url:
+        if provider == "havano_zimra_offline":
+            pass  # Offline signing does not require external base URL or cloud credentials
+        elif not base_url:
             QMessageBox.warning(self, "Missing Field", "Please enter the Base URL")
             return
             
@@ -1257,8 +1368,16 @@ class CompanyDefaultsPage(QWidget):
             inp.setText(val)
 
         self._receipt_header.setText(data.get("receipt_header", ""))
+        font_val = str(data.get("a4_font_size", "8.5") or "8.5").strip()
+        f_idx = self._a4_font_size.findData(font_val)
+        if f_idx >= 0:
+            self._a4_font_size.setCurrentIndex(f_idx)
+        else:
+            self._a4_font_size.setCurrentIndex(2)
         self._footer.setPlainText(data.get("footer_text", ""))
         self._terms.setPlainText(data.get("terms_and_conditions", ""))
+        self._credit_note_terms.setPlainText(data.get("credit_note_terms", ""))
+        self._quotation_terms.setPlainText(data.get("quotation_terms", ""))
 
         bank_text = data.get("banking_details", "")
         self._banking.setPlainText(bank_text)
@@ -1297,9 +1416,10 @@ class CompanyDefaultsPage(QWidget):
             str(data.get("allow_credit_sales", "0")).strip() == "1"
         )
 
-        self._pharmacy_mode_chk.setChecked(
-            str(data.get("pharmacy_mode", "0")).strip() == "1"
-        )
+        is_pharmacy = str(data.get("pharmacy_mode", "0")).strip() == "1"
+        self._pharmacy_mode_chk.setChecked(is_pharmacy)
+        if hasattr(self, "_pharmacy_btn") and self._pharmacy_btn:
+            self._pharmacy_btn.setVisible(is_pharmacy)
 
 
         self._butchery_mode_chk.setChecked(
@@ -1379,6 +1499,8 @@ class CompanyDefaultsPage(QWidget):
         data["receipt_header"]       = self._receipt_header.text().strip()
         data["footer_text"]          = self._footer.toPlainText().strip()
         data["terms_and_conditions"] = self._terms.toPlainText().strip()
+        data["credit_note_terms"]    = self._credit_note_terms.toPlainText().strip()
+        data["quotation_terms"]      = self._quotation_terms.toPlainText().strip()
 
         b_name = self._bank_name.text().strip()
         b_acc_name = self._bank_acc_name.text().strip()
@@ -1396,6 +1518,7 @@ class CompanyDefaultsPage(QWidget):
             banking_parts.append(extra_notes)
 
         data["banking_details"]      = "\n".join(banking_parts).strip()
+        data["a4_font_size"]          = str(self._a4_font_size.currentData() or "8.5")
         data["invoice_prefix"]       = self._prefix_inp.text().strip().upper()
         data["invoice_start_number"] = str(self._start_num.value())
         data["allow_credit_sales"]   = "1" if self._allow_credit_chk.isChecked() else "0"
@@ -1446,3 +1569,12 @@ class CompanyDefaultsPage(QWidget):
             dlg.exec()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open restaurant settings:\n{e}")
+
+    def _open_help_url(self):
+        """Open Havano ERP website / help page"""
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl("https://www.havanoerp.com/"))
+        except Exception as e:
+            print(f"[CompanyDefaultsPage] Failed to open help URL: {e}")

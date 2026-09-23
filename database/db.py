@@ -9,7 +9,7 @@ from pathlib import Path
 # CONFIG  —  edit these two lines only
 # =============================================================================
 SERVER = r"."
-DATABASE = "pos_db"
+DATABASE = "havano_posop07978808"
 # =============================================================================
 
 def _best_driver() -> str:
@@ -38,17 +38,37 @@ def get_app_data_dir() -> Path:
     # Dev mode — go two levels up from database/db.py to reach the project root
     return Path(__file__).resolve().parent.parent / "app_data"
 
+_cached_settings = None
+_cached_settings_mtime = 0.0
+
 def _load_settings() -> dict:
+    defaults = {
+        "auth_mode": "windows",
+        "server": ".\\SQLEXPRESS",
+        "database": "havano_posop07978808",
+        "username": "",
+        "password": "",
+        "system_mode": "saas"
+    }
     path = get_app_data_dir() / "sql_settings.json"
     if not path.exists():
-        return {
-            "auth_mode": "windows",
-            "server": ".",
-            "database": "pos_db",
-            "username": "",
-            "password": ""
-        }
-    return json.loads(path.read_text(encoding="utf-8"))
+        return defaults
+    try:
+        mtime = path.stat().st_mtime
+        global _cached_settings, _cached_settings_mtime
+        if _cached_settings is not None and mtime == _cached_settings_mtime:
+            return _cached_settings
+        data = json.loads(path.read_text(encoding="utf-8")) or {}
+        merged = {**defaults, **data}
+        _cached_settings = merged
+        _cached_settings_mtime = mtime
+        return merged
+    except Exception:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+            return {**defaults, **data}
+        except Exception:
+            return defaults
 
 def is_connection_valid() -> bool:
     """Returns True only if settings file exists AND connection works."""
@@ -59,11 +79,13 @@ def is_connection_valid() -> bool:
         return False
     try:
         cfg = _load_settings()
+        server_val = cfg.get("server") or ".\\SQLEXPRESS"
+        db_val = cfg.get("database") or "havano_posop07978808"
         if cfg.get("auth_mode") == "windows":
             conn_str = (
                 f"DRIVER={{{DRIVER}}};"
-                f"SERVER={cfg['server']};"
-                f"DATABASE={cfg['database']};"
+                f"SERVER={server_val};"
+                f"DATABASE={db_val};"
                 "Trusted_Connection=yes;"
                 "TrustServerCertificate=yes;"
                 "Encrypt=no;"
@@ -71,10 +93,10 @@ def is_connection_valid() -> bool:
         else:
             conn_str = (
                 f"DRIVER={{{DRIVER}}};"
-                f"SERVER={cfg['server']};"
-                f"DATABASE={cfg['database']};"
-                f"UID={cfg['username']};"
-                f"PWD={cfg['password']};"
+                f"SERVER={server_val};"
+                f"DATABASE={db_val};"
+                f"UID={cfg.get('username', '')};"
+                f"PWD={cfg.get('password', '')};"
                 "TrustServerCertificate=yes;"
                 "Encrypt=no;"
             )
@@ -87,6 +109,7 @@ def is_connection_valid() -> bool:
         return False
 
 import threading
+import time
 
 class PooledConnection:
     def __init__(self, conn):
@@ -107,27 +130,35 @@ class PooledConnection:
 _thread_local = threading.local()
 
 def get_connection() -> pyodbc.Connection:
-    cfg = _load_settings()
+    now = time.time()
     
     # Return cached thread-local connection if valid
     if hasattr(_thread_local, "conn"):
+        last_check = getattr(_thread_local, "last_check", 0.0)
+        if now - last_check < 60.0:
+            return PooledConnection(_thread_local.conn)
         try:
-            # properly fetch to clear the result set, and don't leak the cursor
+            # Re-verify idle connection only once every 60s
             c = _thread_local.conn.cursor()
             c.execute("SELECT 1")
             c.fetchone()
             c.close()
+            _thread_local.last_check = now
             return PooledConnection(_thread_local.conn)
         except Exception:
             try: _thread_local.conn.close()
             except: pass
             delattr(_thread_local, "conn")
 
+    cfg = _load_settings()
+    server_val = cfg.get("server") or ".\\SQLEXPRESS"
+    db_val = cfg.get("database") or "havano_posop07978808"
+
     if cfg.get("auth_mode") == "windows":
         conn_str = (
             f"DRIVER={{{DRIVER}}};"
-            f"SERVER={cfg['server']};"
-            f"DATABASE={cfg['database']};"
+            f"SERVER={server_val};"
+            f"DATABASE={db_val};"
             "Trusted_Connection=yes;"
             "TrustServerCertificate=yes;"
             "Encrypt=no;"
@@ -135,16 +166,17 @@ def get_connection() -> pyodbc.Connection:
     else:
         conn_str = (
             f"DRIVER={{{DRIVER}}};"
-            f"SERVER={cfg['server']};"
-            f"DATABASE={cfg['database']};"
-            f"UID={cfg['username']};"
-            f"PWD={cfg['password']};"
+            f"SERVER={server_val};"
+            f"DATABASE={db_val};"
+            f"UID={cfg.get('username', '')};"
+            f"PWD={cfg.get('password', '')};"
             "TrustServerCertificate=yes;"
             "Encrypt=no;"
         )
     
     conn = pyodbc.connect(conn_str)
     _thread_local.conn = conn
+    _thread_local.last_check = now
     return PooledConnection(conn)
 
 def get_api_url() -> str:
@@ -152,11 +184,21 @@ def get_api_url() -> str:
     cfg = _load_settings()
     return str(cfg.get("api_url") or "").strip().rstrip("/")
 
-def fetchall_dicts(cursor) -> list:
+def fetchall_dicts(cursor, sql: str = None, params: tuple = ()) -> list:
+    if sql:
+        cursor.execute(sql, params)
+    if not getattr(cursor, "description", None):
+        return []
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
-def fetchone_dict(cursor) -> dict | None:
+fetchall_dict = fetchall_dicts
+
+def fetchone_dict(cursor, sql: str = None, params: tuple = ()) -> dict | None:
+    if sql:
+        cursor.execute(sql, params)
+    if not getattr(cursor, "description", None):
+        return None
     row = cursor.fetchone()
     if row is None:
         return None

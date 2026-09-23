@@ -391,6 +391,9 @@ class AdvanceSettingsDialog(QDialog):
         self._cb_payments = _ToggleSwitch("Enable Payments")
         self._cb_payments.setChecked(getattr(self._settings, "enablePayments", False))
 
+        self._cb_expenses = _ToggleSwitch("Enable Expenses")
+        self._cb_expenses.setChecked(getattr(self._settings, "enableExpenses", False))
+
         self._cb_erp = _ToggleSwitch("Show ERP Modules in Dashboard")
         self._cb_erp.setChecked(getattr(self._settings, "enableERPModules", False))
 
@@ -406,6 +409,7 @@ class AdvanceSettingsDialog(QDialog):
         gl.addWidget(self._cb_laybyes)
         gl.addWidget(self._cb_quotes)
         gl.addWidget(self._cb_payments)
+        gl.addWidget(self._cb_expenses)
         gl.addWidget(self._cb_erp)
         gl.addWidget(self._cb_sales_report)
         gl.addWidget(self._cb_sales_list)
@@ -433,7 +437,7 @@ class AdvanceSettingsDialog(QDialog):
         self._cb_app_inventory = _ToggleSwitch("Show Inventory Menu")
         self._cb_app_inventory.setChecked(getattr(self._settings, "showAppInventory", False))
 
-        self._cb_app_expenses = _ToggleSwitch("Show Expenses Menu")
+        self._cb_app_expenses = _ToggleSwitch("Show Expenses on Front Screen")
         self._cb_app_expenses.setChecked(getattr(self._settings, "showAppExpenses", False))
 
         agl.addWidget(self._cb_app_sales)
@@ -615,6 +619,7 @@ class AdvanceSettingsDialog(QDialog):
         self._settings.enableLaybyes      = self._cb_laybyes.isChecked()
         self._settings.enableQuotes       = self._cb_quotes.isChecked()
         self._settings.enablePayments     = self._cb_payments.isChecked()
+        self._settings.enableExpenses     = self._cb_expenses.isChecked()
         self._settings.enableERPModules   = self._cb_erp.isChecked()
         self._settings.showSalesReport    = self._cb_sales_report.isChecked()
         self._settings.showSalesList      = self._cb_sales_list.isChecked()
@@ -639,20 +644,12 @@ class AdvanceSettingsDialog(QDialog):
 
         self._settings.systemModeOverride = new_mode
 
-        if new_mode in ("frappe", "odoo", "saas"):
-            self._settings.showAppSales       = False
-            self._settings.showAppSuppliers   = False
-            self._settings.showAppMaintenance = False
-            self._settings.showAppFinance     = False
-            self._settings.showAppInventory   = False
-            self._settings.showAppExpenses    = False
-        else:
-            self._settings.showAppSales       = self._cb_app_sales.isChecked()
-            self._settings.showAppSuppliers   = self._cb_app_suppliers.isChecked()
-            self._settings.showAppMaintenance = self._cb_app_maint.isChecked()
-            self._settings.showAppFinance     = self._cb_app_finance.isChecked()
-            self._settings.showAppInventory   = self._cb_app_inventory.isChecked()
-            self._settings.showAppExpenses    = self._cb_app_expenses.isChecked()
+        self._settings.showAppSales       = self._cb_app_sales.isChecked()
+        self._settings.showAppSuppliers   = self._cb_app_suppliers.isChecked()
+        self._settings.showAppMaintenance = self._cb_app_maint.isChecked()
+        self._settings.showAppFinance     = self._cb_app_finance.isChecked()
+        self._settings.showAppInventory   = self._cb_app_inventory.isChecked()
+        self._settings.showAppExpenses    = self._cb_app_expenses.isChecked()
 
         try:
             # Use a path relative to THIS file so CWD never matters
@@ -686,6 +683,28 @@ class AdvanceSettingsDialog(QDialog):
                 self._settings.kitchenHeaderSize, self._settings.kitchenBodySize,
                 new_mode,
             )
+
+            # Refresh parent nav bar toggles immediately
+            try:
+                p = getattr(self, "parent_window", None) or self.parent()
+                while p:
+                    if hasattr(p, "expenses_btn"):
+                        p.expenses_btn.setVisible(bool(self._settings.enableExpenses))
+                    if hasattr(p, "payments_btn"):
+                        p.payments_btn.setVisible(bool(self._settings.enablePayments))
+                    if hasattr(p, "laybye_btn"):
+                        p.laybye_btn.setVisible(bool(self._settings.enableLaybyes))
+                    if hasattr(p, "_refresh_nav_toggles"):
+                        p._refresh_nav_toggles()
+                    if hasattr(p, "pos_view") and hasattr(p.pos_view, "expenses_btn"):
+                        p.pos_view.expenses_btn.setVisible(bool(self._settings.enableExpenses))
+                    if hasattr(p, "_dashboard") and hasattr(p._dashboard, "_refresh_app_grid"):
+                        p._dashboard._refresh_app_grid()
+                    if hasattr(p, "_refresh_app_grid"):
+                        p._refresh_app_grid()
+                    p = getattr(p, "parent", lambda: None)() if callable(getattr(p, "parent", None)) else None
+            except Exception:
+                pass
 
             if mode_changed:
                 from PySide6.QtWidgets import QMessageBox

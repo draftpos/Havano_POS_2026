@@ -2,7 +2,17 @@
 # models/company_defaults.py
 # =============================================================================
 
+import time
 from database.db import get_connection, fetchone_dict
+
+_columns_checked = False
+_defaults_cache = None
+_defaults_cache_time = 0.0
+
+def invalidate_defaults_cache():
+    global _defaults_cache, _defaults_cache_time
+    _defaults_cache = None
+    _defaults_cache_time = 0.0
 
 _BLANK = {
     # Editable - receipt header
@@ -16,8 +26,12 @@ _BLANK = {
     "allow_credit_sales": "0",
     # Editable - terms & conditions (printed on sales orders)
     "terms_and_conditions": "",
+    "credit_note_terms":    "",
+    "quotation_terms":      "",
     # Editable - banking details (printed on A4 Tax Invoices)
     "banking_details": "",
+    # Editable - A4 Printout Typography (font size in pt, e.g. "8.5")
+    "a4_font_size": "8.5",
     # Editable - ZIMRA
     "zimra_serial_no": "", "zimra_device_id": "",
     "zimra_api_key": "", "zimra_api_url": "",
@@ -36,6 +50,7 @@ _BLANK = {
     "server_api_host": "", "server_pos_account": "", "server_taxes_and_charges": "",
     "server_walk_in_customer": "", "default_price_list_id": "",
     "server_terminal_id": "", "server_shop_id": "", "server_terminal_name": "",
+    "server_store_name": "",
     "api_key": "", "api_secret": "", "odoo_token": "", "system_mode": "frappe",
     "work_offline": "0", "server_database": "",
     "pharmacy_mode": "0", "butchery_mode": "0",
@@ -47,6 +62,9 @@ _BLANK = {
 
 
 def _ensure_columns(cur):
+    global _columns_checked
+    if _columns_checked:
+        return
     try:
         cur.execute("""
             IF NOT EXISTS (
@@ -67,6 +85,8 @@ def _ensure_columns(cur):
                 footer_text                    NVARCHAR(MAX) NULL,
                 receipt_header                 NVARCHAR(255) NULL,
                 terms_and_conditions           NVARCHAR(MAX) NULL,
+                credit_note_terms              NVARCHAR(MAX) NULL,
+                quotation_terms                NVARCHAR(MAX) NULL,
                 banking_details                NVARCHAR(MAX) NULL,
                 zimra_serial_no                NVARCHAR(100) NULL,
                 zimra_device_id                NVARCHAR(100) NULL,
@@ -113,28 +133,39 @@ def _ensure_columns(cur):
                 updated_at                     DATETIME NULL
             )
         """)
-        cur.execute("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'company_defaults' AND COLUMN_NAME = 'bound_device_id'")
-        if cur.fetchone()[0] == 0:
-            cur.execute("ALTER TABLE company_defaults ADD bound_device_id VARCHAR(255) NULL")
-        cur.execute("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'company_defaults' AND COLUMN_NAME = 'subscription_days_left'")
-        if cur.fetchone()[0] == 0:
-            cur.execute("ALTER TABLE company_defaults ADD subscription_days_left VARCHAR(255) NULL")
-        cur.execute("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'company_defaults' AND COLUMN_NAME = 'subscription_expiry'")
-        if cur.fetchone()[0] == 0:
-            cur.execute("ALTER TABLE company_defaults ADD subscription_expiry VARCHAR(255) NULL")
-        cur.execute("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'company_defaults' AND COLUMN_NAME = 'banking_details'")
-        if cur.fetchone()[0] == 0:
-            cur.execute("ALTER TABLE company_defaults ADD banking_details NVARCHAR(MAX) NULL")
+        cur.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'company_defaults'")
+        existing_cols = {r[0].lower() for r in cur.fetchall()}
+        needed = [
+            ("bound_device_id", "VARCHAR(255) NULL"),
+            ("subscription_days_left", "VARCHAR(255) NULL"),
+            ("subscription_expiry", "VARCHAR(255) NULL"),
+            ("banking_details", "NVARCHAR(MAX) NULL"),
+            ("credit_note_terms", "NVARCHAR(MAX) NULL"),
+            ("quotation_terms", "NVARCHAR(MAX) NULL"),
+            ("a4_font_size", "NVARCHAR(50) NULL"),
+            ("server_store_name", "NVARCHAR(255) NULL"),
+        ]
+        for col_name, col_type in needed:
+            if col_name.lower() not in existing_cols:
+                cur.execute(f"ALTER TABLE company_defaults ADD {col_name} {col_type}")
+        _columns_checked = True
     except Exception as e:
         print(f"[CompanyDefaults] _ensure_columns error: {e}")
 
 
-def get_defaults() -> dict:
+_decrypted_secret_cache = {}
+
+def get_defaults(force_reload: bool = False) -> dict:
+    global _defaults_cache, _defaults_cache_time
+    now = time.time()
+    if not force_reload and _defaults_cache is not None and (now - _defaults_cache_time < 60.0):
+        return dict(_defaults_cache)
+
     conn = get_connection()
     cur  = conn.cursor()
     try:
         _ensure_columns(cur)
-        cur.execute("SELECT TOP 1 * FROM company_defaults ORDER BY id")
+        cur.execute("SELECT TOP 1 * FROM company_defaults WITH (NOLOCK) ORDER BY id")
         row = fetchone_dict(cur)
     except Exception:
         row = None
@@ -154,12 +185,18 @@ def get_defaults() -> dict:
                 result[key] = str(val).strip()
     
     # Decrypt api_secret if encrypted
-    if result.get("api_secret"):
-        try:
-            from utils.crypto import decrypt_secret
-            result["api_secret"] = decrypt_secret(result["api_secret"])
-        except Exception:
-            pass
+    raw_secret = result.get("api_secret", "")
+    if raw_secret and raw_secret.startswith("enc:"):
+        if raw_secret in _decrypted_secret_cache:
+            result["api_secret"] = _decrypted_secret_cache[raw_secret]
+        else:
+            try:
+                from utils.crypto import decrypt_secret
+                decrypted = decrypt_secret(raw_secret)
+                _decrypted_secret_cache[raw_secret] = decrypted
+                result["api_secret"] = decrypted
+            except Exception:
+                pass
 
     # Load logo_path from JSON helper
     try:
@@ -173,10 +210,13 @@ def get_defaults() -> dict:
     except Exception as e:
         print(f"[CompanyDefaults] Error loading logo_path from JSON: {e}")
 
+    _defaults_cache = dict(result)
+    _defaults_cache_time = now
     return result
 
 
 def save_defaults(data: dict) -> None:
+    invalidate_defaults_cache()
     conn = get_connection()
     cur  = conn.cursor()
     try:
@@ -200,7 +240,10 @@ def save_defaults(data: dict) -> None:
                 footer_text           = ?,
                 receipt_header        = ?,
                 terms_and_conditions  = ?,
+                credit_note_terms     = ?,
+                quotation_terms       = ?,
                 banking_details       = ?,
+                a4_font_size          = ?,
                 zimra_serial_no       = ?,
                 zimra_device_id       = ?,
                 zimra_api_key         = ?,
@@ -258,7 +301,10 @@ def save_defaults(data: dict) -> None:
             str(data.get("footer_text") or ""),
             str(data.get("receipt_header") or ""),
             str(data.get("terms_and_conditions") or ""),
+            str(data.get("credit_note_terms") or ""),
+            str(data.get("quotation_terms") or ""),
             str(data.get("banking_details") or ""),
+            str(data.get("a4_font_size") or "8.5"),
             str(data.get("zimra_serial_no") or ""),
             str(data.get("zimra_device_id") or ""),
             str(data.get("zimra_api_key") or ""),
@@ -313,6 +359,7 @@ def save_defaults(data: dict) -> None:
         except Exception as e:
             print(f"[CompanyDefaults] Error saving logo_path to JSON: {e}")
     finally:
+        invalidate_defaults_cache()
         conn.close()
 
 
@@ -332,3 +379,34 @@ def get_currency_symbol() -> str:
         return sym or "$"
     except Exception:
         return "$"
+
+
+def wipe_company_defaults(system_mode: str = None) -> None:
+    """
+    Clears all rows from company_defaults table and inserts a clean default record.
+    If system_mode is provided, sets system_mode on the clean record.
+    Invalidates in-memory cache and session credentials.
+    """
+    invalidate_defaults_cache()
+    try:
+        from services.credentials import clear_session_credentials
+        clear_session_credentials()
+    except Exception:
+        pass
+
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        _ensure_columns(cur)
+        cur.execute("DELETE FROM company_defaults")
+        if system_mode:
+            cur.execute("INSERT INTO company_defaults (system_mode) VALUES (?)", (str(system_mode).strip().lower(),))
+        else:
+            cur.execute("INSERT INTO company_defaults DEFAULT VALUES")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[CompanyDefaults] wipe_company_defaults error: {e}")
+    finally:
+        conn.close()
+        invalidate_defaults_cache()

@@ -421,21 +421,26 @@ def _build_cn_payload_local_currency(
     zwd_per_usd = _resolve_zwd_per_usd(
         cn, api_key, api_secret, host, local_currency, posting_date
     )
-    frappe_conversion_rate = round(1.0 / zwd_per_usd, 8)
+    from services.credentials import get_system_mode
+    is_saas = get_system_mode().lower() == "saas"
+
+    if is_saas:
+        frappe_conversion_rate = round(float(zwd_per_usd), 8)
+    else:
+        frappe_conversion_rate = round(1.0 / zwd_per_usd, 8)
 
     log.debug(
         "[cn-sync] CN %s  %s_per_usd=%.6f  frappe_conversion_rate=%.8f",
         cn.get("cn_number"), local_currency, zwd_per_usd, frappe_conversion_rate,
     )
 
-    from services.credentials import get_system_mode
-    is_saas = get_system_mode().lower() == "saas"
-
     frappe_items = []
     for item in items:
         item_code = (item.get("part_no") or "").strip()
         qty       = float(item.get("qty", 0))
-        rate      = float(item.get("price") or 0)   # already in local currency
+        rate      = float(item.get("price") or 0)
+        if is_saas and zwd_per_usd > 0:
+            rate = round(rate / zwd_per_usd, 2)
         if not item_code or qty <= 0:
             continue
         row: dict = {

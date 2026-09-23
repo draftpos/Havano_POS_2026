@@ -7,10 +7,10 @@ DisableReadyMemo=yes
 ; Use exactly the same AppId as the original setup so Inno Setup knows this is an update!
 AppId={{2A6A3644-F949-4786-B029-7C38B1C618F2}}
 AppName=Havano POS
-AppVersion=2.0.8.37
+AppVersion=2.0.8.60
 DefaultDirName={pf}\Havano POS
 DefaultGroupName=Havano POS
-OutputBaseFilename=HavanoPOS_Update_Installer_v2.0.8.37
+OutputBaseFilename=HavanoPOS_Update_Installer_v2.0.8.60
 ; Disable warning that the directory already exists (since it's an update)
 DirExistsWarning=no
 ; Disable Inno Setup's built-in application closing prompt to make it completely silent

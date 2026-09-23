@@ -541,10 +541,9 @@ class _UserFormDialog(QDialog):
         self._p_quote    = ToggleSwitch("Allow quotation",      "Cashier can create and print quotations")
         self._p_reconcile = ToggleSwitch("Allow Shift Reconcile", "Permission to close whole shift and modify reconciliations")
         self._p_view_expected = ToggleSwitch("View Expected Cash", "Can see the expected amount when closing shift")
-        self._p_pharmacist_pay = ToggleSwitch("Allow Pharmacist Pay", "Pharmacist can process payment for loaded orders")
+        self._p_pharmacist_pay = ToggleSwitch("Pharmacist Dispense & Pay", "Pharmacist can both dispense (quote) and tender payments")
         self._p_backoffice = ToggleSwitch("Allow Backoffice Access", "User can access the management dashboard")
         self._p_pos = ToggleSwitch("Allow POS Access", "User can access the POS interface")
-        self._p_pharmacist_pay.setVisible(False)
 
         r, c = 0, 0
         for toggle in [self._p_discount, self._p_receipt, self._p_cn,

@@ -208,7 +208,11 @@ def _parse_online_success(data: dict, username: str) -> dict:
     
     raw_username = user_data.get("username", username)
     raw_company = user_data.get("company", {}).get("name", "")
-    raw_warehouse = user_data.get("warehouse", "")
+    shops_list = user_data.get("shops") or data.get("shops") or []
+    if isinstance(shops_list, list) and len(shops_list) > 0:
+        raw_warehouse = ", ".join([str(s.get("name") or s.get("shop_name") or "").strip() for s in shops_list if (s.get("name") or s.get("shop_name"))])
+    else:
+        raw_warehouse = user_data.get("warehouse", "")
     
     user = {
         "id":           None,

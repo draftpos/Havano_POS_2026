@@ -1867,6 +1867,39 @@ class PaymentDialog(QDialog):
         hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         hl.addWidget(title)
+        if getattr(self, "dining_option", ""):
+            opt = self.dining_option.upper()
+            is_ta = "take" in opt.lower()
+            badge_bg = "#f59e0b" if is_ta else "#10b981"
+            self.dining_badge_btn = QPushButton(f" {opt} ▾ ")
+            self.dining_badge_btn.setCursor(Qt.PointingHandCursor)
+            self.dining_badge_btn.setToolTip("Click to toggle TAKE AWAY / SIT IN")
+            self.dining_badge_btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: white; font-size: 11px; font-weight: bold; background: {badge_bg};
+                    border-radius: 4px; padding: 3px 8px; border: none;
+                }}
+                QPushButton:hover {{
+                    opacity: 0.9;
+                }}
+            """)
+            def _toggle_dining():
+                if "take" in self.dining_option.lower():
+                    self.dining_option = "SIT IN"
+                else:
+                    self.dining_option = "TAKE AWAY"
+                _is_ta = "take" in self.dining_option.lower()
+                _bg = "#f59e0b" if _is_ta else "#10b981"
+                self.dining_badge_btn.setText(f" {self.dining_option.upper()} ▾ ")
+                self.dining_badge_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        color: white; font-size: 11px; font-weight: bold; background: {_bg};
+                        border-radius: 4px; padding: 3px 8px; border: none;
+                    }}
+                """)
+            self.dining_badge_btn.clicked.connect(_toggle_dining)
+            hl.addSpacing(8)
+            hl.addWidget(self.dining_badge_btn)
         hl.addSpacing(12)
         hl.addWidget(rate_pill)
         hl.addStretch()
@@ -2561,6 +2594,16 @@ class PaymentDialog(QDialog):
             self.accepted_company_name = self._company.get("name", "") if self._company else ""
             self.accepted_is_credit = on_account_amount > 0.005
             
+            try:
+                from services.bugsink_service import add_breadcrumb
+                add_breadcrumb(
+                    category="payment",
+                    message=f"PaymentDialog._save started: method={accepted_meth}, total={self.total}, items={len(self.items)}",
+                    level="info"
+                )
+            except Exception:
+                pass
+
             # [OK] CREATE THE SALE IN DATABASE
             from models.sale import create_sale
             from database.db import get_connection
@@ -2647,7 +2690,7 @@ class PaymentDialog(QDialog):
                 total_vat=self.total_vat,
                 discount_amount=self.discount_amount,
                 discount_percent=self.discount_percent,
-                receipt_type=f"Invoice - {self.dining_option}" if self.dining_option else "Invoice",
+                receipt_type=f"Order - {self.dining_option}" if self.dining_option else ("Order" if self._is_takeaway_sitin_enabled() else "Invoice"),
                 footer="",
                 change_amount=self.accepted_change,
                 is_on_account=self.accepted_is_credit,
@@ -2672,6 +2715,17 @@ class PaymentDialog(QDialog):
             self.accepted_sale_id = sale.get("id")
             self.accepted_sale = sale
             print(f"[PaymentDialog] Sale created with ID: {self.accepted_sale_id}")
+
+            try:
+                from services.bugsink_service import add_breadcrumb
+                add_breadcrumb(
+                    category="payment",
+                    message=f"PaymentDialog._save sale created: sale_id={self.accepted_sale_id}",
+                    level="info",
+                    data={"sale_id": self.accepted_sale_id}
+                )
+            except Exception:
+                pass
 
             # [OK] Create Payment Entries for Syncing FIRST before triggering upload
             if not self.accepted_is_credit:
@@ -2860,3 +2914,17 @@ class PaymentDialog(QDialog):
         # Override to prevent QDialog from auto-accepting on Enter/Escape 
         # bypassing the payment validation and save logic.
         pass
+
+    def _is_takeaway_sitin_enabled(self):
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key = 'takeaway_or_sitin'")
+            r = cur.fetchone()
+            conn.close()
+            if r and str(r[0]).strip() in ('1', 'true', 'True'):
+                return True
+        except Exception:
+            pass
+        return False

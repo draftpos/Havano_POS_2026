@@ -91,11 +91,20 @@ class BackupSettingsView(QWidget):
         vl.setSpacing(2)
         vl.setAlignment(Qt.AlignVCenter)
         title = QLabel("BACKUP  &  RESTORE")
-        title.setStyleSheet(f"color:{WHITE}; font-size:20px; font-weight:bold; letter-spacing:1px;")
-        sub = QLabel("Create, import and restore database backups  •  Saved in app_data/backups")
-        sub.setStyleSheet(f"color:{MUTED}; font-size:11px;")
+        title.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: 900; letter-spacing: 1px;")
+        try:
+            from services.backup_service import get_backup_dir as _gbd
+            _backup_path_hint = str(_gbd())
+        except Exception:
+            _backup_path_hint = "app_data/backups"
+        self._sub_lbl = QLabel(
+            f'<span style="color:#ffffff; font-size:12px; font-weight:500;">'
+            f'Create, import and restore database backups &nbsp;&bull;&nbsp; Stored in: </span>'
+            f'<span style="color:#38bdf8; font-size:12px; font-weight:bold;">{_backup_path_hint}</span>'
+        )
+        self._sub_lbl.setTextFormat(Qt.RichText)
         vl.addWidget(title)
-        vl.addWidget(sub)
+        vl.addWidget(self._sub_lbl)
         hl.addLayout(vl)
         hl.addStretch()
 
@@ -133,6 +142,10 @@ class BackupSettingsView(QWidget):
         self._upload_btn = _btn("  Upload Backup", ACCENT, ACCENT_H, "fa5s.upload")
         self._upload_btn.clicked.connect(self._on_upload)
         abl.addWidget(self._upload_btn)
+
+        self._restore_file_btn = _btn("  Restore from Other Folder / File", NAVY_2, NAVY, "fa5s.folder-open")
+        self._restore_file_btn.clicked.connect(self._on_restore_from_file)
+        abl.addWidget(self._restore_file_btn)
 
         abl.addStretch()
 
@@ -214,10 +227,22 @@ class BackupSettingsView(QWidget):
 
                 # Path
                 path_item = QTableWidgetItem(f"  {b['path']}")
-                path_item.setForeground(Qt.MUTED)
+                from PySide6.QtGui import QColor as _QColor
+                path_item.setForeground(_QColor(MUTED))
                 self._tbl.setItem(idx, 3, path_item)
 
-            self._count_lbl.setText(f"{len(backups)} backup(s) found in Application Data")
+            try:
+                from services.backup_service import get_backup_dir as _gbd
+                _active = str(_gbd())
+                _dirs = sorted(set([
+                    _active,
+                    r"C:\Users\Public\HavanoPOS_Backups",
+                    r"C:\ProgramData\HavanoPOS\Backups",
+                ]))
+                _dirs_str = "  |  ".join(_dirs)
+            except Exception:
+                _dirs_str = "app_data/backups"
+            self._count_lbl.setText(f"{len(backups)} backup(s) found  \u2022  Scanned: {_dirs_str}")
         except Exception as e:
             self._count_lbl.setText(f"Error loading backups: {e}")
 
@@ -241,6 +266,7 @@ class BackupSettingsView(QWidget):
         self._status_lbl.setText(msg)
         self._backup_btn.setEnabled(not busy)
         self._upload_btn.setEnabled(not busy)
+        self._restore_file_btn.setEnabled(not busy)
         self._restore_btn.setEnabled(not busy)
         self._delete_btn.setEnabled(not busy)
         QApplication.processEvents()
@@ -269,9 +295,10 @@ class BackupSettingsView(QWidget):
             return
         try:
             import shutil
-            from services.backup_service import BACKUP_DIR
-            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-            dest = BACKUP_DIR / Path(path).name
+            from services.backup_service import get_backup_dir as _gbd
+            cur_backup_dir = _gbd()
+            cur_backup_dir.mkdir(parents=True, exist_ok=True)
+            dest = cur_backup_dir / Path(path).name
             if dest.exists():
                 reply = QMessageBox.question(self, "Overwrite?",
                     f"A file named '{dest.name}' already exists.\nOverwrite?")
@@ -283,6 +310,32 @@ class BackupSettingsView(QWidget):
             self._reload()
         except Exception as e:
             QMessageBox.critical(self, "Import Failed", str(e))
+
+    def _on_restore_from_file(self):
+        """Allows selecting any .bak file directly from another folder/drive and restoring it."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Backup File to Restore", "",
+            "SQL Server Backup (*.bak);;All Files (*)")
+        if not path:
+            return
+
+        bak_file = Path(path)
+        reply = QMessageBox.warning(self, "Restore Database",
+            f"This will OVERWRITE the current database with:\n\n"
+            f"{bak_file.name}\n"
+            f"Location: {bak_file.parent}\n\n"
+            "A safety backup of the current state will be created first.\n\n"
+            "The application will restart after restoring.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        self._set_busy(True, "Restoring database …")
+        w = _RestoreWorker(str(bak_file), self)
+        w.finished.connect(self._on_restore_done)
+        self._workers.append(w)
+        w.start()
 
     def _on_restore(self):
         bak_path = self._selected_path()
@@ -312,7 +365,33 @@ class BackupSettingsView(QWidget):
                 "Database restored successfully.\n\n"
                 "The application will now restart for the changes to take effect.")
             
-            # Force quit immediately to prevent background threads from throwing pyodbc connection errors
+            # Release single instance lock before relaunching
+            try:
+                import main as _main_mod
+                if hasattr(_main_mod, "_lock_file") and _main_mod._lock_file:
+                    _main_mod._lock_file.unlock()
+            except Exception:
+                pass
+
+            # Relaunch the application process
+            try:
+                import sys, subprocess, os
+                exe = sys.executable
+                venv_path = os.environ.get("VIRTUAL_ENV")
+                if venv_path:
+                    venv_exe = os.path.join(venv_path, "Scripts", "python.exe") if os.name == "nt" else os.path.join(venv_path, "bin", "python")
+                    if os.path.exists(venv_exe):
+                        exe = venv_exe
+                elif hasattr(sys, "real_prefix") or (hasattr(sys, "base_prefix") and sys.prefix != sys.base_prefix):
+                    venv_exe = os.path.join(sys.prefix, "Scripts", "python.exe") if os.name == "nt" else os.path.join(sys.prefix, "bin", "python")
+                    if os.path.exists(venv_exe):
+                        exe = venv_exe
+
+                subprocess.Popen([exe] + sys.argv)
+            except Exception as e:
+                print(f"[Restore] Restart failed: {e}")
+
+            # Force quit old process immediately
             import os
             os._exit(0)
         else:

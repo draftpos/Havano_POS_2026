@@ -194,8 +194,8 @@ def pull_sales_orders_from_frappe() -> dict:
         log.warning("[SO pull] no credentials - skipping.")
         return result
 
-    if get_system_mode() == "odoo":
-        log.debug("[SO pull] Odoo mode - skipping Frappe Sales Order pull.")
+    if get_system_mode() != "frappe":
+        log.debug("[SO pull] System mode is '%s' (not 'frappe') - skipping Frappe Sales Order pull.", get_system_mode())
         return result
 
     host = _get_host()
@@ -211,6 +211,18 @@ def pull_sales_orders_from_frappe() -> dict:
         log.info("[SO pull] no Sales Orders returned.")
         return result
 
+    # Fetch docs over HTTP first — do NOT hold open database transactions during network calls
+    fetched_docs = []
+    for n in names:
+        doc = _fetch_order_doc(host, headers, n)
+        if not doc:
+            result["errors"] += 1
+            continue
+        fetched_docs.append((n, doc))
+
+    if not fetched_docs:
+        return result
+
     from database.db import get_connection
     from models.sales_order import ensure_tables
     ensure_tables()
@@ -218,11 +230,7 @@ def pull_sales_orders_from_frappe() -> dict:
     conn = get_connection()
     cur  = conn.cursor()
     try:
-        for n in names:
-            doc = _fetch_order_doc(host, headers, n)
-            if not doc:
-                result["errors"] += 1
-                continue
+        for n, doc in fetched_docs:
             try:
                 order_id = _upsert_order(cur, doc)
                 if order_id:

@@ -17,47 +17,102 @@ log = logging.getLogger("shift")
 # AUTO MIGRATION ON IMPORT
 # =============================================================================
 
+import threading
+
 _MIGRATED = False
+_MIGRATE_LOCK = threading.Lock()
 
 def _auto_migrate():
     """Ensure the currency column exists on shift_rows. Safe to call multiple times."""
     global _MIGRATED
     if _MIGRATED:
         return
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            IF NOT EXISTS (
-                SELECT 1 FROM sys.columns
-                WHERE object_id = OBJECT_ID('shift_rows') AND name = 'currency'
-            )
-            ALTER TABLE shift_rows ADD currency NVARCHAR(10) NOT NULL DEFAULT 'USD'
-        """)
-        cur.execute("""
-            IF NOT EXISTS (
-                SELECT 1 FROM sys.columns
-                WHERE object_id = OBJECT_ID('cashier_reconciliations') AND name = 'is_modified'
-            )
-            AND EXISTS (SELECT 1 FROM sys.tables WHERE name = 'cashier_reconciliations')
-            ALTER TABLE cashier_reconciliations ADD is_modified BIT NOT NULL DEFAULT 0
-        """)
-        cur.execute("""
-            IF NOT EXISTS (
-                SELECT 1 FROM sys.columns
-                WHERE object_id = OBJECT_ID('cashier_reconciliations') AND name = 'modify_reason'
-            )
-            AND EXISTS (SELECT 1 FROM sys.tables WHERE name = 'cashier_reconciliations')
-            ALTER TABLE cashier_reconciliations ADD modify_reason NVARCHAR(MAX) NULL DEFAULT ''
-        """)
-        conn.commit()
-        conn.close()
-        log.info("[shift] Auto-migration: checked shift_rows and cashier_reconciliations.")
-    except Exception as e:
-        log.warning(f"[shift] Auto-migration warning: {e}")
-    _MIGRATED = True
+    with _MIGRATE_LOCK:
+        if _MIGRATED:
+            return
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.columns
+                    WHERE object_id = OBJECT_ID('shift_rows') AND name = 'currency'
+                )
+                ALTER TABLE shift_rows ADD currency NVARCHAR(10) NOT NULL DEFAULT 'USD'
+            """)
+            cur.execute("""
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.columns
+                    WHERE object_id = OBJECT_ID('cashier_reconciliations') AND name = 'is_modified'
+                )
+                AND EXISTS (SELECT 1 FROM sys.tables WHERE name = 'cashier_reconciliations')
+                ALTER TABLE cashier_reconciliations ADD is_modified BIT NOT NULL DEFAULT 0
+            """)
+            cur.execute("""
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.columns
+                    WHERE object_id = OBJECT_ID('cashier_reconciliations') AND name = 'modify_reason'
+                )
+                AND EXISTS (SELECT 1 FROM sys.tables WHERE name = 'cashier_reconciliations')
+                ALTER TABLE cashier_reconciliations ADD modify_reason NVARCHAR(MAX) NULL DEFAULT ''
+            """)
+            cur.execute("""
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.columns
+                    WHERE object_id = OBJECT_ID('shifts') AND name = 'station_name'
+                )
+                AND EXISTS (SELECT 1 FROM sys.tables WHERE name = 'shifts')
+                ALTER TABLE shifts ADD station_name NVARCHAR(100) NULL DEFAULT ''
+            """)
+            cur.execute("""
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.columns
+                    WHERE object_id = OBJECT_ID('credit_notes') AND name = 'shift_id'
+                )
+                AND EXISTS (SELECT 1 FROM sys.tables WHERE name = 'credit_notes')
+                ALTER TABLE credit_notes ADD shift_id INT NULL
+            """)
+            cur.execute("""
+                IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'expenses')
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('expenses') AND name = 'shift_id')
+                    ALTER TABLE expenses ADD shift_id INT NULL;
+                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('expenses') AND name = 'cashier_id')
+                    ALTER TABLE expenses ADD cashier_id INT NULL;
+                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('expenses') AND name = 'cashier_name')
+                    ALTER TABLE expenses ADD cashier_name NVARCHAR(100) NULL;
+                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('expenses') AND name = 'payment_method')
+                    ALTER TABLE expenses ADD payment_method NVARCHAR(100) NOT NULL DEFAULT 'Cash';
+                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('expenses') AND name = 'currency')
+                    ALTER TABLE expenses ADD currency NVARCHAR(10) NULL;
+                END
+            """)
+            conn.commit()
+            conn.close()
+            log.info("[shift] Auto-migration: checked shift_rows, shifts, credit_notes, expenses, and cashier_reconciliations.")
+        except Exception as e:
+            log.warning(f"[shift] Auto-migration warning: {e}")
+        _MIGRATED = True
 
-_auto_migrate()
+threading.Thread(target=_auto_migrate, daemon=True, name="ShiftAutoMigrateThread").start()
+
+
+# =============================================================================
+# WORKSTATION / STATION RESOLUTION HELPER
+# =============================================================================
+
+def get_current_station_name() -> str:
+    """Return local computer name or configured terminal identifier for shift session isolation."""
+    import os, socket
+    try:
+        from models.company_defaults import get_defaults
+        d = get_defaults() or {}
+        term = str(d.get("server_terminal_name") or d.get("server_terminal_id") or "").strip()
+        if term:
+            return term
+    except Exception:
+        pass
+    return str(os.environ.get("COMPUTERNAME") or socket.gethostname() or "STATION-1").strip()
 
 
 # =============================================================================
@@ -173,21 +228,49 @@ def get_payment_method_currency(method_name: str) -> str:
 # READ
 # =============================================================================
 
-def get_active_shift() -> dict | None:
-    """Return the currently open (not ended) shift, or None."""
+def get_active_shift(cashier_id: int = None, station_name: str = None) -> dict | None:
+    """
+    Return the currently open (not ended) shift for this workstation/cashier, or None.
+    Multi-workstation safe: ensures networked POS computers operate on their own isolated active shifts.
+    """
+    curr_station = (station_name or get_current_station_name()).strip()
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT TOP 1
-               s.id, s.shift_number, s.station, s.cashier_id, s.date,
-               s.created_at, s.end_time, s.door_counter, s.customers, s.notes,
-               COALESCE(u.username, '') AS username,
-               COALESCE(u.full_name, u.username, '') AS cashier_fullname
-        FROM shifts s
-        LEFT JOIN users u ON u.id = s.cashier_id
-        WHERE s.end_time IS NULL
-        ORDER BY s.id DESC
-    """)
+    try:
+        cur.execute("""
+            SELECT TOP 1
+                   s.id, s.shift_number, s.station, s.cashier_id, s.date,
+                   s.created_at, s.end_time, s.door_counter, s.customers, s.notes,
+                   COALESCE(s.station_name, '') AS station_name,
+                   COALESCE(u.username, '') AS username,
+                   COALESCE(u.full_name, u.username, '') AS cashier_fullname
+            FROM shifts s
+            LEFT JOIN users u ON u.id = s.cashier_id
+            WHERE s.end_time IS NULL 
+              AND (
+                  LOWER(LTRIM(RTRIM(COALESCE(s.station_name, '')))) = LOWER(?)
+                  OR s.station_name IS NULL 
+                  OR s.station_name = ''
+                  OR (? IS NOT NULL AND s.cashier_id = ?)
+              )
+            ORDER BY 
+              CASE WHEN LOWER(LTRIM(RTRIM(COALESCE(s.station_name, '')))) = LOWER(?) THEN 0 
+                   WHEN ? IS NOT NULL AND s.cashier_id = ? THEN 1 
+                   ELSE 2 END, 
+              s.id DESC
+        """, (curr_station, cashier_id, cashier_id, curr_station, cashier_id, cashier_id))
+    except Exception:
+        cur.execute("""
+            SELECT TOP 1
+                   s.id, s.shift_number, s.station, s.cashier_id, s.date,
+                   s.created_at, s.end_time, s.door_counter, s.customers, s.notes,
+                   COALESCE(u.username, '') AS username,
+                   COALESCE(u.full_name, u.username, '') AS cashier_fullname
+            FROM shifts s
+            LEFT JOIN users u ON u.id = s.cashier_id
+            WHERE s.end_time IS NULL
+            ORDER BY s.id DESC
+        """)
     row = fetchone_dict(cur)
     if not row:
         conn.close()
@@ -265,6 +348,7 @@ def get_all_closed_shifts(date_from: str = None, date_to: str = None) -> list[di
     for s in shifts:
         s["rows"] = _get_shift_rows(s["id"], cur)
         s["is_open"] = False
+        s["opening_balance"] = sum(r["start_float"] for r in s["rows"])
         s["total_expected"] = sum(r["total"] for r in s["rows"])
         s["total_counted"] = sum(r["counted"] for r in s["rows"])
         s["total_variance"] = sum(r["variance"] for r in s["rows"])
@@ -342,6 +426,103 @@ def get_income_by_method_since(shift_id: int) -> dict:
             result["ON ACCOUNT"] = {"amount": float(oa_row[0]), "currency": oa_curr}
             log.info(f"  [INCOME DEBUG] ON ACCOUNT: ${oa_row[0]:.2f}")
 
+        # Deduct Credit Notes (Returns) issued during this shift
+        try:
+            cur.execute("SELECT created_at, end_time FROM shifts WHERE id = ?", (shift_id,))
+            s_times = cur.fetchone()
+            st_time = s_times[0] if s_times else shift_start
+            et_time = s_times[1] if (s_times and s_times[1]) else datetime.now()
+
+            cur.execute("""
+                SELECT cn.total, COALESCE(cn.currency, 'USD') as currency, cn.original_sale_id
+                FROM credit_notes cn
+                WHERE cn.shift_id = ?
+                   OR (cn.shift_id IS NULL AND cn.created_at >= ? AND cn.created_at <= ?)
+            """, (shift_id, st_time, et_time))
+            cn_matches = cur.fetchall()
+            for cn_tot, cn_c, orig_sid in cn_matches:
+                ret_amt = float(cn_tot or 0)
+                if ret_amt <= 0: continue
+                c_clean = (cn_c or "").strip() or get_company_base_currency()
+
+                # Find original sale method if possible
+                orig_m = "Cash"
+                if orig_sid:
+                    try:
+                        cur.execute("SELECT TOP 1 method FROM sales WHERE id = ?", (orig_sid,))
+                        sm_r = cur.fetchone()
+                        if sm_r and sm_r[0]:
+                            orig_m = sm_r[0].strip()
+                    except Exception:
+                        pass
+
+                target_key = (orig_m, c_clean)
+                if target_key in result:
+                    result[target_key]["amount"] = max(0.0, result[target_key]["amount"] - ret_amt)
+                    log.info(f"  [INCOME DEBUG] Deducted Return/CN {ret_amt} from {target_key}")
+                else:
+                    # Deduct from matching currency tuple or string key
+                    deducted = False
+                    for k in list(result.keys()):
+                        if isinstance(k, tuple) and k[1].upper() == c_clean.upper():
+                            result[k]["amount"] = max(0.0, result[k]["amount"] - ret_amt)
+                            deducted = True
+                            log.info(f"  [INCOME DEBUG] Deducted Return/CN {ret_amt} from {k}")
+                            break
+                    if not deducted:
+                        for k in list(result.keys()):
+                            if isinstance(k, str) and k.upper() == orig_m.upper():
+                                result[k]["amount"] = max(0.0, result[k]["amount"] - ret_amt)
+                                log.info(f"  [INCOME DEBUG] Deducted Return/CN {ret_amt} from {k}")
+                                break
+        except Exception as _cne:
+            log.warning(f"Error deducting credit notes in shift {shift_id}: {_cne}")
+
+        # Deduct Paid Expenses issued from the till during this shift per payment method
+        try:
+            cur.execute("""
+                SELECT COALESCE(NULLIF(LTRIM(RTRIM(e.payment_method)), ''), 'Cash') as p_method,
+                       COALESCE(e.currency, '') as p_curr,
+                       COALESCE(SUM(e.amount), 0) as total_amt
+                FROM expenses e
+                WHERE e.paid = 1
+                  AND (e.shift_id = ? OR (e.shift_id IS NULL AND e.created_at >= ? AND e.created_at <= ?))
+                GROUP BY COALESCE(NULLIF(LTRIM(RTRIM(e.payment_method)), ''), 'Cash'), COALESCE(e.currency, '')
+            """, (shift_id, st_time, et_time))
+            exp_rows = cur.fetchall()
+            for p_method, p_curr, exp_amt in exp_rows:
+                exp_val = float(exp_amt or 0)
+                if exp_val <= 0:
+                    continue
+                p_method_clean = p_method.strip()
+                p_curr_clean = p_curr.strip() if p_curr else ""
+                if not p_curr_clean:
+                    p_curr_clean = get_payment_method_currency(p_method_clean)
+
+                target_key = (p_method_clean, p_curr_clean)
+                deducted = False
+                if target_key in result:
+                    result[target_key]["amount"] = max(0.0, result[target_key]["amount"] - exp_val)
+                    deducted = True
+                    log.info(f"  [INCOME DEBUG] Deducted Expense {exp_val} from exact key {target_key}")
+                else:
+                    for k in list(result.keys()):
+                        m_name = k[0] if isinstance(k, tuple) else k
+                        if str(m_name).strip().upper() == p_method_clean.upper():
+                            result[k]["amount"] = max(0.0, result[k]["amount"] - exp_val)
+                            deducted = True
+                            log.info(f"  [INCOME DEBUG] Deducted Expense {exp_val} from method {k}")
+                            break
+                if not deducted:
+                    result[target_key] = {
+                        "amount": 0.0,
+                        "method": p_method_clean,
+                        "currency": p_curr_clean
+                    }
+                    log.info(f"  [INCOME DEBUG] Expense {exp_val} for {target_key} recorded (expected 0.0)")
+        except Exception as _expe:
+            log.warning(f"Error deducting expenses in shift {shift_id}: {_expe}")
+
     except Exception as e:
         log.error(f"Error fetching income by shift_id: {e}. Falling back to timestamp...")
         cur.execute("SELECT created_at FROM shifts WHERE id = ?", (shift_id,))
@@ -362,12 +543,72 @@ def get_income_by_method_since(shift_id: int) -> dict:
                         result[meth_clean] = {"amount": 0.0, "currency": c_val}
                     result[meth_clean]["amount"] += float(a)
 
+            # Deduct expenses by payment method in fallback
+            try:
+                cur.execute("""
+                    SELECT COALESCE(NULLIF(LTRIM(RTRIM(e.payment_method)), ''), 'Cash') as p_method,
+                           COALESCE(SUM(e.amount), 0)
+                    FROM expenses e
+                    WHERE e.paid = 1 AND (e.created_at >= ?)
+                    GROUP BY COALESCE(NULLIF(LTRIM(RTRIM(e.payment_method)), ''), 'Cash')
+                """, (shift_start,))
+                for p_m, e_amt in cur.fetchall():
+                    pm_clean = p_m.strip()
+                    e_val = float(e_amt or 0)
+                    if e_val <= 0: continue
+                    if pm_clean in result:
+                        result[pm_clean]["amount"] = max(0.0, result[pm_clean]["amount"] - e_val)
+                    else:
+                        result[pm_clean] = {"amount": 0.0, "currency": get_payment_method_currency(pm_clean)}
+            except Exception: pass
+
     conn.close()
     log.info(f"[INCOME DEBUG] Final Income Map for Shift {shift_id}: {result}")
     return result
 
 
-def refresh_income(shift_id: int) -> dict:
+def get_shift_credit_notes(shift_id: int) -> list[dict]:
+    """Return all credit notes / returns issued during a shift."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT created_at, end_time FROM shifts WHERE id = ?", (shift_id,))
+        s_row = cur.fetchone()
+        if not s_row:
+            conn.close()
+            return []
+        s_start = s_row[0]
+        s_end = s_row[1] if s_row[1] else datetime.now()
+
+        cur.execute("""
+            SELECT cn.id, cn.cn_number, cn.original_invoice_no, cn.total, cn.currency,
+                   cn.customer_name, cn.cashier_name, cn.created_at
+            FROM credit_notes cn
+            WHERE cn.shift_id = ?
+               OR (cn.shift_id IS NULL AND cn.created_at >= ? AND cn.created_at <= ?)
+            ORDER BY cn.id ASC
+        """, (shift_id, s_start, s_end))
+        rows = fetchall_dicts(cur)
+        conn.close()
+        return rows
+    except Exception as e:
+        log.warning(f"Error fetching shift credit notes: {e}")
+        try: conn.close()
+        except: pass
+        return []
+
+
+def get_shift_expenses(shift_id: int) -> list[dict]:
+    """Return all paid expenses / till payouts recorded during a shift."""
+    try:
+        from models.expense import get_shift_expenses as _gse
+        return _gse(shift_id)
+    except Exception as e:
+        log.warning(f"Error fetching shift expenses: {e}")
+        return []
+
+
+def refresh_income(shift_id: int, force: bool = False) -> dict:
     """Read live sales/payment totals and write them into shift_rows.income."""
     income_by_method = get_income_by_method_since(shift_id)
 
@@ -391,7 +632,7 @@ def refresh_income(shift_id: int) -> dict:
 
     cur.execute("SELECT end_time FROM shifts WHERE id = ?", (shift_id,))
     shift_row = cur.fetchone()
-    is_closed = shift_row and shift_row[0] is not None
+    is_closed = (shift_row and shift_row[0] is not None) and not force
 
     updated_income = {}
 
@@ -661,6 +902,34 @@ def get_cashier_sales_for_shift(shift_id: int) -> list[dict]:
             result[cashier_key]['totals']['total_vat'] += sale_record['total_vat']
             result[cashier_key]['totals']['total_discount'] += sale_record['discount_amount']
 
+    # Deduct paid expenses per cashier and payment method
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT cashier_id,
+                   COALESCE(NULLIF(LTRIM(RTRIM(payment_method)), ''), 'Cash') as pm,
+                   COALESCE(SUM(amount), 0) as exp_amt
+            FROM expenses
+            WHERE paid = 1 AND (shift_id = ? OR (shift_id IS NULL AND created_at >= ? AND created_at <= ?))
+            GROUP BY cashier_id, COALESCE(NULLIF(LTRIM(RTRIM(payment_method)), ''), 'Cash')
+        """, (shift_id, start_time, end_time))
+        for cid, pm, exp_amt in cur.fetchall():
+            exp_val = float(exp_amt or 0)
+            if exp_val <= 0: continue
+            pm_key = pm.strip().upper()
+            for ckey, cdata in result.items():
+                if cdata.get("cashier_id") == cid or (cid is None and len(result) == 1):
+                    if pm_key in cdata['totals']['payment_methods']:
+                        cdata['totals']['payment_methods'][pm_key] = max(
+                            0.0, cdata['totals']['payment_methods'][pm_key] - exp_val
+                        )
+                    else:
+                        cdata['totals']['payment_methods'][pm_key] = 0.0
+        conn.close()
+    except Exception as e:
+        log.warning(f"Error deducting expenses in get_cashier_sales_for_shift: {e}")
+
     return list(result.values())
 
 
@@ -768,6 +1037,7 @@ def get_print_ready_cashiers(shift_id: int) -> list[dict]:
         shift_row_map[method_upper] = {
             "expected_global": float(row["total"]),
             "counted_global": float(row["counted"]),
+            "currency": row.get("currency") or get_payment_method_currency(row["method"]),
         }
 
     total_collected_per_method = {}
@@ -807,6 +1077,7 @@ def get_print_ready_cashiers(shift_id: int) -> list[dict]:
 
             payment_rows.append({
                 "method": method_key,
+                "currency": shift_row_map.get(method_upper, {}).get("currency") or get_payment_method_currency(method_key),
                 "collected": amount_collected,
                 "expected": cashier_expected,
                 "counted": cashier_counted,
@@ -882,19 +1153,27 @@ def print_shift_cashier_report(shift_id: int):
 # =============================================================================
 
 def start_shift(station: int, shift_number: int, cashier_id: int,
-                date: str, opening_floats: dict) -> dict:
+                date: str, opening_floats: dict, station_name: str = None) -> dict:
     """Create a new shift. opening_floats: {method: float} or {method: (float, currency)}."""
     now = datetime.now()
     start_time = now.strftime("%H:%M:%S")
+    curr_station = (station_name or get_current_station_name()).strip()
 
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("""
-        INSERT INTO shifts (shift_number, station, cashier_id, date, start_time, created_at)
-        OUTPUT INSERTED.id
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (shift_number, station, cashier_id, date, start_time, now))
+    try:
+        cur.execute("""
+            INSERT INTO shifts (shift_number, station, cashier_id, date, start_time, created_at, station_name)
+            OUTPUT INSERTED.id
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (shift_number, station, cashier_id, date, start_time, now, curr_station))
+    except Exception:
+        cur.execute("""
+            INSERT INTO shifts (shift_number, station, cashier_id, date, start_time, created_at)
+            OUTPUT INSERTED.id
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (shift_number, station, cashier_id, date, start_time, now))
 
     shift_id = int(cur.fetchone()[0])
 
@@ -953,7 +1232,7 @@ def end_shift(shift_id: int, counted_values: dict,
         log.info(f"end_shift {shift_id}: closed successfully at {end_time}")
 
         try:
-            income_written = refresh_income(shift_id)
+            income_written = refresh_income(shift_id, force=True)
             log.info(f"end_shift {shift_id}: final income refresh -> {income_written}")
         except Exception as e:
             log.error(f"end_shift {shift_id}: final income refresh failed: {e}")
@@ -1101,7 +1380,7 @@ def _get_shift_rows(shift_id: int, cur) -> list[dict]:
         start = float(r["start_float"])
         income = float(r["income"])
         counted = float(r["counted"])
-        total = start + income
+        total = income
         r["start_float"] = start
         r["income"] = income
         r["counted"] = counted
@@ -1285,6 +1564,7 @@ def get_shift_by_id(shift_id: int) -> dict | None:
         conn.close()
         return None
     row["rows"] = _get_shift_rows(shift_id, cur)
+    row["opening_balance"] = sum(float(r.get("start_float", 0.0) or 0.0) for r in row["rows"])
     row["is_open"] = row["end_time"] is None
     row["cashier_sales"] = _get_cashier_sales_for_shift(shift_id, cur)
     conn.close()
@@ -1297,7 +1577,7 @@ def get_shift_reports(date_from=None, date_to=None) -> list[dict]:
     query = """
         SELECT s.id, s.shift_number as shift_no, s.created_at,
                u.username as cashier_name,
-               (SELECT SUM(start_float + income) FROM shift_rows WHERE shift_id = s.id) as expected_amount,
+               (SELECT SUM(income) FROM shift_rows WHERE shift_id = s.id) as expected_amount,
                (SELECT SUM(counted) FROM shift_rows WHERE shift_id = s.id) as actual_amount
         FROM shifts s
         LEFT JOIN users u ON u.id = s.cashier_id
@@ -1429,7 +1709,7 @@ def diagnose_income(shift_id: int = None):
     rows = cur.fetchall()
     if rows:
         for method, currency, start_float, income, counted in rows:
-            total = start_float + income
+            total = income
             variance = counted - total
             print(f"    {method} ({currency}): start_float=${start_float:.2f}, income=${income:.2f}, total=${total:.2f}, counted=${counted:.2f}, variance=${variance:.2f}")
     else:
