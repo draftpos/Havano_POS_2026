@@ -16,11 +16,19 @@ from pathlib import Path
 
 log = logging.getLogger("SiteConfig")
 
-_DEFAULT_HOST  = ""
-_SETTINGS_FILE = Path("app_data/sql_settings.json")
+_DEFAULT_HOST  = "https://backoffice.havano.pro"
+def _get_settings_file() -> Path:
+    try:
+        from database.db import get_app_data_dir
+        return get_app_data_dir() / "sql_settings.json"
+    except Exception:
+        pass
+    import sys
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent / "app_data" / "sql_settings.json"
+    return Path(__file__).resolve().parent.parent / "app_data" / "sql_settings.json"
 
 _cached: str | None = None
-
 
 def get_host() -> str:
     """Returns the full base URL exactly as configured in sql_settings.json."""
@@ -28,8 +36,9 @@ def get_host() -> str:
     if _cached is not None:
         return _cached
     try:
-        if _SETTINGS_FILE.exists():
-            data = json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
+        settings_path = _get_settings_file()
+        if settings_path.exists():
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
             url  = str(data.get("api_url") or "").strip().rstrip("/")
             if url:
                 if url.startswith("htps://"):
@@ -38,6 +47,10 @@ def get_host() -> str:
                     url = "https://" + url
                 _cached = url
                 return url
+            # If in SaaS mode and api_url is empty, fallback to default SaaS host
+            if str(data.get("system_mode") or "").strip().lower() == "saas":
+                _cached = _DEFAULT_HOST
+                return _DEFAULT_HOST
     except Exception as e:
         log.warning("[site_config] Could not read sql_settings.json: %s", e)
     
@@ -59,15 +72,17 @@ def invalidate_cache():
 # SERVER CHANGE DETECTION & DB WIPE
 # =============================================================================
 
-_LAST_URL_FILE = Path("app_data/last_known_url.txt")
+def _get_last_url_file() -> Path:
+    return _get_settings_file().parent / "last_known_url.txt"
 
 def check_url_changed() -> bool:
     """True if current api_url differs from last saved URL."""
     current = get_host().strip().lower()
-    if not _LAST_URL_FILE.exists():
+    last_file = _get_last_url_file()
+    if not last_file.exists():
         return False
     try:
-        last = _LAST_URL_FILE.read_text(encoding="utf-8").strip().lower()
+        last = last_file.read_text(encoding="utf-8").strip().lower()
         return current != last
     except Exception:
         return False
@@ -75,7 +90,7 @@ def check_url_changed() -> bool:
 def save_current_url():
     """Save current api_url so check_url_changed() returns False on next run."""
     try:
-        _LAST_URL_FILE.write_text(get_host().strip(), encoding="utf-8")
+        _get_last_url_file().write_text(get_host().strip(), encoding="utf-8")
     except Exception as e:
         log.error("[site_config] Could not save current URL: %s", e)
 

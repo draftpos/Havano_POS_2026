@@ -3,6 +3,11 @@ from models.product import adjust_stock, get_product_by_id
 from models.receipt import ReceiptData, Item, MultiCurrencyDetail
 from services.printing_service import PrintingService
 
+try:
+    from services.bugsink_service import add_breadcrumb
+except Exception:
+    def add_breadcrumb(*args, **kwargs): pass
+
 from datetime import date
 import json
 from pathlib import Path
@@ -49,7 +54,6 @@ def _clamp_num(val, max_val=99999999.99, min_val=-99999999.99):
     except Exception:
         return 0.0
 
-
 def _format_invoice_no(seq: int) -> str:
     """
     Format invoice number and ensure it hasn't been used before.
@@ -58,16 +62,51 @@ def _format_invoice_no(seq: int) -> str:
 
     if prefix:
         clean_prefix = prefix.replace("-", "").replace("_", "").upper()
-        candidate = f"{clean_prefix}-{seq:04d}"  # Updated to 4 digits as requested
+        candidate = f"{clean_prefix}-{seq:04d}"  # 4 digits format
     else:
         candidate = f"{seq:04d}"
 
     # Check if this invoice number already exists in sales table
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM sales WHERE invoice_no = ?", (candidate,))
+    cur.execute("SELECT COUNT(*) FROM sales WITH (NOLOCK) WHERE invoice_no = ?", (candidate,))
     count = cur.fetchone()[0]
     conn.close()
+
+    if count > 0:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        return f"{candidate}-{timestamp}"
+
+    return candidate
+
+
+def generate_invoice_number(conn=None) -> str:
+    prefix, start = _get_invoice_settings()
+
+    close_conn = False
+    if conn is None:
+        conn = get_connection()
+        close_conn = True
+
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(MAX(invoice_number), 0) FROM sales WITH (NOLOCK)")
+    row = cur.fetchone()
+    current_max = int(row[0]) if row else 0
+
+    if current_max == 0:
+        seq = max(start, 1)
+    else:
+        seq = current_max + 1
+
+    candidate = f"{prefix}-{seq:06d}" if prefix else f"{seq:06d}"
+
+    # Verify uniqueness in DB (just in case)
+    cur.execute("SELECT COUNT(*) FROM sales WITH (NOLOCK) WHERE invoice_no = ?", (candidate,))
+    count = cur.fetchone()[0]
+
+    if close_conn:
+        conn.close()
 
     if count > 0:
         # If exists, add timestamp to make it unique
@@ -86,7 +125,7 @@ def get_next_invoice_number() -> int:
     """
     conn = get_connection()
     cur  = conn.cursor()
-    cur.execute("SELECT COALESCE(MAX(invoice_number), 0) FROM sales")
+    cur.execute("SELECT COALESCE(MAX(invoice_number), 0) FROM sales WITH (NOLOCK)")
     row = cur.fetchone()
     conn.close()
     current_max = int(row[0])
@@ -155,10 +194,10 @@ _SALE_SELECT = """
        C.email,
        C.zimra_serial_no,
        C.zimra_device_id,
-       (SELECT COALESCE(SUM(qty * cost_price), 0) FROM sale_items WHERE sale_id = s.id) AS total_cost
-FROM sales s
-LEFT JOIN users u ON u.id = s.cashier_id
-LEFT JOIN company_defaults C ON 1=1
+       (SELECT COALESCE(SUM(qty * cost_price), 0) FROM sale_items WITH (NOLOCK) WHERE sale_id = s.id) AS total_cost
+FROM sales s WITH (NOLOCK)
+LEFT JOIN users u WITH (NOLOCK) ON u.id = s.cashier_id
+LEFT JOIN company_defaults C WITH (NOLOCK) ON 1=1
 """
 
 
@@ -217,7 +256,7 @@ def get_today_total() -> float:
     cur  = conn.cursor()
     cur.execute("""
         SELECT COALESCE(SUM(total), 0)
-        FROM sales
+        FROM sales WITH (NOLOCK)
         WHERE CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
     """)
     row = cur.fetchone()
@@ -230,7 +269,7 @@ def get_today_total_by_method() -> dict:
     cur  = conn.cursor()
     cur.execute("""
         SELECT method, COALESCE(SUM(total), 0)
-        FROM sales
+        FROM sales WITH (NOLOCK)
         WHERE CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
         GROUP BY method
     """)
@@ -426,6 +465,13 @@ def create_sale(
 
     transaction_id = transaction_id or idempotency_key
 
+    add_breadcrumb(
+        category="sale",
+        message=f"create_sale called: total={total}, items={len(items)}, method={method}, currency={currency}",
+        level="info",
+        data={"total": float(total or 0), "items_count": len(items), "method": str(method), "currency": str(currency)}
+    )
+
     print(f"\n{'=' * 40}")
     print(f"CREATE_SALE CALLED at {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     print(f"Transaction ID: {transaction_id}")
@@ -463,6 +509,11 @@ def create_sale(
             existing = cur.fetchone()
             if existing:
                 sale_id, created_at = existing
+                add_breadcrumb(
+                    category="sale",
+                    message=f"Duplicate transaction detected: tx_id={transaction_id}, returning existing sale_id={sale_id}",
+                    level="warning"
+                )
                 print(f"[!] DUPLICATE DETECTED! transaction_id={transaction_id} "
                       f"already processed at {created_at}. "
                       f"Returning existing sale ID: {sale_id}")
@@ -608,18 +659,22 @@ def create_sale(
     cur  = conn.cursor()
 
     order_number = 1
-    if shift_id:
-        try:
+    try:
+        if shift_id:
             cur.execute(
                 "SELECT ISNULL(MAX(order_number), 0) + 1 FROM sales WHERE shift_id = ?",
                 (shift_id,),
             )
-            row = cur.fetchone()
-            if row and row[0]:
-                order_number = int(row[0])
-        except Exception as _oe:
-            print(f"[create_sale] order_number lookup skipped: {_oe}")
-            order_number = 1
+        else:
+            cur.execute(
+                "SELECT ISNULL(MAX(order_number), 0) + 1 FROM sales WHERE CAST(invoice_date AS DATE) = CAST(GETDATE() AS DATE)"
+            )
+        row = cur.fetchone()
+        if row and row[0]:
+            order_number = int(row[0])
+    except Exception as _oe:
+        print(f"[create_sale] order_number lookup skipped: {_oe}")
+        order_number = 1
 
     cashier_cloud_user_id = None
     if cashier_id or cashier_name:
@@ -747,6 +802,12 @@ def create_sale(
             print(f"[DEBUG] create_sale: Executed INSERT into sales with waiter_name='{waiter_name}'")
 
         sale_id = int(cur.fetchone()[0])
+        add_breadcrumb(
+            category="sale",
+            message=f"Sale inserted into DB: sale_id={sale_id}, invoice_no={invoice_no}",
+            level="info",
+            data={"sale_id": sale_id, "invoice_no": invoice_no}
+        )
         print(f"[create_sale] Created sale ID: {sale_id}")
 
         # Lookup order station flags from products table by id, part_no, or name
@@ -754,7 +815,7 @@ def create_sale(
         try:
             cur.execute(
                 "SELECT id, part_no, name, order_1, order_2, order_3, order_4, order_5, order_6 "
-                "FROM products"
+                "FROM products WITH (NOLOCK)"
             )
             for row in cur.fetchall():
                 pid = str(row[0] or "")
@@ -852,12 +913,24 @@ def create_sale(
                         
                     if p_row:
                         prod_id = p_row["id"]
+                        qty = float(item.get("qty", 1))
                         if p_row.get("track_stock", True):
-                            qty = float(item.get("qty", 1))
                             # Use the specific warehouse for deduction
                             adjust_stock(prod_id, -qty, warehouse_id=warehouse_id)
                         else:
-                            print(f"[create_sale] Item {part_no} has track_stock=False, skipping stock adjustment.")
+                            print(f"[create_sale] Item {part_no} has track_stock=False, skipping general stock adjustment.")
+                        
+                        # Deduct from specific batch if batch_no is specified
+                        item_batch_no = item.get("batch_no")
+                        if item_batch_no:
+                            try:
+                                cur.execute(
+                                    "UPDATE product_batches SET qty = qty - ?, synced = 0 WHERE product_id = ? AND batch_no = ?",
+                                    (qty, prod_id, str(item_batch_no).strip())
+                                )
+                                print(f"[create_sale] Deducted {qty} from batch '{item_batch_no}' for product_id={prod_id}")
+                            except Exception as _b_err:
+                                print(f"[create_sale] Batch stock deduction warning for '{item_batch_no}': {_b_err}")
                 except Exception as _se:
                     print(f"[create_sale] Stock adjustment failed for item {idx}: {_se}")
 
@@ -874,6 +947,13 @@ def create_sale(
         conn.commit()
         conn.close()
 
+        add_breadcrumb(
+            category="sale",
+            message=f"Sale committed successfully: sale_id={sale_id}, invoice_no={invoice_no}, items={item_insert_count}",
+            level="info",
+            data={"sale_id": sale_id, "invoice_no": invoice_no, "item_count": item_insert_count}
+        )
+
         print(f"[create_sale] Successfully created sale ID: {sale_id} with invoice: {invoice_no}")
 
         sale = get_sale_by_id(sale_id)
@@ -882,6 +962,23 @@ def create_sale(
             sale["splits"] = list(splits)
 
         _trigger_fiscalization_background(sale_id)
+
+        # ── Auto-Create KDS Order for Take Away Sales ──
+        try:
+            from models.restaurant_order import auto_create_kds_takeaway_order
+            auto_create_kds_takeaway_order(
+                items=items,
+                customer_name=customer_name or "Take Away Customer",
+                receipt_type=receipt_type,
+                cashier_id=cashier_id,
+                warehouse_id=warehouse_id,
+                cost_center_id=cost_center_id,
+                shift_id=shift_id,
+                invoice_no=invoice_no,
+                order_number=sale.get("order_number") or order_number,
+            )
+        except Exception as _kds_err:
+            print(f"[create_sale] Auto KDS order creation warning: {_kds_err}")
 
         # ── Auto-Quotation for Cashier Pharmacy Sales ──
         try:
@@ -1581,7 +1678,7 @@ def _fetch_items(sale_id: int, cur) -> list[dict]:
                    order_1, order_2, order_3, order_4, order_5, order_6,
                    is_pharmacy, dosage, batch_no, expiry_date, serial_no, price_list_rate,
                    COALESCE(uom, '') AS uom
-            FROM sale_items
+            FROM sale_items WITH (NOLOCK)
             WHERE sale_id = ?
             ORDER BY id
         """, (sale_id,))
@@ -1592,7 +1689,7 @@ def _fetch_items(sale_id: int, cur) -> list[dict]:
                    discount, tax, total,
                    tax_type, tax_rate, tax_amount, remarks,
                    order_1, order_2, order_3, order_4, order_5, order_6
-            FROM sale_items
+            FROM sale_items WITH (NOLOCK)
             WHERE sale_id = ?
             ORDER BY id
         """, (sale_id,))
@@ -1758,7 +1855,7 @@ def _get_active_printers() -> list[str]:
 # =============================================================================
 # KITCHEN ORDER PRINTING
 # =============================================================================
-def print_s(sale: dict, is_cancelled: bool = False):
+def print_s(sale: dict, is_cancelled: bool = False, skip_print_after_order: bool = True):
     """Print separate KOT for every active Order 1–6 station.
     Gated on hardware_settings.kitchen_printing_enabled - when off this is a
     no-op so non-restaurant tills don't spam empty KOTs."""
@@ -1769,7 +1866,7 @@ def print_s(sale: dict, is_cancelled: bool = False):
         from services.printing_service import PrintingService
         
         print(f"\n{'='*60}")
-        print(f"[KITCHEN DEBUG] print_s() called for invoice: {sale.get('invoice_no', 'N/A')}")
+        print(f"[KITCHEN DEBUG] print_s() called for invoice: {sale.get('invoice_no', 'N/A')} (skip_print_after_order={skip_print_after_order})")
         print(f"[KITCHEN DEBUG] Sale has {len(sale.get('items', []))} items")
         
         # Debug: Print all items and their order flags
@@ -1829,7 +1926,62 @@ def print_s(sale: dict, is_cancelled: bool = False):
             order_field = order_key.lower().replace(" ", "_")
             print(f"[KITCHEN DEBUG] Checking for {order_key} (field: {order_field})")
             
-            order_items = [it for it in sale.get("items", []) if it.get(order_field)]
+            order_items = []
+            for it in sale.get("items", []):
+                # Lookup station flag order_1..6 if missing from cart item dict
+                has_station = bool(it.get(order_field))
+                if not has_station:
+                    try:
+                        pno = str(it.get("part_no") or it.get("item_code") or "").strip()
+                        pname = str(it.get("product_name") or it.get("name") or "").strip()
+                        pid = it.get("product_id") or 0
+                        from database.db import get_connection
+                        _conn = get_connection(); _cur = _conn.cursor()
+                        _cur.execute(f"""
+                            SELECT TOP 1 ISNULL({order_field}, 0) FROM products
+                            WHERE (part_no <> '' AND part_no = ?)
+                               OR (name <> '' AND LOWER(name) = LOWER(?))
+                               OR (id > 0 AND id = ?)
+                        """, (pno, pname, pid))
+                        _row = _cur.fetchone()
+                        _conn.close()
+                        if _row and (_row[0] is True or str(_row[0]).strip().lower() in ("1", "true", "yes", "t", "y")):
+                            has_station = True
+                    except Exception:
+                        has_station = False
+
+                if not has_station:
+                    continue
+                
+                # Check print_after_order flag from cart item or DB
+                pao_raw = it.get("print_after_order")
+                pao_val = str(pao_raw).strip().lower() in ("1", "true", "yes", "t", "y") or pao_raw is True or pao_raw == 1
+                if not pao_val:
+                    try:
+                        pno = str(it.get("part_no") or it.get("item_code") or "").strip()
+                        pname = str(it.get("product_name") or it.get("name") or "").strip()
+                        pid = it.get("product_id") or 0
+                        from database.db import get_connection
+                        _conn = get_connection(); _cur = _conn.cursor()
+                        _cur.execute("""
+                            SELECT TOP 1 ISNULL(print_after_order, 0) FROM products
+                            WHERE (part_no <> '' AND part_no = ?)
+                               OR (name <> '' AND LOWER(name) = LOWER(?))
+                               OR (id > 0 AND id = ?)
+                        """, (pno, pname, pid))
+                        _row = _cur.fetchone()
+                        _conn.close()
+                        if _row and (_row[0] is True or str(_row[0]).strip().lower() in ("1", "true", "yes", "t", "y")):
+                            pao_val = True
+                    except Exception as _err:
+                        print(f"[KITCHEN DEBUG] DB lookup error for pao_val: {_err}")
+
+                if skip_print_after_order and pao_val:
+                    print(f"[KITCHEN DEBUG] Skipping '{it.get('product_name')}' for immediate print because print_after_order is ON")
+                    continue
+
+                order_items.append(it)
+
             print(f"[KITCHEN DEBUG]   Found {len(order_items)} items for {order_key}: {[it.get('product_name') for it in order_items]}")
             
             if not order_items:
@@ -1892,6 +2044,8 @@ def print_s(sale: dict, is_cancelled: bool = False):
         print(f"❌ Kitchen Order printing error: {e}")
         import traceback
         traceback.print_exc()
+
+print_kitchen_orders = print_s
 
 # =============================================================================
 # TRANSACTION HASH HELPERS

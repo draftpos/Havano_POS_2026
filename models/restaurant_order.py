@@ -854,15 +854,88 @@ def update_item_prep_status(order_id: int, item_name: str, status: str):
         print(f"[Model] Error updating item prep status: {e}")
 
 
+def print_kds_order_if_required(order_id: int):
+    """
+    When an order is marked ready / done on KDS, check if any item in the order
+    has print_after_order = 1 (or True) on its product record.
+    If so, print kitchen order receipts to the designated kitchen printers.
+    """
+    try:
+        conn = get_connection(); cur = conn.cursor()
+        cur.execute("""
+            SELECT roi.product_id, roi.item_code, roi.item_name, roi.quantity, roi.item_notes,
+                   roi.order_1, roi.order_2, roi.order_3, roi.order_4, roi.order_5, roi.order_6,
+                   ISNULL(p.print_after_order, 0) as print_after_order
+            FROM restaurant_order_items roi
+            LEFT JOIN products p ON (roi.product_id = p.id OR (roi.product_id = 0 AND roi.item_code = p.part_no))
+            WHERE roi.order_id = ?
+        """, (order_id,))
+        rows = cur.fetchall()
+        if not rows:
+            conn.close()
+            return
+
+        has_print_after_order = any(bool(r[11]) for r in rows)
+        if not has_print_after_order:
+            conn.close()
+            return  # No items require print after order completion
+
+        # Fetch order details for printing
+        cur.execute("""
+            SELECT o.id, COALESCE(t.name, 'Take Away') as table_name, o.customer_name,
+                   o.bill_notes, o.shift_order_number, u.username as cashier_name
+            FROM restaurant_orders o
+            LEFT JOIN restaurant_tables t ON o.table_id = t.id
+            LEFT JOIN users u ON o.waiter_id = u.id
+            WHERE o.id = ?
+        """, (order_id,))
+        o_row = cur.fetchone()
+        conn.close()
+
+        if not o_row:
+            return
+
+        items = []
+        for r in rows:
+            items.append({
+                "product_name": r[2],
+                "qty": float(r[3] or 1),
+                "part_no": r[1] or "",
+                "notes": r[4] or "",
+                "order_1": bool(r[5]),
+                "order_2": bool(r[6]),
+                "order_3": bool(r[7]),
+                "order_4": bool(r[8]),
+                "order_5": bool(r[9]),
+                "order_6": bool(r[10]),
+            })
+
+        sale_dict = {
+            "invoice_no": f"TA-{order_id}",
+            "order_number": o_row[4] or order_id,
+            "customer_name": o_row[2] or "Take Away Customer",
+            "bill_notes": o_row[3] or "",
+            "cashier_name": o_row[5] or "Cashier",
+            "items": items
+        }
+
+        from models.sale import print_s
+        print_s(sale_dict, skip_print_after_order=False)
+        print(f"[AutoKDSPrint] Printed kitchen order slips after marking order #{order_id} ready.")
+    except Exception as e:
+        print(f"[AutoKDSPrint] Failed to print KOT on completion: {e}")
+
+
+
 def get_kds_orders() -> list[dict]:
     """Fetch orders for KDS including items."""
     try:
         conn = get_connection(); cur = conn.cursor()
         cur.execute("""
-            SELECT o.id, o.table_id, t.name as table_name, t.table_number,
+            SELECT o.id, o.table_id, COALESCE(t.name, 'Take Away') as table_name, COALESCE(t.table_number, 'TA') as table_number,
                    o.customer_name, o.prep_status, o.created_at, o.waiter_id, o.bill_notes
             FROM restaurant_orders o
-            JOIN restaurant_tables t ON o.table_id = t.id
+            LEFT JOIN restaurant_tables t ON o.table_id = t.id
             WHERE o.prep_status IN ('Preparing', 'Ready', 'Cancelled')
             ORDER BY o.created_at ASC
         """)
@@ -883,6 +956,140 @@ def get_kds_orders() -> list[dict]:
     except Exception as e:
         print(f"[Model] Error getting KDS orders: {e}")
         return []
+
+
+def auto_create_kds_takeaway_order(
+    items: list[dict],
+    customer_name: str = "Take Away Customer",
+    receipt_type: str = "",
+    cashier_id: int | None = None,
+    warehouse_id: int | None = None,
+    cost_center_id: int | None = None,
+    shift_id: int | None = None,
+    invoice_no: str = "",
+    order_number: int | None = None,
+):
+    """
+    If 'takeaway_or_sitin' AND 'auto_kds_takeaway_orders' pos_settings rules are enabled,
+    automatically insert a KDS order into restaurant_orders for Take Away sales invoices,
+    and broadcast the new order to all active KDS/Dispatch monitors.
+    """
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        # 1. Check rules in pos_settings
+        cur.execute("SELECT setting_key, setting_value FROM pos_settings WHERE setting_key IN ('takeaway_or_sitin', 'enable_kds_websocket', 'auto_kds_takeaway_orders', 'takeaway_monitors')")
+        rules = {row[0]: str(row[1]).strip().lower() in ("1", "true", "yes", "t", "y") for row in cur.fetchall()}
+
+        is_takeaway_prompt_on = rules.get("takeaway_or_sitin", False)
+        is_kds_websocket_on = rules.get("enable_kds_websocket", False)
+        is_auto_kds_on = rules.get("auto_kds_takeaway_orders", False) or rules.get("takeaway_monitors", False)
+
+        if not (is_takeaway_prompt_on and is_kds_websocket_on and is_auto_kds_on):
+            conn.close()
+            return  # Auto-KDS takeaway creation not enabled unless all 3 settings are ON
+
+        # Verify if receipt_type indicates TAKE AWAY when specified
+        is_ta = True
+        if receipt_type:
+            rt_str = str(receipt_type).lower()
+            is_ta = "take away" in rt_str or "takeaway" in rt_str or "invoice" in rt_str or "order" in rt_str
+
+        if not is_ta:
+            conn.close()
+            return
+
+        # 2. Get or create virtual Take Away table in restaurant_tables
+        cur.execute("SELECT id FROM restaurant_tables WHERE name = 'Take Away' OR table_number = 'TA'")
+        tb_row = cur.fetchone()
+        if tb_row:
+            table_id = tb_row[0]
+        else:
+            cur.execute("""
+                INSERT INTO restaurant_tables (name, table_number, capacity, floor, active, status)
+                OUTPUT INSERTED.id
+                VALUES ('Take Away', 'TA', 1, 'Main Floor', 1, 'Available')
+            """)
+            table_id = cur.fetchone()[0]
+
+        # Get shift order number (use sale's order_number if provided, else compute next)
+        shift_order_number = int(order_number) if order_number and int(order_number) > 0 else 1
+        if not (order_number and int(order_number) > 0):
+            try:
+                if shift_id:
+                    cur.execute("SELECT MAX(shift_order_number) FROM restaurant_orders WHERE shift_id = ?", (shift_id,))
+                    max_num = cur.fetchone()[0]
+                    shift_order_number = (max_num or 0) + 1
+            except Exception:
+                pass
+
+        cust_label = customer_name or "Take Away Customer"
+
+        # 3. Create order in restaurant_orders
+        cur.execute("""
+            INSERT INTO restaurant_orders (
+                table_id, waiter_id, customer_name, status, prep_status, bill_notes,
+                created_at, warehouse_id, cost_center_id, shift_id, shift_order_number
+            )
+            OUTPUT INSERTED.id
+            VALUES (?, ?, ?, 'Paid', 'Preparing', '', CURRENT_TIMESTAMP, ?, ?, ?, ?)
+        """, (table_id, cashier_id, cust_label, warehouse_id, cost_center_id, shift_id, shift_order_number))
+        
+        order_id = cur.fetchone()[0]
+
+        # 4. Product station flags lookup map
+        order_map: dict[str, tuple] = {}
+        try:
+            cur.execute("SELECT id, part_no, name, order_1, order_2, order_3, order_4, order_5, order_6 FROM products")
+            for row in cur.fetchall():
+                pid = str(row[0] or "")
+                pno = str(row[1] or "").strip()
+                pname = str(row[2] or "").strip().lower()
+                flags = tuple(1 if row[i] else 0 for i in range(3, 9))
+                if pid: order_map[f"id:{pid}"] = flags
+                if pno: order_map[f"pno:{pno}"] = flags
+                if pname: order_map[f"name:{pname}"] = flags
+        except Exception:
+            pass
+
+        # 5. Insert line items
+        for it in items:
+            pno = str(it.get("part_no", "")).strip()
+            pname = str(it.get("product_name") or it.get("name") or "").strip()
+            pid = it.get("product_id") or it.get("id") or 0
+            qty = float(it.get("qty", 1))
+            rate = float(it.get("price", 0))
+
+            flags = (
+                order_map.get(f"id:{pid}") or
+                order_map.get(f"pno:{pno}") or
+                order_map.get(f"name:{pname}") or
+                (0, 0, 0, 0, 0, 0)
+            )
+
+            cur.execute("""
+                INSERT INTO restaurant_order_items (
+                    order_id, product_id, item_code, item_name, quantity, rate,
+                    item_notes, order_1, order_2, order_3, order_4, order_5, order_6
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (order_id, pid, pno, pname, qty, rate, it.get("notes", ""), *flags))
+
+        conn.commit()
+        conn.close()
+
+        print(f"[AutoKDS] Created Take Away KDS order #{order_id} for invoice {invoice_no}")
+
+        # 6. Broadcast to live KDS screens via WebSocket broadcaster
+        try:
+            from services.kds_service import kds_service
+            kds_service.broadcast_sync({"type": "refresh", "order_id": order_id})
+        except Exception as _ws_err:
+            print(f"[AutoKDS] WebSocket broadcast error: {_ws_err}")
+
+    except Exception as e:
+        print(f"[AutoKDS] Error creating Take Away order: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

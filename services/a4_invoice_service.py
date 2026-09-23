@@ -7,6 +7,24 @@
 # Page geometry mirrors Odoo's paperformat "A4 No Top Margin":
 #   format=A4, orientation=Portrait, margin_top=5mm, margin_bottom=5mm,
 #   margin_left=7mm, margin_right=7mm, header_line=False, dpi=90
+#
+# CROSS-MACHINE RELIABILITY NOTES (read before touching the CSS):
+#   1. NEVER load fonts from the internet (@import url(fonts.googleapis.com...)).
+#      If the target PC has no internet access (or is firewalled), the font
+#      silently falls back to whatever's on that machine, and every line
+#      height / wrap point shifts -> "layout looks different on other PCs".
+#      Fonts are now embedded as base64 @font-face (see _get_embedded_font_css)
+#      with a safe system-font fallback stack if the .ttf files aren't bundled.
+#   2. NEVER use emoji characters (👤📄🏦 etc.) for icons. Emoji glyphs are
+#      drawn by the OS's colour-emoji font, which varies by machine (some
+#      Windows/Linux boxes have none) -> icons render as blank boxes on some
+#      PCs. Icons are now inline SVG (see _icon_svg), which render identically
+#      everywhere because they're vector paths, not font glyphs.
+#   3. QWebEngineView (Chromium) can fail to initialize on machines with
+#      unusual/older GPU drivers and silently fall back to QTextDocument,
+#      which does NOT support flexbox/position/etc. -> broken header layout.
+#      We now force software rendering via QTWEBENGINE_CHROMIUM_FLAGS so the
+#      GPU driver is taken out of the equation entirely.
 # =============================================================================
 
 import os
@@ -29,6 +47,13 @@ MARGIN_TOP_MM = 5
 MARGIN_BOTTOM_MM = 5
 MARGIN_LEFT_MM = 7
 MARGIN_RIGHT_MM = 7
+
+# Printable page height in pt, used to force the footer to the true bottom
+# of the A4 page regardless of how little content is on the invoice.
+# A4 = 297mm tall. Minus top/bottom margins -> printable height.
+# 1mm = 72/25.4 pt
+_MM_TO_PT = 72.0 / 25.4
+PAGE_CONTENT_HEIGHT_PT = round((297 - MARGIN_TOP_MM - MARGIN_BOTTOM_MM) * _MM_TO_PT, 1)  # ~813.3pt
 
 
 def _get_logo_data_uri(co: dict) -> str:
@@ -53,6 +78,77 @@ def _get_logo_data_uri(co: dict) -> str:
     except Exception as e:
         log.warning("Logo load error: %s", e)
     return ""
+
+
+def _get_embedded_font_css() -> str:
+    """
+    Embeds bundled Poppins .ttf files (if present) as base64 @font-face rules
+    so the invoice renders with the exact same typeface, weights, line-height
+    and wrapping on EVERY machine, with zero internet dependency and zero
+    reliance on Poppins being installed system-wide.
+
+    Expected bundle layout (ship these alongside the app / add to PyInstaller
+    as data files):
+        <app_dir>/assets/fonts/Poppins-Regular.ttf    (weight 400)
+        <app_dir>/assets/fonts/Poppins-Medium.ttf     (weight 500)
+        <app_dir>/assets/fonts/Poppins-SemiBold.ttf   (weight 600)
+        <app_dir>/assets/fonts/Poppins-Bold.ttf       (weight 700)
+        <app_dir>/assets/fonts/Poppins-ExtraBold.ttf  (weight 800)
+
+    If none are found (e.g. not bundled yet), this returns "" and the CSS
+    font-family fallback stack (system-safe fonts) is used instead -- so the
+    document still looks correct and IDENTICAL across machines, just with a
+    different (but universally available) typeface.
+    """
+    try:
+        # sys._MEIPASS is set inside a PyInstaller onefile/onefolder bundle.
+        base_dir = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+        fonts_dir = os.path.join(base_dir, "assets", "fonts")
+        weights = {
+            "400": "Poppins-Regular.ttf",
+            "500": "Poppins-Medium.ttf",
+            "600": "Poppins-SemiBold.ttf",
+            "700": "Poppins-Bold.ttf",
+            "800": "Poppins-ExtraBold.ttf",
+        }
+        face_rules = []
+        for weight, fname in weights.items():
+            fpath = os.path.join(fonts_dir, fname)
+            if os.path.exists(fpath):
+                with open(fpath, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                face_rules.append(f"""
+        @font-face {{
+            font-family: 'Poppins';
+            font-style: normal;
+            font-weight: {weight};
+            font-display: block;
+            src: url(data:font/truetype;base64,{b64}) format('truetype');
+        }}""")
+        return "\n".join(face_rules)
+    except Exception as e:
+        log.warning("Embedded font load error (falling back to system fonts): %s", e)
+        return ""
+
+
+def _icon_svg(name: str, size: float = 8, color: str = "#ffffff") -> str:
+    """
+    Tiny inline vector icons used instead of emoji. Emoji glyphs are drawn by
+    whatever colour-emoji font happens to be installed on a given machine
+    (many Windows Server / minimal Linux boxes have none at all), which is a
+    common cause of icons silently disappearing on "some other computer".
+    SVG paths render identically everywhere because there's no font lookup.
+    """
+    icons = {
+        "pin": f'<svg width="{size}pt" height="{size}pt" viewBox="0 0 24 24" fill="{color}" style="vertical-align:middle;"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>',
+        "phone": f'<svg width="{size}pt" height="{size}pt" viewBox="0 0 24 24" fill="{color}" style="vertical-align:middle;"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.9 21 3 13.1 3 3.9c0-.6.4-1 1-1H7.6c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .8-.2 1L6.6 10.8z"/></svg>',
+        "mail": f'<svg width="{size}pt" height="{size}pt" viewBox="0 0 24 24" fill="{color}" style="vertical-align:middle;"><path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z"/></svg>',
+        "user": f'<svg width="{size}pt" height="{size}pt" viewBox="0 0 24 24" fill="{color}" style="vertical-align:middle;"><path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10zm0 2c-4.4 0-8 2.2-8 5v2h16v-2c0-2.8-3.6-5-8-5z"/></svg>',
+        "doc": f'<svg width="{size}pt" height="{size}pt" viewBox="0 0 24 24" fill="{color}" style="vertical-align:middle;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm0 6V3.5L18.5 8H14z"/></svg>',
+        "bank": f'<svg width="{size}pt" height="{size}pt" viewBox="0 0 24 24" fill="{color}" style="vertical-align:middle;"><path d="M12 2 2 8v2h20V8L12 2zM4 11v8H2v2h20v-2h-2v-8h-2v8h-3v-8h-2v8h-3v-8H6v8H4v-8z"/></svg>',
+        "shake": f'<svg width="{size}pt" height="{size}pt" viewBox="0 0 24 24" fill="{color}" style="vertical-align:middle;"><path d="M11 7 8 4 2 10l3 3 1-1 5 5 2-2-5-5 1-1 3 3 3-3-3-3-1 1z"/></svg>',
+    }
+    return icons.get(name, "")
 
 
 def render_a4_invoice_html(sale_data: dict | object) -> str:
@@ -93,8 +189,26 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
 
     doc_type = str(_get("doc_type") or _get("docType") or "").lower()
     receipt_type = str(_get("receiptType") or _get("receipt_type") or "").upper()
-    is_quote = "quotation" in receipt_type.lower() or "quotation" in doc_type or "quote" in receipt_type.lower()
-    is_return = "credit" in receipt_type.lower() or "return" in receipt_type.lower() or "credit_note" in doc_type
+    is_quote = "quotation" in receipt_type.lower() or "quotation" in doc_type or "quote" in receipt_type.lower() or bool(_get("is_quote")) or bool(_get("is_quotation"))
+    is_return = "credit" in receipt_type.lower() or "return" in receipt_type.lower() or "credit_note" in doc_type or "credit" in doc_type or bool(_get("is_return")) or bool(_get("is_credit_note"))
+    is_order = "order" in receipt_type.lower() or "take away" in receipt_type.lower() or "takeaway" in receipt_type.lower() or "sit in" in receipt_type.lower() or "sitin" in receipt_type.lower()
+
+    original_invoice_no = (
+        _get("originalInvoiceNo")
+        or _get("original_invoice_no")
+        or _get("orig_invoice")
+        or _get("invoice_no") if is_return else ""
+    )
+    if is_return and str(original_invoice_no) == str(invoice_no):
+        original_invoice_no = ""
+
+    return_reason = (
+        _get("creditNoteReason")
+        or _get("return_reason")
+        or _get("reason")
+        or ""
+    )
+    cashier_name = _get("cashierName") or _get("cashier_name") or ""
 
     if is_quote:
         doc_title = "QUOTATION"
@@ -103,6 +217,10 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
     elif is_return:
         doc_title = "CREDIT NOTE"
         doc_no_label = "Credit Note No."
+        doc_date_label = "Date"
+    elif is_order:
+        doc_title = "ORDER"
+        doc_no_label = "Order No."
         doc_date_label = "Date"
     else:
         doc_title = "INVOICE"
@@ -119,10 +237,35 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
         except Exception:
             pass
 
-    terms_text = _get("salesOrderTerms") or _get("terms_and_conditions") or co.get("terms_and_conditions", "")
-    banking_text = _get("banking_details") or co.get("banking_details", "")
+    # Original Invoice & Reason metadata for Credit Notes
+    credit_note_meta_html = ""
+    if is_return:
+        cn_meta_rows = []
+        if original_invoice_no:
+            cn_meta_rows.append(f'<tr><td class="prop-label">Orig. Invoice</td><td class="prop-colon">:</td><td style="font-weight: bold; color: #0a2342;">{original_invoice_no}</td></tr>')
+        if return_reason:
+            cn_meta_rows.append(f'<tr><td class="prop-label">Reason</td><td class="prop-colon">:</td><td>{return_reason}</td></tr>')
+        if cashier_name:
+            cn_meta_rows.append(f'<tr><td class="prop-label">Cashier</td><td class="prop-colon">:</td><td>{cashier_name}</td></tr>')
+        credit_note_meta_html = "".join(cn_meta_rows)
 
-    terms_html = "<br>".join([line.strip() for line in terms_text.strip().splitlines() if line.strip()]) if terms_text.strip() else "<i style='color: #94a3b8;'>Standard terms & conditions apply.</i>"
+    if is_quote:
+        terms_text = (co.get("quotation_terms") or "").strip() or (co.get("terms_and_conditions") or "").strip() or _get("quotation_terms") or _get("salesOrderTerms")
+    elif is_return:
+        terms_text = (co.get("credit_note_terms") or "").strip() or (co.get("terms_and_conditions") or "").strip() or _get("credit_note_terms")
+    else:
+        terms_text = (co.get("terms_and_conditions") or "").strip() or _get("salesOrderTerms") or _get("terms_and_conditions")
+    banking_text = (co.get("banking_details") or "").strip() or _get("banking_details") or ""
+
+    if is_return and not terms_text.strip():
+        terms_html = "1. This Credit Note is issued in accordance with our return and refund policy.<br>2. Store credit or refund will be processed as stated."
+    elif is_quote and not terms_text.strip():
+        terms_html = "1. This is a quotation - not a tax invoice.<br>2. Prices are indicative and subject to change.<br>3. Quotation is valid until the date shown above."
+    elif terms_text.strip():
+        terms_html = "<br>".join([line.strip() for line in terms_text.strip().splitlines() if line.strip()])
+    else:
+        terms_html = "<i style='color: #94a3b8;'>Standard terms & conditions apply.</i>"
+
     banking_html = "<br>".join([line.strip() for line in banking_text.strip().splitlines() if line.strip()]) if banking_text.strip() else "<i style='color: #94a3b8;'>No banking details provided.</i>"
 
     subtotal = float(_get("subtotal", 0.0) or _get("total", 0.0))
@@ -133,18 +276,6 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
     amount_tendered = float(_get("amountTendered", 0.0) or _get("amount_tendered", 0.0) or _get("tendered", 0.0) or 0.0)
     change_amount = float(_get("change", 0.0) or _get("change_amount", 0.0) or _get("changeAmount", 0.0) or 0.0)
 
-    # ------------------------------------------------------------------
-    # PLACEHOLDER: dual-currency conversion (secondary/base currency columns)
-    # Wire real values from sale_data / company defaults here. Until then
-    # this defaults to a 1:1 rate so the extra columns just mirror the
-    # primary currency amounts.
-    # TODO: replace with your actual exchange-rate source, e.g.:
-    #   exchange_rate = _get("exchangeRate") or _get("exchange_rate") or co.get("exchange_rate", 1.0)
-    #   base_currency = _get("baseCurrency") or _get("base_currency") or co.get("base_currency", "USD")
-    # ------------------------------------------------------------------
-    exchange_rate = float(_get("exchangeRate") or _get("exchange_rate") or co.get("exchange_rate", 1.0) or 1.0)
-    base_currency = _get("baseCurrency") or _get("base_currency") or co.get("base_currency", "USD") or "USD"
-    show_dual_currency = bool(_get("showDualCurrency", True))  # TODO: wire real flag / just remove if always on
 
     # Items extraction
     items = []
@@ -164,9 +295,6 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
             tot = float(getattr(it, "amount", 0.0) or getattr(it, "total", qty * price))
         items.append({
             "name": p_name, "qty": qty, "price": price, "tax": tax, "total": tot,
-            # PLACEHOLDER conversion — TODO: replace with a real converted value
-            # (per-line rate if it can differ from the document-level rate).
-            "tax_conv": tax * exchange_rate,
         })
 
     # Render table rows matching Odoo report_sale_document main-table
@@ -175,36 +303,31 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
         bg_style = 'style="background-color: #f8fafc;"' if idx % 2 == 0 else ''
         item_rows_html += f"""
         <tr {bg_style}>
-            <td class="idx-col">{idx}</td>
-            <td class="desc-col">{item['name']}</td>
-            <td>{item['qty']:.1f}</td>
-            <td>{item['price']:.2f}</td>
-            <td>{item['tax']:.2f}</td>
-            <td style="font-weight: bold;">{item['total']:.2f}</td>
+            <td class="idx-col" style="text-align: center; padding: 4pt 4pt; border: 1pt solid #e2e8f0; font-size: 8.5pt;">{idx}</td>
+            <td class="desc-col" style="text-align: left; padding: 4pt 6pt; border: 1pt solid #e2e8f0; font-size: 8.5pt; font-weight: 500;">{item['name']}</td>
+            <td style="text-align: center; padding: 4pt 4pt; border: 1pt solid #e2e8f0; font-size: 8.5pt;">{item['qty']:.1f}</td>
+            <td style="text-align: right; padding: 4pt 6pt; border: 1pt solid #e2e8f0; font-size: 8.5pt;">{item['price']:,.2f}</td>
+            <td style="text-align: right; padding: 4pt 6pt; border: 1pt solid #e2e8f0; font-size: 8.5pt;">{item['tax']:,.2f}</td>
+            <td style="text-align: right; padding: 4pt 6pt; border: 1pt solid #e2e8f0; font-size: 8.5pt; font-weight: bold;">{item['total']:,.2f}</td>
         </tr>
         """
-
-    exchange_rate_html = f"""
-        <div style="font-size: 6.5pt; color: #475569; margin-top: 4pt;">
-            Exchange Rate: 1 {currency} = {exchange_rate:.4f} {base_currency}
-        </div>
-    """ if show_dual_currency else ""
 
     # Tendered / Change rows — only rendered when a tendered amount was recorded
     tendered_change_html = ""
     if amount_tendered > 0:
         tendered_change_html += f"""
                         <tr>
-                            <td style="padding: 2pt 4pt; border: 1pt solid #e2e8f0; font-weight: bold;">AMOUNT TENDERED</td>
-                            <td style="padding: 2pt 4pt; border: 1pt solid #e2e8f0;">{currency} {amount_tendered:,.2f}</td>
+                            <td style="padding: 3pt 5pt; border: 1pt solid #e2e8f0; font-weight: bold; font-size: 8.5pt; text-align: left;">AMOUNT TENDERED</td>
+                            <td style="padding: 3pt 5pt; border: 1pt solid #e2e8f0; font-size: 8.5pt; text-align: right;">{currency} {amount_tendered:,.2f}</td>
                         </tr>
                         <tr>
-                            <td style="padding: 2pt 4pt; border: 1pt solid #e2e8f0; font-weight: bold; color: #16a34a;">CHANGE</td>
-                            <td style="padding: 2pt 4pt; border: 1pt solid #e2e8f0; color: #16a34a; font-weight: bold;">{currency} {change_amount:,.2f}</td>
+                            <td style="padding: 3pt 5pt; border: 1pt solid #e2e8f0; font-weight: bold; color: #16a34a; font-size: 8.5pt; text-align: left;">CHANGE</td>
+                            <td style="padding: 3pt 5pt; border: 1pt solid #e2e8f0; color: #16a34a; font-weight: bold; font-size: 8.5pt; text-align: right;">{currency} {change_amount:,.2f}</td>
                         </tr>
         """
 
     logo_html = _get_logo_data_uri(co)
+    embedded_font_css = _get_embedded_font_css()
 
     # Address block
     full_address = address
@@ -212,37 +335,112 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
         full_address += f", {address2}"
 
     # ZIMRA Block detection
+    # ReceiptData field mapping:
+    #   receiptNo    -> global invoice number (fiscal_global_no in DB)
+    #   vCode        -> verification code     (fiscal_verification_code in DB)
+    #   deviceSerial -> EFD serial number
+    #   deviceId     -> EFD device ID
+    #   fiscalDay    -> fiscal day string
+    #   qrCode       -> verification URL (raw string, not base64 PNG)
     zimra_html = ""
+    fiscal_status = str(_get("fiscal_status") or _get("fiscalStatus") or "").strip().lower()
     zimra_serial = _get("deviceSerial") or co.get("zimra_serial_no", "")
-    zimra_global = _get("fiscalGlobalNo") or _get("fiscal_global_no", "")
-    zimra_vcode = _get("verificationCode") or _get("fiscal_verification_code", "")
-    zimra_qr = _get("qrCode") or _get("fiscal_qr_code", "")
+    # Support both ReceiptData attribute names and dict key names
+    zimra_global = (
+        _get("receiptNo")
+        or _get("fiscalGlobalNo")
+        or _get("fiscal_global_no", "")
+    )
+    zimra_vcode = (
+        _get("vCode")
+        or _get("verificationCode")
+        or _get("fiscal_verification_code", "")
+    )
+    # Format 16-char vcode with dashes for readability
+    if zimra_vcode and len(str(zimra_vcode)) == 16:
+        _vc = str(zimra_vcode)
+        zimra_vcode = f"{_vc[:4]}-{_vc[4:8]}-{_vc[8:12]}-{_vc[12:]}"
+    zimra_qr_raw = _get("qrCode") or _get("fiscal_qr_code", "")
     zimra_day = _get("fiscalDay") or _get("fiscal_day", "")
 
-    if zimra_serial or zimra_global or zimra_qr:
-        qr_img_html = f'<img src="data:image/png;base64,{zimra_qr}" style="width:50pt; height:50pt; display:inline-block;" alt="ZIMRA QR Code"/>' if (len(zimra_qr) > 50) else ''
-        zimra_html = f"""
-        <div style="margin-top: 8pt; padding: 5pt; border: 1pt solid #0a2342; border-radius: 3pt; background-color: #f8fafc;">
-            <table class="w-100" style="width: 100%; border-collapse: collapse;">
-                <tr>
-                    <td style="width: 55pt; text-align: center; vertical-align: middle;">
-                        {qr_img_html}
-                    </td>
-                    <td style="vertical-align: middle; padding-left: 5pt; font-size: 6.5pt; line-height: 1.3;">
-                        <div style="font-weight: 800; font-size: 7.5pt; color: #0a2342; margin-bottom: 1.5pt;">
-                            ZIMRA ELECTRONIC FISCAL VERIFICATION
-                        </div>
-                        <table class="prop-table" style="font-size: 6.5pt; width: 100%;">
-                            {'<tr><td class="font-bold" style="width: 100pt;">Global Invoice No</td><td class="prop-colon">:</td><td>' + zimra_global + '</td></tr>' if zimra_global else ''}
-                            {'<tr><td class="font-bold">Verification Code</td><td class="prop-colon">:</td><td>' + zimra_vcode + '</td></tr>' if zimra_vcode else ''}
-                            {'<tr><td class="font-bold">EFD Serial Number</td><td class="prop-colon">:</td><td>' + zimra_serial + '</td></tr>' if zimra_serial else ''}
-                            {'<tr><td class="font-bold">Fiscal Day</td><td class="prop-colon">:</td><td>' + str(zimra_day) + '</td></tr>' if zimra_day else ''}
-                        </table>
-                    </td>
-                </tr>
-            </table>
-        </div>
+    # Dynamic A4 Font Size from Company Defaults
+    try:
+        base_font_pt = float(co.get("a4_font_size", 8.5) or 8.5)
+        if base_font_pt < 6 or base_font_pt > 16:
+            base_font_pt = 8.5
+    except Exception:
+        base_font_pt = 8.5
+
+    f_base = f"{base_font_pt}pt"
+    f_small = f"{round(base_font_pt * 0.94, 1)}pt"
+    f_tiny = f"{round(base_font_pt * 0.85, 1)}pt"
+    f_micro = f"{round(base_font_pt * 0.75, 1)}pt"
+    f_title = f"{round(base_font_pt * 1.53, 1)}pt"
+    f_h1 = f"{round(base_font_pt * 1.45, 1)}pt"
+    f_head = f"{round(base_font_pt * 1.05, 1)}pt"
+
+    # Only show ZIMRA block when the sale is actually fiscalized (or pending-sync)
+    _show_zimra = (
+        fiscal_status in ("fiscalized", "pending_sync")
+        or (zimra_serial or zimra_global or zimra_qr_raw)
+    )
+    zimra_present = _show_zimra and bool(zimra_serial or zimra_global or zimra_qr_raw)
+    
+    zimra_footer_cell = ""
+    if zimra_present:
+        # Try to generate a real QR code image from the URL string
+        qr_img_html = ""
+        qr_link_html = ""
+        if zimra_qr_raw:
+            try:
+                import qrcode, io
+                qr_img_obj = qrcode.make(zimra_qr_raw)
+                buf = io.BytesIO()
+                qr_img_obj.save(buf, format="PNG")
+                qr_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                qr_img_html = (
+                    f'<img src="data:image/png;base64,{qr_b64}" '
+                    f'style="width:48pt; height:48pt; display:inline-block;" alt="ZIMRA QR Code"/>'
+                )
+            except Exception:
+                if zimra_qr_raw.startswith("http"):
+                    qr_link_html = (
+                        f'<a href="{zimra_qr_raw}" style="font-size:5.5pt; color:#0a2342; word-break:break-all;">'
+                        f'[Scan to Verify]</a>'
+                    )
+        pending_note_html = ""
+        if fiscal_status == "pending_sync":
+            pending_note_html = (
+                f'<div style="color:#c05a00; font-weight:bold; font-size:{f_micro}; padding-top:1pt;">'
+                '&#9888; Pending sync</div>'
+            )
+
+        zimra_footer_cell = f"""
+        <td class="align-top" style="width: 32%; padding-left: 8pt; vertical-align: top;">
+            <div style="padding: 4pt 6pt; border: 1.2pt solid #0a2342; border-radius: 4pt; background-color: #f0f4fa;">
+                <div style="font-weight: 800; font-size: {f_tiny}; color: #0a2342; margin-bottom: 2pt; text-align:center; letter-spacing:0.3pt;">
+                    &#x2713;&nbsp; ZIMRA FISCAL VERIFICATION
+                </div>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tr>
+                        <td style="width: 52pt; text-align: center; vertical-align: middle; padding-right: 4pt;">
+                            {qr_img_html or qr_link_html or f'<span style="font-size:7pt; color:#64748b;">QR</span>'}
+                        </td>
+                        <td style="vertical-align: top; font-size: {f_micro}; line-height: 1.25;">
+                            {'<div style="color:#0a2342; font-weight:bold;"><b>Inv:</b> ' + str(zimra_global) + '</div>' if zimra_global else ''}
+                            {'<div style="color:#334155; font-family:monospace; word-break:break-all;"><b>VCode:</b> ' + str(zimra_vcode) + '</div>' if zimra_vcode else ''}
+                            {'<div style="color:#64748b;"><b>EFD:</b> ' + str(zimra_serial) + '</div>' if zimra_serial else ''}
+                            {'<div style="color:#64748b;"><b>Day:</b> ' + str(zimra_day) + '</div>' if zimra_day else ''}
+                            {pending_note_html}
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </td>
         """
+
+    terms_width = "34%" if zimra_present else "50%"
+    banking_width = "34%" if zimra_present else "50%"
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -250,31 +448,36 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
     <meta charset="utf-8">
     <title>{doc_title} - {invoice_no}</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800;900&display=swap');
+        {embedded_font_css}
 
-        body {{
+        * {{ box-sizing: border-box; }}
+
+        html, body {{
             margin: 0 !important;
             padding: 0 !important;
             background: #ffffff;
-            font-family: 'Poppins', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-            font-size: 7pt;
+            font-family: 'Poppins', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+            font-size: {f_base};
             color: #1e293b;
-            line-height: 1.3;
+            line-height: 1.35;
         }}
-        .print-container {{
+
+        .page {{
+            display: flex;
+            flex-direction: column;
+            min-height: {PAGE_CONTENT_HEIGHT_PT}pt;
             width: 100%;
-            margin: 0 !important;
-            padding: 0 !important;
-            box-sizing: border-box;
-            background: #ffffff;
         }}
+        .page-body {{ flex: 0 0 auto; }}
+        .page-footer {{ margin-top: auto; flex: 0 0 auto; }}
+
         .text-primary-dark {{ color: #0a2342; }}
         .bg-primary-dark {{ background-color: #0a2342; color: #ffffff; }}
 
         .icon-circle {{
-            display: inline-block; width: 11pt; height: 11pt;
+            display: inline-block; width: 13pt; height: 13pt;
             background: #0a2342; color: #ffffff; border-radius: 50%;
-            text-align: center; line-height: 11pt; margin-right: 3pt; font-size: 6.5pt;
+            text-align: center; line-height: 13pt; margin-right: 4pt; font-size: {f_micro};
         }}
 
         .w-100 {{ width: 100%; border-collapse: collapse; }}
@@ -288,193 +491,211 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
         .align-middle {{ vertical-align: middle; }}
         .font-bold {{ font-weight: bold; }}
 
-        /* Fixed table layout so column widths below are respected exactly
-           instead of the browser auto-sizing them from cell content
-           (which is what was causing the columns to look misaligned/broken). */
+        .header-brand-table {{ border-collapse: collapse; }}
+        .header-brand-table td {{ vertical-align: middle; padding: 0; }}
+
         .main-table {{ width: 100%; border-collapse: collapse; margin-top: 6pt; table-layout: fixed; }}
-        .main-table th {{ background: #0a2342; color: #ffffff; padding: 3pt 4pt; font-size: 7pt; border: 1pt solid #ffffff; text-align: center; word-wrap: break-word; }}
-        .main-table td {{ padding: 3pt 4pt; border: 1pt solid #e2e8f0; text-align: center; font-size: 7pt; word-wrap: break-word; }}
+        .main-table th {{ background: #0a2342; color: #ffffff; padding: 4.5pt 5pt; font-size: {f_base}; border: 1pt solid #ffffff; text-align: center; word-wrap: break-word; }}
+        .main-table td {{ padding: 3.5pt 5pt; border: 1pt solid #e2e8f0; text-align: center; font-size: {f_base}; word-wrap: break-word; }}
         .main-table td.desc-col {{ text-align: left; font-weight: 500; }}
         .main-table td.idx-col {{ font-weight: bold; }}
 
-        .prop-table {{ width: 100%; border-collapse: collapse; font-size: 7pt; }}
-        .prop-table td {{ padding: 1.5pt 0; vertical-align: top; }}
-        .prop-label {{ font-weight: bold; width: 70pt; }}
+        .prop-table {{ width: 100%; border-collapse: collapse; font-size: {f_base}; }}
+        .prop-table td {{ padding: 2pt 0; vertical-align: top; }}
+        .prop-label {{ font-weight: bold; width: 80pt; }}
         .prop-colon {{ width: 8pt; text-align: center; }}
     </style>
 </head>
 <body>
-    <div class="print-container">
-        <!-- Top Center Title -->
-        <div class="text-center" style="margin-top: 0px; margin-bottom: 6pt;">
-            <span style="font-size: 10pt; font-weight: 800; letter-spacing: 2pt; color: #0a2342; display: inline-block;">
-                &mdash;&mdash;&nbsp;&nbsp;{doc_title}&nbsp;&nbsp;&mdash;&mdash;
-            </span>
+    <div class="print-container page">
+        <div class="page-body">
+            <!-- Top Center Title -->
+            <div class="text-center" style="margin-top: 0px; margin-bottom: 6pt;">
+                <span style="font-size: {f_title}; font-weight: 800; letter-spacing: 2.5pt; color: #0a2342; display: inline-block;">
+                    &mdash;&mdash;&nbsp;&nbsp;{doc_title}&nbsp;&nbsp;&mdash;&mdash;
+                </span>
+            </div>
+
+            <!-- Top Header Row -->
+            <table width="100%" cellpadding="0" cellspacing="0" class="w-100" style="width: 100%; margin-bottom: 6pt; border-bottom: 1.5pt solid #0a2342; padding-bottom: 5pt; border-collapse: collapse;">
+                <tr>
+                    <!-- Left: Logo & Company Name -->
+                    <td width="50%" valign="middle" align="left" class="w-50 align-middle text-left" style="width: 50%; vertical-align: middle; text-align: left;">
+                        <table cellpadding="0" cellspacing="0" class="header-brand-table" style="border-collapse: collapse;">
+                            <tr>
+                                <td valign="middle" style="vertical-align: middle;">{logo_html}</td>
+                                <td valign="middle" style="vertical-align: middle; padding-left: 5pt;">
+                                    <h1 style="color: #0a2342; font-size: {f_h1}; font-weight: 800; margin: 0; line-height: 1.15;">
+                                        {company_name_upper}
+                                    </h1>
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                    <!-- Right: Contact Details -->
+                    <td width="50%" valign="middle" align="right" class="w-50 align-middle text-right" style="width: 50%; vertical-align: middle; text-align: right; font-size: {f_small}; line-height: 1.35;">
+                        <table cellpadding="0" cellspacing="0" style="margin-left: auto; border-collapse: collapse;">
+                            <tr><td style="padding-bottom: 1.5pt; text-align: left; vertical-align: top; font-weight: bold;">{company_name_upper}</td></tr>
+                            {'<tr><td style="padding-bottom: 1.5pt; text-align: left; vertical-align: top;">' + _icon_svg('pin', 7.5, '#0a2342') + ' ' + full_address + '</td></tr>' if full_address else ''}
+                            {'<tr><td style="padding-bottom: 1.5pt; text-align: left; vertical-align: top;">' + _icon_svg('phone', 7.5, '#0a2342') + ' ' + phone + '</td></tr>' if phone else ''}
+                            {'<tr><td style="padding-bottom: 1.5pt; text-align: left; vertical-align: top;">' + _icon_svg('mail', 7.5, '#0a2342') + ' ' + company_email + '</td></tr>' if company_email else ''}
+                            <tr>
+                                <td style="padding-bottom: 1.5pt; text-align: left; vertical-align: top;">
+                                    <span class="font-bold">TIN:</span> {tin_no} &nbsp;|&nbsp; <span class="font-bold">VAT No:</span> {vat_no}
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+
+            <!-- Mid Section: Customer & Document Info -->
+            <table width="100%" cellpadding="0" cellspacing="0" class="w-100" style="width: 100%; margin-bottom: 8pt; border-collapse: collapse;">
+                <tr>
+                    <!-- Customer Info -->
+                    <td width="50%" valign="top" class="w-50 align-top" style="width: 50%; vertical-align: top; padding-right: 12pt;">
+                        <div style="margin-bottom: 4pt;">
+                            <span class="icon-circle">{_icon_svg('user', 7)}</span>
+                            <span class="text-primary-dark font-bold" style="font-size: {f_head};">CUSTOMER DETAILS</span>
+                        </div>
+                        <table width="100%" cellpadding="1" cellspacing="0" class="prop-table" style="width: 100%; border-collapse: collapse; font-size: {f_base};">
+                            <tr>
+                                <td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Customer Name</td>
+                                <td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>
+                                <td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{customer_name}</td>
+                            </tr>
+                            {'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Address</td><td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td><td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">' + customer_address + '</td></tr>' if customer_address else ''}
+                            {'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Phone</td><td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td><td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">' + customer_phone + '</td></tr>' if customer_phone else ''}
+                        </table>
+                    </td>
+
+                    <!-- Document Info -->
+                    <td width="50%" valign="top" class="w-50 align-top" style="width: 50%; vertical-align: top; border-left: 1.5pt solid #e2e8f0; padding-left: 12pt;">
+                        <table width="100%" cellpadding="1" cellspacing="0" class="prop-table" style="width: 100%; border-collapse: collapse; font-size: {f_base};">
+                            <tr>
+                                <td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">{doc_no_label}</td>
+                                <td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>
+                                <td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top; font-weight: bold;">{invoice_no}</td>
+                            </tr>
+                            <tr>
+                                <td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">{doc_date_label}</td>
+                                <td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>
+                                <td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{invoice_date}</td>
+                            </tr>
+                            {valid_until_html}
+                            {credit_note_meta_html}
+                            <tr>
+                                <td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Currency</td>
+                                <td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>
+                                <td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{currency}</td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+
+            <!-- Order Lines Table -->
+            <table width="100%" cellpadding="3" cellspacing="0" class="main-table" style="width: 100%; border-collapse: collapse; margin-top: 6pt;">
+                <thead>
+                    <tr style="background-color: #0a2342; color: #ffffff;">
+                        <th width="5%" style="width: 5%; background-color: #0a2342; color: #ffffff; padding: 4.5pt 3pt; font-size: {f_base}; text-align: center; border: 1pt solid #ffffff;">#</th>
+                        <th width="35%" class="text-left" style="width: 35%; background-color: #0a2342; color: #ffffff; padding: 4.5pt 5pt; font-size: {f_base}; text-align: left; border: 1pt solid #ffffff;">Description</th>
+                        <th width="10%" style="width: 10%; background-color: #0a2342; color: #ffffff; padding: 4.5pt 3pt; font-size: {f_base}; text-align: center; border: 1pt solid #ffffff;">{'Qty Returned' if is_return else 'Qty'}</th>
+                        <th width="16%" style="width: 16%; background-color: #0a2342; color: #ffffff; padding: 4.5pt 5pt; font-size: {f_base}; text-align: right; border: 1pt solid #ffffff;">Unit Price ({currency})</th>
+                        <th width="16%" style="width: 16%; background-color: #0a2342; color: #ffffff; padding: 4.5pt 5pt; font-size: {f_base}; text-align: right; border: 1pt solid #ffffff;">Tax Amount ({currency})</th>
+                        <th width="18%" style="width: 18%; background-color: #0a2342; color: #ffffff; padding: 4.5pt 5pt; font-size: {f_base}; text-align: right; border: 1pt solid #ffffff;">{'Total Credit (' + currency + ')' if is_return else 'Total Amount (' + currency + ')'}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {item_rows_html}
+                </tbody>
+            </table>
+
+            <!-- Totals Section -->
+            <table width="100%" cellpadding="0" cellspacing="0" class="w-100" style="width: 100%; margin-top: 5pt; border-collapse: collapse;">
+                <tr>
+                    <td width="55%" valign="top" class="w-60" style="width: 55%; vertical-align: top;">
+                    </td>
+                    <td width="45%" valign="top" class="w-40 text-right" style="width: 45%; vertical-align: top; text-align: right;">
+                        <table width="100%" cellpadding="2" cellspacing="0" style="width: 100%; border-collapse: collapse; text-align: right; font-size: {f_base};">
+                            <tr>
+                                <td style="padding: 3pt 5pt; border: 1pt solid #e2e8f0; font-weight: bold; text-align: left;">SUBTOTAL (Excl. Tax)</td>
+                                <td style="padding: 3pt 5pt; border: 1pt solid #e2e8f0; width: 45%; text-align: right;">{currency} {subtotal:,.2f}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 3pt 5pt; border: 1pt solid #e2e8f0; font-weight: bold; text-align: left;">TOTAL TAX</td>
+                                <td style="padding: 3pt 5pt; border: 1pt solid #e2e8f0; text-align: right;">{currency} {total_vat:,.2f}</td>
+                            </tr>
+                            <tr class="bg-primary-dark" style="background-color: #0a2342; color: #ffffff;">
+                                <td style="padding: 4.5pt 5pt; font-weight: bold; font-size: {f_head}; color: #ffffff; text-align: left;">{'TOTAL CREDIT (Incl. Tax)' if is_return else 'TOTAL (Incl. Tax)'}</td>
+                                <td style="padding: 4.5pt 5pt; font-weight: bold; font-size: {f_head}; color: #ffffff; text-align: right;">{currency} {grand_total:,.2f}</td>
+                            </tr>
+                            {tendered_change_html}
+                        </table>
+                    </td>
+                </tr>
+            </table>
         </div>
 
-        <!-- Top Header Row -->
-        <table class="w-100" style="margin-bottom: 6pt; border-bottom: 1.5pt solid #0a2342; padding-bottom: 5pt; border-collapse: collapse;">
-            <tr>
-                <!-- Left: Logo & Company Name -->
-                <td class="w-50 align-middle text-left">
-                    <div style="display: flex; align-items: center;">
-                        {logo_html}
-                        <div>
-                            <h1 style="color: #0a2342; font-size: 10.5pt; font-weight: 800; margin: 0; line-height: 1.1;">
-                                {company_name_upper}
-                            </h1>
-                        </div>
-                    </div>
-                </td>
-                <!-- Right: Contact Details -->
-                <td class="w-50 align-middle text-right" style="font-size: 6.5pt; line-height: 1.3;">
-                    <table style="margin-left: auto; border-collapse: collapse;">
-                        <tr><td style="padding-bottom: 1pt; text-align: left; vertical-align: top; font-weight: bold;">{company_name_upper}</td></tr>
-                        {'<tr><td style="padding-bottom: 1pt; text-align: left; vertical-align: top;">📍 ' + full_address + '</td></tr>' if full_address else ''}
-                        {'<tr><td style="padding-bottom: 1pt; text-align: left; vertical-align: top;">📞 ' + phone + '</td></tr>' if phone else ''}
-                        {'<tr><td style="padding-bottom: 1pt; text-align: left; vertical-align: top;">✉ ' + company_email + '</td></tr>' if company_email else ''}
-                        <tr>
-                            <td style="padding-bottom: 1pt; text-align: left; vertical-align: top;">
-                                <span class="font-bold">TIN:</span> {tin_no} &nbsp;|&nbsp; <span class="font-bold">VAT No:</span> {vat_no}
-                            </td>
-                        </tr>
-                    </table>
-                </td>
-            </tr>
-        </table>
-
-        <!-- Mid Section: Customer & Document Info -->
-        <table class="w-100" style="margin-bottom: 6pt; border-collapse: collapse;">
-            <tr>
-                <!-- Customer Info -->
-                <td class="w-50 align-top" style="padding-right: 8pt;">
-                    <div style="margin-bottom: 3pt; display: flex; align-items: center;">
-                        <span class="icon-circle">👤</span>
-                        <span class="text-primary-dark font-bold" style="font-size: 7pt;">CUSTOMER DETAILS</span>
-                    </div>
-                    <table class="prop-table">
-                        <tr>
-                            <td class="prop-label">Customer Name</td><td class="prop-colon">:</td>
-                            <td>{customer_name}</td>
-                        </tr>
-                        {'<tr><td class="prop-label">Address</td><td class="prop-colon">:</td><td>' + customer_address + '</td></tr>' if customer_address else ''}
-                        {'<tr><td class="prop-label">Phone</td><td class="prop-colon">:</td><td>' + customer_phone + '</td></tr>' if customer_phone else ''}
-                    </table>
-                </td>
-
-                <!-- Document Info -->
-                <td class="w-50 align-top" style="border-left: 1.5pt solid #e2e8f0; padding-left: 8pt;">
-                    <table class="prop-table" style="margin-left: 3pt;">
-                        <tr>
-                            <td class="prop-label">{doc_no_label}</td>
-                            <td class="prop-colon">:</td>
-                            <td>{invoice_no}</td>
-                        </tr>
-                        <tr>
-                            <td class="prop-label">{doc_date_label}</td>
-                            <td class="prop-colon">:</td>
-                            <td>{invoice_date}</td>
-                        </tr>
-                        {valid_until_html}
-                        <tr>
-                            <td class="prop-label">Currency</td><td class="prop-colon">:</td>
-                            <td>{currency}</td>
-                        </tr>
-                    </table>
-                </td>
-            </tr>
-        </table>
-
-        <!-- Order Lines Table -->
-        <table class="main-table">
-            <thead>
+        <!-- ============================================================
+             PAGE FOOTER — pinned to the bottom of the printable A4 page
+             Includes Terms & Conditions, Banking Details, and ZIMRA/QR Code
+             all aligned horizontally in the SAME ROW for optimal space use.
+             ============================================================ -->
+        <div class="page-footer">
+            <table class="w-100" style="margin-top: 6pt; margin-bottom: 3pt; border-collapse: collapse;">
                 <tr>
-                    <th style="width: 5%;">#</th>
-                    <th class="text-left" style="width: 32%;">Description</th>
-                    <th style="width: 8%;">Qty</th>
-                    <th style="width: 18%;">Unit Price ({currency})</th>
-                    <th style="width: 18%;">Tax Amount ({currency})</th>
-                    <th style="width: 19%;">Total Amount ({currency})</th>
-                </tr>
-            </thead>
-            <tbody>
-                {item_rows_html}
-            </tbody>
-        </table>
-
-        <!-- Totals Section -->
-        <table class="w-100" style="margin-top: 5pt; border-collapse: collapse;">
-            <tr>
-                <td class="w-60"></td>
-                <td class="w-40 text-right">
-                    <table style="width: 100%; border-collapse: collapse; text-align: right; font-size: 7pt;">
-                        <tr>
-                            <td style="padding: 2pt 4pt; border: 1pt solid #e2e8f0; font-weight: bold;">SUBTOTAL (Excl. Tax)</td>
-                            <td style="padding: 2pt 4pt; border: 1pt solid #e2e8f0; width: 45%;">{currency} {subtotal:,.2f}</td>
-                        </tr>
-                        <tr>
-                            <td style="padding: 2pt 4pt; border: 1pt solid #e2e8f0; font-weight: bold;">TOTAL TAX</td>
-                            <td style="padding: 2pt 4pt; border: 1pt solid #e2e8f0;">{currency} {total_vat:,.2f}</td>
-                        </tr>
-                        <tr class="bg-primary-dark">
-                            <td style="padding: 3.5pt 4pt; font-weight: bold; font-size: 7.5pt; color: #ffffff;">TOTAL (Incl. Tax)</td>
-                            <td style="padding: 3.5pt 4pt; font-weight: bold; font-size: 8pt; color: #ffffff;">{currency} {grand_total:,.2f}</td>
-                        </tr>
-                        {tendered_change_html}
-                    </table>
-                </td>
-            </tr>
-        </table>
-        {exchange_rate_html}
-
-        <!-- Bottom Footer Section -->
-        <table class="w-100" style="margin-top: 10pt; margin-bottom: 5pt; border-collapse: collapse;">
-            <tr>
-                <!-- Left: Terms & Conditions -->
-                <td class="w-50 align-top" style="padding-right: 8pt;">
-                    <div style="margin-bottom: 3pt; border-bottom: 1pt solid #0a2342; padding-bottom: 1.5pt; width: 100%;">
-                        <span class="icon-circle">📄</span>
-                        <span class="text-primary-dark font-bold" style="font-size: 7pt;">TERMS &amp; CONDITIONS</span>
-                    </div>
-                    <div style="font-size: 6.5pt; line-height: 1.25; color: #334155; min-height: 22pt;">
-                        {terms_html}
-                    </div>
-
-                    <!-- Signature -->
-                    <div style="margin-top: 8pt;">
-                        <div style="border-bottom: 1pt dashed #0a2342; width: 110pt; height: 12pt; margin-bottom: 1.5pt;"></div>
-                        <div style="font-weight: bold; font-size: 6.5pt;">Authorised Signatory</div>
-                        <div style="font-size: 6.5pt; color: #0a2342; font-weight: bold;">{company_name_upper}</div>
-                    </div>
-                </td>
-
-                <!-- Right: Banking Details -->
-                <td class="w-50 align-top" style="padding-left: 8pt;">
-                    <div style="margin-bottom: 3pt; border-bottom: 1pt solid #0a2342; padding-bottom: 1.5pt; width: 100%;">
-                        <span class="icon-circle">🏦</span>
-                        <span class="text-primary-dark font-bold" style="font-size: 7pt;">BANKING DETAILS</span>
-                    </div>
-                    <div style="font-size: 6.5pt; line-height: 1.25; color: #334155; margin-bottom: 5pt;">
-                        {banking_html}
-                    </div>
-
-                    <!-- Thank you message -->
-                    <div style="margin-top: 6pt; display: flex; align-items: center;">
-                        <span class="icon-circle" style="font-size: 7pt; width: 14pt; height: 14pt; line-height: 14pt;">🤝</span>
-                        <div style="margin-left: 4pt;">
-                            <div class="text-primary-dark font-bold" style="font-size: 7pt;">Thank you for your business!</div>
-                            <div style="font-size: 6.5pt; color: #475569;">{footer_text}</div>
+                    <!-- Column 1: Terms & Conditions -->
+                    <td class="align-top" style="width: {terms_width}; padding-right: 6pt; vertical-align: top;">
+                        <div style="margin-bottom: 2pt; border-bottom: 1pt solid #0a2342; padding-bottom: 2pt; width: 100%;">
+                            <span class="icon-circle">{_icon_svg('doc', 7)}</span>
+                            <span class="text-primary-dark font-bold" style="font-size: {f_small};">TERMS &amp; CONDITIONS</span>
                         </div>
-                    </div>
-                </td>
-            </tr>
-        </table>
+                        <div style="font-size: {f_small}; line-height: 1.3; color: #334155; min-height: 16pt;">
+                            {terms_html}
+                        </div>
 
-        {zimra_html}
+                        <!-- Signature Block -->
+                        <div style="margin-top: 6pt;">
+                            <div style="border-bottom: 1pt dashed #0a2342; width: 110pt; height: 10pt; margin-bottom: 2pt;"></div>
+                            <div style="font-weight: bold; font-size: {f_tiny};">Authorised Signatory</div>
+                            <div style="font-size: {f_tiny}; color: #0a2342; font-weight: bold;">{company_name_upper}</div>
+                        </div>
+                    </td>
 
-        <!-- Very Bottom Banner -->
-        <div class="bg-primary-dark text-center" style="padding: 3pt; font-size: 6.5pt; font-weight: bold; margin-top: 6pt; color: #ffffff;">
-            Powered by HavanoERP
+                    <!-- Column 2: Banking Details -->
+                    <td class="align-top" style="width: {banking_width}; padding-left: 6pt; padding-right: { '6pt' if zimra_present else '0' }; vertical-align: top;">
+                        <div style="margin-bottom: 2pt; border-bottom: 1pt solid #0a2342; padding-bottom: 2pt; width: 100%;">
+                            <span class="icon-circle">{_icon_svg('bank', 7)}</span>
+                            <span class="text-primary-dark font-bold" style="font-size: {f_small};">BANKING DETAILS</span>
+                        </div>
+                        <div style="font-size: {f_small}; line-height: 1.3; color: #334155; margin-bottom: 3pt;">
+                            {banking_html}
+                        </div>
+
+                        <!-- Thank you message -->
+                        <table style="margin-top: 3pt; border-collapse: collapse;">
+                            <tr>
+                                <td style="vertical-align: middle;">
+                                    <span class="icon-circle" style="font-size: {f_tiny}; width: 14pt; height: 14pt; line-height: 14pt;">{_icon_svg('shake', 7)}</span>
+                                </td>
+                                <td style="vertical-align: middle; padding-left: 4pt;">
+                                    <div class="text-primary-dark font-bold" style="font-size: {f_small};">Thank you for your business!</div>
+                                    <div style="font-size: {f_tiny}; color: #475569;">{footer_text}</div>
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+
+                    <!-- Column 3: ZIMRA Fiscal Details & QR Code (in same row!) -->
+                    {zimra_footer_cell}
+                </tr>
+            </table>
+
+            <!-- Very Bottom Banner -->
+            <div class="bg-primary-dark text-center" style="padding: 3pt; font-size: {f_tiny}; font-weight: bold; margin-top: 4pt; color: #ffffff;">
+                Powered by HavanoERP
+            </div>
         </div>
     </div>
 </body>
@@ -485,60 +706,115 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
 
 def _html_to_pdf(html_content: str, pdf_path: str, timeout_ms: int = 15000) -> None:
     """
-    Renders `html_content` to `pdf_path` using a real Chromium engine
-    (QWebEngineView), so full CSS (flexbox, fonts, emoji, etc.) is honoured
-    exactly as it would be in a browser, and the resulting PDF page is
-    genuinely A4-sized — no QTextDocument pt/dpi guesswork involved.
+    Renders `html_content` to `pdf_path`.
+    Tries Chromium QWebEngineView first if available.
+    If QWebEngineView is not packaged (e.g. excluded in PyInstaller builds),
+    seamlessly falls back to native QTextDocument + QPrinter which is 100% built-in
+    and always works on any computer without external dependencies.
 
-    This function pumps a local QEventLoop, so it must be called from the
-    Qt GUI thread (same as the old QTextDocument/QPrinter approach).
+    Reliability fix: QWebEngineView (Chromium) can fail to initialize on
+    machines with older/unusual GPU drivers, which used to silently drop us
+    into the much more limited QTextDocument fallback (no flexbox support,
+    weaker CSS support) -> the PDF would look different on that machine.
+    We now force Chromium onto software rendering via
+    QTWEBENGINE_CHROMIUM_FLAGS so GPU driver differences between machines
+    can no longer cause that silent downgrade.
     """
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-
-    view = QWebEngineView()
-    view.setHtml(html_content)
-
-    # Wait for the page to finish loading before printing it.
-    load_loop = QEventLoop()
-    load_ok = {"ok": False}
-
-    def _on_load_finished(ok):
-        load_ok["ok"] = ok
-        load_loop.quit()
-
-    view.loadFinished.connect(_on_load_finished)
-    QTimer.singleShot(timeout_ms, load_loop.quit)  # safety timeout
-    load_loop.exec()
-
-    if not load_ok["ok"]:
-        raise RuntimeError("Failed to load invoice HTML in QWebEngineView.")
-
-    # A4, portrait, margins matching Odoo's paperformat exactly.
-    page_layout = QPageLayout(
-        QPageSize(QPageSize.PageSizeId.A4),
-        QPageLayout.Orientation.Portrait,
-        QMarginsF(MARGIN_LEFT_MM, MARGIN_TOP_MM, MARGIN_RIGHT_MM, MARGIN_BOTTOM_MM),
-        QPageLayout.Unit.Millimeter,
+    # Must be set before the QWebEngine profile initializes (i.e. before the
+    # first QWebEngineView is constructed anywhere in the process).
+    os.environ.setdefault(
+        "QTWEBENGINE_CHROMIUM_FLAGS",
+        "--disable-gpu --disable-software-rasterizer --disable-gpu-compositing --no-sandbox",
     )
 
-    print_loop = QEventLoop()
-    print_ok = {"ok": False}
+    from PySide6.QtGui import QTextDocument, QPageSize, QPageLayout
+    from PySide6.QtPrintSupport import QPrinter
 
-    def _on_pdf_finished(path, ok):
-        print_ok["ok"] = ok
-        print_loop.quit()
+    # 1. Attempt QWebEngineView (Chromium rendering)
+    try:
+        from PySide6.QtWebEngineWidgets import QWebEngineView
 
-    view.page().pdfPrintingFinished.connect(_on_pdf_finished)
-    view.page().printToPdf(pdf_path, page_layout)
-    QTimer.singleShot(timeout_ms, print_loop.quit)  # safety timeout
-    print_loop.exec()
+        view = QWebEngineView()
+        view.setHtml(html_content)
 
-    if not print_ok["ok"] or not os.path.exists(pdf_path):
-        raise RuntimeError("QWebEngine failed to print the invoice to PDF.")
+        load_loop = QEventLoop()
+        load_ok = {"ok": False}
 
-    # Keep the view alive until printToPdf's signal has actually fired above;
-    # safe to drop the reference now that we're done with it.
-    view.deleteLater()
+        def _on_load_finished(ok):
+            load_ok["ok"] = ok
+            load_loop.quit()
+
+        view.loadFinished.connect(_on_load_finished)
+        QTimer.singleShot(timeout_ms, load_loop.quit)
+        load_loop.exec()
+
+        if load_ok["ok"]:
+            page_layout = QPageLayout(
+                QPageSize(QPageSize.PageSizeId.A4),
+                QPageLayout.Orientation.Portrait,
+                QMarginsF(MARGIN_LEFT_MM, MARGIN_TOP_MM, MARGIN_RIGHT_MM, MARGIN_BOTTOM_MM),
+                QPageLayout.Unit.Millimeter,
+            )
+
+            print_loop = QEventLoop()
+            print_ok = {"ok": False}
+
+            def _on_pdf_finished(path, ok):
+                print_ok["ok"] = ok
+                print_loop.quit()
+
+            view.page().pdfPrintingFinished.connect(_on_pdf_finished)
+            view.page().printToPdf(pdf_path, page_layout)
+            QTimer.singleShot(timeout_ms, print_loop.quit)
+            print_loop.exec()
+
+            view.deleteLater()
+
+            if print_ok["ok"] and os.path.exists(pdf_path):
+                return
+            else:
+                log.warning("[a4_invoice] QWebEngine loaded but PDF export failed/timed out - falling back to QTextDocument")
+        else:
+            log.warning("[a4_invoice] QWebEngine failed to load HTML (ok=False) - falling back to QTextDocument")
+    except (ImportError, ModuleNotFoundError) as e:
+        log.info(f"[a4_invoice] QWebEngineView not available ({e}) - using native QTextDocument fallback")
+    except Exception as e:
+        log.warning(f"[a4_invoice] QWebEngineView failed ({e}) - falling back to QTextDocument")
+
+    # 2. Universal fallback: QTextDocument + QPrinter (always bundled in PySide6)
+    #    NOTE: this renderer does not support flexbox/position/border-radius/
+    #    @font-face reliably, so the "page-footer at bottom" behaviour and
+    #    embedded font may not apply here -- it still produces a correct,
+    #    readable PDF, just with simpler layout. The primary path above
+    #    (now GPU-independent) should be used on essentially all machines.
+    try:
+        from PySide6.QtGui import QTextDocument, QPageSize, QPageLayout
+        from PySide6.QtPrintSupport import QPrinter
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setOutputFormat(QPrinter.PdfFormat)
+        printer.setOutputFileName(pdf_path)
+        printer.setFullPage(True)
+        page_layout = QPageLayout(
+            QPageSize(QPageSize.PageSizeId.A4),
+            QPageLayout.Orientation.Portrait,
+            QMarginsF(MARGIN_LEFT_MM, MARGIN_TOP_MM, MARGIN_RIGHT_MM, MARGIN_BOTTOM_MM),
+            QPageLayout.Unit.Millimeter,
+        )
+        printer.setPageLayout(page_layout)
+
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setHtml(html_content)
+        doc.print_(printer)
+
+        if os.path.exists(pdf_path):
+            log.info("[a4_invoice] Successfully generated A4 PDF via QTextDocument fallback.")
+            return
+        raise RuntimeError("QTextDocument failed to create PDF file.")
+    except Exception as e:
+        log.error(f"[a4_invoice] All PDF generation methods failed: {e}", exc_info=True)
+        raise
 
 
 def show_a4_invoice_preview(sale_data: dict | object, parent=None):
@@ -570,6 +846,14 @@ def show_a4_invoice_preview(sale_data: dict | object, parent=None):
 
     except Exception as exc:
         log.error("Failed to show A4 Preview: %s", exc, exc_info=True)
-        if parent:
-            QMessageBox.critical(parent, "Preview Error", f"Could not generate A4 Preview:\n{exc}")
+        from PySide6.QtWidgets import QMessageBox, QApplication
+        active_w = parent or QApplication.activeWindow()
+        QMessageBox.critical(active_w, "Preview Error", f"Could not generate A4 Preview:\n{exc}")
         return False
+
+
+def show_a4_credit_note_preview(credit_note_data: dict | object, parent=None):
+    """
+    Renders the A4 Credit Note with full vector formatting and launches PdfPreviewDialog.
+    """
+    return show_a4_invoice_preview(credit_note_data, parent=parent)

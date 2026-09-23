@@ -38,6 +38,12 @@ except ImportError:
     _HAS_SALES_LIST = False
 
 try:
+    from views.dialogs.credit_notes_list_dialog import CreditNotesListDialog
+    _HAS_CREDIT_NOTES_LIST = True
+except ImportError:
+    _HAS_CREDIT_NOTES_LIST = False
+
+try:
     from views.dialogs.stock_file_dialog import StockFileDialog
     _HAS_STOCK = True
 except ImportError:
@@ -1530,12 +1536,7 @@ def decode_weight_barcode(bc: str) -> tuple[str, float]:
                 print(f"[takeover_monitor] 🚨 TERMINAL SESSION DISCONNECT! Bound: {bound_dev} | Current: {current_dev}")
                 if hasattr(self, "_takeover_timer") and self._takeover_timer:
                     self._takeover_timer.stop()
-                QMessageBox.warning(
-                    self,
-                    "Terminal Session Disconnected",
-                    "Your terminal session was taken over by another device.\n\nYou have been logged out."
-                )
-                self.close()
+                self._evict_and_logout_user()
         except Exception as _te:
             print(f"[takeover_monitor] Error: {_te}")
 
@@ -6116,6 +6117,7 @@ class POSView(QWidget):
         # ── Sales button ──────────────────────────────────────────────────────
         sales_menu_btn = HoverMenuButton("Sales", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         
         # Hide "Sales Report" (which reveals total sales) from cashiers
@@ -7930,6 +7932,7 @@ class POSView(QWidget):
         # ── Sales button ──────────────────────────────────────────────────────
         sales_menu_btn = HoverMenuButton("Sales", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Sales Report", self._open_sales_report_tab)
@@ -11732,6 +11735,18 @@ class POSView(QWidget):
         else:
             coming_soon(self, "Sales List - add views/dialogs/sales_list_dialog.py")
 
+    def _open_credit_notes_list(self):
+        if _HAS_CREDIT_NOTES_LIST:
+            dlg = CreditNotesListDialog(self)
+            dlg.show()
+        else:
+            try:
+                from views.dialogs.credit_notes_list_dialog import CreditNotesListDialog
+                dlg = CreditNotesListDialog(self)
+                dlg.show()
+            except Exception as e:
+                coming_soon(self, f"Credit Notes List: {e}")
+
     def _open_sales_report(self):
         try:
             from views.reports.sales_report_dialog import SalesReportDialog
@@ -13657,6 +13672,9 @@ class AdminDashboard(QWidget):
         
         root.addWidget(self.stack, 1)
 
+        # Pre-warm Company Defaults module in background so clicking the module is instant
+        QTimer.singleShot(600, self._prewarm_company_defaults)
+
     # =========================================================================
     # SETTINGS PAGE (tabbed sub-page)
     # =========================================================================
@@ -13919,9 +13937,20 @@ class AdminDashboard(QWidget):
         return w
 
 
-    # =========================================================================
-    # COMPANY DEFAULTS PAGE  (stack index 11)
-    # =========================================================================
+    def _prewarm_company_defaults(self):
+        """Pre-warm Company Defaults in background so clicking the module tile is instant."""
+        try:
+            if not hasattr(self, "_odoo_modules_loaded"):
+                self._odoo_modules_loaded = {}
+            if "Company Defaults" not in self._odoo_modules_loaded:
+                widget = self._build_company_defaults_page()
+                self._odoo_modules_loaded["Company Defaults"] = widget
+                old_w = self.stack.widget(7)
+                if old_w and old_w != widget:
+                    self.stack.removeWidget(old_w)
+                    self.stack.insertWidget(7, widget)
+        except Exception as e:
+            print(f"[AdminDashboard] Prewarm Company Defaults skipped: {e}")
 
     def _build_company_defaults_page(self):
         """Embed CompanyDefaultsPage directly in the AdminDashboard stack."""
@@ -14061,10 +14090,10 @@ class AdminDashboard(QWidget):
             if name == "Company Defaults":
                 widget = self._build_company_defaults_page()
             else:
-                if not hasattr(self, "odoo_modules") or not self.odoo_modules:
-                    from views.components.odoo_builders import build_odoo_modules
-                    self.odoo_modules = build_odoo_modules(self)
-                widget = self.odoo_modules.get(name, QWidget())
+                from views.components.odoo_builders import build_odoo_module
+                widget = build_odoo_module(self, name)
+                if hasattr(self, "odoo_modules") and self.odoo_modules is not None:
+                    self.odoo_modules[name] = widget
 
             self._odoo_modules_loaded[name] = widget
             # Replace placeholder widget in stack at index idx
@@ -14074,6 +14103,9 @@ class AdminDashboard(QWidget):
                 self.stack.insertWidget(idx, widget)
 
         self.stack.setCurrentIndex(idx)
+        if name == "Company Defaults":
+            if hasattr(self, "_company_defaults_widget") and hasattr(self._company_defaults_widget, "_load"):
+                self._company_defaults_widget._load()
 
     def _build_app_grid(self):
         from PySide6.QtWidgets import QScrollArea, QGridLayout
@@ -19887,6 +19919,7 @@ class POSView(QWidget):
         # ΓöÇΓöÇ Sales button ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         sales_menu_btn = HoverMenuButton("Sales ", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Sales Report", self._open_sales_report_tab)
@@ -21628,6 +21661,7 @@ class POSView(QWidget):
         # ΓöÇΓöÇ Sales button ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         sales_menu_btn = HoverMenuButton("Sales ", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Sales Report", self._open_sales_report_tab)
@@ -25291,6 +25325,19 @@ class POSView(QWidget):
         else:
             coming_soon(self, "Sales List - add views/dialogs/sales_list_dialog.py")
 
+    def _open_credit_notes_list(self):
+        try:
+            from views.dialogs.credit_notes_list_dialog import CreditNotesListDialog
+            dlg = CreditNotesListDialog(self)
+            dlg.show()
+        except Exception as e:
+            try:
+                from views.dialogs.credit_notes_list_dialog import CreditNotesListDialog
+                dlg = CreditNotesListDialog(self.parent_window or self)
+                dlg.show()
+            except Exception as err:
+                coming_soon(self, f"Credit Notes List: {err}")
+
     def _open_sales_report(self):
         try:
             from views.reports.sales_report_dialog import SalesReportDialog
@@ -27305,37 +27352,49 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _evict_and_logout_user(self):
-        """Safely executed on the Main GUI thread to stop timers, warn user, and restart to Login Dialog."""
+        """Safely executed on the Main GUI thread to stop timers, notify user, and force logout to Login Dialog."""
         print("[takeover_monitor] Executing session eviction on Main GUI Thread...")
+        self._is_evicted = True
+        self._is_logging_out = True
+
         if hasattr(self, "_takeover_timer") and self._takeover_timer:
             try:
                 self._takeover_timer.stop()
             except Exception:
                 pass
+
+        # Close any open child modal dialogs so they do not block eviction
+        try:
+            from PySide6.QtWidgets import QDialog
+            for child in self.findChildren(QDialog):
+                if child.isVisible():
+                    child.reject()
+        except Exception:
+            pass
+
+        # Clear server_terminal_id from local defaults so next login requires re-selection
+        try:
+            from models.company_defaults import get_defaults, save_defaults
+            d = get_defaults() or {}
+            d["server_terminal_id"] = ""
+            save_defaults(d)
+        except Exception:
+            pass
+
+        # Notify the user that their session was taken over
         try:
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("Terminal Session Disconnected")
             msg_box.setIcon(QMessageBox.Warning)
             msg_box.setText("Your terminal session was taken over by another device.")
-            msg_box.setInformativeText("Please log in again with your email to take over this terminal.")
+            msg_box.setInformativeText("You have been automatically logged out.\nPlease log in again to take over this terminal.")
             msg_box.setStandardButtons(QMessageBox.Ok)
             msg_box.exec()
         except Exception as _e:
             print(f"[takeover_monitor] Warning popup error: {_e}")
 
-        try:
-            from PySide6.QtCore import QProcess
-            from PySide6.QtWidgets import QApplication
-            import sys
-            print("[takeover_monitor] Restarting application to Login Screen...")
-            QProcess.startDetached(sys.executable, sys.argv)
-            QApplication.quit()
-        except Exception as _e:
-            print(f"[takeover_monitor] Restart error: {_e}")
-            try:
-                self.close()
-            except Exception:
-                pass
+        # Force immediate logout to LoginDialog (cannot be cancelled by user)
+        self._do_logout()
 
     def _do_terminal_takeover(self, force_takeover: bool = True):
         """
@@ -27412,7 +27471,11 @@ class MainWindow(QMainWindow):
                     err_lower = err.lower()
                     # Only evict on explicit ownership conflict — NOT on plain 401 / unauthorized
                     # which can occur transiently when the session token hasn't fully propagated.
-                    if any(k in err_lower for k in ["assigned to another", "taken over", "403"]):
+                    takeover_err_keywords = [
+                        "assigned to another", "taken over", "already in use", "take over",
+                        "occupied", "another device", "conflict", "403", "409"
+                    ]
+                    if any(k in err_lower for k in takeover_err_keywords):
                         print(f"[takeover_monitor] EVICTION TRIGGERED — server rejected terminal session: {err}")
                         d["server_terminal_id"] = ""
                         save_defaults(d)
@@ -27427,7 +27490,12 @@ class MainWindow(QMainWindow):
                 for shop in (user_obj.get("shops") or [] if isinstance(user_obj, dict) else []):
                     for term in (shop.get("terminals") or []):
                         if str(term.get("id")) == str(sel_term_id):
-                            cloud_bound = str(term.get("device_hardware_id") or "").strip()
+                            cloud_bound = str(
+                                term.get("device_hardware_id") or 
+                                term.get("hardware_id") or 
+                                term.get("mac_address") or 
+                                ""
+                            ).strip()
                             found = True
                             break
                     if found:
@@ -28887,6 +28955,14 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open Sales Report: {e}")
 
+    def _open_credit_notes_list(self):
+        try:
+            from views.dialogs.credit_notes_list_dialog import CreditNotesListDialog
+            dlg = CreditNotesListDialog(self)
+            dlg.show()
+        except Exception as e:
+            coming_soon(self, f"Credit Notes List: {e}")
+
     def _release_instance_lock(self):
         # The class-level socket is intentionally kept alive for the whole
         # process lifetime so that logout + re-login does NOT drop the lock
@@ -28894,15 +28970,21 @@ class MainWindow(QMainWindow):
         pass
 
     def closeEvent(self, event):
-        if not getattr(self, "_is_logging_out", False):
-            from PySide6.QtWidgets import QMessageBox
-            reply = QMessageBox.question(
-                self, "Confirm Exit", "Are you sure you want to close the application?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.No:
-                event.ignore()
+        if getattr(self, "_is_evicted", False) or getattr(self, "_is_logging_out", False):
+            event.accept()
+            return
+
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "Confirm Exit", "Are you sure you want to close the application?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.No:
+            if getattr(self, "_is_evicted", False):
+                event.accept()
                 return
+            event.ignore()
+            return
 
         # Only release the port lock when the application is genuinely closing
         # (not during a logout/re-login cycle).  We detect a re-login by

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -81,8 +80,9 @@ def _get_exchange_rate(from_currency: str, to_currency: str,
             f"&to_currency={urllib.parse.quote(to_currency)}"
             f"&transaction_date={transaction_date}"
         )
-        req = urllib.request.Request(url)
-        req.add_header("Authorization", f"token {api_key}:{api_secret}")
+        from services.credentials import build_auth_header
+        auth_hdr = build_auth_header(api_key, api_secret) or f"token {api_key}:{api_secret}"
+        req.add_header("Authorization", auth_hdr)
         with safe_urlopen(req, timeout=REQUEST_TIMEOUT) as r:
             data = json.loads(r.read().decode())
             rate = float(data.get("message") or data.get("result") or 0)
@@ -247,7 +247,7 @@ def _parse_posting_datetime(sale: dict) -> tuple[str, str]:
         cur  = conn.cursor()
         # Corrected column names: doc_ref, doc_type, error_msg, id
         cur.execute(
-            "SELECT TOP 1 error_msg FROM sync_errors "
+            "SELECT TOP 1 error_msg FROM sync_errors WITH (NOLOCK) "
             "WHERE doc_ref = ? AND doc_type = 'SI' "
             "ORDER BY id DESC", 
             (inv_no,)
@@ -292,11 +292,15 @@ def _resolve_waiter_frappe_user(waiter_name: str) -> str:
         from database.db import get_connection
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT TOP 1 frappe_user, email, username FROM users WHERE username = ? OR full_name = ?", (waiter_name, waiter_name))
+        cur.execute("SELECT TOP 1 frappe_user, email, username FROM users WITH (NOLOCK) WHERE username = ? OR full_name = ? OR email = ?", (waiter_name, waiter_name, waiter_name))
         row = cur.fetchone()
         conn.close()
         if row:
             f_user, email, uname = row
+            # In SaaS mode, Frappe/SaaS user ID is strictly the user's email address
+            from services.credentials import get_system_mode
+            if get_system_mode() == "saas" and email and "@" in str(email):
+                return str(email).strip()
             if f_user and str(f_user).strip():
                 return str(f_user).strip()
             if email and str(email).strip():
@@ -324,7 +328,9 @@ def _fetch_tax_account_map(host: str, api_key: str, api_secret: str, company: st
         url = f"{host}/api/resource/Account?filters={urllib.parse.quote(filters_str)}&fields={urllib.parse.quote(fields)}&limit_page_length=0"
         
         req = urllib.request.Request(url)
-        req.add_header("Authorization", f"token {api_key}:{api_secret}")
+        from services.credentials import build_auth_header
+        auth_hdr = build_auth_header(api_key, api_secret) or f"token {api_key}:{api_secret}"
+        req.add_header("Authorization", auth_hdr)
         with safe_urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode())
             accounts = data.get("data", [])
@@ -374,7 +380,7 @@ def _build_erpnext_tax_lines(sale: dict, items: list[dict], defaults: dict, host
         cur = conn.cursor()
         
         placeholders = ",".join("?" * len(item_codes))
-        cur.execute(f"SELECT part_no, tax_category, minimum_net_rate FROM product_taxes WHERE part_no IN ({placeholders})", tuple(item_codes))
+        cur.execute(f"SELECT part_no, tax_category, minimum_net_rate FROM product_taxes WITH (NOLOCK) WHERE part_no IN ({placeholders})", tuple(item_codes))
         rows = cur.fetchall()
         conn.close()
         
@@ -432,6 +438,126 @@ def _build_erpnext_tax_lines(sale: dict, items: list[dict], defaults: dict, host
         log.error("Error building ERPNext tax lines: %s", e)
         return []
 
+def _resolve_price_list(sale: dict, defaults: dict) -> str:
+    pl = sale.get("price_list")
+    if pl and str(pl).strip() and str(pl).strip().lower() != "none":
+        return str(pl).strip()
+    d_pl_id = defaults.get("default_price_list_id")
+    if d_pl_id:
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM price_lists WITH (NOLOCK) WHERE id = ?", (d_pl_id,))
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0]:
+                return str(row[0]).strip()
+        except Exception:
+            pass
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM price_lists WITH (NOLOCK) WHERE name = 'Retail'")
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            return "Retail"
+    except Exception:
+        pass
+    return "Retail"
+
+
+def _build_saas_payments(sale: dict, defaults: dict, currency: str, conversion_rate: float) -> list[dict]:
+    raw_splits = sale.get("payment_splits") or sale.get("payments")
+    splits = []
+    if isinstance(raw_splits, str) and raw_splits.strip():
+        try:
+            parsed = json.loads(raw_splits)
+            if isinstance(parsed, list):
+                splits = parsed
+        except Exception:
+            splits = []
+    elif isinstance(raw_splits, list):
+        splits = raw_splits
+
+    if not splits and sale.get("id"):
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT mode_of_payment, currency, paid_amount,
+                       COALESCE(received_amount, paid_amount) AS received_amount
+                FROM payment_entries
+                WHERE sale_id = ?
+                  AND (payment_type IS NULL OR payment_type = 'Receive')
+                ORDER BY id
+            """, (sale["id"],))
+            rows = cur.fetchall()
+            conn.close()
+            for r in rows:
+                splits.append({
+                    "method": r[0],
+                    "currency": r[1] or "USD",
+                    "paid_amount": float(r[2]),
+                    "native_amount": float(r[3]),
+                })
+        except Exception:
+            pass
+
+    saas_payments = []
+    if splits:
+        for sp in splits:
+            m = str(sp.get("method") or sp.get("payment_method") or sale.get("payment_method") or sale.get("method") or "Cash").strip()
+            c = str(sp.get("currency") or sp.get("native_currency") or currency or "USD").strip().upper()
+            if c in ("US", ""):
+                c = "USD"
+            if c == "USD":
+                amt = float(sp.get("base_value") if sp.get("base_value") is not None else (sp.get("paid_amount") or sp.get("amount") or 0))
+            else:
+                amt = float(sp.get("native_amount") if sp.get("native_amount") is not None else (sp.get("paid_amount") or sp.get("amount") or sp.get("base_value") or 0))
+
+            if c == "USD":
+                exch = 1.0
+            else:
+                r = sp.get("exchange_rate")
+                if r is not None and float(r) > 0:
+                    rf = float(r)
+                    exch = round(1.0 / rf, 8) if rf < 1.0 else round(rf, 8)
+                else:
+                    exch = float(conversion_rate) if float(conversion_rate) > 0 else 1.0
+
+            saas_payments.append({
+                "payment_method": m,
+                "amount": int(amt) if amt == int(amt) else round(amt, 2),
+                "currency": c,
+                "exchange_rate": exch
+            })
+
+    if not saas_payments:
+        m = str(sale.get("payment_method") or sale.get("method") or "Cash").strip()
+        c = str(sale.get("currency") or currency or "USD").strip().upper()
+        if c in ("US", ""):
+            c = "USD"
+        amt = float(sale.get("tendered") or sale.get("total") or 0)
+        if c == "USD":
+            exch = 1.0
+        else:
+            r = float(sale.get("exchange_rate") or conversion_rate or 1.0)
+            exch = round(1.0 / r, 8) if (0 < r < 1.0) else round(r, 8)
+
+        saas_payments.append({
+            "payment_method": m,
+            "amount": int(amt) if amt == int(amt) else round(amt, 2),
+            "currency": c,
+            "exchange_rate": exch
+        })
+
+    return saas_payments
+
+
 def _base_payload_fields(sale: dict, defaults: dict,
                          posting_date: str, posting_time: str,
                          currency: str, conversion_rate: float) -> dict:
@@ -455,18 +581,27 @@ def _base_payload_fields(sale: dict, defaults: dict,
 
     terminal_id = str(defaults.get("server_terminal_id") or "").strip()
     shop_id     = str(defaults.get("server_shop_id") or "").strip()
-    
-    print(f"\n[DEBUG UPLOAD] retrieved server_terminal_id = '{terminal_id}'")
-    print(f"[DEBUG UPLOAD] retrieved server_shop_id = '{shop_id}'")
+    terminal_name = str(defaults.get("server_terminal_name") or "").strip()
+
+    # In SaaS mode the login API stores the terminal as server_shop_id.
+    # Use it as the effective terminal when server_terminal_id is blank.
+    try:
+        from services.credentials import get_system_mode as _gsm
+        _effective_terminal = shop_id if (_gsm() == "saas" and not terminal_id) else terminal_id
+    except Exception:
+        _effective_terminal = terminal_id
+
+    price_list = str(sale.get("price_list") or defaults.get("default_price_list") or "Standard Selling")
     
     payload: dict = {
         "customer":               customer,
+        "price_list":             price_list,
         "posting_date":           posting_date,
         "posting_time":           posting_time,
         "set_posting_time":       1,
         "currency":               currency,
         "conversion_rate":        conversion_rate,
-        "is_pos":                 1 if terminal_id else 0,
+        "is_pos":                 1 if _effective_terminal else 0,
         "update_stock":           1,
         "docstatus":              1,
         "is_return":              1 if (sale.get("receipt_type") in ("Credit Note", "Refund") or float(sale.get("total") or 0) < 0) else 0,
@@ -476,9 +611,8 @@ def _base_payload_fields(sale: dict, defaults: dict,
         "custom_verification_code":      str(sale.get("fiscal_verification_code") or ""),
     }
 
-    if terminal_id:
-        # We also pass shop_id or pos_profile as a fallback if needed
-        payload["pos_profile"] = shop_id if shop_id else "Terminal 1"
+    if _effective_terminal:
+        payload["pos_profile"] = shop_id if shop_id else _effective_terminal
 
     if company:
         payload["company"] = company
@@ -496,67 +630,47 @@ def _base_payload_fields(sale: dict, defaults: dict,
     try:
         from services.credentials import get_system_mode
         if get_system_mode() == "saas":
-            # Strip out all Frappe-specific fields to match exact SaaS payload
-            keys_to_remove = ["is_pos", "is_return", "custom_waiter", "pos_cashier", 
-                              "custom_verification_code", "taxes_and_charges", 
-                              "is_on_account", "custom_is_on_account", "pos_profile", "terminal_id"]
+            # Strip out Frappe-specific fields that are not needed in SaaS mode
+            keys_to_remove = ["is_return", "custom_waiter", "pos_cashier",
+                              "custom_verification_code", "taxes_and_charges",
+                              "is_on_account", "custom_is_on_account",
+                              "store", "price_list", "grand_total", "total"]
             for k in keys_to_remove:
                 if k in payload:
                     del payload[k]
+                    
+            # Ensure required SaaS keys are explicitly set
+            payload["is_pos"] = 1
+            payload["pos_profile"] = terminal_name if terminal_name else (terminal_id if terminal_id else "Terminal 1")
             
-            # Map cashier and owner specifically for SaaS mode
+            try:
+                payload["terminal_id"] = int(terminal_id) if terminal_id else None
+            except Exception:
+                payload["terminal_id"] = terminal_id
+                
+            payload["payment_method"] = str(sale.get("method") or "Cash")
+            
+            # Map cashier and owner specifically for SaaS mode (requires valid user email)
             saas_user = frappe_waiter if frappe_waiter else frappe_cashier
+            if not saas_user or "@" not in str(saas_user):
+                saas_user = str(defaults.get("server_email") or defaults.get("active_user_email") or "").strip() or saas_user
             payload["cashier"] = saas_user
             payload["owner"] = saas_user
-            
-            import json
-            try:
-                from database.db import get_connection
-                conn = get_connection()
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT mode_of_payment, paid_amount, currency, source_exchange_rate "
-                    "FROM payment_entries WHERE sale_invoice_no = ?",
-                    (sale.get("invoice_no"),)
-                )
-                rows = cur.fetchall()
-                conn.close()
-                frappe_payments = []
-                
-                if rows:
-                    for r in rows:
-                        mop, p_amt, p_curr, exch_rate = r
-                        val = float(p_amt or 0)
-                        if val > 0:
-                            frappe_payments.append({
-                                "payment_method": str(mop or "Cash"),
-                                "amount": val,
-                                "base_amount": val,
-                                "currency": str(p_curr or currency),
-                                "exchange_rate": float(exch_rate or 1.0),
-                                "reference": None
-                            })
-                
-                # Fallback if no splits were recorded, just map the main method
-                if not frappe_payments:
-                    val = float(sale.get("total", 0))
-                    if val > 0:
-                        frappe_payments.append({
-                            "mode_of_payment": sale.get("method", "Cash"),
-                            "payment_method": sale.get("method", "Cash"),
-                            "amount": val,
-                            "base_amount": val,
-                            "currency": currency,
-                            "exchange_rate": 1.0,
-                            "reference": None
-                        })
-                
-                if frappe_payments:
-                    payload["payments"] = frappe_payments
-                    # Map the default one to payload root too
-                    payload["payment_method"] = frappe_payments[0]["payment_method"]
-            except Exception as e:
-                log.warning("Could not append saas payments for %s: %s", sale.get("id"), e)
+            payload["sales_person"] = saas_user
+            payload["trade_name"] = customer
+            payload["app_version"] = str(defaults.get("app_version") or "2.3.4").strip()
+
+            # Attach SaaS payments array
+            payload["payments"] = _build_saas_payments(sale, defaults, currency, conversion_rate)
+            if payload.get("payment_method") == "SPLIT" and payload.get("payments"):
+                payload["payment_method"] = payload["payments"][0]["payment_method"]
+
+            # Take parent conversion_rate directly from payment entry exchange_rate
+            if payload.get("payments") and len(payload["payments"]) >= 1:
+                single_pay = payload["payments"][0]
+                pay_rate = single_pay.get("exchange_rate")
+                if pay_rate is not None and float(pay_rate) > 0 and single_pay.get("currency") != "USD":
+                    payload["conversion_rate"] = pay_rate
     except Exception:
         pass
 
@@ -597,8 +711,13 @@ def _build_payload_usd(sale: dict, items: list[dict], defaults: dict) -> dict:
 
         row: dict = {
             "item_code": item_code,
+            "item_name": str(it.get("product_name") or item_code),
+            "description": str(it.get("product_name") or item_code),
             "qty":       qty,
             "rate":      rate,
+            "price_list_rate": rate,
+            "allow_zero_valuation_rate": 1,
+            "valuation_rate": 0,
             "uom":       (it.get("uom") or "Nos"),
             "discount_percentage": l_disc,
         }
@@ -683,7 +802,13 @@ def _build_payload_local_currency(
     zwd_per_usd = _resolve_zwd_per_usd(
         sale, api_key, api_secret, host, local_currency, posting_date
     )
-    frappe_conversion_rate = round(1.0 / zwd_per_usd, 8)
+    from services.credentials import get_system_mode
+    is_saas = get_system_mode().lower() == "saas"
+
+    if is_saas:
+        frappe_conversion_rate = round(float(zwd_per_usd), 8)
+    else:
+        frappe_conversion_rate = round(1.0 / zwd_per_usd, 8)
 
     log.debug(
         "[_build_payload_local_currency] sale=%s  %s_per_usd=%.6f  "
@@ -698,7 +823,9 @@ def _build_payload_local_currency(
     for it in items:
         item_code = (it.get("part_no") or "").strip()
         qty       = float(it.get("qty", 0))
-        rate      = float(it.get("price") or 0)   # already in local currency
+        rate      = float(it.get("price") or 0)
+        if is_saas and zwd_per_usd > 0:
+            rate = round(rate / zwd_per_usd, 2)
         l_disc    = float(it.get("discount") or 0)
 
         if not item_code or qty <= 0:
@@ -706,8 +833,13 @@ def _build_payload_local_currency(
 
         row: dict = {
             "item_code": item_code,
+            "item_name": str(it.get("product_name") or item_code),
+            "description": str(it.get("product_name") or item_code),
             "qty":       qty,
             "rate":      rate,
+            "price_list_rate": rate,
+            "allow_zero_valuation_rate": 1,
+            "valuation_rate": 0,
             "uom":       (it.get("uom") or "Nos"),
             "discount_percentage": l_disc,
         }
@@ -826,8 +958,13 @@ def _build_payload_mixed_to_usd(
 
         row: dict = {
             "item_code": item_code,
+            "item_name": str(it.get("product_name") or item_code),
+            "description": str(it.get("product_name") or item_code),
             "qty":       qty,
             "rate":      rate_usd,
+            "price_list_rate": rate_usd,
+            "allow_zero_valuation_rate": 1,
+            "valuation_rate": 0,
             "uom":       (it.get("uom") or "Nos"),
             "discount_percentage": l_disc,
         }
@@ -929,6 +1066,30 @@ def _build_payload(sale: dict, items: list[dict], defaults: dict,
         if "taxes_and_charges" in payload:
             del payload["taxes_and_charges"]
 
+    try:
+        from services.credentials import get_system_mode
+        if get_system_mode() == "saas":
+            payload.pop("grand_total", None)
+            payload.pop("total", None)
+            payload.pop("price_list", None)
+
+            price_list_name = _resolve_price_list(sale, defaults)
+            for item in payload.get("items", []):
+                item["pricelist"] = price_list_name
+
+            if "payments" not in payload or not payload["payments"]:
+                payload["payments"] = _build_saas_payments(
+                    sale, defaults,
+                    payload.get("currency", "USD"),
+                    float(payload.get("conversion_rate", 1.0))
+                )
+            if payload.get("payment_method") == "SPLIT" and payload.get("payments"):
+                payload["payment_method"] = payload["payments"][0]["payment_method"]
+
+            payload["app_version"] = str(defaults.get("app_version") or "2.3.4").strip()
+    except Exception:
+        pass
+
     return payload, is_mixed
 
 
@@ -947,7 +1108,7 @@ def _is_already_synced(sale_id: int) -> bool:
         conn = get_connection()
         cur  = conn.cursor()
         cur.execute(
-            "SELECT synced, frappe_ref FROM sales WHERE id = ?",
+            "SELECT synced, frappe_ref FROM sales WITH (NOLOCK) WHERE id = ?",
             (sale_id,)
         )
         row = cur.fetchone()
@@ -1031,11 +1192,22 @@ def _push_sale(sale: dict, api_key: str, api_secret: str,
         log.info(f"{_dumps(p)}")
         log.info(f"============================================================\n")
         
+        # Explicitly print to console for debugging as requested by user
+        print(f"\n[DEBUG] 🚀 PUSHING PAYLOAD TO SAAS ({inv_no}):")
+        try:
+            print(json.dumps(p, indent=2, default=str))
+        except Exception:
+            print(_dumps(p))
+        print("="*60 + "\n")
+        
         try:
             body = _dumps(p).encode("utf-8")
         except Exception as e:
             log.error("JSON serialisation failed: %s", e)
             return False
+
+        from services.credentials import build_auth_header
+        auth_hdr = build_auth_header(api_key, api_secret) or f"token {api_key}:{api_secret}"
 
         req = urllib.request.Request(
             url=url,
@@ -1044,7 +1216,7 @@ def _push_sale(sale: dict, api_key: str, api_secret: str,
             headers={
                 "Content-Type":  "application/json",
                 "Accept":        "application/json",
-                "Authorization": f"token {api_key}:{api_secret}",
+                "Authorization": auth_hdr,
                 "Idempotency-Key": f"pos_sale_{inv_no}_{i}",
             },
         )
@@ -1162,14 +1334,14 @@ def push_unsynced_sales() -> dict:
         #   def try_lock_sale(sale_id: int) -> bool:
         #       conn = get_connection()
         #       cur  = conn.cursor()
-        #       cur.execute("""
+        #       cur.execute(\"\"\"
         #           UPDATE sales WITH (ROWLOCK, UPDLOCK)
         #           SET    syncing = 1,
         #                  sync_locked_at = GETDATE()
         #           WHERE  id      = ?
         #             AND  syncing = 0
         #             AND  synced  = 0
-        #       """, (sale_id,))
+        #       \"\"\", (sale_id,))
         #       conn.commit()
         #       locked = cur.rowcount == 1
         #       conn.close()
@@ -1286,4 +1458,4 @@ def start_upload_thread() -> object:
 def stop_upload_thread():
     global _upload_thread_running
     _upload_thread_running = False
-    log.info("POS upload daemon stop requested.")
+    log.info("POS upload daemon thread stopped.")

@@ -825,7 +825,11 @@ def migrate():
 
     # ── Pharmacy label data gaps (Phase 9) ────────────────────────────────────
     _add_column_if_missing("quotations", "cashier_name", "NVARCHAR(120) NULL")
-    print("[migrate] OK  quotations.cashier_name")
+    _add_column_if_missing("quotations", "waiter_name", "NVARCHAR(255) NULL")
+    print("[migrate] OK  quotations.cashier_name / waiter_name")
+
+    _add_column_if_missing("users", "allow_pharmacist_pay", "BIT NOT NULL DEFAULT 0")
+    print("[migrate] OK  users.allow_pharmacist_pay")
 
     _add_column_if_missing("sale_items", "uom", "NVARCHAR(20) NULL")
     print("[migrate] OK  sale_items.uom")
@@ -912,11 +916,16 @@ def migrate():
         IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[expense_categories]') AND type in (N'U'))
         BEGIN
             CREATE TABLE [dbo].[expense_categories](
-                [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                [name] [nvarchar](100) NOT NULL UNIQUE
+                [id]              [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                [name]            [nvarchar](200) NOT NULL UNIQUE,
+                [default_account] [nvarchar](200) NULL,
+                [description]     [nvarchar](500) NULL,
+                [created_at]      [datetime] DEFAULT GETDATE()
             )
         END
     """)
+    _add_column_if_missing("expense_categories", "default_account", "NVARCHAR(200) NULL")
+    _add_column_if_missing("expense_categories", "description",     "NVARCHAR(500) NULL")
     print("[migrate] OK  expense_categories")
 
     # ── expenses ──────────────────────────────────────────────────────────────
@@ -924,28 +933,38 @@ def migrate():
         IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[expenses]') AND type in (N'U'))
         BEGIN
             CREATE TABLE [dbo].[expenses](
-                [id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                [name] [nvarchar](200) NOT NULL,
-                [expense_category_id] [int] NOT NULL REFERENCES expense_categories(id),
-                [amount] [decimal](18,4) NOT NULL DEFAULT 0.0,
-                [supplier_id] [int] NULL REFERENCES suppliers(id),
-                [paid] [bit] NOT NULL DEFAULT 1,
-                [expense_number] [nvarchar](50) NULL,
-                [balance] [decimal](18,4) NULL,
-                [created_at] [datetime] DEFAULT GETDATE()
+                [id]                  [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                [expense_number]      [nvarchar](50) NULL,
+                [name]                [nvarchar](200) NOT NULL,
+                [expense_category_id] [int] NULL REFERENCES expense_categories(id),
+                [amount]              [decimal](18,4) NOT NULL DEFAULT 0.0,
+                [payment_method]      [nvarchar](100) NOT NULL DEFAULT 'Cash',
+                [currency]            [nvarchar](10) NULL,
+                [supplier_id]         [int] NULL REFERENCES suppliers(id),
+                [paid]                [bit] NOT NULL DEFAULT 1,
+                [balance]             [decimal](18,4) NULL,
+                [shift_id]            [int] NULL,
+                [cashier_id]          [int] NULL,
+                [cashier_name]        [nvarchar](100) NULL,
+                [synced]              [bit] NOT NULL DEFAULT 0,
+                [cloud_name]          [nvarchar](100) NULL,
+                [cloud_status]        [nvarchar](50) NULL,
+                [sync_error]          [nvarchar](max) NULL,
+                [created_at]          [datetime] DEFAULT GETDATE()
             )
         END
-        ELSE
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='expenses' AND COLUMN_NAME='expense_number')
-            ALTER TABLE expenses ADD expense_number NVARCHAR(50) NULL;
-            IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='expenses' AND COLUMN_NAME='balance')
-            BEGIN
-                ALTER TABLE expenses ADD balance DECIMAL(18,4) NULL;
-                EXEC('UPDATE expenses SET balance = amount WHERE balance IS NULL');
-            END
-        END
     """)
+    _add_column_if_missing("expenses", "expense_number",      "NVARCHAR(50) NULL")
+    _add_column_if_missing("expenses", "payment_method",      "NVARCHAR(100) NOT NULL DEFAULT 'Cash'")
+    _add_column_if_missing("expenses", "currency",            "NVARCHAR(10) NULL")
+    _add_column_if_missing("expenses", "balance",             "DECIMAL(18,4) NULL")
+    _add_column_if_missing("expenses", "shift_id",            "INT NULL")
+    _add_column_if_missing("expenses", "cashier_id",          "INT NULL")
+    _add_column_if_missing("expenses", "cashier_name",        "NVARCHAR(100) NULL")
+    _add_column_if_missing("expenses", "synced",              "BIT NOT NULL DEFAULT 0")
+    _add_column_if_missing("expenses", "cloud_name",          "NVARCHAR(100) NULL")
+    _add_column_if_missing("expenses", "cloud_status",        "NVARCHAR(50) NULL")
+    _add_column_if_missing("expenses", "sync_error",          "NVARCHAR(MAX) NULL")
     print("[migrate] OK  expenses")
 
     # ── supplier_payments ─────────────────────────────────────────────────────

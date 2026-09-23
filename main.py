@@ -1,5 +1,6 @@
 import sys
 import os
+import logging
 import traceback
 import time as _timing
 from pathlib import Path
@@ -38,7 +39,8 @@ from database.db import is_connection_valid, get_connection
 #  on Nextcloud. Example: "2.0.0" → "2.1.0" for next release.
 # ────────────────────────────────────────────────────────s────
 
-APP_VERSION = "2.0.8.37"
+APP_VERSION = "2.0.8.60"
+Debug = False
 
 
 def resource_path(relative_path: str) -> str:
@@ -68,10 +70,12 @@ class StartupWorker(QThread):
                     cfg = json.loads(settings_file.read_text(encoding="utf-8"))
                     if cfg.get("system_mode") == "offline" and cfg.get("auth_mode") == "windows":
                         import pyodbc
-                        conn_str = f"DRIVER={{{DRIVER}}};SERVER={cfg['server']};Trusted_Connection=yes;TrustServerCertificate=yes;Encrypt=no;"
+                        s_server = cfg.get("server") or ".\\SQLEXPRESS"
+                        s_db = cfg.get("database") or "havano_posop07978808"
+                        conn_str = f"DRIVER={{{DRIVER}}};SERVER={s_server};Trusted_Connection=yes;TrustServerCertificate=yes;Encrypt=no;"
                         conn = pyodbc.connect(conn_str, autocommit=True, timeout=5)
                         cur = conn.cursor()
-                        cur.execute(f"IF NOT EXISTS (SELECT name FROM master.sys.databases WHERE name = N'{cfg['database']}') CREATE DATABASE [{cfg['database']}]")
+                        cur.execute(f"IF NOT EXISTS (SELECT name FROM master.sys.databases WHERE name = N'{s_db}') CREATE DATABASE [{s_db}]")
                         conn.close()
             except Exception as e:
                 print(f"[startup] Auto-create DB error: {e}")
@@ -216,9 +220,20 @@ def setup_crash_logging():
         with open(error_log, "a", encoding="utf-8") as f:
             f.write("\n=== Thread Exception ===\n")
             traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback, file=f)
+        # Forward to Bugsink
+        try:
+            from services.bugsink_service import capture_exception as _bs_cap
+            if args.exc_value:
+                _bs_cap(args.exc_value)
+        except Exception:
+            pass
     threading.excepthook = thread_exception_handler
 
 def global_exception_handler(exctype, value, tb):
+    if issubclass(exctype, (SystemExit, KeyboardInterrupt)):
+        sys.__excepthook__(exctype, value, tb)
+        return
+
     error_msg = "".join(traceback.format_exception(exctype, value, tb))
     print(f"CRITICAL EXCEPTION ({exctype.__name__}):\n{error_msg}")
     
@@ -235,9 +250,12 @@ def global_exception_handler(exctype, value, tb):
     except Exception as e:
         print(f"Failed to write crash log: {e}")
 
-    if issubclass(exctype, (SystemExit, KeyboardInterrupt)):
-        sys.__excepthook__(exctype, value, tb)
-        return
+    # Forward to Bugsink
+    try:
+        from services.bugsink_service import capture_exception as _bs_cap
+        _bs_cap(value)
+    except Exception:
+        pass
 
     if QApplication.instance():
         msg = QMessageBox(None)
@@ -328,9 +346,29 @@ if __name__ == "__main__":
     setup_crash_logging()
     sys.excepthook = global_exception_handler
 
+    # Initialize Bugsink error tracking (disabled when Debug is True)
+    try:
+        from services.bugsink_service import init_bugsink, get_log_handler
+        init_bugsink(version=APP_VERSION, enabled=not Debug)
+        if not Debug:
+            handler = get_log_handler()
+            if handler:
+                logging.getLogger().addHandler(handler)
+        else:
+            print("[main] Debug mode active — Bugsink error tracking disabled.")
+    except Exception as _bs_err:
+        print(f"[main] Bugsink init skipped: {_bs_err}")
+
     # 1. Initialize Application
     app = QApplication(sys.argv)
     apply_global_styles(app)
+
+    # Start In-Process UI Freeze & Hang Watchdog (monitors main GUI thread unresponsiveness)
+    try:
+        from services.hang_watchdog import start_hang_watchdog
+        start_hang_watchdog(check_interval_seconds=1.0)
+    except Exception as _wd_err:
+        print(f"[main] Hang watchdog start skipped: {_wd_err}")
 
     # Pre-flight QtAwesome font integrity check & self-healing (must run after QApplication is initialized)
     try:
@@ -347,6 +385,19 @@ if __name__ == "__main__":
             log_file = get_app_data_dir() / "logs" / "error.log"
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"\n{'='*50}\n[{datetime.datetime.now()}] [QUIT TRIGGERED] Application about to quit. Call stack:\n{st}\n")
+        except Exception:
+            pass
+        # Stop hang watchdog
+        try:
+            from services.hang_watchdog import _watchdog_instance
+            if _watchdog_instance:
+                _watchdog_instance.stop()
+        except Exception:
+            pass
+        # Gracefully drain Bugsink queue before exit
+        try:
+            from services.bugsink_service import shutdown as _bs_shutdown
+            _bs_shutdown()
         except Exception:
             pass
 
@@ -545,11 +596,15 @@ if __name__ == "__main__":
                     save_current_url()
             else:
                 save_current_url()
-    except Exception:
-        pass
+    except Exception as _sc_err:
+        print(f"[main] Site config check failed: {_sc_err}")
 
-    # 5.6 Offline License Gate — only for offline mode
-    # (Moved to login_dialog.py so the user can log in first and be prompted for the trial)
+    # Verify write-once terminal reference vs active company defaults
+    try:
+        from services.auth_service import verify_terminal_reference
+        verify_terminal_reference()
+    except Exception as _vtre:
+        print(f"[main] Terminal reference verification skipped: {_vtre}")
 
     # 6. Login -> Main
     from views.login_dialog import LoginDialog
@@ -624,7 +679,9 @@ if __name__ == "__main__":
             except Exception as _ce:
                 print(f"[Login] Deferred stock cache init error: {_ce}")
 
-            sys.exit(app.exec())
+            ret = app.exec()
+            import os
+            os._exit(ret)
         except Exception as e:
             # Hide loader on error too
             try:

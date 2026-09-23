@@ -54,6 +54,7 @@ def get_configured_paper_size() -> str:
             os.path.join(_root, "app_data", "hardware_settings.json"),
             os.path.join(os.path.abspath("."), "app_data", "hardware_settings.json"),
             os.path.join(get_app_data_dir(), "hardware_settings.json"),
+            os.path.join(_root, "views", "app_data", "hardware_settings.json"),
             "app_data/hardware_settings.json",
         ]
 
@@ -64,6 +65,17 @@ def get_configured_paper_size() -> str:
                     val = data.get("paper_size") or data.get("paperSize")
                     if val:
                         return str(val).strip()
+
+        # Check DB fallback as well
+        try:
+            from database.hardware_settings_db import load_hw
+            hw = load_hw()
+            if hw:
+                val = hw.get("paper_size") or hw.get("paperSize")
+                if val:
+                    return str(val).strip()
+        except Exception:
+            pass
     except Exception as e:
         print(f"[get_configured_paper_size] Error reading hardware settings: {e}")
 
@@ -157,6 +169,15 @@ class PrintingService:
 
     def print_credit_note(self, receipt: ReceiptData, printer_name: str = None) -> bool:
         """Full credit note receipt with fiscal QR code support and waiting for fiscalization."""
+        # Read hardware settings for paper size selection
+        paper_size = get_configured_paper_size()
+
+        # If A4 is selected, popup A4 Credit Note Preview Dialog
+        if str(paper_size).upper() == "A4":
+            print(f"[PrintingService] Paper size is A4 — opening A4 Credit Note Preview")
+            from services.a4_invoice_service import show_a4_credit_note_preview
+            return show_a4_credit_note_preview(receipt)
+
         settings = AdvanceSettings.load_from_file()
         painter = None
         try:
@@ -427,14 +448,38 @@ class PrintingService:
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
                 y += 14
 
-            # Footer
+            # Terms & Conditions (Credit Note)
             painter.setFont(normal_font)
             try:
                 from models.company_defaults import get_defaults
                 co_defs = get_defaults() or {}
+                cn_terms = (co_defs.get("credit_note_terms") or "").strip()
                 company_footer = (co_defs.get("footer_text") or "").strip()
             except Exception:
+                cn_terms = ""
                 company_footer = ""
+
+            if cn_terms:
+                y += 6
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 14
+                painter.setFont(bold_font)
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 24, Qt.AlignLeft, "TERMS & CONDITIONS")
+                y += 26
+                painter.setFont(normal_font)
+                fm_t = painter.fontMetrics()
+                for term_line in cn_terms.splitlines():
+                    term_line = term_line.strip()
+                    if not term_line:
+                        continue
+                    t_rect = fm_t.boundingRect(0, 0, self.paper_width - self.margin*2, 1000, Qt.TextWordWrap, term_line)
+                    painter.drawText(self.margin, y, self.paper_width - self.margin*2, t_rect.height(), Qt.TextWordWrap, term_line)
+                    y += t_rect.height() + 4
+                y += 10
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 14
+
+            # Footer
 
             _footer_raw = (getattr(receipt, "footer", "") or "").strip()
             if company_footer:
@@ -503,7 +548,15 @@ class PrintingService:
                 if not info.isNull():
                     printer.setPrinterName(printer_name)
 
-            printer.setPageSize(QPageSize(QSizeF(80, 1500), QPageSize.Millimeter))
+            paper_size = get_configured_paper_size()
+            num_rows = len(expected_data or {}) + len(counted_data or {})
+            page_height = max(200, 150 + (num_rows * 15))
+            if str(paper_size) == "58mm":
+                self.paper_width = 380
+                printer.setPageSize(QPageSize(QSizeF(58, page_height), QPageSize.Millimeter))
+            else:
+                self.paper_width = 550
+                printer.setPageSize(QPageSize(QSizeF(80, page_height), QPageSize.Millimeter))
             printer.setPageMargins(QMarginsF(0, 0, 0, 0))
 
             painter = QPainter(printer)
@@ -587,14 +640,26 @@ class PrintingService:
             fm = painter.fontMetrics()
             line_h = fm.height() + 8
 
+            usable_meta_w = self.paper_width - self.margin * 2
+            default_lbl_w = max(180, int(usable_meta_w * 0.40))
+
             def draw_meta(label: str, value: str):
                 nonlocal y
                 painter.setFont(bold_font)
-                painter.drawText(self.margin, y, 140, line_h, Qt.AlignLeft, label)
+                fm_b = painter.fontMetrics()
+                try:
+                    w = fm_b.horizontalAdvance(label) + 12
+                except Exception:
+                    try:
+                        w = fm_b.boundingRect(label).width() + 12
+                    except Exception:
+                        w = default_lbl_w
+                lbl_w = max(default_lbl_w, w)
+                painter.drawText(self.margin, y, lbl_w, line_h, Qt.AlignLeft, label)
                 painter.setFont(normal_font)
-                painter.drawText(self.margin + 140, y,
-                                 self.paper_width - self.margin * 2 - 140, line_h,
-                                 Qt.AlignLeft, value)
+                val_x = self.margin + lbl_w
+                val_w = max(50, self.paper_width - self.margin - val_x)
+                painter.drawText(val_x, y, val_w, line_h, Qt.AlignLeft, value)
                 y += line_h
 
             draw_meta("Shift #:", str(shift_id))
@@ -614,15 +679,24 @@ class PrintingService:
             painter.setFont(normal_font)
             # Combine all keys from both maps
             all_methods = sorted(list(set(expected_data.keys()) | set(counted_data.keys())))
+            currency_totals = {}
+
             for method in all_methods:
                 exp = float(expected_data.get(method, 0.0))
                 cnt = float(counted_data.get(method, 0.0))
                 var = cnt - exp
 
-                # If the method does not contain " (" we assume it is USD and we add it to the Grand Total
-                if " (" not in method:
-                    total_expected += exp
-                    total_counted += cnt
+                # Extract currency if method has format "Method (CURRENCY)" or default to USD
+                cur_match = "USD"
+                if " (" in method and method.endswith(")"):
+                    cur_match = method.split(" (")[-1].rstrip(")").strip().upper()
+                if not cur_match:
+                    cur_match = "USD"
+
+                if cur_match not in currency_totals:
+                    currency_totals[cur_match] = {'expected': 0.0, 'counted': 0.0}
+                currency_totals[cur_match]['expected'] += exp
+                currency_totals[cur_match]['counted'] += cnt
 
                 painter.setFont(normal_font)
                 lh_row = painter.fontMetrics().height() + 6
@@ -661,21 +735,37 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 10
 
-            # Grand Total
-            painter.setFont(bold_font)
-            lh_tot = painter.fontMetrics().height() + 6
-            grand_var = total_counted - total_expected
+            # Grand Total: only show if single currency, omit completely if multiple currencies exist
+            if len(currency_totals) == 1:
+                painter.setFont(bold_font)
+                lh_tot = painter.fontMetrics().height() + 6
 
-            painter.drawText(COL_METHOD_X, y, COL_METHOD_W, lh_tot, Qt.AlignLeft | Qt.AlignVCenter, "TOTAL (USD)")
-            painter.drawText(COL_EXP_X, y, COL_EXP_W, lh_tot, Qt.AlignRight | Qt.AlignVCenter, f"{total_expected:,.2f}")
-            painter.drawText(COL_CNT_X, y, COL_CNT_W, lh_tot, Qt.AlignRight | Qt.AlignVCenter, f"{total_counted:,.2f}")
+                w_tot = self.paper_width - self.margin * 2
+                col1_tot = int(w_tot * 0.36)
+                col2_tot = int(w_tot * 0.32)
+                col3_tot = w_tot - col1_tot - col2_tot
+                x1_tot = self.margin
+                x2_tot = x1_tot + col1_tot
+                x3_tot = x2_tot + col2_tot
 
-            var_clr = DANGER if grand_var < 0 else SUCCESS if grand_var > 0 else DARK_TEXT
-            painter.setPen(QColor(var_clr))
-            painter.drawText(COL_VAR_X, y, COL_VAR_W, lh_tot, Qt.AlignRight | Qt.AlignVCenter, f"{grand_var:+,.2f}")
+                for ccy, c_tot in currency_totals.items():
+                    tot_exp = c_tot['expected']
+                    tot_cnt = c_tot['counted']
+                    grand_var = tot_cnt - tot_exp
 
-            painter.setPen(QColor(DARK_TEXT))
-            y += lh_tot + 20
+                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, lh_tot, Qt.AlignLeft | Qt.AlignVCenter, f"TOTAL ({ccy})")
+                    y += lh_tot
+                    painter.drawText(x1_tot, y, col1_tot, lh_tot, Qt.AlignLeft | Qt.AlignVCenter, f"{tot_exp:,.2f}")
+                    painter.drawText(x2_tot, y, col2_tot, lh_tot, Qt.AlignCenter | Qt.AlignVCenter, f"{tot_cnt:,.2f}")
+
+                    var_clr = DANGER if grand_var < 0 else SUCCESS if grand_var > 0 else DARK_TEXT
+                    painter.setPen(QColor(var_clr))
+                    painter.drawText(x3_tot, y, col3_tot, lh_tot, Qt.AlignRight | Qt.AlignVCenter, f"{grand_var:+,.2f}")
+
+                    painter.setPen(QColor(DARK_TEXT))
+                    y += lh_tot + 6
+
+                y += 14
 
             # Footer
             painter.setFont(normal_font)
@@ -712,15 +802,56 @@ class PrintingService:
         """
         settings = AdvanceSettings.load_from_file()
 
+        if not printer_name or printer_name == "(None)":
+            try:
+                from views.dialogs.settings_dialog import _load_hw
+                hw = _load_hw()
+                main_pr = hw.get("main_printer")
+                if main_pr and main_pr != "(None)":
+                    printer_name = main_pr
+            except Exception:
+                pass
+
         painter = None
         try:
+            paper_size = get_configured_paper_size()
+
+            if str(paper_size).strip().upper() == "A4":
+                try:
+                    from services.a4_shift_recon_service import show_a4_shift_recon_preview
+                    return show_a4_shift_recon_preview(
+                        shift=shift,
+                        totals=totals,
+                        reconciliation_data=reconciliation_data,
+                        print_data=print_data,
+                    )
+                except Exception as a4_err:
+                    print(f"[PrintingService] A4 Shift Recon failed, falling back: {a4_err}")
+
             printer = QPrinter(QPrinter.HighResolution)
             if printer_name and printer_name != "(None)":
                 info = QPrinterInfo.printerInfo(printer_name)
                 if not info.isNull():
                     printer.setPrinterName(printer_name)
 
-            printer.setPageSize(QPageSize(QSizeF(80, 2000), QPageSize.Millimeter))
+            # Estimate total rows across cashiers and payment methods for dynamic height matching normal receipt
+            num_rows = len(totals or [])
+            if reconciliation_data:
+                num_rows = max(num_rows, len(reconciliation_data.get('payment_methods', [])))
+                for c in reconciliation_data.get('cashiers', []):
+                    num_rows += len(c.get('rows', []) or c.get('payment_breakdown', [])) + 3
+            elif print_data:
+                num_rows = max(num_rows, len(print_data.get('payment_methods', [])))
+                for c in print_data.get('cashiers', []):
+                    num_rows += len(c.get('rows', []) or c.get('payment_breakdown', [])) + 3
+
+            page_height = max(200, 150 + (num_rows * 15))
+            if str(paper_size) == "58mm":
+                self.paper_width = 380
+                printer.setPageSize(QPageSize(QSizeF(58, page_height), QPageSize.Millimeter))
+            else:
+                self.paper_width = 550
+                printer.setPageSize(QPageSize(QSizeF(80, page_height), QPageSize.Millimeter))
             printer.setPageMargins(QMarginsF(0, 0, 0, 0))
 
             painter = QPainter(printer)
@@ -771,45 +902,89 @@ class PrintingService:
             y += 20
 
             # Shift Meta
+            opening_balance = 0.0
             if reconciliation_data:
                 shift_num = reconciliation_data.get('shift_number', '-')
+                station = reconciliation_data.get('station', '')
+                station_name = reconciliation_data.get('station_name', '')
                 shift_date = reconciliation_data.get('date', datetime.now().strftime("%d/%m/%Y"))
                 start_time = reconciliation_data.get('start_time', '-')
                 end_time = reconciliation_data.get('end_time', datetime.now().strftime("%H:%M:%S"))
                 closing_cashier = reconciliation_data.get('closing_cashier_name', '')
+                opening_balance = float(reconciliation_data.get('opening_balance', reconciliation_data.get('start_float', 0.0)) or 0.0)
             elif print_data:
                 shift_num = print_data.get('shift_number', '-')
+                station = print_data.get('station', '')
+                station_name = print_data.get('station_name', '')
                 shift_date = print_data.get('date', datetime.now().strftime("%d/%m/%Y"))
                 start_time = print_data.get('start_time', '-')
                 end_time = print_data.get('end_time', datetime.now().strftime("%H:%M:%S"))
                 closing_cashier = print_data.get('closing_cashier_name', '')
+                opening_balance = float(print_data.get('opening_balance', print_data.get('start_float', 0.0)) or 0.0)
             else:
                 shift_num = shift.get('shift_number', '-') if shift else '-'
+                station = shift.get('station', '') if shift else ''
+                station_name = shift.get('station_name', '') if shift else ''
                 shift_date = shift.get('date', datetime.now().strftime("%d/%m/%Y")) if shift else datetime.now().strftime("%d/%m/%Y")
                 start_time = shift.get('start_time', '-') if shift else '-'
                 end_time = datetime.now().strftime("%H:%M:%S")
                 closing_cashier = ''
+                opening_balance = float(shift.get('opening_balance', shift.get('start_float', 0.0)) if shift else 0.0)
+
+            s_id_meta = (shift.get('id', shift.get('shift_id')) if shift else None) or \
+                        (reconciliation_data.get('shift_id') if reconciliation_data else None) or \
+                        (print_data.get('shift_id') if print_data else None)
+            if opening_balance == 0.0 and s_id_meta:
+                try:
+                    from database.db import get_connection
+                    conn_ob = get_connection()
+                    cur_ob = conn_ob.cursor()
+                    cur_ob.execute("SELECT SUM(start_float) FROM shift_rows WHERE shift_id = ?", (s_id_meta,))
+                    ob_res = cur_ob.fetchone()
+                    if ob_res and ob_res[0] is not None:
+                        opening_balance = float(ob_res[0])
+                    conn_ob.close()
+                except Exception:
+                    pass
 
             painter.setFont(normal_font)
             fm = painter.fontMetrics()
             line_h = fm.height() + 8  # slightly more breathing room
 
+            usable_meta_w = self.paper_width - self.margin * 2
+            default_lbl_w = max(180, int(usable_meta_w * 0.40))
+
             def draw_meta(label: str, value: str):
                 nonlocal y
                 painter.setFont(bold_font)
-                painter.drawText(self.margin, y, 140, line_h, Qt.AlignLeft, label)
+                fm_b = painter.fontMetrics()
+                try:
+                    w = fm_b.horizontalAdvance(label) + 12
+                except Exception:
+                    try:
+                        w = fm_b.boundingRect(label).width() + 12
+                    except Exception:
+                        w = default_lbl_w
+                lbl_w = max(default_lbl_w, w)
+                painter.drawText(self.margin, y, lbl_w, line_h, Qt.AlignLeft, label)
                 painter.setFont(normal_font)
-                painter.drawText(self.margin + 140, y,
-                                 self.paper_width - self.margin * 2 - 140, line_h,
-                                 Qt.AlignLeft, value)
+                val_x = self.margin + lbl_w
+                val_w = max(50, self.paper_width - self.margin - val_x)
+                painter.drawText(val_x, y, val_w, line_h, Qt.AlignLeft, value)
                 y += line_h
 
             draw_meta("Shift #:", str(shift_num))
+            if station_name or station:
+                st_str = f"Station {station}" if station else ""
+                if station_name:
+                    st_str = f"{st_str} ({station_name})" if st_str else str(station_name)
+                draw_meta("Workstation:", st_str)
             draw_meta("Date:", str(shift_date))
             draw_meta("Started:", str(start_time))
             draw_meta("Closed:", str(end_time))
             if closing_cashier:
                 draw_meta("Closed By:", str(closing_cashier))
+            draw_meta("Opening Bal:", f"${opening_balance:,.2f}")
 
             y += 6
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
@@ -854,45 +1029,49 @@ class PrintingService:
                 painter.setFont(row_font)
                 lh = painter.fontMetrics().height() + 6
 
-                # Method Name
+                # Method Name — full width, left aligned
                 painter.setPen(QColor(method_color or DARK_TEXT))
-                painter.drawText(self.margin, y, self.paper_width - self.margin * 2, lh, Qt.AlignLeft | Qt.AlignVCenter, f"{method_label}")
+                painter.drawText(self.margin, y,
+                                 self.paper_width - self.margin * 2, lh,
+                                 Qt.AlignLeft | Qt.AlignVCenter,
+                                 f"{method_label}")
                 y += lh
-                
+
                 painter.setFont(normal_font)
                 painter.setPen(QColor(DARK_TEXT))
-                
+
                 if show_expected:
-                    w = self.paper_width - self.margin * 2
-                    col1 = w * 0.33
-                    col2 = w * 0.33
-                    col3 = w * 0.34
-                    
-                    # Headers row
-                    painter.setFont(normal_font)
-                    painter.drawText(self.margin, y, col1, lh, Qt.AlignLeft | Qt.AlignVCenter, "Expected")
-                    painter.drawText(self.margin + col1, y, col2, lh, Qt.AlignCenter | Qt.AlignVCenter, "Counted")
-                    painter.drawText(self.margin + col1 + col2, y, col3, lh, Qt.AlignRight | Qt.AlignVCenter, "Variance")
-                    y += lh
-                    
-                    # Values row
-                    painter.setFont(row_font) # Keep bold if on account or grand total
-                    painter.drawText(self.margin, y, col1, lh, Qt.AlignLeft | Qt.AlignVCenter, f"{expected:,.2f}")
-                    painter.drawText(self.margin + col1, y, col2, lh, Qt.AlignCenter | Qt.AlignVCenter, f"{counted:,.2f}")
-                    
+                    # Integer column widths — avoids right-shift on thermal printers
+                    usable = self.paper_width - self.margin * 2
+                    col1 = int(usable * 0.36)   # Expected
+                    col2 = int(usable * 0.32)   # Counted
+                    col3 = usable - col1 - col2  # Variance (remainder)
+                    x1 = self.margin
+                    x2 = x1 + col1
+                    x3 = x2 + col2
+
+                    # Values row (no header labels — cleaner layout)
+                    painter.setFont(row_font)
+                    painter.drawText(x1, y, col1, lh, Qt.AlignLeft | Qt.AlignVCenter, f"{expected:,.2f}")
+                    painter.drawText(x2, y, col2, lh, Qt.AlignCenter | Qt.AlignVCenter, f"{counted:,.2f}")
+
                     var_clr = variance_color or (DANGER if variance < 0 else SUCCESS if variance > 0 else DARK_TEXT)
                     painter.setPen(QColor(var_clr))
-                    painter.drawText(self.margin + col1 + col2, y, col3, lh, Qt.AlignRight | Qt.AlignVCenter, f"{variance:+,.2f}")
+                    painter.drawText(x3, y, col3, lh, Qt.AlignRight | Qt.AlignVCenter, f"{variance:+,.2f}")
                     painter.setPen(QColor(DARK_TEXT))
                     y += lh
                 else:
                     painter.setFont(normal_font)
-                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, lh, Qt.AlignLeft | Qt.AlignVCenter, "Counted")
+                    painter.drawText(self.margin, y,
+                                     self.paper_width - self.margin * 2, lh,
+                                     Qt.AlignLeft | Qt.AlignVCenter, "Counted")
                     y += lh
                     painter.setFont(row_font)
-                    painter.drawText(self.margin, y, self.paper_width - self.margin * 2, lh, Qt.AlignLeft | Qt.AlignVCenter, f"{counted:,.2f}")
+                    painter.drawText(self.margin, y,
+                                     self.paper_width - self.margin * 2, lh,
+                                     Qt.AlignLeft | Qt.AlignVCenter, f"{counted:,.2f}")
                     y += lh
-                
+
                 painter.setPen(QColor(DARK_TEXT))
                 y += 4
                 self._draw_dot_line(painter, self.margin, y, self.paper_width - self.margin * 2, ".")
@@ -931,8 +1110,13 @@ class PrintingService:
                 grand_expected = sum(float(t.get('expected', 0)) for t in totals)
                 grand_counted = sum(float(t.get('actual', 0)) for t in totals)
 
-            shift_id = shift.get('id', shift.get('shift_id')) if shift else None
+            shift_id = (shift.get('id', shift.get('shift_id')) if shift else None) or \
+                       (reconciliation_data.get('shift_id') if reconciliation_data else None) or \
+                       (print_data.get('shift_id') if print_data else None)
             total_credit_notes = 0.0
+            credit_notes_list = []
+            total_expenses = 0.0
+            expenses_list = []
             
             if shift_id:
                 try:
@@ -944,20 +1128,28 @@ class PrintingService:
                     if shift_times:
                         st = shift_times[0]
                         et = shift_times[1] if shift_times[1] else datetime.now()
-                        cur.execute("SELECT COALESCE(SUM(total), 0) FROM credit_notes WHERE created_at >= ? AND created_at <= ?", (st, et))
-                        total_credit_notes = float(cur.fetchone()[0])
+                        cur.execute("""
+                            SELECT cn_number, total, COALESCE(currency, 'USD') as currency, cashier_name
+                            FROM credit_notes
+                            WHERE (shift_id = ? OR (shift_id IS NULL AND created_at >= ? AND created_at <= ?))
+                        """, (shift_id, st, et))
+                        credit_notes_list = cur.fetchall()
+                        total_credit_notes = sum(float(r[1] or 0) for r in credit_notes_list)
+
+                        cur.execute("""
+                            SELECT e.expense_number, e.amount, COALESCE(c.name, 'Expense') as category, e.name as title, e.cashier_name,
+                                   COALESCE(NULLIF(LTRIM(RTRIM(e.payment_method)), ''), 'Cash') as payment_method
+                            FROM expenses e
+                            LEFT JOIN expense_categories c ON e.expense_category_id = c.id
+                            WHERE e.paid = 1
+                              AND (e.shift_id = ? OR (e.shift_id IS NULL AND e.created_at >= ? AND e.created_at <= ?))
+                            ORDER BY e.id ASC
+                        """, (shift_id, st, et))
+                        expenses_list = cur.fetchall()
+                        total_expenses = sum(float(r[1] or 0) for r in expenses_list)
                     conn.close()
                 except Exception as e:
-                    print(f"Error fetching credit notes for shift: {e}")
-
-            if total_credit_notes > 0:
-                for pm in payment_methods:
-                    method_upper = pm.get('method', '').upper()
-                    if "CASH" in method_upper and "ECOCASH" not in method_upper:
-                        pm['expected'] = float(pm.get('expected', 0)) - total_credit_notes
-                        pm['variance'] = float(pm.get('counted', pm.get('actual', 0))) - pm['expected']
-                        break
-                grand_expected -= total_credit_notes
+                    print(f"Error fetching credit notes/expenses for shift: {e}")
 
             # Cashier Breakdown
             if cashiers:
@@ -975,24 +1167,51 @@ class PrintingService:
                     painter.drawText(self.margin + 10, y, self.paper_width - self.margin * 2 - 10, line_h,
                                      Qt.AlignLeft, f"Sales: ${total_sales:,.2f} | Transactions: {transactions}")
                     y += line_h
-                    y += 4
+
+                    # Credit Notes & Final Sales for Cashier
+                    c_cns = [cn for cn in credit_notes_list if (str(cn[3] or '').strip().lower() == str(cashier_name).strip().lower())]
+                    if len(cashiers) == 1 and not c_cns and credit_notes_list:
+                        c_cns = credit_notes_list
+                    c_cn_count = len(c_cns)
+                    c_cn_total = sum(float(cn[1] or 0) for cn in c_cns)
+                    c_final_sales = total_sales - c_cn_total
+
+                    painter.setFont(small_font)
+                    painter.drawText(self.margin + 10, y, self.paper_width - self.margin * 2 - 10, line_h,
+                                     Qt.AlignLeft, f"Credit Notes: -${c_cn_total:,.2f} (Count: {c_cn_count})")
+                    y += line_h
+
+                    painter.setFont(bold_font)
+                    painter.drawText(self.margin + 10, y, self.paper_width - self.margin * 2 - 10, line_h,
+                                     Qt.AlignLeft, f"Final Sales: ${c_final_sales:,.2f}")
+                    y += line_h + 4
 
                     # "rows" is the primary key; fall back to "payment_breakdown"
                     rows_to_print = cashier.get('rows') or cashier.get('payment_breakdown', [])
-
+                    c_curr_totals = {}
                     painter.setFont(normal_font)
                     if rows_to_print:
                         for row in rows_to_print:
                             method   = row.get('method', '')
-                            currency = row.get('currency', 'USD')
+                            currency = (row.get('currency') or '').strip().upper()
+                            if not currency:
+                                if " (" in method and method.endswith(")"):
+                                    currency = method.split(" (")[-1].rstrip(")").strip().upper()
+                            if not currency:
+                                currency = 'USD'
                             expected = float(row.get('expected', 0))
                             counted  = float(row.get('counted',
                                              row.get('collected',
                                              row.get('amount_collected', 0))))
                             variance = counted - expected
 
-                            if currency.upper() not in ("USD", "US") and method:
-                                method = f"{method} ({currency.upper()})"
+                            if currency not in c_curr_totals:
+                                c_curr_totals[currency] = {'expected': 0.0, 'counted': 0.0}
+                            c_curr_totals[currency]['expected'] += expected
+                            c_curr_totals[currency]['counted'] += counted
+
+                            if currency not in ("USD", "US") and not method.upper().endswith(f"({currency})"):
+                                method = f"{method} ({currency})"
 
                             is_on_account = method.upper() == "ON ACCOUNT"
                             _draw_recon_row(
@@ -1011,22 +1230,22 @@ class PrintingService:
 
                     y += 4
 
-                    # Cashier sub-total
-                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
-                    y += 6
-
-                    total_exp = float(cashier.get('total_expected', 0))
-                    total_cnt = float(cashier.get('total_counted', cashier.get('total_sales', 0)))
-                    total_var = total_cnt - total_exp
-
-                    _draw_recon_row(
-                        method_label="SUB-TOTAL (USD)",
-                        expected=total_exp,
-                        counted=total_cnt,
-                        variance=total_var,
-                        row_font=bold_font,
-                    )
-                    y += 8
+                    # Cashier sub-totals: only show if single currency for that cashier, omit if multiple currencies exist
+                    if len(c_curr_totals) == 1:
+                        painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                        y += 6
+                        for ccy, c_tot in c_curr_totals.items():
+                            c_exp = c_tot['expected']
+                            c_cnt = c_tot['counted']
+                            c_var = c_cnt - c_exp
+                            _draw_recon_row(
+                                method_label=f"SUB-TOTAL ({ccy})",
+                                expected=c_exp,
+                                counted=c_cnt,
+                                variance=c_var,
+                                row_font=bold_font,
+                            )
+                        y += 8
 
                     # Separator between cashiers
                     painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
@@ -1045,15 +1264,26 @@ class PrintingService:
                 y += line_h + 6
 
                 painter.setFont(normal_font)
+                summary_curr_totals = {}
                 for pm in payment_methods:
                     method   = pm.get('method', '')
-                    currency = pm.get('currency', 'USD')
+                    currency = (pm.get('currency') or '').strip().upper()
+                    if not currency:
+                        if " (" in method and method.endswith(")"):
+                            currency = method.split(" (")[-1].rstrip(")").strip().upper()
+                    if not currency:
+                        currency = 'USD'
                     expected = float(pm.get('expected', 0))
                     counted  = float(pm.get('counted', pm.get('actual', 0)))
                     variance = counted - expected
                     
-                    if currency.upper() not in ("USD", "US") and method:
-                        method = f"{method} ({currency.upper()})"
+                    if currency not in summary_curr_totals:
+                        summary_curr_totals[currency] = {'expected': 0.0, 'counted': 0.0}
+                    summary_curr_totals[currency]['expected'] += expected
+                    summary_curr_totals[currency]['counted'] += counted
+
+                    if currency not in ("USD", "US") and not method.upper().endswith(f"({currency})"):
+                        method = f"{method} ({currency})"
 
                     is_on_account = method.upper() == "ON ACCOUNT"
                     _draw_recon_row(
@@ -1066,50 +1296,25 @@ class PrintingService:
                     )
 
                 painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
-                y += 10
 
-                # Grand total row
-                if total_credit_notes > 0:
-                    # Show Gross before deductions
-                    _draw_recon_row(
-                        method_label="GROSS TOTAL (USD)",
-                        expected=grand_expected + total_credit_notes,
-                        counted=grand_counted,
-                        variance=(grand_counted - (grand_expected + total_credit_notes)),
-                        row_font=normal_font,
-                    )
-                    _draw_recon_row(
-                        method_label="LESS CREDIT NOTES",
-                        expected=-total_credit_notes,
-                        counted=0.0,
-                        variance=total_credit_notes,
-                        row_font=normal_font,
-                        method_color=DANGER,
-                        variance_color=SUCCESS
-                    )
-                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                # Grand Totals: only show if single currency, omit if multiple currencies exist
+                if len(summary_curr_totals) == 1:
                     y += 6
-                    
-                    grand_var = grand_counted - grand_expected
-                    _draw_recon_row(
-                        method_label="NET COLLECTED (USD)",
-                        expected=grand_expected,
-                        counted=grand_counted,
-                        variance=grand_var,
-                        row_font=bold_font,
-                    )
+                    for ccy, g_tot in summary_curr_totals.items():
+                        g_exp = g_tot['expected']
+                        g_cnt = g_tot['counted']
+                        g_var = g_cnt - g_exp
+                        _draw_recon_row(
+                            method_label=f"TOTAL ({ccy})",
+                            expected=g_exp,
+                            counted=g_cnt,
+                            variance=g_var,
+                            row_font=bold_font,
+                        )
+                    painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                    y += 20
                 else:
-                    grand_var = grand_counted - grand_expected
-                    _draw_recon_row(
-                        method_label="TOTAL (USD)",
-                        expected=grand_expected,
-                        counted=grand_counted,
-                        variance=grand_var,
-                        row_font=bold_font,
-                    )
-
-                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
-                y += 20
+                    y += 12
 
             # ─────────────────────────────────────────────────────────────────
             # Invoice count
@@ -1367,9 +1572,15 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 20
 
+            dining_opt = str(getattr(receipt, "receiptType", "") or "")
+            order_no = int(getattr(receipt, "orderNumber", 0) or 0)
+            if order_no > 0:
+                inv_str = f"Order No: #{order_no}  Invoice No: {receipt.invoiceNo or 'N/A'}"
+            else:
+                inv_str = f"Invoice No: {receipt.invoiceNo or 'N/A'}"
             painter.setFont(normal_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, 28,
-                             Qt.AlignCenter, f"Invoice No: {receipt.invoiceNo or 'N/A'}")
+                             Qt.AlignCenter, inv_str)
             y += 32
             
             _raw_date = str(receipt.invoiceDate or "").split(" ")[0].split("T")[0]
@@ -1874,8 +2085,9 @@ class PrintingService:
                              Qt.AlignCenter, f"Time    : {datetime.now().strftime('%H:%M:%S')}")
             y += 28
             if receipt.cashierName:
+                waiter_disp = self._clean_person_name(receipt.cashierName)
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 28,
-                                 Qt.AlignCenter, f"Waiter  : {receipt.cashierName}")
+                                 Qt.AlignCenter, f"Waiter  : {waiter_disp}")
                 y += 28
 
             dining_opt = getattr(receipt, "receiptType", "") or ""
@@ -2058,19 +2270,14 @@ class PrintingService:
                 y += 16
 
             # ── Footer ────────────────────────────────────────────────────
-            painter.setFont(kot_hdr_font)
-            footer_h = painter.fontMetrics().height() + 8
-            painter.drawText(self.margin, y, self.paper_width - self.margin * 2, footer_h,
-                             Qt.AlignCenter, banner_text)
-            y += footer_h
             if getattr(receipt, "is_modified", False):
                 painter.setFont(normal_font)
                 mod_h = painter.fontMetrics().height() + 8
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, mod_h,
                                  Qt.AlignCenter, "*** MODIFIED ***")
-                y += mod_h - 18 # adjust next y
+                y += mod_h + 4
             painter.setFont(small_font)
-            y += 26
+            y += 10
             import main as _m_main
             v_str = getattr(_m_main, "APP_VERSION", "2.0.0")
             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 22,
@@ -2176,6 +2383,16 @@ class PrintingService:
                 all_ok = False
         return all_ok
 
+    def _clean_person_name(self, raw_name: str) -> str:
+        if not raw_name:
+            return "Admin"
+        val = str(raw_name).strip()
+        if "@" in val:
+            prefix = val.split("@")[0]
+            words = [w.capitalize() for w in prefix.replace(".", " ").replace("_", " ").replace("-", " ").split() if w]
+            return " ".join(words) if words else prefix
+        return val
+
     def _do_print_invoice_receipt(self, receipt: ReceiptData, printer_name: str = None) -> bool:
         # [OK] FIX: Automatically convert dictionary to ReceiptData object if needed
         if isinstance(receipt, dict):
@@ -2262,15 +2479,20 @@ class PrintingService:
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 25
 
+            dining_opt = getattr(receipt, "receiptType", "") or ""
+            is_order_type = str(getattr(receipt, "doc_type", "")).lower() == "order" or str(dining_opt).lower() == "order"
+
             # Receipt Heading
             painter.setFont(bold_font)
-            _heading = (getattr(receipt, "receiptHeader", "") or "").strip() or "*** SALES RECEIPT ***"
+            _heading = (getattr(receipt, "receiptHeader", "") or "").strip()
+            if not _heading:
+                _heading = "*** TAX ORDER ***" if is_order_type else "*** SALES RECEIPT ***"
             
             try:
                 from services.fiscalization_service import get_fiscalization_service
                 fs = get_fiscalization_service()
                 if fs and fs.is_fiscalization_enabled():
-                    _heading = "*** FISCAL TAX INVOICE ***"
+                    _heading = "*** FISCAL TAX ORDER ***" if is_order_type else "*** FISCAL TAX INVOICE ***"
             except Exception:
                 pass
 
@@ -2278,12 +2500,11 @@ class PrintingService:
                              Qt.AlignCenter, _heading)
             y += 44
 
-            dining_opt = getattr(receipt, "receiptType", "") or ""
-            if "take away" in dining_opt.lower() or "takeaway" in dining_opt.lower():
+            if "take away" in str(dining_opt).lower() or "takeaway" in str(dining_opt).lower():
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 38,
                                  Qt.AlignCenter, "TAKE AWAY")
                 y += 44
-            elif "sit" in dining_opt.lower():
+            elif "sit" in str(dining_opt).lower():
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 38,
                                  Qt.AlignCenter, "SIT IN")
                 y += 44
@@ -2300,6 +2521,12 @@ class PrintingService:
                 _display_date = datetime.strptime(_raw_date, "%Y-%m-%d").strftime("%d/%m/%Y") if _raw_date else datetime.now().strftime("%d/%m/%Y")
             except ValueError:
                 _display_date = _raw_date or datetime.now().strftime("%d/%m/%Y")
+
+            order_no = int(getattr(receipt, "orderNumber", 0) or 0)
+            if order_no > 0:
+                self._draw_doc_row(painter, "Order No:", f"#{order_no}",
+                                   y, _inv_row_h, bold_font, normal_font)
+                y += _inv_row_h + 4
 
             self._draw_doc_row(painter, "Invoice No:", receipt.invoiceNo or "N/A",
                                y, _inv_row_h, bold_font, normal_font)
@@ -2320,7 +2547,8 @@ class PrintingService:
             self._draw_doc_row(painter, "Time:", _raw_time,
                                y, _inv_row_h, bold_font, normal_font)
             y += _inv_row_h + 4
-            self._draw_doc_row(painter, "Cashier:", receipt.cashierName or "Admin",
+            cashier_disp = self._clean_person_name(receipt.cashierName or "Admin")
+            self._draw_doc_row(painter, "Cashier:", cashier_disp,
                                y, _inv_row_h, bold_font, normal_font)
             y += _inv_row_h + 4
 
@@ -2730,8 +2958,8 @@ class PrintingService:
                                          Qt.AlignCenter, f"GLOBAL NUMBER: {_disp_global}")
                         y += 20
 
-                        # 3. VERIFICATION CODE (Only if NOT pending)
-                        if v_code and fiscal_status != "PENDING_SYNC":
+                        # 3. VERIFICATION CODE
+                        if v_code:
                             formatted_v_code = v_code
                             if len(v_code) == 16:
                                 formatted_v_code = f"{v_code[:4]}-{v_code[4:8]}-{v_code[8:12]}-{v_code[12:]}"
@@ -2739,10 +2967,27 @@ class PrintingService:
                                              Qt.AlignCenter, f"VERIFICATION CODE: {formatted_v_code}")
                             y += 22
                             
-                            device_sn = getattr(settings, "device_sn", "") or ""
-                            d_id = f_device_id if f_device_id else device_sn
-                            d_sn = f_device_sn if f_device_sn else device_sn
-                            d_day = f_day if f_day else "N/A"
+                            device_sn = getattr(f_settings, "device_sn", "") if f_settings else ""
+                            d_sn = f_device_sn if f_device_sn else (getattr(receipt, "deviceSerial", "") or device_sn)
+                            d_id = f_device_id if f_device_id else (getattr(receipt, "deviceId", "") or d_sn)
+                            d_day = f_day if f_day else (getattr(receipt, "fiscalDay", "") or "0")
+
+                            if not d_sn or not d_id:
+                                try:
+                                    from services.havano_zimra_offline_service import get_havano_zimra_offline_service
+                                    _h_srv = get_havano_zimra_offline_service()
+                                    _cfg_path = _h_srv.get_config_file_path(f_settings)
+                                    if os.path.exists(_cfg_path):
+                                        from havanozimrapackage import ZimraDevice
+                                        _zd = ZimraDevice()
+                                        _zd.load_config_file(_cfg_path)
+                                        if not d_sn:
+                                            d_sn = _zd.get_config_value("deviceSerialNo") or _zd.get_config_value("device_sn") or ""
+                                        if not d_id:
+                                            d_id = _zd.get_config_value("DeviceID") or _zd.get_config_value("device_id") or d_sn
+                                except Exception:
+                                    pass
+
                             painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 20,
                                              Qt.AlignCenter, f"Device ID: {d_id} | SN: {d_sn}")
                             y += 18
@@ -2768,19 +3013,45 @@ class PrintingService:
             try:
                 from models.company_defaults import get_defaults
                 co_defs = get_defaults() or {}
+                inv_terms = getattr(receipt, "salesOrderTerms", "") or (co_defs.get("terms_and_conditions") or "").strip()
                 company_footer = (co_defs.get("footer_text") or "").strip()
             except Exception:
+                inv_terms = ""
                 company_footer = ""
+
+            if inv_terms:
+                y += 6
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 14
+                painter.setFont(bold_font)
+                painter.drawText(self.margin, y, self.paper_width - self.margin*2, 24, Qt.AlignLeft, "TERMS & CONDITIONS")
+                y += 26
+                painter.setFont(normal_font)
+                fm_t = painter.fontMetrics()
+                for term_line in inv_terms.splitlines():
+                    term_line = term_line.strip()
+                    if not term_line:
+                        continue
+                    t_rect = fm_t.boundingRect(0, 0, self.paper_width - self.margin*2, 1000, Qt.TextWordWrap, term_line)
+                    painter.drawText(self.margin, y, self.paper_width - self.margin*2, t_rect.height(), Qt.TextWordWrap, term_line)
+                    y += t_rect.height() + 4
+                y += 10
+                painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
+                y += 14
 
             _footer_raw = (getattr(receipt, "footer", "") or "").strip()
             if company_footer:
-                if not _footer_raw or _footer_raw == f"Havano Version {v_str}" or _footer_raw == "Thank you for your purchase!":
+                if not _footer_raw or _footer_raw.startswith("Havano Version") or _footer_raw == "Thank you for your purchase!":
                     _footer_raw = company_footer
                 elif company_footer not in _footer_raw:
                     _footer_raw = f"{company_footer}\n{_footer_raw}"
 
             if not _footer_raw:
-                _footer_raw = f"Havano Version {v_str}"
+                _footer_raw = "Thank you for your purchase!"
+
+            version_text = f"Havano Version {v_str}"
+            if version_text not in _footer_raw:
+                _footer_raw = f"{_footer_raw}\n{version_text}"
 
             for _line in _footer_raw.splitlines():
                 painter.drawText(self.margin, y, self.paper_width - self.margin * 2, 22,

@@ -20,7 +20,6 @@ __pycache__/
 # Databases and environment
 *.db
 *.sqlite3
-.env
 
 # Build / packaging
 build/
@@ -30,3 +29,5 @@ dist/
 logs/
 *.log
 /docs
+config.bat
+node_modules

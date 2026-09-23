@@ -25,10 +25,9 @@ pyinstaller --noconfirm --onedir --windowed --icon "assets/havano_new_blue.ico" 
   --add-data "%QTA_PATH%\fonts;qtawesome/fonts" ^
   --exclude-module "pandas" --exclude-module "numpy" --exclude-module "matplotlib" ^
   --exclude-module "scipy" --exclude-module "tensorflow" --exclude-module "keras" ^
-  --exclude-module "torch" --exclude-module "PySide6.QtWebEngineWidgets" ^
-  --exclude-module "PySide6.QtWebEngineCore" --exclude-module "PySide6.QtQuick" ^
+  --exclude-module "torch" --exclude-module "PySide6.QtQuick" ^
   --exclude-module "PySide6.QtQml" --exclude-module "PySide6.QtOpenGL" ^
-  --exclude-module "PySide6.QtQuick3D" --exclude-module "PySide6.QtPdf" ^
+  --exclude-module "PySide6.QtQuick3D" ^
   --exclude-module "IPython" --exclude-module "jupyter" ^
   --exclude-module "notebook" --exclude-module "cv2" ^
   --name "HavanoPOS" main.py

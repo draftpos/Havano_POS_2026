@@ -1,9 +1,11 @@
 import asyncio
 import json
 import threading
-# pyrefly: ignore [missing-import]
-import websockets
-# pyrefly: ignore [missing-import]
+try:
+    import websockets
+except ImportError:
+    websockets = None
+
 from PySide6.QtCore import QObject, Signal
 
 class KDSBroadcaster(QObject):
@@ -19,6 +21,9 @@ class KDSBroadcaster(QObject):
         self._thread = None
 
     def start_server(self, host="0.0.0.0", port=8765):
+        if not websockets:
+            print("[KDS] websockets module not installed - KDS server disabled.")
+            return
         self._thread = threading.Thread(target=self._run_server, args=(host, port), daemon=True)
         self._thread.start()
 

@@ -38,7 +38,7 @@ def _get_base_select(warehouse_id: int = None) -> str:
 def _get_base_join(warehouse_id: int = None) -> str:
     joins = []
     if warehouse_id:
-        joins.append(f"LEFT JOIN product_warehouse_stock pws ON p.id = pws.product_id AND pws.warehouse_id = {int(warehouse_id)}")
+        joins.append(f"LEFT JOIN product_warehouse_stock pws WITH (NOLOCK) ON p.id = pws.product_id AND pws.warehouse_id = {int(warehouse_id)}")
     return "\n".join(joins)
 
 
@@ -50,10 +50,10 @@ def _apply_prices(products_list: list[dict], price_list_name: str = None) -> lis
         from database.db import get_connection
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT part_no, uom, price FROM item_prices WHERE price_list = ? AND price_type = 'selling'", (target_pl,))
+        cur.execute("SELECT part_no, uom, price FROM item_prices WITH (NOLOCK) WHERE price_list = ? AND price_type = 'selling'", (target_pl,))
         price_map = {(r[0], r[1]): float(r[2]) for r in cur.fetchall()}
         if target_pl != "Standard Selling":
-            cur.execute("SELECT part_no, uom, price FROM item_prices WHERE price_list = 'Standard Selling' AND price_type = 'selling'")
+            cur.execute("SELECT part_no, uom, price FROM item_prices WITH (NOLOCK) WHERE price_list = 'Standard Selling' AND price_type = 'selling'")
             fallback_map = {(r[0], r[1]): float(r[2]) for r in cur.fetchall()}
             for k, v in fallback_map.items():
                 if k not in price_map:
@@ -64,7 +64,7 @@ def _apply_prices(products_list: list[dict], price_list_name: str = None) -> lis
             if key in price_map and price_map[key] > 0:
                 p["price"] = price_map[key]
     except Exception as e:
-        print(f"[_apply_prices] Error: {e}")
+        print(f"[models.product] Error applying price list {target_pl}: {e}")
     return products_list
 
 
@@ -90,16 +90,17 @@ def _get_warehouse_filter(warehouse_id: int = None, only_in_stock: bool = False)
     return filter_clause
 
 
-def get_all_products(include_variants: bool = False, warehouse_id: int = None, only_in_stock: bool = False, price_list_name: str = None) -> list[dict]:
+def get_all_products(warehouse_id: int = None, only_in_stock: bool = False, price_list_name: str = None) -> list[dict]:
     conn = get_connection()
     cur  = conn.cursor()
-    
-    where = "WHERE (p.active = 1 OR p.active IS NULL)"
-    if not include_variants:
-        where += f" {_HIDE_VARIANTS}"
-    where += _get_warehouse_filter(warehouse_id, only_in_stock)
-    
-    cur.execute(f"SELECT {_get_base_select(warehouse_id)} FROM products p {_get_base_join(warehouse_id)} {where} ORDER BY p.id DESC")
+    wh_filter = _get_warehouse_filter(warehouse_id, only_in_stock)
+    cur.execute(f"""
+        SELECT {_get_base_select(warehouse_id)}
+        FROM products p WITH (NOLOCK)
+        {_get_base_join(warehouse_id)}
+        WHERE (p.active = 1 OR p.active IS NULL) {wh_filter}
+        ORDER BY p.name ASC
+    """)
     rows = fetchall_dicts(cur)
     conn.close()
     products = [_to_dict(r, warehouse_id) for r in rows]
@@ -107,34 +108,62 @@ def get_all_products(include_variants: bool = False, warehouse_id: int = None, o
 
 
 
-def get_products_by_category(category: str, include_variants: bool = False, warehouse_id: int = None, only_in_stock: bool = False, price_list_name: str = None) -> list[dict]:
+def get_products_by_category(category: str, warehouse_id: int = None, only_in_stock: bool = False, price_list_name: str = None) -> list[dict]:
     conn = get_connection()
     cur  = conn.cursor()
-    tail = "" if include_variants else _HIDE_VARIANTS
     wh_filter = _get_warehouse_filter(warehouse_id, only_in_stock)
     cur.execute(f"""
         SELECT {_get_base_select(warehouse_id)}
-        FROM products p
+        FROM products p WITH (NOLOCK)
         {_get_base_join(warehouse_id)}
-        WHERE (p.active = 1 OR p.active IS NULL) AND p.category = ? {tail} {wh_filter}
-        ORDER BY p.id DESC
+        WHERE (p.active = 1 OR p.active IS NULL) AND p.category = ? {wh_filter}
+        ORDER BY p.name ASC
     """, (category,))
     rows = fetchall_dicts(cur)
     conn.close()
-    return _apply_prices([_to_dict(r, warehouse_id) for r in rows], price_list_name=price_list_name)
+    products = [_to_dict(r, warehouse_id) for r in rows]
+    return _apply_prices(products, price_list_name=price_list_name)
 
+
+def get_all_products_including_inactive(warehouse_id: int = None, only_in_stock: bool = False, price_list_name: str = None) -> list[dict]:
+    conn = get_connection()
+    cur  = conn.cursor()
+    wh_filter = _get_warehouse_filter(warehouse_id, only_in_stock)
+    cur.execute(f"""
+        SELECT {_get_base_select(warehouse_id)}, p.active
+        FROM products p WITH (NOLOCK)
+        {_get_base_join(warehouse_id)}
+        WHERE 1=1 {wh_filter}
+        ORDER BY p.name ASC
+    """)
+    rows = fetchall_dicts(cur)
+    conn.close()
+    products = [_to_dict(r, warehouse_id) for r in rows]
+    return _apply_prices(products, price_list_name=price_list_name)
+
+
+def get_all_categories() -> list[str]:
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT DISTINCT category
+        FROM products WITH (NOLOCK)
+        WHERE category IS NOT NULL AND category != ''
+        ORDER BY category ASC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 
 def get_categories() -> list[str]:
     conn = get_connection()
     cur  = conn.cursor()
     cur.execute("""
-        SELECT DISTINCT category FROM (
-            SELECT category FROM products WHERE category IS NOT NULL AND category != ''
-            UNION
-            SELECT name as category FROM item_groups WHERE name IS NOT NULL AND name != ''
-        ) AS t
-        ORDER BY category
+        SELECT DISTINCT category
+        FROM products WITH (NOLOCK)
+        WHERE category IS NOT NULL AND category != '' AND (active = 1 OR active IS NULL)
+        ORDER BY category ASC
     """)
     rows = cur.fetchall()
     conn.close()
@@ -154,12 +183,12 @@ def search_products(query: str, warehouse_id: int = None, only_in_stock: bool = 
     
     cur.execute(f"""
         SELECT TOP {limit} {_get_base_select(warehouse_id)}
-        FROM products p
+        FROM products p WITH (NOLOCK)
         {_get_base_join(warehouse_id)}
         WHERE (p.active = 1 OR p.active IS NULL) AND (
            p.part_no LIKE ? 
            OR p.name LIKE ?
-           OR p.part_no IN (SELECT part_no FROM product_barcodes WHERE barcode LIKE ?)
+           OR p.part_no IN (SELECT part_no FROM product_barcodes WITH (NOLOCK) WHERE barcode LIKE ?)
         ) {wh_filter}
         ORDER BY 
             CASE WHEN p.part_no LIKE ? THEN 1 WHEN p.name LIKE ? THEN 2 ELSE 3 END,
@@ -175,7 +204,7 @@ def search_products(query: str, warehouse_id: int = None, only_in_stock: bool = 
 def get_product_by_id(product_id: int, warehouse_id: int = None, price_list_name: str = None) -> dict | None:
     conn = get_connection()
     cur  = conn.cursor()
-    cur.execute(f"SELECT {_get_base_select(warehouse_id)} FROM products p {_get_base_join(warehouse_id)} WHERE p.id = ?", (product_id,))
+    cur.execute(f"SELECT {_get_base_select(warehouse_id)} FROM products p WITH (NOLOCK) {_get_base_join(warehouse_id)} WHERE p.id = ?", (product_id,))
     row = fetchone_dict(cur)
     conn.close()
     if not row:
@@ -188,15 +217,15 @@ def get_product_by_id(product_id: int, warehouse_id: int = None, price_list_name
 def get_product_by_part_no(part_no: str, warehouse_id: int = None, price_list_name: str = None) -> dict | None:
     conn = get_connection()
     cur  = conn.cursor()
-    cur.execute(f"SELECT {_get_base_select(warehouse_id)} FROM products p {_get_base_join(warehouse_id)} WHERE p.part_no = ?", (part_no,))
+    cur.execute(f"SELECT {_get_base_select(warehouse_id)} FROM products p WITH (NOLOCK) {_get_base_join(warehouse_id)} WHERE p.part_no = ?", (part_no,))
     row = fetchone_dict(cur)
     if not row:
         # Fallback: check alternative barcodes table
         cur.execute(f"""
             SELECT {_get_base_select(warehouse_id)}
-            FROM products p
+            FROM products p WITH (NOLOCK)
             {_get_base_join(warehouse_id)}
-            WHERE p.part_no = (SELECT TOP 1 part_no FROM product_barcodes WHERE barcode = ?)
+            WHERE p.part_no = (SELECT TOP 1 part_no FROM product_barcodes WITH (NOLOCK) WHERE barcode = ?)
         """, (part_no,))
         row = fetchone_dict(cur)
     conn.close()

@@ -10,7 +10,8 @@
       "exchange_rate": 1.0,
       "rate": 1.0,
       "inverse_rate": 1.0,
-      "symbol": "USD"
+      "symbol": "USD",
+      "on_account": false
     },
     {
       "id": 1081,
@@ -22,7 +23,8 @@
       "exchange_rate": 1.0,
       "rate": 1.0,
       "inverse_rate": 1.0,
-      "symbol": "USD"
+      "symbol": "USD",
+      "on_account": false
     },
     {
       "id": 1082,
@@ -34,7 +36,8 @@
       "exchange_rate": 1.0,
       "rate": 1.0,
       "inverse_rate": 1.0,
-      "symbol": "USD"
+      "symbol": "USD",
+      "on_account": false
     },
     {
       "id": 1083,
@@ -46,7 +49,8 @@
       "exchange_rate": 1.0,
       "rate": 1.0,
       "inverse_rate": 1.0,
-      "symbol": "USD"
+      "symbol": "USD",
+      "on_account": false
     },
     {
       "id": 1084,
@@ -58,7 +62,8 @@
       "exchange_rate": 1.0,
       "rate": 1.0,
       "inverse_rate": 1.0,
-      "symbol": "USD"
+      "symbol": "USD",
+      "on_account": false
     },
     {
       "id": 1656,
@@ -67,10 +72,11 @@
       "type": "Cash",
       "currency": "ZWG",
       "currency_id": 236,
-      "exchange_rate": 100.0,
-      "rate": 100.0,
-      "inverse_rate": 0.01,
-      "symbol": "ZWG"
+      "exchange_rate": 35.0,
+      "rate": 35.0,
+      "inverse_rate": 0.02857142857142857,
+      "symbol": "ZWG",
+      "on_account": false
     },
     {
       "id": 1708,
@@ -79,10 +85,11 @@
       "type": "Cash",
       "currency": "AMD",
       "currency_id": 239,
-      "exchange_rate": 40.0,
-      "rate": 40.0,
-      "inverse_rate": 0.025,
-      "symbol": "AMD"
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "AMD",
+      "on_account": false
     },
     {
       "id": 1709,
@@ -94,7 +101,8 @@
       "exchange_rate": 2.0,
       "rate": 2.0,
       "inverse_rate": 0.5,
-      "symbol": "R"
+      "symbol": "R",
+      "on_account": false
     },
     {
       "id": 1935,
@@ -106,7 +114,8 @@
       "exchange_rate": 1.0,
       "rate": 1.0,
       "inverse_rate": 1.0,
-      "symbol": "USD"
+      "symbol": "USD",
+      "on_account": false
     },
     {
       "id": 2227,
@@ -115,10 +124,11 @@
       "type": "Cash",
       "currency": "AMD",
       "currency_id": 239,
-      "exchange_rate": 40.0,
-      "rate": 40.0,
-      "inverse_rate": 0.025,
-      "symbol": "AMD"
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "AMD",
+      "on_account": false
     },
     {
       "id": 2228,
@@ -130,7 +140,8 @@
       "exchange_rate": 1.0,
       "rate": 1.0,
       "inverse_rate": 1.0,
-      "symbol": "USD"
+      "symbol": "USD",
+      "on_account": false
     },
     {
       "id": 2229,
@@ -139,10 +150,11 @@
       "type": "Bank",
       "currency": "AFN",
       "currency_id": 47,
-      "exchange_rate": 40.0,
-      "rate": 40.0,
-      "inverse_rate": 0.025,
-      "symbol": "Afs"
+      "exchange_rate": 1.0,
+      "rate": 1.0,
+      "inverse_rate": 1.0,
+      "symbol": "Afs",
+      "on_account": false
     }
   ]
 }

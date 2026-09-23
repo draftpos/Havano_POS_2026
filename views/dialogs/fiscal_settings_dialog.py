@@ -51,6 +51,23 @@ class TestConnectionThread(QThread):
                     self.finished_signal.emit(False, f"Revmax Ping failed: {ping_result.error}")
             except Exception as e:
                 self.finished_signal.emit(False, f"Revmax connection error: {str(e)}")
+        elif self.settings.provider == "havano_zimra_offline":
+            from services.havano_zimra_offline_service import get_havano_zimra_offline_service
+            service = get_havano_zimra_offline_service()
+            try:
+                ping_result = service.ping_device(self.settings)
+                if ping_result.is_success and ping_result.data:
+                    res = ping_result.data
+                    self.finished_signal.emit(
+                        True,
+                        f"Connected! Havano Zimra Offline Signing Ready\n"
+                        f"Device Serial: {res.device_sn} | ID: {res.device_id}\n"
+                        f"Config: {res.config_file}"
+                    )
+                else:
+                    self.finished_signal.emit(False, f"Offline verification failed: {ping_result.error}")
+            except Exception as e:
+                self.finished_signal.emit(False, f"Offline device error: {str(e)}")
         else:
             service = get_zimra_service()
             try:
@@ -120,6 +137,7 @@ class FiscalSettingsDialog(QDialog):
         main_layout.addWidget(QLabel("Provider:"), 1, 0)
         self.provider_combo = QComboBox()
         self.provider_combo.addItem("Havano Zimra", "havano_zimra")
+        self.provider_combo.addItem("Havano Zimra (Offline Device)", "havano_zimra_offline")
         self.provider_combo.addItem("Axis Virtual API", "axis")
         self.provider_combo.addItem("Revmax Hardware Integration", "revmax")
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
@@ -223,6 +241,7 @@ class FiscalSettingsDialog(QDialog):
         provider = self.provider_combo.currentData()
         is_axis = (provider == "axis")
         is_zimra = (provider in ("frappe", "havano_zimra"))
+        is_offline_zimra = (provider == "havano_zimra_offline")
         is_revmax = (provider == "revmax")
         
         self.frappe_lbl_key.setVisible(is_zimra)
@@ -236,8 +255,14 @@ class FiscalSettingsDialog(QDialog):
         self.axis_password_edit.setVisible(is_axis)
         
         current_url = self.base_url_edit.text().strip()
-        if not current_url:
-            self.base_url_edit.setText("https://erpfiscal.havano.online")
+        if is_offline_zimra:
+            self.base_url_edit.setPlaceholderText("havanoconfig.ini (Optional path override)")
+            if current_url == "https://erpfiscal.havano.online":
+                self.base_url_edit.setText("")
+        else:
+            self.base_url_edit.setPlaceholderText("http://140.82.25.196:10002")
+            if not current_url:
+                self.base_url_edit.setText("https://erpfiscal.havano.online")
         
         if is_zimra:
             if not self.api_key_edit.text().strip():
@@ -303,7 +328,9 @@ class FiscalSettingsDialog(QDialog):
         )
         
         # Validate required fields
-        if not test_settings.base_url:
+        if test_settings.provider == "havano_zimra_offline":
+            pass  # Offline signing does not require external base_url or cloud credentials
+        elif not test_settings.base_url:
             QMessageBox.warning(self, "Missing Field", "Please enter the Base URL")
             return
             

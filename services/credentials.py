@@ -12,6 +12,7 @@
 # =============================================================================
 
 import logging
+from pathlib import Path
 log = logging.getLogger("credentials")
 
 _session: dict = {}
@@ -60,8 +61,16 @@ def set_session(api_key: str, api_secret: str, **extra):
             WHERE  id = (SELECT MIN(id) FROM company_defaults)
         """, (k, db_secret, token, mode))
         conn.commit()
+        cur.close()
         conn.close()
         log.debug("[credentials] Persisted to DB (Mode: %s, Encrypted Secret)", mode)
+
+        if mode.lower() == "saas":
+            try:
+                from models.saas_snapshot import take_saas_snapshot_once
+                take_saas_snapshot_once(username=extra.get("username") or "Admin")
+            except Exception as _ex_snap:
+                log.debug("[credentials] Auto snapshot capture check: %s", _ex_snap)
     except Exception as e:
         log.warning("[credentials] Could not persist to DB: %s", e)
 
@@ -81,7 +90,6 @@ def set_session(api_key: str, api_secret: str, **extra):
             settings.showAppMaintenance = False
             settings.showAppFinance = False
             settings.showAppInventory = False
-            settings.showAppExpenses = False
             settings.save_to_file(_path)
             log.debug(f"[credentials] Enforced ERP module lock for {current_mode} mode upon login.")
     except Exception as e:
@@ -131,6 +139,12 @@ def get_all_credentials() -> dict:
     if not _loaded_from_db:
         _loaded_from_db = True
         try:
+            from models.saas_snapshot import verify_saas_snapshot_lock_on_login
+            verify_saas_snapshot_lock_on_login()
+        except Exception:
+            pass
+
+        try:
             from database.db import get_connection
             from utils.crypto import decrypt_secret
             conn = get_connection()
@@ -155,19 +169,26 @@ def get_all_credentials() -> dict:
     return dict(_session)
 
 
+def _get_app_data_dir() -> Path:
+    try:
+        from database.db import get_app_data_dir
+        return get_app_data_dir()
+    except Exception:
+        pass
+    import sys
+    from pathlib import Path
+    if getattr(sys, 'frozen', False) or hasattr(sys, "_MEIPASS"):
+        return Path(sys.executable).parent / "app_data"
+    return Path(__file__).resolve().parent.parent / "app_data"
+
+
 def get_system_mode() -> str:
     """
     Primary authority for system mode is app_data/sql_settings.json ("system_mode").
     """
     try:
-        import json, sys, os
-        from pathlib import Path
-        if hasattr(sys, "_MEIPASS"):
-            app_data_dir = Path(sys.executable).parent / "app_data"
-        else:
-            app_data_dir = Path(os.path.abspath(".")) / "app_data"
-
-        settings_file = app_data_dir / "sql_settings.json"
+        import json
+        settings_file = _get_app_data_dir() / "sql_settings.json"
         if settings_file.exists():
             data = json.loads(settings_file.read_text(encoding="utf-8"))
             if data.get("system_mode"):
@@ -199,11 +220,21 @@ def has_credentials() -> bool:
     """Returns True if we have valid auth for the current mode."""
     creds = get_all_credentials()
     mode = str(creds.get("system_mode") or get_system_mode() or "frappe").strip().lower()
-    if mode == "odoo":
+    if mode == "saas":
+        has_saas = bool(creds.get("api_key") or _session.get("api_key"))
+        if not has_saas:
+            try:
+                from models.saas_snapshot import restore_saas_defaults_from_snapshot
+                if restore_saas_defaults_from_snapshot():
+                    creds = get_all_credentials()
+                    has_saas = bool(creds.get("api_key") or _session.get("api_key"))
+            except Exception:
+                pass
+        return has_saas
+    elif mode == "odoo":
         return bool(creds.get("api_key") or creds.get("odoo_token") or _session.get("api_key"))
-    elif mode == "saas":
-        return bool(creds.get("api_key") or _session.get("api_key"))
     return bool(creds.get("api_key") or _session.get("api_key"))
+
 
 
 def check_credentials(api_key: str, api_secret: str) -> bool:
@@ -284,11 +315,12 @@ def _wipe_db_for_mode_switch():
     clear_session_credentials()
 
 
-def set_system_mode(mode: str, parent=None, confirm_wipe: bool = True) -> bool:
+def set_system_mode(mode: str, parent=None, confirm_wipe: bool = True, wipe_full_db: bool = True) -> bool:
     """
     Single canonical writer for system mode.
 
-    Prompts user and wipes database if mode is changing while a local database exists.
+    If wipe_full_db is True, prompts user and wipes full database on mode change.
+    If wipe_full_db is False (e.g. Reindexing), updates company_defaults and config files only.
     Returns True if mode was updated, False if cancelled by user.
     """
     new_mode = (mode or "frappe").strip().lower()
@@ -313,17 +345,28 @@ def set_system_mode(mode: str, parent=None, confirm_wipe: bool = True) -> bool:
         current_mode = (get_system_mode() or "").strip().lower()
 
     if current_mode and new_mode != current_mode:
-        if _db_has_active_data():
+        if wipe_full_db and _db_has_active_data():
             if confirm_wipe:
                 user_confirmed = _prompt_wipe_confirmation(current_mode, new_mode, parent=parent)
                 if not user_confirmed:
                     log.info("[credentials] System mode change from %s to %s cancelled by user.", current_mode, new_mode)
                     return False
 
+            _write_mode_files(new_mode)
             log.info("[credentials] Mode switch (%s -> %s) executing database wipe...", current_mode, new_mode)
             _wipe_db_for_mode_switch()
+        else:
+            _write_mode_files(new_mode)
+    else:
+        _write_mode_files(new_mode)
 
-    _write_mode_files(new_mode)
+    if new_mode == "offline":
+        try:
+            from setup_database import ensure_offline_defaults
+            ensure_offline_defaults()
+        except Exception as _e:
+            log.warning("[credentials] Failed to ensure offline defaults: %s", _e)
+
     return True
 
 
@@ -333,13 +376,8 @@ def _write_mode_files(mode: str) -> None:
 
     # ── 1. sql_settings.json ──────────────────────────────────────────────
     try:
-        import json, sys, os
-        from pathlib import Path
-        if hasattr(sys, "_MEIPASS"):
-            app_data_dir = Path(sys.executable).parent / "app_data"
-        else:
-            app_data_dir = Path(os.path.abspath(".")) / "app_data"
-        settings_file = app_data_dir / "sql_settings.json"
+        import json
+        settings_file = _get_app_data_dir() / "sql_settings.json"
         data: dict = {}
         if settings_file.exists():
             try:
@@ -347,6 +385,8 @@ def _write_mode_files(mode: str) -> None:
             except Exception:
                 pass
         data["system_mode"] = mode
+        if mode == "saas" and not data.get("api_url"):
+            data["api_url"] = "https://backoffice.havano.pro"
         settings_file.write_text(json.dumps(data, indent=4), encoding="utf-8")
         log.debug("[credentials] sql_settings.json updated -> system_mode=%s", mode)
     except Exception as e:
@@ -372,8 +412,10 @@ def _write_mode_files(mode: str) -> None:
         conn = get_connection()
         cur  = conn.cursor()
         cur.execute("UPDATE company_defaults SET system_mode = ? WHERE id = (SELECT MIN(id) FROM company_defaults)", (mode,))
+        if mode != "offline":
+            cur.execute("UPDATE company_defaults SET work_offline = '0' WHERE id = (SELECT MIN(id) FROM company_defaults)")
         conn.commit()
         conn.close()
-        log.debug("[credentials] company_defaults table updated -> system_mode=%s", mode)
+        log.debug("[credentials] company_defaults table updated -> system_mode=%s (work_offline=0)", mode)
     except Exception as _ex_cd:
         log.debug("[credentials] company_defaults table system_mode update skipped: %s", _ex_cd)

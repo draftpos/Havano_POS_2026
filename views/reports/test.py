@@ -6298,6 +6298,7 @@ class POSView(QWidget):
                 footer          = co.get("footer_text", "Thank you for your purchase!"),
                 qrCode          = sale.get("fiscal_qr_code", ""),
                 vCode           = sale.get("fiscal_verification_code", ""),
+                orderNumber     = int(sale.get("order_number", 0) or 0),
             )
 
             for it in sale.get("items", []):

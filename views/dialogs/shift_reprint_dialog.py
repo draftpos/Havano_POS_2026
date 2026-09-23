@@ -212,11 +212,29 @@ class ShiftReprintDialog(QDialog):
         self.print_btn.setEnabled(False)
         self.print_btn.clicked.connect(self._reprint)
         
+        self.a4_btn = QPushButton("A4 Report")
+        self.a4_btn.setObjectName("a4Btn")
+        self.a4_btn.setEnabled(False)
+        self.a4_btn.setStyleSheet("""
+            QPushButton#a4Btn {
+                background-color: #0a2342;
+                color: white;
+            }
+            QPushButton#a4Btn:hover {
+                background-color: #1e3a8a;
+            }
+            QPushButton#a4Btn:disabled {
+                background-color: #9e9e9e;
+            }
+        """)
+        self.a4_btn.clicked.connect(self._reprint_a4)
+
         self.close_btn = QPushButton("Close")
         self.close_btn.setObjectName("closeBtn")
         self.close_btn.clicked.connect(self.reject)
         
         button_layout.addStretch()
+        button_layout.addWidget(self.a4_btn)
         button_layout.addWidget(self.print_btn)
         button_layout.addWidget(self.close_btn)
         layout.addLayout(button_layout)
@@ -384,6 +402,7 @@ class ShiftReprintDialog(QDialog):
         self.date_to.setDate(QDate.currentDate())
         self._load_recent_shifts()
         self.print_btn.setEnabled(False)
+        self.a4_btn.setEnabled(False)
     
     def _populate_table(self, reconciliations):
         """Populate the table with reconciliation data."""
@@ -392,6 +411,7 @@ class ShiftReprintDialog(QDialog):
         self.table.setRowCount(len(reconciliations))
         self.table.clearSelection()
         self.print_btn.setEnabled(False)
+        self.a4_btn.setEnabled(False)
         
         for row, rec in enumerate(reconciliations):
             # Recon ID
@@ -453,11 +473,59 @@ class ShiftReprintDialog(QDialog):
     def _on_selection_changed(self):
         """Enable/disable print button based on selection."""
         selected = self.table.selectedItems()
-        self.print_btn.setEnabled(len(selected) > 0)
+        has_sel = len(selected) > 0
+        self.print_btn.setEnabled(has_sel)
+        self.a4_btn.setEnabled(has_sel)
 
     def _on_current_item_changed(self, current, previous):
         """Also enable button when keyboard navigation changes current item."""
-        self.print_btn.setEnabled(current is not None)
+        has_cur = current is not None
+        self.print_btn.setEnabled(has_cur)
+        self.a4_btn.setEnabled(has_cur)
+
+    def _reprint_a4(self):
+        """Preview the selected shift reconciliation in A4."""
+        selected_rows = set()
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+        
+        if not selected_rows:
+            QMessageBox.warning(self, "No Selection", "Please select a shift to view in A4.")
+            return
+        
+        row = list(selected_rows)[0]
+        item0 = self.table.item(row, 0)
+        reconciliation_id = item0.data(Qt.UserRole) if item0 else None
+        
+        if not reconciliation_id:
+            QMessageBox.warning(self, "Error", "Could not retrieve reconciliation ID.")
+            return
+        
+        try:
+            from models.shift import get_shift_reconciliation
+            from services.a4_shift_recon_service import show_a4_shift_recon_preview
+            
+            reconciliation = get_shift_reconciliation(reconciliation_id)
+            if not reconciliation:
+                QMessageBox.warning(self, "Error", f"Could not load reconciliation #{reconciliation_id}")
+                return
+            
+            reconciliation_data = reconciliation.get('reconciliation_data', {})
+            if not reconciliation_data:
+                try:
+                    import json
+                    reconciliation_data = json.loads(reconciliation.get('reconciliation_json', '{}'))
+                except:
+                    reconciliation_data = {}
+            
+            show_a4_shift_recon_preview(
+                shift=None,
+                reconciliation_data=reconciliation_data,
+                is_reprint=True,
+                parent=self
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "A4 Preview Error", f"Failed to preview A4 report: {e}")
     
     def _reprint(self):
         """Reprint the selected shift reconciliation."""
@@ -471,7 +539,8 @@ class ShiftReprintDialog(QDialog):
         
         # Get the first selected row
         row = list(selected_rows)[0]
-        reconciliation_id = self.table.item(row, 0).data(Qt.UserRole)
+        item0 = self.table.item(row, 0)
+        reconciliation_id = item0.data(Qt.UserRole) if item0 else None
         
         if not reconciliation_id:
             QMessageBox.warning(self, "Error", "Could not retrieve reconciliation ID.")
@@ -511,8 +580,11 @@ class ShiftReprintDialog(QDialog):
                 })
             
             # Get printer name
-            settings = AdvanceSettings.load_from_file()
-            printer_name = getattr(settings, "receiptPrinterName", None)
+            from views.dialogs.settings_dialog import _load_hw
+            hw = _load_hw()
+            printer_name = hw.get("main_printer", None)
+            if printer_name == "(None)":
+                printer_name = None
             
             # Reprint
             print(f"\n[DEBUG] Reprinting reconciliation #{reconciliation_id} for Shift #{reconciliation_data.get('shift_number')}")

@@ -2,7 +2,7 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QHeaderView, QAbstractItemView, QMessageBox, 
-    QApplication, QTabWidget, QWidget, QToolButton, QSizePolicy
+    QApplication, QTabWidget, QWidget, QToolButton, QSizePolicy, QInputDialog
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
@@ -113,7 +113,7 @@ class UnfiscalizedDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Fiscalization Dashboard")
-        self.setMinimumSize(1000, 650)
+        self.setMinimumSize(1180, 650)
         self.setModal(True)
         self.setStyleSheet(f"QDialog {{ background: {OFF_WHITE}; }}")
         self._sales = []
@@ -186,6 +186,22 @@ class UnfiscalizedDialog(QDialog):
         self._retry_all_btn.setCursor(Qt.PointingHandCursor)
         self._retry_all_btn.setStyleSheet(self._btn_ss(SUCCESS, "#1f9447"))
         self._retry_all_btn.clicked.connect(self._retry_all)
+
+        self._change_inv_btn = QPushButton("Change Invoice No")
+        self._change_inv_btn.setIcon(qta.icon("fa5s.edit"))
+        self._change_inv_btn.setFixedHeight(36)
+        self._change_inv_btn.setCursor(Qt.PointingHandCursor)
+        self._change_inv_btn.setEnabled(False)
+        self._change_inv_btn.setStyleSheet(self._btn_ss("#e67e22", "#d35400"))
+        self._change_inv_btn.clicked.connect(self._change_invoice_no)
+
+        self._mark_synced_btn = QPushButton("Mark Fiscalized / Remove")
+        self._mark_synced_btn.setIcon(qta.icon("fa5s.check-circle"))
+        self._mark_synced_btn.setFixedHeight(36)
+        self._mark_synced_btn.setCursor(Qt.PointingHandCursor)
+        self._mark_synced_btn.setEnabled(False)
+        self._mark_synced_btn.setStyleSheet(self._btn_ss("#2c3e50", "#1a252f"))
+        self._mark_synced_btn.clicked.connect(self._mark_as_fiscalized)
         
         close_btn = QPushButton("Close")
         close_btn.setFixedHeight(36)
@@ -196,6 +212,8 @@ class UnfiscalizedDialog(QDialog):
         
         btn_layout.addWidget(self._retry_btn)
         btn_layout.addWidget(self._retry_all_btn)
+        btn_layout.addWidget(self._change_inv_btn)
+        btn_layout.addWidget(self._mark_synced_btn)
         btn_layout.addStretch()
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
@@ -212,14 +230,15 @@ class UnfiscalizedDialog(QDialog):
 
     def _build_sales_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w)
-        self._table = QTableWidget(0, 5)
-        self._table.setHorizontalHeaderLabels(["Sale ID", "Invoice No", "Customer", "Total", "Status"])
+        self._table = QTableWidget(0, 6)
+        self._table.setHorizontalHeaderLabels(["Sale ID", "Invoice No", "Customer", "Total", "Status", "Error / Reason"])
         hh = self._table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed); self._table.setColumnWidth(0, 80)
-        hh.setSectionResizeMode(1, QHeaderView.Fixed); self._table.setColumnWidth(1, 180)
-        hh.setSectionResizeMode(2, QHeaderView.Stretch)
-        hh.setSectionResizeMode(3, QHeaderView.Fixed); self._table.setColumnWidth(3, 120)
+        hh.setSectionResizeMode(0, QHeaderView.Fixed); self._table.setColumnWidth(0, 70)
+        hh.setSectionResizeMode(1, QHeaderView.Fixed); self._table.setColumnWidth(1, 130)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed); self._table.setColumnWidth(2, 160)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed); self._table.setColumnWidth(3, 100)
         hh.setSectionResizeMode(4, QHeaderView.Fixed); self._table.setColumnWidth(4, 120)
+        hh.setSectionResizeMode(5, QHeaderView.Stretch)
         
         self._style_table(self._table)
         self._table.cellClicked.connect(self._on_selection_changed)
@@ -309,7 +328,7 @@ class UnfiscalizedDialog(QDialog):
         cursor.execute("""
             SELECT id, invoice_no, customer_name, total, fiscal_status, fiscal_error
             FROM sales 
-            WHERE fiscal_status IN ('pending', 'failed')
+            WHERE fiscal_status IN ('pending', 'failed', 'PENDING_SYNC', 'pending_sync', 'offline_signed')
             ORDER BY id DESC
         """)
         rows = fetchall_dicts(cursor)
@@ -320,8 +339,19 @@ class UnfiscalizedDialog(QDialog):
         for sale in rows:
             r = self._table.rowCount()
             self._table.insertRow(r)
-            status = sale.get("fiscal_status", "unknown")
-            status_color = DANGER if status == "failed" else "#e67e22"
+            status = str(sale.get("fiscal_status", "unknown")).upper()
+            if status == "FAILED":
+                status_color = DANGER
+                display_status = "FAILED"
+            elif status in ("PENDING_SYNC", "OFFLINE_SIGNED"):
+                status_color = "#e67e22"
+                display_status = "PENDING SYNC"
+            elif status == "PENDING":
+                status_color = "#e67e22"
+                display_status = "PENDING"
+            else:
+                status_color = "#e67e22"
+                display_status = status
             
             self._table.setItem(r, 0, QTableWidgetItem(str(sale.get("id", ""))))
             self._table.setItem(r, 1, QTableWidgetItem(sale.get("invoice_no", "")))
@@ -336,15 +366,30 @@ class UnfiscalizedDialog(QDialog):
             total_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self._table.setItem(r, 3, total_item)
             
-            status_item = QTableWidgetItem(status.upper())
+            status_item = QTableWidgetItem(display_status)
             status_item.setForeground(QColor(status_color))
             status_item.setTextAlignment(Qt.AlignCenter)
             self._table.setItem(r, 4, status_item)
             
-            if sale.get("fiscal_error"):
-                self._table.item(r, 4).setToolTip(f"Error: {sale.get('fiscal_error')}")
+            error_msg = str(sale.get("fiscal_error") or "").strip()
+            error_item = QTableWidgetItem(error_msg)
+            if status == "FAILED":
+                err_color = DANGER
+            elif "already exist" in error_msg.lower():
+                err_color = "#d35400"
+            else:
+                err_color = MUTED
+            error_item.setForeground(QColor(err_color))
+            error_item.setToolTip(error_msg if error_msg else "No errors recorded")
+            self._table.setItem(r, 5, error_item)
         
         self._count_lbl.setText(f"{len(rows)} item(s) pending")
+        if hasattr(self, "_retry_btn"):
+            self._retry_btn.setEnabled(False)
+        if hasattr(self, "_change_inv_btn"):
+            self._change_inv_btn.setEnabled(False)
+        if hasattr(self, "_mark_synced_btn"):
+            self._mark_synced_btn.setEnabled(False)
         
         # 2. Load Z-Report Summary Details
         from services.fiscalization_service import get_fiscalization_service
@@ -453,6 +498,99 @@ class UnfiscalizedDialog(QDialog):
 
     def _on_selection_changed(self, row, col):
         self._retry_btn.setEnabled(True)
+        self._change_inv_btn.setEnabled(True)
+        self._mark_synced_btn.setEnabled(True)
+
+    def _change_invoice_no(self):
+        row = self._table.currentRow()
+        if row < 0: return
+        sale_id = int(self._table.item(row, 0).text())
+        current_inv = self._table.item(row, 1).text()
+
+        new_inv, ok = QInputDialog.getText(
+            self, "Change Invoice Number",
+            f"Enter new unique invoice number for Sale #{sale_id}:\n(Current: {current_inv})",
+            text=current_inv
+        )
+        if not ok or not new_inv.strip():
+            return
+
+        new_inv = new_inv.strip()
+        if new_inv == current_inv:
+            return
+
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            # Check if new invoice number already exists locally in sales (invoice_no is NVARCHAR)
+            cur.execute("SELECT id FROM sales WHERE invoice_no = ? AND id != ?", (new_inv, sale_id))
+            if cur.fetchone():
+                QMessageBox.warning(self, "Duplicate Invoice", f"Invoice number '{new_inv}' is already used by another local sale.")
+                conn.close()
+                return
+
+            # Note: in schema, invoice_number is INT, while invoice_no is NVARCHAR(40)
+            if new_inv.isdigit():
+                cur.execute("""
+                    UPDATE sales 
+                    SET invoice_no = ?, invoice_number = ?, 
+                        fiscal_error = 'Invoice number changed. Ready to retry.'
+                    WHERE id = ?
+                """, (new_inv, int(new_inv), sale_id))
+            else:
+                cur.execute("""
+                    UPDATE sales 
+                    SET invoice_no = ?, 
+                        fiscal_error = 'Invoice number changed. Ready to retry.'
+                    WHERE id = ?
+                """, (new_inv, sale_id))
+            conn.commit()
+            conn.close()
+
+            QMessageBox.information(
+                self, "Invoice Number Updated",
+                f"Invoice number updated from '{current_inv}' to '{new_inv}'.\n\nYou can now click 'Retry Selected' to submit it to ZIMRA."
+            )
+            self._load_data()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to update invoice number: {e}")
+
+    def _mark_as_fiscalized(self):
+        row = self._table.currentRow()
+        if row < 0: return
+        sale_id = int(self._table.item(row, 0).text())
+        current_inv = self._table.item(row, 1).text()
+
+        reply = QMessageBox.question(
+            self, "Mark as Fiscalized / Remove",
+            f"Are you sure you want to mark invoice {current_inv} as fiscalized/synced?\n\n"
+            f"This will remove it from the unfiscalized queue and update the Z badge count.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE sales 
+                SET fiscal_status = 'fiscalized', fiscal_error = NULL, fiscal_sync_date = SYSDATETIME()
+                WHERE id = ?
+            """, (sale_id,))
+            conn.commit()
+            conn.close()
+
+            # Refresh parent POS badge if possible
+            if self.parent() and hasattr(self.parent(), "_refresh_unsynced_badge"):
+                try:
+                    self.parent()._refresh_unsynced_badge()
+                except Exception:
+                    pass
+
+            self._load_data()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to mark as fiscalized: {e}")
     
     def _retry_selected(self):
         row = self._table.currentRow()
@@ -483,3 +621,19 @@ class UnfiscalizedDialog(QDialog):
             print(f"Error retrying sale {sale_id}: {e}")
         
         QTimer.singleShot(1500, self._load_data)
+
+    def accept(self):
+        if self.parent() and hasattr(self.parent(), "_refresh_unsynced_badge"):
+            try:
+                self.parent()._refresh_unsynced_badge()
+            except Exception:
+                pass
+        super().accept()
+
+    def reject(self):
+        if self.parent() and hasattr(self.parent(), "_refresh_unsynced_badge"):
+            try:
+                self.parent()._refresh_unsynced_badge()
+            except Exception:
+                pass
+        super().reject()
