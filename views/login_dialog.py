@@ -32,19 +32,25 @@ def get_current_site_url():
 # =============================================================================
 # Connectivity helper  (fast, non-blocking check)
 # =============================================================================
-def _is_online(timeout: float = 2.0) -> bool:
+def _is_online(timeout: float = 3.0) -> bool:
     """
-    Quick TCP-level reachability check.
-    Parses SITE_URL to determine the correct host and port (defaulting to 443/80).
+    Robust non-blocking reachability check.
+    Probes host via TCP and HTTP fallback with SSL resilience.
+    Accepts any HTTP response code (including 200, 301, 302, 401, 403, 404)
+    as proof of server reachability.
     """
     import socket
     from urllib.parse import urlparse
-    import time
+    import urllib.request
+    import urllib.error
+    import ssl
     
-    # SITE_URL might be "mysite.com" or "http://mysite.com:8069"
     url = get_current_site_url()
     if url == "Not Configured":
         return False
+
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
 
     parsed = urlparse(url)
     host = parsed.hostname or url
@@ -55,18 +61,28 @@ def _is_online(timeout: float = 2.0) -> bool:
     if not port:
         port = 443 if parsed.scheme == "https" else 80
 
-    # 1. TCP probe
+    # 1. Fast TCP probe (up to 3s)
     try:
-        sock = socket.create_connection((host, port), timeout=timeout)
+        sock = socket.create_connection((host, port), timeout=min(timeout, 3.0))
         sock.close()
         return True
     except OSError:
         pass
 
-    # 2. HTTP fallback
+    # 2. HTTP fallback with SSL CERT_NONE & User-Agent
     try:
-        import urllib.request
-        urllib.request.urlopen(url, timeout=timeout)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "HavanoPOS/2026 ConnectivityCheck"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return True
+    except urllib.error.HTTPError:
+        # Any HTTP status code (200, 301, 302, 401, 403, 404, etc.) proves the server is alive!
         return True
     except Exception:
         pass
@@ -115,40 +131,44 @@ class LoginWorker(QThread):
             pass
 
         # Strategy: 
-        # 1. If username is 'admin' or we are in 'work_offline' mode, try local FIRST.
-        # 2. Otherwise, check connectivity and try online.
-        # 3. Fallback to local if online fails (but not if it's a genuine auth rejection, 
-        #    UNLESS it's a timeout or network error).
+        # 1. If username is 'admin' or we are in explicit 'work_offline' mode or system_mode == 'offline', try local FIRST.
+        # 2. In online modes (saas, frappe, odoo), ALWAYS attempt online login to backoffice server!
+        # 3. Fallback to local only if online fails due to network/timeout.
         
-        should_try_local_first = (self.username.lower() == 'admin' or is_offline_mode)
+        is_cloud_mode = (self.system_mode in ("saas", "frappe", "odoo"))
+        should_try_local_first = (self.username.lower() == 'admin' or is_offline_mode or self.system_mode == "offline")
         
         if should_try_local_first:
-            print(f"[LoginWorker] prioritizing local auth (admin or offline_mode)")
+            print(f"[LoginWorker] prioritizing local auth (admin, work_offline, or system_mode=offline)")
             result = self._try_local()
             if result.get("success"):
                 self.finished.emit(result)
                 return
+            if self.system_mode == "offline":
+                self.finished.emit(result)
+                return
             print(f"[LoginWorker] local auth failed for {self.username}, continuing to online check...")
 
-        online = _is_online(timeout=8.0)
-        print(f"[LoginWorker] connectivity={online}")
+        # For cloud modes, attempt online login directly!
+        result = self._try_online()
+        if result.get("success"):
+            self.finished.emit(result)
+            return
 
-        if online:
-            result = self._try_online()
-            # If online path returned a genuine credential error, don't
-            # silently fall back - surface it immediately so the user knows.
-            # EXCEPT if we didn't try local yet and it might be a local-only user.
-            if result.get("success"):
-                self.finished.emit(result)
-                return
-            
-            # If online check returned an explicit rejection from the server
-            # (e.g. credential failure or tenant mismatch), surface it immediately.
-            if result.get("source") == "online" and result.get("error"):
-                print(f"[LoginWorker] online error surfaced: {result.get('error')}")
-                self.finished.emit(result)
-                return
+        # If online check returned an explicit rejection from the server
+        # (e.g. invalid credentials or tenant mismatch), surface it immediately.
+        # Only fall back to local if it was a connection error / timeout.
+        err_str = str(result.get("error") or "").lower()
+        is_net_error = (
+            result.get("source") in ("timeout", "exception") or
+            any(k in err_str for k in ["timeout", "timed out", "network", "connect", "refused", "unreachable", "getaddrinfo", "connection reset"])
+        )
+        if result.get("source") == "online" and not is_net_error:
+            print(f"[LoginWorker] online error surfaced: {result.get('error')}")
+            self.finished.emit(result)
+            return
 
+        print(f"[LoginWorker] online attempt failed ({result.get('error')}), falling back to local auth...")
         result = self._try_local()
         self.finished.emit(result)
 
@@ -747,6 +767,7 @@ class SettingsHubDialog(QDialog):
             ("Mode Setup",      "Switch system modes.", self._do_mode_setup),
             ("Database",        "Configure SQL Server connection.",      self._do_database),
             ("License",         "Activate or view software license.",    self._do_license),
+            ("Reindexing",      "View mode & reindex defaults.",         self._do_reindexing),
         ]
 
         for title, subtitle, handler in items:
@@ -824,6 +845,10 @@ class SettingsHubDialog(QDialog):
         self.accept()
         self._login._open_license_dialog()
 
+    def _do_reindexing(self):
+        self.accept()
+        self._login._open_reindexing_dialog()
+
 
 # =============================================================================
 # Main Login Dialog
@@ -877,6 +902,12 @@ class LoginDialog(QDialog):
 
         # Async connectivity check - never blocks UI
         self._refresh_connectivity()
+
+        # Auto-recovery background connectivity timer (quietly tests every 15 seconds)
+        self._connectivity_timer = QTimer(self)
+        self._connectivity_timer.setInterval(15000)
+        self._connectivity_timer.timeout.connect(lambda: self._refresh_connectivity(force=False))
+        self._connectivity_timer.start()
 
         QApplication.instance().installEventFilter(self)
 
@@ -939,6 +970,11 @@ class LoginDialog(QDialog):
 
     def _cleanup(self):
         QApplication.instance().removeEventFilter(self)
+        if hasattr(self, "_connectivity_timer") and self._connectivity_timer:
+            try:
+                self._connectivity_timer.stop()
+            except Exception:
+                pass
         for w in (self._worker, self._conn_worker):
             if w:
                 try:
@@ -1034,24 +1070,26 @@ class LoginDialog(QDialog):
         if _sup_num == "0782168407":
             _sup_num = "+263 779 973 028"
 
-        def add_info(label, value, link=False):
+        def add_info(label, value, link=False, font_size=14, label_size=10, value_color=NAVY_2, add_stretch=True):
             w = QWidget(); w.setStyleSheet("background:transparent; border:none;")
-            l = QVBoxLayout(w); l.setContentsMargins(0,0,0,0); l.setSpacing(4)
-            lbl1 = QLabel(label); lbl1.setStyleSheet(f"color:{MUTED}; font-size:11px; font-weight:800; letter-spacing:1px;")
+            l = QVBoxLayout(w); l.setContentsMargins(0,0,0,0); l.setSpacing(2)
+            lbl1 = QLabel(label); lbl1.setStyleSheet(f"color:{MUTED}; font-size:{label_size}px; font-weight:800; letter-spacing:0.8px;")
             lbl1.setAlignment(Qt.AlignCenter)
             
             if link:
                 lbl2 = QLabel(f'<a href="https://{value}/" style="color:{ACCENT}; text-decoration:none; font-weight:bold;">{value}</a>')
                 lbl2.setOpenExternalLinks(True)
             else:
-                lbl2 = QLabel(value)
+                lbl2 = QLabel(str(value))
                 
             lbl2.setAlignment(Qt.AlignCenter)
-            lbl2.setStyleSheet(f"color:{NAVY_2}; font-size:15px; font-weight:700;")
+            lbl2.setStyleSheet(f"color:{value_color}; font-size:{font_size}px; font-weight:600;")
             lbl2.setWordWrap(True)
+            lbl2.setToolTip(str(value))
             l.addWidget(lbl1); l.addWidget(lbl2)
             left_l.addWidget(w)
-            left_l.addStretch()
+            if add_stretch:
+                left_l.addStretch()
 
         _configured_store = (
             d.get("server_warehouse") or 
@@ -1059,6 +1097,33 @@ class LoginDialog(QDialog):
             d.get("server_shop_id") or 
             "Main Store"
         )
+
+        import socket
+        try:
+            from models.sql_settings import SQLSettings
+            _sql_cfg = SQLSettings.load()
+            _db_server = _sql_cfg.server or "."
+            _db_name = _sql_cfg.database or "POS_DB"
+        except Exception:
+            _db_server = "."
+            _db_name = "POS_DB"
+
+        _comp_name = os.environ.get("COMPUTERNAME") or socket.gethostname()
+        if not _db_server or _db_server.strip() in (".", "(local)", "localhost", "127.0.0.1"):
+            _server_display = _comp_name
+        else:
+            _s = _db_server.strip()
+            _matched = False
+            for _pfx in (".\\", "./", "localhost\\", "localhost/", "(local)\\", "(local)/", "127.0.0.1\\", "127.0.0.1/"):
+                if _s.lower().startswith(_pfx.lower()):
+                    _server_display = f"{_comp_name}\\\\{_s[len(_pfx):]}"
+                    _matched = True
+                    break
+            if not _matched:
+                if "\\" in _s and "\\\\" not in _s:
+                    _server_display = _s.replace("\\", "\\\\")
+                else:
+                    _server_display = _s
 
         if _agent_num and str(_agent_num).strip().lower() != "agent":
             add_info("AGENT NUMBER", _agent_num)
@@ -1068,6 +1133,8 @@ class LoginDialog(QDialog):
         add_info("SALES", "+263 778 078 440")
         add_info("EMAIL ADDRESS", "support@havanoerp.com")
         add_info("WEBSITE", "www.havanoerp.com", link=True)
+        add_info("DATABASE SERVER", _server_display, font_size=9, label_size=8, value_color="#64748b", add_stretch=False)
+        add_info("DATABASE NAME", _db_name, font_size=9, label_size=8, value_color="#64748b", add_stretch=True)
         
         # ── Download Progress ──────────────────────────────────────────────────
         self.download_lbl = QLabel("")
@@ -1101,14 +1168,43 @@ class LoginDialog(QDialog):
         top_row = QHBoxLayout()
         top_row.setContentsMargins(40, 16, 16, 0)
         
-        # Status bar items
-        self._status_dot = QLabel("●")
-        self._status_dot.setStyleSheet(f"color:{MID}; font-size:7px; background:transparent;")
-        self._status_lbl = QLabel("Checking connection…")
-        self._status_lbl.setStyleSheet(f"color:{MUTED}; font-size:11px; background:transparent;")
+        # Status bar clickable badge
+        self._status_box = QFrame()
+        self._status_box.setCursor(Qt.PointingHandCursor)
+        self._status_box.setToolTip("Click to test server connection")
+        self._status_box.setObjectName("statusBadge")
+        self._status_box.setStyleSheet(f"""
+            QFrame#statusBadge {{
+                background: #F8FAFC;
+                border: 1px solid {BORDER};
+                border-radius: 12px;
+            }}
+            QFrame#statusBadge:hover {{
+                background: #F1F5F9;
+                border: 1px solid {ACCENT};
+            }}
+        """)
+        sbl = QHBoxLayout(self._status_box)
+        sbl.setContentsMargins(10, 4, 10, 4)
+        sbl.setSpacing(6)
         
-        top_row.addWidget(self._status_dot)
-        top_row.addWidget(self._status_lbl)
+        self._status_dot = QLabel("●")
+        self._status_dot.setStyleSheet(f"color:{MID}; font-size:8px; background:transparent;")
+        self._status_lbl = QLabel("Checking connection…")
+        self._status_lbl.setStyleSheet(f"color:{MUTED}; font-size:11px; font-weight:600; background:transparent;")
+        
+        self._status_refresh_icon = QLabel()
+        if qta:
+            self._status_refresh_icon.setPixmap(qta.icon("fa5s.sync-alt", color=MUTED).pixmap(QSize(10, 10)))
+        self._status_refresh_icon.setStyleSheet("background:transparent;")
+        
+        sbl.addWidget(self._status_dot)
+        sbl.addWidget(self._status_lbl)
+        sbl.addWidget(self._status_refresh_icon)
+        
+        self._status_box.mousePressEvent = lambda _e: self._manual_refresh_connectivity()
+        
+        top_row.addWidget(self._status_box)
         top_row.addStretch()
         
         self.close_btn = QPushButton()
@@ -1525,6 +1621,31 @@ class LoginDialog(QDialog):
             dlg.exec()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open License window:\n{e}")
+
+    def _open_reindexing_dialog(self):
+        try:
+            from views.dialogs.reindexing_dialog import ReindexingDialog
+            dlg = ReindexingDialog(self)
+            dlg.exec()
+            if getattr(dlg, "reindexed", False):
+                from services.credentials import clear_session_credentials
+                clear_session_credentials()
+
+                QMessageBox.information(
+                    self,
+                    "Admin Login Required",
+                    "System mode and snapshot defaults have been reindexed.\n\n"
+                    "Please log in using your Admin Email and Password so fresh authentication "
+                    "tokens and company defaults can be generated and locked into the system."
+                )
+
+                self._switch_mode(1)
+                if hasattr(self, "username_input"):
+                    self.username_input.setFocus()
+                    self.username_input.selectAll()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not open Reindexing window:\n{e}")
+
 
     def _get_admin_pin(self) -> str:
         admin_pin = ""
@@ -2024,116 +2145,119 @@ class LoginDialog(QDialog):
             self._shake(); self._pin_clear()
             return
 
-        # --- Store / Warehouse Assignment Check for Cashiers ---
-        try:
-            from models.company_defaults import get_defaults
-            defaults = get_defaults() or {}
-            pos_warehouse = (defaults.get("server_warehouse") or defaults.get("warehouse") or defaults.get("company_name") or "").strip()
-            user_warehouse = (user.get("warehouse") or user.get("default_store") or user.get("allowed_stores") or "").strip()
-            
-            # Extract shops from raw_data or user dict if available
-            raw_user_block = (user.get("raw_data") or {}).get("user") or {}
-            user_shops = raw_user_block.get("shops") or (user.get("raw_data") or {}).get("shops") or user.get("shops") or []
-            
-            if isinstance(user_shops, list) and len(user_shops) > 0:
-                user_warehouse = ", ".join([str(s.get("name") or s.get("shop_name") or "").strip() for s in user_shops if (s.get("name") or s.get("shop_name"))])
-            else:
+        from services.credentials import get_system_mode
+        is_saas_mode = (get_system_mode() == "saas" or getattr(self, "system_mode", "") == "saas")
+
+        # ── SaaS Mode Only Checks (Store assignment, subscription expiry, cloud terminal) ──
+        if is_saas_mode:
+            # --- Store / Warehouse Assignment Check for Cashiers ---
+            try:
+                from models.company_defaults import get_defaults
+                defaults = get_defaults() or {}
+                pos_warehouse = (defaults.get("server_warehouse") or defaults.get("warehouse") or defaults.get("company_name") or "").strip()
                 user_warehouse = (user.get("warehouse") or user.get("default_store") or user.get("allowed_stores") or "").strip()
+                
+                # Extract shops from raw_data or user dict if available
+                raw_user_block = (user.get("raw_data") or {}).get("user") or {}
+                user_shops = raw_user_block.get("shops") or (user.get("raw_data") or {}).get("shops") or user.get("shops") or []
+                
+                if isinstance(user_shops, list) and len(user_shops) > 0:
+                    user_warehouse = ", ".join([str(s.get("name") or s.get("shop_name") or "").strip() for s in user_shops if (s.get("name") or s.get("shop_name"))])
+                else:
+                    user_warehouse = (user.get("warehouse") or user.get("default_store") or user.get("allowed_stores") or "").strip()
 
-            # Local DB lookup if user warehouse still empty
-            if not user_warehouse and user.get("id"):
-                try:
-                    from database.db import get_connection
-                    _conn = get_connection(); _cur = _conn.cursor()
-                    _cur.execute("SELECT warehouse FROM users WHERE id = ?", (user.get("id"),))
-                    _r = _cur.fetchone(); _conn.close()
-                    if _r and _r[0]: user_warehouse = str(_r[0]).strip()
-                except Exception: pass
-
-            user_role = str(user.get("role") or "").strip().lower()
-            is_admin_user = any(k in user_role for k in ("admin", "system manager", "tenant_admin", "super", "owner"))
-
-            if not is_admin_user and pos_warehouse:
-                pw_low = pos_warehouse.lower().strip()
-                is_allowed = False
-
-                # 1. Check user warehouse column / allowed stores
-                if user_warehouse:
-                    allowed_stores = [s.strip().lower() for s in user_warehouse.split(",") if s.strip()]
-                    if any(pw_low in s or s in pw_low for s in allowed_stores):
-                        is_allowed = True
-
-                # 2. Check store token keyword against user email, username, or full_name
-                if not is_allowed:
-                    u_email = str(user.get("email") or "").lower()
-                    u_name = str(user.get("username") or user.get("full_name") or "").lower()
-                    store_tokens = [t for t in pw_low.split() if len(t) > 3 and t not in ("store", "legends", "shop", "pos")]
-                    for tok in store_tokens:
-                        if tok in u_email or tok in u_name:
-                            is_allowed = True
-                            break
-
-                if not is_allowed:
-                    err_msg = f"User does not belong to Store {pos_warehouse}."
-                    print(f"[login] 🛑 {err_msg}")
-                    self._show_error(err_msg)
-                    self._shake()
-                    self._pin_clear()
+                # Local DB lookup if user warehouse still empty
+                if not user_warehouse and user.get("id"):
                     try:
-                        from views.dialogs.shop_terminal_dialogs import show_store_access_denied_dialog
-                        show_store_access_denied_dialog(self, err_msg, pos_warehouse)
-                    except Exception as _ex_dlg:
-                        print(f"[login] Popup error: {_ex_dlg}")
-                    return
-        except Exception as e:
-            print(f"[login] Store restriction check warning: {e}")
-        # --------------------------------------------------------
+                        from database.db import get_connection
+                        _conn = get_connection(); _cur = _conn.cursor()
+                        _cur.execute("SELECT warehouse FROM users WHERE id = ?", (user.get("id"),))
+                        _r = _cur.fetchone(); _conn.close()
+                        if _r and _r[0]: user_warehouse = str(_r[0]).strip()
+                    except Exception: pass
 
-        # --- SaaS Store Subscription Expiry & 3-Day Warning Check ---
-        try:
-            raw_user_block = (user.get("raw_data") or {}).get("user") or {}
-            days_left = raw_user_block.get("days_left") or (user.get("raw_data") or {}).get("days_left") or user.get("days_left")
-            
-            # Check shop-specific days_left if available
-            for s in user_shops:
-                if isinstance(s, dict) and s.get("days_left") is not None:
-                    s_name = str(s.get("name") or s.get("shop_name") or "").strip().lower()
-                    if pos_warehouse and (pos_warehouse.lower() in s_name or s_name in pos_warehouse.lower()):
-                        days_left = s.get("days_left")
-                        break
+                user_role = str(user.get("role") or "").strip().lower()
+                is_admin_user = any(k in user_role for k in ("admin", "system manager", "tenant_admin", "super", "owner"))
 
-            if days_left is not None:
-                try:
-                    d_val = int(days_left)
-                    if d_val <= 0:
-                        err_msg = f"Subscription for Store {pos_warehouse or 'Store'} has EXPIRED."
+                if not is_admin_user and pos_warehouse:
+                    pw_low = pos_warehouse.lower().strip()
+                    is_allowed = False
+
+                    # 1. Check user warehouse column / allowed stores
+                    if user_warehouse:
+                        allowed_stores = [s.strip().lower() for s in user_warehouse.split(",") if s.strip()]
+                        if any(pw_low in s or s in pw_low for s in allowed_stores):
+                            is_allowed = True
+
+                    # 2. Check store token keyword against user email, username, or full_name
+                    if not is_allowed:
+                        u_email = str(user.get("email") or "").lower()
+                        u_name = str(user.get("username") or user.get("full_name") or "").lower()
+                        store_tokens = [t for t in pw_low.split() if len(t) > 3 and t not in ("store", "legends", "shop", "pos")]
+                        for tok in store_tokens:
+                            if tok in u_email or tok in u_name:
+                                is_allowed = True
+                                break
+
+                    if not is_allowed:
+                        err_msg = f"User does not belong to Store {pos_warehouse}."
                         print(f"[login] 🛑 {err_msg}")
                         self._show_error(err_msg)
                         self._shake()
                         self._pin_clear()
                         try:
-                            from views.dialogs.shop_terminal_dialogs import show_subscription_expired_dialog
-                            show_subscription_expired_dialog(self, pos_warehouse or "")
-                        except Exception as _ex_sub_dlg:
-                            print(f"[login] Expired popup error: {_ex_sub_dlg}")
+                            from views.dialogs.shop_terminal_dialogs import show_store_access_denied_dialog
+                            show_store_access_denied_dialog(self, err_msg, pos_warehouse)
+                        except Exception as _ex_dlg:
+                            print(f"[login] Popup error: {_ex_dlg}")
                         return
-                    elif d_val <= 3:
-                        print(f"[login] ⚠️ Store subscription expiring in {d_val} days. Displaying prompt.")
-                        try:
-                            from views.dialogs.shop_terminal_dialogs import show_subscription_warning_dialog
-                            show_subscription_warning_dialog(self, pos_warehouse or "", d_val)
-                        except Exception as _ex_sub_warn:
-                            print(f"[login] Warning popup error: {_ex_sub_warn}")
-                except (ValueError, TypeError) as _ex_sub:
-                    print(f"[login] Subscription days parse warning: {_ex_sub}")
-        except Exception as _ex_sub_chk:
-            print(f"[login] Subscription check warning: {_ex_sub_chk}")
-        # --------------------------------------------------------
+            except Exception as e:
+                print(f"[login] Store restriction check warning: {e}")
+            # --------------------------------------------------------
 
-        # --- SaaS Store & Terminal Assignment Check ---
-        try:
-            from services.credentials import get_system_mode
-            if get_system_mode() == "saas":
+            # --- SaaS Store Subscription Expiry & 3-Day Warning Check ---
+            try:
+                raw_user_block = (user.get("raw_data") or {}).get("user") or {}
+                days_left = raw_user_block.get("days_left") or (user.get("raw_data") or {}).get("days_left") or user.get("days_left")
+                
+                # Check shop-specific days_left if available
+                for s in user_shops:
+                    if isinstance(s, dict) and s.get("days_left") is not None:
+                        s_name = str(s.get("name") or s.get("shop_name") or "").strip().lower()
+                        if pos_warehouse and (pos_warehouse.lower() in s_name or s_name in pos_warehouse.lower()):
+                            days_left = s.get("days_left")
+                            break
+
+                if days_left is not None:
+                    try:
+                        d_val = int(days_left)
+                        if d_val <= 0:
+                            err_msg = f"Subscription for Store {pos_warehouse or 'Store'} has EXPIRED."
+                            print(f"[login] 🛑 {err_msg}")
+                            self._show_error(err_msg)
+                            self._shake()
+                            self._pin_clear()
+                            try:
+                                from views.dialogs.shop_terminal_dialogs import show_subscription_expired_dialog
+                                show_subscription_expired_dialog(self, pos_warehouse or "")
+                            except Exception as _ex_sub_dlg:
+                                print(f"[login] Expired popup error: {_ex_sub_dlg}")
+                            return
+                        elif d_val <= 3:
+                            print(f"[login] ⚠️ Store subscription expiring in {d_val} days. Displaying prompt.")
+                            try:
+                                from views.dialogs.shop_terminal_dialogs import show_subscription_warning_dialog
+                                show_subscription_warning_dialog(self, pos_warehouse or "", d_val)
+                            except Exception as _ex_sub_warn:
+                                print(f"[login] Warning popup error: {_ex_sub_warn}")
+                    except (ValueError, TypeError) as _ex_sub:
+                        print(f"[login] Subscription days parse warning: {_ex_sub}")
+            except Exception as _ex_sub_chk:
+                print(f"[login] Subscription check warning: {_ex_sub_chk}")
+            # --------------------------------------------------------
+
+            # --- SaaS Store & Terminal Assignment Check ---
+            try:
                 from views.dialogs.saas_assignment_handler import handle_saas_shop_and_terminal_selection
                 raw_data = user.get("raw_data") if isinstance(user, dict) else {}
                 saas_ok = handle_saas_shop_and_terminal_selection(self, user, raw_data)
@@ -2141,23 +2265,21 @@ class LoginDialog(QDialog):
                     self._shake()
                     self._pin_clear()
                     return
-        except Exception as e:
-            print(f"[login] SaaS shop & terminal assignment error: {e}")
-        # ------------------------------------
+            except Exception as e:
+                print(f"[login] SaaS shop & terminal assignment error: {e}")
+            # ------------------------------------
 
-        # --- SaaS MOP exchange rate cache refresh (background, non-blocking) ---
-        try:
-            from services.credentials import get_system_mode
-            if get_system_mode() == "saas":
+            # --- SaaS MOP exchange rate cache refresh (background, non-blocking) ---
+            try:
                 self._update_sync_status(
                     "Updating Exchange Rates...",
                     "Fetching current multi-currency exchange rates..."
                 )
                 from services.saas_mop_rates import start_rate_poller
                 start_rate_poller()   # fetches immediately, then every 3 minutes
-        except Exception as _mop_ex:
-            print(f"[login] MOP rate poller error: {_mop_ex}")
-        # -----------------------------------------------------------------------
+            except Exception as _mop_ex:
+                print(f"[login] MOP rate poller error: {_mop_ex}")
+            # -----------------------------------------------------------------------
 
         # Cost Center / Warehouse check (relaxed non-blocking notice)
         cost_center = (user.get("cost_center") or "").strip()
@@ -2166,9 +2288,6 @@ class LoginDialog(QDialog):
             print(f"[login] ⚠️ Notice: User '{user.get('username')}' has empty cost_center='{cost_center}' or warehouse='{warehouse}'. Proceeding with defaults.")
 
         # PIN check - ONLY in non-SaaS modes. In SaaS mode, NEVER prompt the user to set up a PIN
-        from services.credentials import get_system_mode
-        is_saas_mode = (get_system_mode() == "saas" or getattr(self, "system_mode", "") == "saas")
-
         if not is_saas_mode:
             if not (user.get("pin") or "").strip():
                 user["pin"] = self._fetch_local_pin(user)
@@ -2538,10 +2657,24 @@ class LoginDialog(QDialog):
     # =========================================================================
     # Connectivity (async, non-blocking)
     # =========================================================================
-    def _refresh_connectivity(self):
+    def _manual_refresh_connectivity(self):
+        """Immediate manual connectivity check triggered by user tapping the status badge."""
+        try:
+            from services.site_config import invalidate_cache
+            invalidate_cache()
+        except Exception:
+            pass
+        self._refresh_connectivity(force=True)
+
+    def _refresh_connectivity(self, force: bool = False):
         """Fire a background connectivity check; update status bar on result."""
         if self._conn_worker and self._conn_worker.isRunning():
-            return
+            if not force:
+                return
+            try:
+                self._conn_worker.terminate()
+            except Exception:
+                pass
         self._set_status("Checking connection…", MID)
         self._conn_worker = ConnectivityWorker(self)
         self._conn_worker.result.connect(self._on_connectivity_result)
@@ -2550,6 +2683,8 @@ class LoginDialog(QDialog):
     def _on_connectivity_result(self, online: bool):
         if self.system_mode == "offline":
             self._set_status("Offline Mode", SUCCESS)
+            if hasattr(self, "_status_box"):
+                self._status_box.setToolTip("System is in Standalone Offline Mode. Click to re-test.")
             return
             
         if self.system_mode == "odoo":
@@ -2562,22 +2697,23 @@ class LoginDialog(QDialog):
         if online:
             url_disp = get_current_site_url().replace("https://", "").replace("http://", "")
             self._set_status(f"Online ({mode_str}) - {url_disp}", SUCCESS)
+            if hasattr(self, "_status_box"):
+                self._status_box.setToolTip(f"Server is online ({url_disp}). Click to test connection.")
         else:
-            self._set_status(f"Offline ({mode_str}) - local database only", ORANGE)
+            self._set_status(f"Offline ({mode_str}) - tap to retry", ORANGE)
+            if hasattr(self, "_status_box"):
+                self._status_box.setToolTip("Server currently unreachable. Tap to re-check connection.")
 
     def _set_status(self, msg: str, colour: str):
-        for w in (self._status_dot, self._status_lbl):
-            w.setStyleSheet(
-                w.styleSheet().replace(
-                    w.styleSheet().split("color:")[1].split(";")[0],
-                    colour,
-                ) if "color:" in w.styleSheet() else
-                f"color:{colour}; font-size:{'7' if w is self._status_dot else '10'}px; "
-                "background:transparent;"
-            )
-        self._status_lbl.setText(msg)
-        self._status_dot.setStyleSheet(f"color:{colour}; font-size:7px; background:transparent;")
-        self._status_lbl.setStyleSheet(f"color:{colour}; font-size:10px; background:transparent;")
+        if hasattr(self, "_status_dot") and self._status_dot:
+            self._status_dot.setStyleSheet(f"color:{colour}; font-size:8px; background:transparent;")
+        if hasattr(self, "_status_lbl") and self._status_lbl:
+            self._status_lbl.setText(msg)
+            self._status_lbl.setStyleSheet(f"color:{colour}; font-size:11px; font-weight:600; background:transparent;")
+        if hasattr(self, "_status_refresh_icon") and self._status_refresh_icon:
+            if qta:
+                icon_col = SUCCESS if colour == SUCCESS else (ORANGE if colour == ORANGE else MUTED)
+                self._status_refresh_icon.setPixmap(qta.icon("fa5s.sync-alt", color=icon_col).pixmap(QSize(10, 10)))
 
     # =========================================================================
     # Button helpers

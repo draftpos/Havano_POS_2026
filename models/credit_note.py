@@ -39,6 +39,7 @@ def _ensure_tables_and_columns():
             cashier_name        NVARCHAR(120) NOT NULL DEFAULT '',
             customer_name       NVARCHAR(120) NOT NULL DEFAULT '',
             cn_status           NVARCHAR(20)  NOT NULL DEFAULT 'pending_sync',
+            shift_id            INT           NULL,
             syncing             INT           NOT NULL DEFAULT 0,
             created_at          DATETIME2     NOT NULL DEFAULT SYSDATETIME()
         )
@@ -95,6 +96,7 @@ def _ensure_tables_and_columns():
         ("fiscal_sync_date", "DATETIME2 NULL"),
         ("fiscal_error", "NVARCHAR(MAX) NULL"),
         ("sync_error", "NVARCHAR(MAX) NULL"),
+        ("shift_id", "INT NULL"),
     ]
     
     for col_name, col_def in fiscal_columns:
@@ -195,12 +197,22 @@ def create_credit_note(
     currency: str = "USD",
     customer_name: str = "",
     cashier_name: str = "",
+    shift_id: int | None = None,
 ) -> dict:
     """
     Create a credit note by copying EXACT values from the original sale.
     Uses SAME currency and SAME exchange rate as original sale.
     """
     from models.product import adjust_stock
+
+    if shift_id is None:
+        try:
+            from models.shift import get_active_shift
+            act_s = get_active_shift()
+            if act_s:
+                shift_id = act_s.get("id")
+        except Exception:
+            pass
 
     conn = get_connection()
     cur = conn.cursor()
@@ -347,29 +359,55 @@ def create_credit_note(
             pass
         
         if has_exchange_rate:
-            cur.execute("""
-                INSERT INTO credit_notes
-                    (cn_number, original_sale_id, original_invoice_no,
-                     frappe_ref, total, currency, exchange_rate, cashier_name, customer_name,
-                     cn_status, fiscal_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-            """, (
-                cn_number, original_sale_id, original_invoice_no,
-                frappe_ref, total_credit_amount, final_currency, stored_rate, cashier_name, final_customer_name,
-                cn_status
-            ))
+            try:
+                cur.execute("""
+                    INSERT INTO credit_notes
+                        (cn_number, original_sale_id, original_invoice_no,
+                         frappe_ref, total, currency, exchange_rate, cashier_name, customer_name,
+                         cn_status, fiscal_status, shift_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """, (
+                    cn_number, original_sale_id, original_invoice_no,
+                    frappe_ref, total_credit_amount, final_currency, stored_rate, cashier_name, final_customer_name,
+                    cn_status, shift_id
+                ))
+            except Exception:
+                cur.execute("""
+                    INSERT INTO credit_notes
+                        (cn_number, original_sale_id, original_invoice_no,
+                         frappe_ref, total, currency, exchange_rate, cashier_name, customer_name,
+                         cn_status, fiscal_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                """, (
+                    cn_number, original_sale_id, original_invoice_no,
+                    frappe_ref, total_credit_amount, final_currency, stored_rate, cashier_name, final_customer_name,
+                    cn_status
+                ))
         else:
-            cur.execute("""
-                INSERT INTO credit_notes
-                    (cn_number, original_sale_id, original_invoice_no,
-                     frappe_ref, total, currency, cashier_name, customer_name,
-                     cn_status, fiscal_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-            """, (
-                cn_number, original_sale_id, original_invoice_no,
-                frappe_ref, total_credit_amount, final_currency, cashier_name, final_customer_name,
-                cn_status
-            ))
+            try:
+                cur.execute("""
+                    INSERT INTO credit_notes
+                        (cn_number, original_sale_id, original_invoice_no,
+                         frappe_ref, total, currency, cashier_name, customer_name,
+                         cn_status, fiscal_status, shift_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """, (
+                    cn_number, original_sale_id, original_invoice_no,
+                    frappe_ref, total_credit_amount, final_currency, cashier_name, final_customer_name,
+                    cn_status, shift_id
+                ))
+            except Exception:
+                cur.execute("""
+                    INSERT INTO credit_notes
+                        (cn_number, original_sale_id, original_invoice_no,
+                         frappe_ref, total, currency, cashier_name, customer_name,
+                         cn_status, fiscal_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                """, (
+                    cn_number, original_sale_id, original_invoice_no,
+                    frappe_ref, total_credit_amount, final_currency, cashier_name, final_customer_name,
+                    cn_status
+                ))
         
         # 5. Get the inserted ID
         cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")

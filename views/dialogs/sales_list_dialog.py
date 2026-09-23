@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui  import QColor, QFont
 import qtawesome as qta
 
+from datetime import datetime
 from models.sale import get_all_sales, delete_sale, get_sale_items
 
 NAVY      = "#1a5fb4"
@@ -224,6 +225,13 @@ class _SyncWorker(QObject):
             res.error_message = f"Could not load unsynced sales: {res.error_message}"
             self.finished.emit(0, -1, [res])
             return
+
+        # Trigger credit note sync alongside sales sync
+        try:
+            from services.credit_note_sync_service import push_unsynced_credit_notes
+            push_unsynced_credit_notes()
+        except Exception:
+            pass
 
         if not sales:
             self.finished.emit(0, 0, [])
@@ -584,6 +592,17 @@ class SalesListPage(QWidget):
             self._is_offline = not is_connected()
         except Exception:
             self._is_offline = False
+        try:
+            from services.credentials import get_system_mode
+            self._is_saas = (get_system_mode() == "saas")
+        except Exception:
+            self._is_saas = False
+
+        self._columns = [
+            c for c in _COLUMNS
+            if not (self._is_saas and c[1] == "profit")
+        ]
+
         self._build_ui()
         self._load_data()
 
@@ -592,20 +611,20 @@ class SalesListPage(QWidget):
 
         from views.reports.report_template import ReportTemplate
         self.report = ReportTemplate("Sales Invoices", is_report=True, show_date_filter=True, parent=self)
-        self.report.set_headers([c[0] for c in _COLUMNS])
+        self.report.set_headers([c[0] for c in self._columns])
         
         self.report.btn_apply.clicked.connect(self._load_data)
         self.table = self.report.table
         
         hh = self.table.horizontalHeader()
-        for i, (_, _, w, _, stretch) in enumerate(_COLUMNS):
+        for i, (_, key, w, _, stretch) in enumerate(self._columns):
             if stretch:
                 hh.setSectionResizeMode(i, QHeaderView.Stretch)
             else:
                 hh.setSectionResizeMode(i, QHeaderView.Fixed)
                 self.table.setColumnWidth(i, w)
                 
-            if self._is_offline and _COLUMNS[i][1] in ("synced", "frappe_ref"):
+            if self._is_offline and key in ("synced", "frappe_ref"):
                 self.table.setColumnHidden(i, True)
 
         self.table.doubleClicked.connect(self._on_view_details)
@@ -663,10 +682,106 @@ class SalesListPage(QWidget):
 
     # ── data ──────────────────────────────────────────────────────────────────
 
+    def _get_credit_notes(self, date_from=None, date_to=None) -> list[dict]:
+        from database.db import get_connection, fetchall_dicts
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            query = """
+                SELECT cn.id, cn.cn_number, cn.original_sale_id, cn.original_invoice_no,
+                       cn.frappe_ref, cn.frappe_cn_ref, cn.total, cn.currency, cn.exchange_rate,
+                       cn.cashier_name, cn.customer_name, cn.cn_status, cn.created_at, cn.fiscal_status,
+                       COALESCE(s.method, 'Credit Note') AS method,
+                       COALESCE(C.company_name, '') AS company_name,
+                       COALESCE((SELECT SUM(qty) FROM credit_note_items WHERE credit_note_id = cn.id), 0) AS total_items,
+                       COALESCE((SELECT SUM(cni.qty * p.cost_price) FROM credit_note_items cni LEFT JOIN products p ON p.part_no = cni.part_no WHERE cni.credit_note_id = cn.id), 0) AS total_cost
+                FROM credit_notes cn
+                LEFT JOIN sales s ON s.id = cn.original_sale_id
+                LEFT JOIN company_defaults C ON 1=1
+            """
+            params = []
+            if date_from and date_to:
+                query += " WHERE cn.created_at BETWEEN ? AND ?"
+                params = [date_from, date_to]
+            query += " ORDER BY cn.created_at DESC"
+            cur.execute(query, tuple(params))
+            rows = fetchall_dicts(cur)
+            conn.close()
+        except Exception as e:
+            return []
+
+        cn_records = []
+        for r in rows:
+            raw_dt = r.get("created_at")
+            if isinstance(raw_dt, str):
+                try:
+                    dt = datetime.fromisoformat(raw_dt)
+                except Exception:
+                    dt = None
+            elif hasattr(raw_dt, "strftime"):
+                dt = raw_dt
+            else:
+                dt = None
+
+            amt = float(r.get("total") or 0)
+            items_cnt = float(r.get("total_items") or 0)
+            cost_val = float(r.get("total_cost") or 0)
+            profit_val = amt - cost_val
+
+            orig_no = str(r.get("original_invoice_no") or "").strip()
+            orig_clean = orig_no.split("-")[-1].lstrip("0") if "-" in orig_no else orig_no
+            display_no = f"CN: {orig_clean or orig_no}" if orig_no else f"CN-{r['id']}"
+
+            synced = (r.get("cn_status") == "synced") or bool(r.get("frappe_cn_ref"))
+            f_ref = (r.get("frappe_cn_ref") or r.get("frappe_ref") or "").strip()
+
+            cn_records.append({
+                "id":                  r["id"],
+                "is_credit_note":      True,
+                "cn_number":           r.get("cn_number", ""),
+                "original_invoice_no": orig_no,
+                "number":              display_no,
+                "date":                f"{dt.month}/{dt.day}/{dt.year}" if dt else "",
+                "time":                dt.strftime("%H:%M") if dt else "",
+                "created_at":          raw_dt,
+                "cashier_id":          None,
+                "user":                r.get("cashier_name") or "Admin",
+                "total":               -amt,
+                "amount":              -amt,
+                "tendered":            -amt,
+                "change_amount":       0.0,
+                "method":              f"{r.get('method') or 'Refund'} (CN)",
+                "profit":              -profit_val,
+                "gross_percent":       100.0,
+                "customer_name":       r.get("customer_name") or "Cash Customer",
+                "company_name":        r.get("company_name", ""),
+                "currency":            r.get("currency") or "USD",
+                "total_items":         -items_cnt,
+                "synced":              synced,
+                "frappe_ref":          f_ref,
+            })
+        return cn_records
+
     def _load_data(self):
         date_from = self.report.start_date.date().toString("yyyy-MM-dd") + " 00:00:00"
         date_to = self.report.end_date.date().toString("yyyy-MM-dd") + " 23:59:59"
-        self._all_sales = get_all_sales(date_from=date_from, date_to=date_to)
+        sales = get_all_sales(date_from=date_from, date_to=date_to)
+        cns = self._get_credit_notes(date_from=date_from, date_to=date_to)
+
+        all_records = sales + cns
+        def _get_sort_key(item):
+            ca = item.get("created_at")
+            if isinstance(ca, datetime):
+                return ca
+            if isinstance(ca, str):
+                try:
+                    return datetime.fromisoformat(ca)
+                except Exception:
+                    pass
+            return datetime.min
+
+        all_records.sort(key=_get_sort_key, reverse=True)
+        self._all_sales = all_records
         self._render_table(self._visible_sales())
         self._update_sync_label()
 
@@ -687,16 +802,18 @@ class SalesListPage(QWidget):
         self.report._update_totals()
 
     def _fill_row(self, row, sale):
+        is_cn      = bool(sale.get("is_credit_note"))
         synced     = bool(sale.get("synced"))
         frappe_ref = (sale.get("frappe_ref") or "").strip()
 
-        for c, (_, key, _, align, _) in enumerate(_COLUMNS):
+        for c, (_, key, _, align, _) in enumerate(self._columns):
             if key == "synced":
                 text = "Synced" if synced else "Pending"
             elif key == "frappe_ref":
                 text = frappe_ref if frappe_ref else "-"
             elif key in ("amount", "tendered", "change_amount", "profit"):
-                text = f"{float(sale.get(key, 0)):.2f}"
+                val = float(sale.get(key, 0))
+                text = f"{val:.2f}"
             elif key == "gross_percent":
                 text = f"{float(sale.get(key, 0)):.2f}%"
             elif key == "total_items":
@@ -710,18 +827,29 @@ class SalesListPage(QWidget):
             it.setFlags(it.flags() & ~Qt.ItemIsEditable)
             it.setTextAlignment(align)
 
+            if is_cn:
+                it.setBackground(QColor("#fff2f2"))
+                if key in ("number", "amount", "profit", "tendered", "total_items", "method"):
+                    it.setForeground(QColor(DANGER))
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                if key == "number":
+                    it.setIcon(qta.icon("fa5s.reply", color=DANGER))
+                    if sale.get("cn_number") or sale.get("original_invoice_no"):
+                        it.setToolTip(f"Credit Note: {sale.get('cn_number')}\nOriginal Invoice: {sale.get('original_invoice_no')}")
+            elif not synced:
+                it.setBackground(QColor(AMBER_BG))
+
             if key == "synced":
                 if synced:
                     it.setIcon(qta.icon("fa5s.check", color=SUCCESS))
                 it.setForeground(QColor(SUCCESS if synced else AMBER))
                 f = it.font(); f.setBold(True); it.setFont(f)
-            elif key == "frappe_ref":
+            elif key == "frappe_ref" and not is_cn:
                 it.setForeground(QColor(MUTED if not frappe_ref else ACCENT))
-            elif not synced:
-                it.setBackground(QColor(AMBER_BG))
 
             if c == 0:
                 it.setData(Qt.UserRole, sale["id"])
+                it.setData(Qt.UserRole + 1, is_cn)
             self.table.setItem(row, c, it)
 
     def _update_sync_label(self):
@@ -735,7 +863,8 @@ class SalesListPage(QWidget):
         it = self.table.item(rows[0].row(), 0)
         if not it or not it.text().strip(): return None
         sale_id = it.data(Qt.UserRole)
-        return next((s for s in self._all_sales if s["id"] == sale_id), None)
+        is_cn = bool(it.data(Qt.UserRole + 1))
+        return next((s for s in self._all_sales if s["id"] == sale_id and bool(s.get("is_credit_note")) == is_cn), None)
 
     def _on_selection(self):
         has = self._get_selected_sale() is not None
@@ -747,6 +876,11 @@ class SalesListPage(QWidget):
         sale = self._get_selected_sale()
         if not sale:
             return
+
+        if sale.get("is_credit_note"):
+            self._on_view_cn_details(sale)
+            return
+
         items = get_sale_items(sale["id"])
         if not items:
             self._show_status("No items found for this invoice.", color=AMBER)
@@ -770,6 +904,50 @@ class SalesListPage(QWidget):
         
         m = QMessageBox(self)
         m.setWindowTitle("Sale Details")
+        m.setText(msg_text)
+        m.setStyleSheet(f"""
+            QMessageBox {{ background-color:{WHITE}; }}
+            QLabel {{ color:{DARK_TEXT};font-size:13px; }}
+            QPushButton {{ background-color:{ACCENT};color:{WHITE};border:none;
+                           border-radius:6px;padding:8px 20px;min-width:70px; }}
+            QPushButton:hover {{ background-color:{ACCENT_H}; }}
+        """)
+        m.exec()
+
+    def _on_view_cn_details(self, cn: dict):
+        from database.db import get_connection, fetchall_dicts
+        try:
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("""
+                SELECT part_no, product_name, qty, price, total, reason
+                FROM credit_note_items
+                WHERE credit_note_id = ?
+            """, (cn["id"],))
+            items = fetchall_dicts(cur)
+            conn.close()
+        except Exception:
+            items = []
+
+        msg_text = f"<b>Credit Note:</b> {cn.get('cn_number') or cn['number']}<br>"
+        msg_text += f"<b>Original Invoice:</b> {cn.get('original_invoice_no') or '-'}<br>"
+        msg_text += f"<b>Date:</b> {cn.get('date', '')} {cn.get('time', '')}<br>"
+        msg_text += f"<b>Customer:</b> {cn.get('customer_name') or 'Walk-in'}<br><br>"
+        
+        msg_text += "<b>Returned Items:</b><br>"
+        msg_text += "<table width='100%' border='1' cellspacing='0' cellpadding='4'>"
+        msg_text += "<tr bgcolor='#f5f8fc'><th>Item</th><th>Qty</th><th>Refund Amount</th><th>Reason</th></tr>"
+        
+        for item in items:
+            msg_text += f"<tr><td>{item.get('product_name')}</td>"
+            msg_text += f"<td align='center'>{float(item.get('qty', 0))}</td>"
+            msg_text += f"<td align='right'>${float(item.get('total', 0)):.2f}</td>"
+            msg_text += f"<td>{item.get('reason') or '-'}</td></tr>"
+            
+        msg_text += "</table><br>"
+        msg_text += f"<div align='right'><b style='color:#b02020;'>Total Refund: ${abs(float(cn.get('amount', 0))):.2f}</b></div>"
+        
+        m = QMessageBox(self)
+        m.setWindowTitle("Credit Note Details")
         m.setText(msg_text)
         m.setStyleSheet(f"""
             QMessageBox {{ background-color:{WHITE}; }}
@@ -870,6 +1048,30 @@ class SalesListPage(QWidget):
     def _on_delete(self):
         sale = self._get_selected_sale()
         if not sale: return
+        if sale.get("is_credit_note"):
+            confirm = QMessageBox(self)
+            confirm.setWindowTitle("Confirm Delete")
+            confirm.setText(f"Delete Credit Note {sale['number']}?")
+            confirm.setInformativeText("This cannot be undone.")
+            confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            confirm.setDefaultButton(QMessageBox.No)
+            confirm.setStyleSheet(f"""
+                QMessageBox {{ background-color:{WHITE}; }} QLabel {{ color:{DARK_TEXT}; }}
+                QPushButton {{ background-color:{ACCENT};color:{WHITE};border:none;
+                               border-radius:6px;padding:8px 20px;min-width:70px; }}
+                QPushButton:hover {{ background-color:{ACCENT_H}; }}
+            """)
+            if confirm.exec() == QMessageBox.Yes:
+                try:
+                    from database.db import get_connection
+                    conn = get_connection(); cur = conn.cursor()
+                    cur.execute("DELETE FROM credit_notes WHERE id = ?", (sale["id"],))
+                    conn.commit(); conn.close()
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", f"Failed to delete credit note: {e}")
+                self._load_data()
+            return
+
         confirm = QMessageBox(self)
         confirm.setWindowTitle("Confirm Delete")
         confirm.setText(f"Delete Sale #{sale['number']}?")
@@ -929,6 +1131,10 @@ class SalesListDialog(QDialog):
         self.showMaximized()
 
     def _recall_into_pos(self, sale: dict, items: list[dict]):
+        if sale.get("is_credit_note"):
+            QMessageBox.information(self, "Credit Note", "Credit notes cannot be recalled as new sales.")
+            return
+
         pos = self.parent()
 
         if not pos or not hasattr(pos, "invoice_table") or not hasattr(pos, "_init_row"):

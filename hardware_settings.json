@@ -1,17 +1,20 @@
 {
-  "main_printer": "XP-80C",
+  "main_printer": "POS-80C (copy 1)",
+  "paper_size": "80mm",
+  "kitchen_printing_enabled": true,
+  "pharmacy_label_printer": "(None)",
   "orders": {
     "Order 1": {
-      "active": false,
-      "printer": "(None)"
+      "active": true,
+      "printer": "POS-80C (copy 1)"
     },
     "Order 2": {
-      "active": false,
-      "printer": "(None)"
+      "active": true,
+      "printer": "POS-80C (copy 1)"
     },
     "Order 3": {
-      "active": false,
-      "printer": "(None)"
+      "active": true,
+      "printer": "POS-80C (copy 1)"
     },
     "Order 4": {
       "active": false,

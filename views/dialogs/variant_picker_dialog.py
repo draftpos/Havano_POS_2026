@@ -64,7 +64,7 @@ class VariantPickerDialog(QDialog):
         variants = self._load_variants()
 
         # Size identically to the UOM popup: header ~110 + 82px per row + 60 cancel.
-        n = max(1, len(variants))
+        n = 2 if not variants else len(variants)
         self.setFixedSize(460, min(110 + n * 82 + 60, 640))
 
         self._build(variants)
@@ -140,16 +140,42 @@ class VariantPickerDialog(QDialog):
 
     def _empty_state_widget(self) -> QWidget:
         """Shown when the template has no synced variants."""
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(0, 8, 0, 8)
+        l.setSpacing(12)
+
         msg = QLabel(
-            "This item has no synced variants.\n\n"
-            "Create variants on the server and re-sync products."
+            "This item has no synced variants.\n"
+            "You can proceed with the base item or create variants on the server."
         )
         msg.setAlignment(Qt.AlignCenter)
         msg.setWordWrap(True)
         msg.setStyleSheet(
-            f"color:{MUTED}; font-size:13px; background:transparent; padding:24px 8px;"
+            f"color:{MUTED}; font-size:13px; background:transparent; padding:8px 8px;"
         )
-        return msg
+        l.addWidget(msg)
+
+        item_name = self.template.get("name") or "Item"
+        add_base_btn = QPushButton(f"Add Base Product ({item_name})")
+        add_base_btn.setFixedHeight(46)
+        add_base_btn.setCursor(Qt.PointingHandCursor)
+        add_base_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {NAVY};
+                color: {WHITE};
+                border: none;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background: {ACCENT};
+            }}
+        """)
+        add_base_btn.clicked.connect(lambda: self._pick(self.template))
+        l.addWidget(add_base_btn)
+        return w
 
     def _variants_scroll(self, variants: list[dict]) -> QScrollArea:
         """Vertical scroll wrapper - only used when list is long."""

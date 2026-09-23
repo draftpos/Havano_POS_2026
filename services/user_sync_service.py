@@ -34,6 +34,20 @@ def sync_users() -> dict:
     """
     result = {"synced": 0, "skipped": 0, "errors": 0}
 
+    from services.credentials import get_system_mode
+    sys_mode = (get_system_mode() or "").lower().strip()
+    if sys_mode == "odoo":
+        try:
+            from services.odoo.user_sync_service import sync_users_odoo
+            return sync_users_odoo()
+        except Exception as e:
+            log.debug("[user-sync] Odoo user sync fallback skipped: %s", e)
+            return result
+
+    if sys_mode == "offline":
+        log.debug("[user-sync] Offline mode active — skipping remote user sync.")
+        return result
+
     api_key, api_secret = _get_credentials()
     if not api_key:
         log.warning("[user-sync] No credentials - skipping.")
@@ -61,12 +75,12 @@ def sync_users() -> dict:
                 if data:
                     break
         except urllib.error.HTTPError as e:
-            log.warning("[user-sync] HTTP %s fetching users from %s", e.code, url)
+            log.debug("[user-sync] HTTP %s fetching users from %s", e.code, url)
         except Exception as e:
-            log.warning("[user-sync] Error fetching from %s: %s", url, e)
+            log.debug("[user-sync] Error fetching from %s: %s", url, e)
 
     if not data:
-        log.error("[user-sync] Could not fetch users from any endpoint.")
+        log.debug("[user-sync] Could not fetch users from any endpoint.")
         return result
 
     users = []

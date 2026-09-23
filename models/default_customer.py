@@ -87,6 +87,23 @@ def create_default_customer():
             customer_id = existing[0]
             frappe_synced = existing[1]
             print(f"   [OK] Cash Customer customer already exists (ID: {customer_id})")
+
+            # Ensure price list aligns with company defaults (e.g. Retail in SaaS mode)
+            try:
+                defs = get_defaults() or {}
+                target_pl_id = defs.get("default_price_list_id")
+                if not target_pl_id:
+                    cursor.execute("SELECT id FROM [dbo].[price_lists] WHERE LOWER(name) = 'retail'")
+                    r_pl = cursor.fetchone()
+                    if r_pl:
+                        target_pl_id = r_pl[0]
+                if target_pl_id:
+                    tid = int(target_pl_id)
+                    cursor.execute("UPDATE [dbo].[customers] SET default_price_list_id = ? WHERE id = ? AND (default_price_list_id IS NULL OR default_price_list_id != ?)", (tid, customer_id, tid))
+                    conn.commit()
+            except Exception as pl_up_err:
+                print(f"   [!] Could not update customer price list: {pl_up_err}")
+
             if frappe_synced:
                 print(f"   [OK] Already synced with Frappe")
             else:
@@ -181,9 +198,23 @@ def create_default_customer():
         print("\n5. Getting price list...")
         price_list_id = None
         
-        # Try to find 'Standard Selling' first
-        cursor.execute("SELECT id FROM [dbo].[price_lists] WHERE name = 'Standard Selling'")
-        pl = cursor.fetchone()
+        # Check company defaults / Retail first
+        defs = get_defaults() or {}
+        target_pl_id = defs.get("default_price_list_id")
+        if target_pl_id:
+            cursor.execute("SELECT id FROM [dbo].[price_lists] WHERE id = ?", (target_pl_id,))
+            pl = cursor.fetchone()
+        else:
+            pl = None
+
+        if not pl:
+            cursor.execute("SELECT id FROM [dbo].[price_lists] WHERE LOWER(name) = 'retail'")
+            pl = cursor.fetchone()
+
+        if not pl:
+            # Fallback to 'Standard Selling'
+            cursor.execute("SELECT id FROM [dbo].[price_lists] WHERE name = 'Standard Selling'")
+            pl = cursor.fetchone()
         
         if not pl:
             # Fallback to 'Standard'

@@ -9,7 +9,7 @@ import time
 # table / index. Mismatches between this constant and schema_info.version
 # trigger a full migration pass on next launch; matches short-circuit so
 # startup doesn't burn 5–15s on INFORMATION_SCHEMA round-trips every time.
-SCHEMA_VERSION = "2026.09.03.1"
+SCHEMA_VERSION = "2026.09.19.2"
 
 
 def _hash(pw: str) -> str:
@@ -82,6 +82,82 @@ def _write_schema_version(conn, version: str) -> None:
         print(f"[setup_database] ! could not stamp schema version: {e}")
 
 
+def ensure_offline_defaults(conn=None):
+    """Seed initial offline payment methods (Cash, Ecocash) ONLY if modes_of_payment is completely empty."""
+    should_close = False
+    try:
+        from services.credentials import get_system_mode
+        if (get_system_mode() or "").strip().lower() != "offline":
+            return
+        
+        if conn is None:
+            from database.db import get_connection
+            conn = get_connection()
+            should_close = True
+        
+        cur = conn.cursor()
+        
+        # If modes_of_payment already has records (or user has configured/deleted methods), do not overwrite/re-create!
+        try:
+            cur.execute("SELECT COUNT(*) FROM [dbo].[modes_of_payment]")
+            row = cur.fetchone()
+            if row and row[0] > 0:
+                return
+        except Exception:
+            pass
+
+        # Ensure at least 1 company exists
+        cur.execute("SELECT TOP 1 id, name FROM [dbo].[companies] ORDER BY id ASC")
+        comp_row = cur.fetchone()
+        comp_id = comp_row[0] if comp_row else None
+        comp_name = comp_row[1] if comp_row else "Default Company"
+        if not comp_id:
+            cur.execute("INSERT INTO [dbo].[companies] (name, abbreviation, default_currency, country) VALUES ('Default Company', 'DC', 'USD', 'Zimbabwe')")
+            cur.execute("SELECT TOP 1 id, name FROM [dbo].[companies] ORDER BY id DESC")
+            r = cur.fetchone()
+            comp_id, comp_name = int(r[0]), str(r[1])
+        
+        # Cash MOP
+        cur.execute("SELECT id FROM [dbo].[modes_of_payment] WHERE name = 'Cash'")
+        if not cur.fetchone():
+            cur.execute("INSERT INTO [dbo].[modes_of_payment] (name, type, mop_type, enabled, gl_account, gl_account_name, account_currency) VALUES ('Cash', 'Cash', 'Cash', 1, 'Cash', 'Cash', 'USD')")
+            print("  [+] Default Cash payment method created")
+
+        # Ecocash MOP
+        cur.execute("SELECT id FROM [dbo].[modes_of_payment] WHERE name = 'Ecocash'")
+        if not cur.fetchone():
+            cur.execute("INSERT INTO [dbo].[modes_of_payment] (name, type, mop_type, enabled, gl_account, gl_account_name, account_currency) VALUES ('Ecocash', 'Mobile', 'Ecocash', 1, 'Ecocash', 'Ecocash', 'USD')")
+            print("  [+] Default Ecocash payment method created")
+
+        # Cash GL Account
+        cur.execute("SELECT id FROM [dbo].[gl_accounts] WHERE name = 'Cash'")
+        if not cur.fetchone():
+            cur.execute("""
+                INSERT INTO [dbo].[gl_accounts] (name, account_name, account_type, is_group, account_currency, company)
+                VALUES ('Cash', 'Cash', 'Cash', 0, 'USD', ?)
+            """, (comp_name,))
+            print("  [+] 'Cash' GL Account created (offline mode)")
+
+        # Ecocash GL Account
+        cur.execute("SELECT id FROM [dbo].[gl_accounts] WHERE name = 'Ecocash'")
+        if not cur.fetchone():
+            cur.execute("""
+                INSERT INTO [dbo].[gl_accounts] (name, account_name, account_type, is_group, account_currency, company)
+                VALUES ('Ecocash', 'Ecocash', 'Cash', 0, 'USD', ?)
+            """, (comp_name,))
+            print("  [+] 'Ecocash' GL Account created (offline mode)")
+
+        conn.commit()
+    except Exception as e:
+        print(f"[setup_database] ensure_offline_defaults error: {e}")
+    finally:
+        if should_close and conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # run() is the only public entry-point.
 # main.py calls:  from setup_database import run; run()
@@ -123,6 +199,18 @@ def run():
     if stored == SCHEMA_VERSION and not forced and not tables_missing:
         print(f"[setup_database] schema at {SCHEMA_VERSION} — skipping migrations "
               f"({int((time.perf_counter() - _t0) * 1000)} ms)")
+        try:
+            ensure_offline_defaults(conn)
+        except Exception:
+            pass
+        try:
+            from models.saas_snapshot import ensure_snapshot_tables, take_saas_snapshot_once
+            ensure_snapshot_tables()
+            from services.credentials import get_system_mode
+            if (get_system_mode() or "").strip().lower() == "saas":
+                take_saas_snapshot_once()
+        except Exception:
+            pass
         try:
             conn.close()
         except Exception:
@@ -225,6 +313,8 @@ def run():
                 [footer_text]              NVARCHAR(500) NOT NULL DEFAULT '',
                 [receipt_header]           NVARCHAR(200) NOT NULL DEFAULT '',
                 [terms_and_conditions]     NVARCHAR(MAX) NOT NULL DEFAULT '',
+                [credit_note_terms]        NVARCHAR(MAX) NOT NULL DEFAULT '',
+                [quotation_terms]          NVARCHAR(MAX) NOT NULL DEFAULT '',
                 [banking_details]          NVARCHAR(MAX) NOT NULL DEFAULT '',
                 [zimra_serial_no]          NVARCHAR(100) NOT NULL DEFAULT '',
                 [zimra_device_id]          NVARCHAR(100) NOT NULL DEFAULT '',
@@ -259,6 +349,7 @@ def run():
                 [system_mode]              NVARCHAR(20)  NOT NULL DEFAULT 'frappe',
                 [work_offline]             NVARCHAR(10)  NOT NULL DEFAULT '0',
                 [pharmacy_mode]            NVARCHAR(10)  NOT NULL DEFAULT '0',
+                [allow_cashier_pharmacy_sales] NVARCHAR(10) NOT NULL DEFAULT '0',
                 [butchery_mode]            NVARCHAR(10)  NOT NULL DEFAULT '0',
                 [support_number]           NVARCHAR(255) NULL DEFAULT '',
                 [agent_number]             NVARCHAR(255) NULL DEFAULT '',
@@ -267,8 +358,12 @@ def run():
                 [server_terminal_id]       NVARCHAR(100) NOT NULL DEFAULT '',
                 [server_shop_id]           NVARCHAR(100) NOT NULL DEFAULT '',
                 [server_terminal_name]     NVARCHAR(150) NOT NULL DEFAULT '',
+                [bound_device_id]          VARCHAR(255)  NULL DEFAULT '',
                 [subscription_days_left]   NVARCHAR(50)  NULL DEFAULT '',
                 [subscription_expiry]      NVARCHAR(50)  NULL DEFAULT '',
+                [a4_font_size]             NVARCHAR(50)  NULL DEFAULT '8.5',
+                [sale_id_prefix]           NVARCHAR(50)  NULL DEFAULT '',
+                [server_store_name]        NVARCHAR(255) NULL DEFAULT '',
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -315,14 +410,21 @@ def run():
             ("system_mode",               "NVARCHAR(20) NOT NULL DEFAULT 'frappe'"),
             ("work_offline",              "NVARCHAR(10) NOT NULL DEFAULT '0'"),
             ("pharmacy_mode",             "NVARCHAR(10) NOT NULL DEFAULT '0'"),
+            ("allow_cashier_pharmacy_sales", "NVARCHAR(10) NOT NULL DEFAULT '0'"),
             ("butchery_mode",             "NVARCHAR(10) NOT NULL DEFAULT '0'"),
             ("server_database",           "NVARCHAR(100) NOT NULL DEFAULT ''"),
             ("server_terminal_id",        "NVARCHAR(100) NOT NULL DEFAULT ''"),
             ("server_shop_id",            "NVARCHAR(100) NOT NULL DEFAULT ''"),
             ("server_terminal_name",      "NVARCHAR(150) NOT NULL DEFAULT ''"),
+            ("bound_device_id",           "VARCHAR(255) NULL DEFAULT ''"),
             ("subscription_days_left",   "NVARCHAR(50)  NULL DEFAULT ''"),
             ("subscription_expiry",      "NVARCHAR(50)  NULL DEFAULT ''"),
             ("banking_details",          "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+            ("credit_note_terms",        "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+            ("quotation_terms",          "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+            ("a4_font_size",             "NVARCHAR(50) NULL DEFAULT '8.5'"),
+            ("sale_id_prefix",           "NVARCHAR(50) NULL DEFAULT ''"),
+            ("server_store_name",        "NVARCHAR(255) NULL DEFAULT ''"),
         ]:
             add_col("company_defaults", col, defn)
         
@@ -740,6 +842,7 @@ def run():
                 [order_4]           BIT           NOT NULL DEFAULT 0,
                 [order_5]           BIT           NOT NULL DEFAULT 0,
                 [order_6]           BIT           NOT NULL DEFAULT 0,
+                [print_after_order] BIT           NOT NULL DEFAULT 0,
                 [uom]               NVARCHAR(20)  NULL,
                 [conversion_factor] DECIMAL(12,4) NULL,
                 [tax_rate]          DECIMAL(8,4)  NULL,
@@ -789,6 +892,7 @@ def run():
             ("order_4",           "BIT           NOT NULL DEFAULT 0"),
             ("order_5",           "BIT           NOT NULL DEFAULT 0"),
             ("order_6",           "BIT           NOT NULL DEFAULT 0"),
+            ("print_after_order", "BIT           NOT NULL DEFAULT 0"),
             ("uom",               "NVARCHAR(20)  NULL"),
             ("conversion_factor", "DECIMAL(12,4) NULL"),
             ("tax_rate",          "DECIMAL(8,4)  NULL"),
@@ -1069,6 +1173,7 @@ def run():
                 [id]           INT           IDENTITY(1,1) NOT NULL,
                 [shift_number] INT           NOT NULL,
                 [station]      INT           NOT NULL,
+                [station_name] NVARCHAR(100) NULL DEFAULT '',
                 [cashier_id]   INT           NULL,
                 [date]         DATE          NOT NULL,
                 [start_time]   DATETIME2(7)  NOT NULL,
@@ -1084,6 +1189,7 @@ def run():
     else:
         skip("shifts")
         for col, defn in [
+            ("station_name", "NVARCHAR(100) NULL DEFAULT ''"),
             ("door_counter", "INT           NOT NULL DEFAULT 0"),
             ("customers",    "INT           NOT NULL DEFAULT 0"),
             ("notes",        "NVARCHAR(MAX) NULL"),
@@ -1191,6 +1297,7 @@ def run():
                 [cn_number]           NVARCHAR(40)  NOT NULL DEFAULT '',
                 [original_sale_id]    INT           NOT NULL,
                 [original_invoice_no] NVARCHAR(40)  NOT NULL DEFAULT '',
+                [shift_id]            INT           NULL,
                 [frappe_ref]          NVARCHAR(80)  NULL,
                 [frappe_cn_ref]       NVARCHAR(80)  NULL,
                 [total]               DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -1205,6 +1312,7 @@ def run():
         ok("credit_notes")
     else:
         skip("credit_notes")
+        add_col("credit_notes", "shift_id",      "INT           NULL")
         add_col("credit_notes", "frappe_ref",    "NVARCHAR(80) NULL")
         add_col("credit_notes", "frappe_cn_ref", "NVARCHAR(80) NULL")
         add_col("credit_notes", "sync_error",    "NVARCHAR(MAX) NULL")
@@ -1657,12 +1765,27 @@ def run():
         """)
         ok("invoice_counter")
     else:
-        skip("invoice_counter")
-        for col, defn in [
-            ("last_number", "INT          NOT NULL DEFAULT 0"),
-            ("updated_at",  "DATETIME2(7) NOT NULL DEFAULT SYSDATETIME()"),
-        ]:
             add_col("invoice_counter", col, defn)
+
+    # ==================================================================
+    # 30b. terminal_reference (Immutable Write-Once Terminal Config)
+    # ==================================================================
+    if not table_exists("terminal_reference"):
+        cur.execute("""
+            CREATE TABLE [dbo].[terminal_reference] (
+                [id]                 INT           IDENTITY(1,1) NOT NULL,
+                [terminal_id]        NVARCHAR(100) NOT NULL,
+                [terminal_name]      NVARCHAR(255) NULL,
+                [store_id]           NVARCHAR(100) NULL,
+                [store_name]         NVARCHAR(255) NULL,
+                [device_hardware_id] NVARCHAR(255) NULL,
+                [created_at]         DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
+                PRIMARY KEY CLUSTERED ([id] ASC)
+            )
+        """)
+        ok("terminal_reference")
+    else:
+        skip("terminal_reference")
 
     # ==================================================================
     # 31. product_taxes
@@ -1832,6 +1955,8 @@ def run():
                 [customer]         NVARCHAR(120) NOT NULL DEFAULT '',
                 [synced]           BIT           NOT NULL DEFAULT 0,
                 [frappe_ref]       NVARCHAR(80)  NULL,
+                [cashier_name]     NVARCHAR(120) NULL,
+                [waiter_name]      NVARCHAR(255) NULL,
                 [sync_date]        DATETIME2(7)  NULL,
                 [raw_data]         NVARCHAR(MAX) NULL,
                 [created_at]       DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME(),
@@ -1853,6 +1978,8 @@ def run():
             ("customer",         "NVARCHAR(120) NOT NULL DEFAULT ''"),
             ("synced",           "BIT           NOT NULL DEFAULT 0"),
             ("frappe_ref",       "NVARCHAR(80)  NULL"),
+            ("cashier_name",     "NVARCHAR(120) NULL"),
+            ("waiter_name",      "NVARCHAR(255) NULL"),
             ("sync_date",        "DATETIME2(7)  NULL"),
             ("raw_data",         "NVARCHAR(MAX) NULL"),
             ("created_at",       "DATETIME2(7)  NOT NULL DEFAULT SYSDATETIME()"),
@@ -1878,6 +2005,10 @@ def run():
                 [product_id]   INT           NULL,
                 [part_no]      NVARCHAR(50)  NULL,
                 [cost_price]   DECIMAL(12,2) NOT NULL DEFAULT 0,
+                [is_pharmacy]  BIT           NOT NULL DEFAULT 0,
+                [dosage]       NVARCHAR(500) NULL,
+                [batch_no]     NVARCHAR(100) NULL,
+                [expiry_date]  DATE          NULL,
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
@@ -1895,6 +2026,10 @@ def run():
             ("product_id",  "INT           NULL"),
             ("part_no",     "NVARCHAR(50)  NULL"),
             ("cost_price",  "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+            ("is_pharmacy", "BIT           NOT NULL DEFAULT 0"),
+            ("dosage",      "NVARCHAR(500) NULL"),
+            ("batch_no",    "NVARCHAR(100) NULL"),
+            ("expiry_date", "DATE          NULL"),
         ]:
             add_col("quotation_items", col, defn)
 
@@ -2273,6 +2408,148 @@ def run():
     else:
         skip("uoms")
 
+    # ==================================================================
+    # 50. product_batches
+    # ==================================================================
+    if not table_exists("product_batches"):
+        cur.execute("""
+            CREATE TABLE [dbo].[product_batches] (
+                [id]               INT           IDENTITY(1,1) PRIMARY KEY,
+                [product_id]       INT           NOT NULL,
+                [batch_no]         NVARCHAR(100) NOT NULL,
+                [manufacture_date] DATE          NULL,
+                [expiry_date]      DATE          NULL,
+                [qty]              DECIMAL(18,4) NOT NULL DEFAULT 0,
+                [created_by]       NVARCHAR(100) NULL,
+                [synced]           BIT           NOT NULL DEFAULT 0,
+                [created_at]       DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
+                [updated_at]       DATETIME2     NOT NULL DEFAULT SYSDATETIME()
+            )
+        """)
+        ok("product_batches")
+    else:
+        skip("product_batches")
+        for col, defn in [
+            ("product_id",       "INT           NOT NULL DEFAULT 0"),
+            ("batch_no",         "NVARCHAR(100) NOT NULL DEFAULT ''"),
+            ("manufacture_date", "DATE          NULL"),
+            ("expiry_date",      "DATE          NULL"),
+            ("qty",              "DECIMAL(18,4) NOT NULL DEFAULT 0"),
+            ("created_by",       "NVARCHAR(100) NULL"),
+            ("synced",           "BIT           NOT NULL DEFAULT 0"),
+            ("created_at",       "DATETIME2     NOT NULL DEFAULT SYSDATETIME()"),
+            ("updated_at",       "DATETIME2     NOT NULL DEFAULT SYSDATETIME()"),
+        ]:
+            add_col("product_batches", col, defn)
+
+    # ==================================================================
+    # 51. suppliers
+    # ==================================================================
+    if not table_exists("suppliers"):
+        cur.execute("""
+            CREATE TABLE [dbo].[suppliers] (
+                [id]         INT            IDENTITY(1,1) PRIMARY KEY,
+                [name]       NVARCHAR(200)  NOT NULL,
+                [email]      NVARCHAR(200)  NULL,
+                [phone]      NVARCHAR(50)   NULL,
+                [address]    NVARCHAR(MAX)  NULL,
+                [balance]    DECIMAL(18,4)  NOT NULL DEFAULT 0.0,
+                [created_at] DATETIME2      NOT NULL DEFAULT SYSDATETIME()
+            )
+        """)
+        ok("suppliers")
+    else:
+        skip("suppliers")
+        add_col("suppliers", "balance", "DECIMAL(18,4) NOT NULL DEFAULT 0.0")
+
+    # ==================================================================
+    # 52. expense_categories
+    # ==================================================================
+    if not table_exists("expense_categories"):
+        cur.execute("""
+            CREATE TABLE [dbo].[expense_categories] (
+                [id]              INT            IDENTITY(1,1) PRIMARY KEY,
+                [name]            NVARCHAR(200)  NOT NULL,
+                [default_account] NVARCHAR(200)  NULL,
+                [description]     NVARCHAR(500)  NULL,
+                [created_at]      DATETIME2      NOT NULL DEFAULT SYSDATETIME(),
+                CONSTRAINT [UQ_expense_categories_name] UNIQUE ([name])
+            )
+        """)
+        ok("expense_categories")
+    else:
+        skip("expense_categories")
+        add_col("expense_categories", "default_account", "NVARCHAR(200) NULL")
+        add_col("expense_categories", "description",     "NVARCHAR(500) NULL")
+
+    # ==================================================================
+    # 53. expenses
+    # ==================================================================
+    if not table_exists("expenses"):
+        cur.execute("""
+            CREATE TABLE [dbo].[expenses] (
+                [id]                  INT            IDENTITY(1,1) PRIMARY KEY,
+                [expense_number]      NVARCHAR(50)   NULL,
+                [expense_category_id] INT            NULL,
+                [expense_type]        NVARCHAR(200)  NULL,
+                [name]                NVARCHAR(200)  NOT NULL,
+                [description]         NVARCHAR(MAX)  NULL,
+                [amount]              DECIMAL(18,4)  NOT NULL DEFAULT 0.0,
+                [payment_method]      NVARCHAR(100)  NOT NULL DEFAULT 'Cash',
+                [currency]            NVARCHAR(10)   NULL,
+                [supplier_id]         INT            NULL,
+                [paid]                BIT            NOT NULL DEFAULT 1,
+                [balance]             DECIMAL(18,4)  NULL,
+                [shift_id]            INT            NULL,
+                [cashier_id]          INT            NULL,
+                [cashier_name]        NVARCHAR(100)  NULL,
+                [synced]              BIT            NOT NULL DEFAULT 0,
+                [cloud_name]          NVARCHAR(100)  NULL,
+                [cloud_status]        NVARCHAR(50)   NULL,
+                [sync_error]          NVARCHAR(MAX)  NULL,
+                [created_at]          DATETIME2      NOT NULL DEFAULT SYSDATETIME()
+            )
+        """)
+        ok("expenses")
+    else:
+        skip("expenses")
+        for col, defn in [
+            ("expense_number",      "NVARCHAR(50)   NULL"),
+            ("expense_category_id", "INT            NULL"),
+            ("expense_type",        "NVARCHAR(200)  NULL"),
+            ("description",         "NVARCHAR(MAX)  NULL"),
+            ("payment_method",      "NVARCHAR(100)  NOT NULL DEFAULT 'Cash'"),
+            ("currency",            "NVARCHAR(10)   NULL"),
+            ("supplier_id",         "INT            NULL"),
+            ("balance",             "DECIMAL(18,4)  NULL"),
+            ("shift_id",            "INT            NULL"),
+            ("cashier_id",          "INT            NULL"),
+            ("cashier_name",        "NVARCHAR(100)  NULL"),
+            ("synced",              "BIT            NOT NULL DEFAULT 0"),
+            ("cloud_name",          "NVARCHAR(100)  NULL"),
+            ("cloud_status",        "NVARCHAR(50)   NULL"),
+            ("sync_error",          "NVARCHAR(MAX)  NULL"),
+        ]:
+            add_col("expenses", col, defn)
+
+        # Backfill description from name, and expense_type from expense_categories if empty
+        try:
+            cur.execute("""
+                UPDATE [dbo].[expenses]
+                SET description = name
+                WHERE (description IS NULL OR description = '') AND name IS NOT NULL;
+            """)
+            cur.execute("""
+                UPDATE e
+                SET e.expense_type = c.name
+                FROM [dbo].[expenses] e
+                INNER JOIN [dbo].[expense_categories] c ON e.expense_category_id = c.id
+                WHERE (e.expense_type IS NULL OR e.expense_type = '');
+            """)
+            conn.commit()
+        except Exception as _bfe:
+            print(f"    ! notice on expense backfill: {_bfe}")
+
     # Add UNIQUE constraint on cost_centers.name if missing (prevents duplicate synced entities)
     try:
         cur.execute("""
@@ -2562,31 +2839,40 @@ def run():
         print(f"[setup_database] ! Error seeding default entities: {e}")
 
     # ==================================================================
-    # Seed: default superadmin & admin users (All Modes: SaaS, Odoo, Frappe, Offline)
+    # Seed: default superadmin & admin users (In SaaS mode: superadmin is omitted and removed)
     # ==================================================================
     try:
-        # Seed superadmin user
-        cur.execute("SELECT id FROM [dbo].[users] WHERE username = 'superadmin'")
-        if not cur.fetchone():
-            cur.execute("""
-                INSERT INTO [dbo].[users]
-                    (username, password, role, display_name, full_name,
-                     active, synced_from_frappe,
-                     allow_discount, allow_receipt,
-                     allow_credit_note, allow_reprint,
-                     allow_laybye, allow_quote,
-                     company, max_discount_percent, pin)
-                VALUES (?, ?, 'admin', 'Super Admin', 'Super Admin',
-                        1, 0, 1, 1, 1, 1, 1, 1, '', 0, '3432')
-            """, ("superadmin", _hash("3432")))
+        from services.credentials import get_system_mode
+        is_saas = (get_system_mode() or "").strip().lower() == "saas"
+
+        if is_saas:
+            # In SaaS mode, user authentication and roles come from SaaS cloud; remove any local superadmin
+            cur.execute("DELETE FROM [dbo].[users] WHERE username = 'superadmin'")
             conn.commit()
-            print("\n  [+] Default superadmin user created:")
-            print("      Username : superadmin")
-            print("      Password : 3432")
-            print("      PIN      : 3432")
+            print("[setup_database] SaaS mode: local superadmin user omitted and removed from DB.")
         else:
-            cur.execute("UPDATE [dbo].[users] SET pin = '3432' WHERE username = 'superadmin' AND (pin IS NULL OR pin = '')")
-            conn.commit()
+            # Seed superadmin user for non-SaaS modes
+            cur.execute("SELECT id FROM [dbo].[users] WHERE username = 'superadmin'")
+            if not cur.fetchone():
+                cur.execute("""
+                    INSERT INTO [dbo].[users]
+                        (username, password, role, display_name, full_name,
+                         active, synced_from_frappe,
+                         allow_discount, allow_receipt,
+                         allow_credit_note, allow_reprint,
+                         allow_laybye, allow_quote,
+                         company, max_discount_percent, pin)
+                    VALUES (?, ?, 'admin', 'Super Admin', 'Super Admin',
+                            1, 0, 1, 1, 1, 1, 1, 1, '', 0, '3432')
+                """, ("superadmin", _hash("3432")))
+                conn.commit()
+                print("\n  [+] Default superadmin user created:")
+                print("      Username : superadmin")
+                print("      Password : 3432")
+                print("      PIN      : 3432")
+            else:
+                cur.execute("UPDATE [dbo].[users] SET pin = '3432' WHERE username = 'superadmin' AND (pin IS NULL OR pin = '')")
+                conn.commit()
 
         cur.execute("SELECT id FROM [dbo].[users] WHERE username = 'admin'")
         if not cur.fetchone():
@@ -2680,6 +2966,20 @@ def run():
         print(f"[setup_database] stamped schema_info.version = {SCHEMA_VERSION}")
     except Exception as _e:
         print(f"[setup_database] ! stamp failed: {_e}")
+
+    try:
+        from database.apply_performance_indexes import apply_optimizations
+        apply_optimizations()
+    except Exception as _e_opt:
+        print(f"[setup_database] ! database optimization notice: {_e_opt}")
+
+    try:
+        from services.credentials import get_system_mode
+        if (get_system_mode() or "").strip().lower() == "saas":
+            from models.saas_snapshot import take_saas_snapshot_once
+            take_saas_snapshot_once(username="System/Setup")
+    except Exception as _e_snap:
+        print(f"[setup_database] ! SaaS initial snapshot setup note: {_e_snap}")
 
 if __name__ == "__main__":
     run()

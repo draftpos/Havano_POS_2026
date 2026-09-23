@@ -1076,7 +1076,11 @@ class PurchaseInvoiceDialog(QDialog):
             from database.db import get_connection
             conn = get_connection()
             cur = conn.cursor()
-            cur.execute("SELECT 1 FROM products WHERE is_pharmacy_product = 1 OR has_batch = 1 LIMIT 1")
+            cur.execute("""
+                SELECT TOP 1 1 FROM products WHERE is_pharmacy_product = 1
+                UNION ALL
+                SELECT TOP 1 1 FROM product_batches
+            """)
             has_system_batches = bool(cur.fetchone())
             conn.close()
         except Exception:
@@ -1095,7 +1099,7 @@ class PurchaseInvoiceDialog(QDialog):
         for i, item in enumerate(self.items):
             if item["product_id"] == product["id"]:
                 # Product already in table - just focus its qty field, don't auto-fill
-                qty_widget = self.table.cellWidget(i, 3)
+                qty_widget = self.table.cellWidget(i, 5)
                 if isinstance(qty_widget, QLineEdit):
                     qty_widget.setFocus()
                     qty_widget.selectAll()

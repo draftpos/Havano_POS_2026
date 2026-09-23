@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, QStandardPaths
 from PySide6.QtGui import QColor, QTextDocument, QPageSize, QPageLayout
 from PySide6.QtPrintSupport import QPrinter
-from database.db import get_connection, fetchall_dicts
+from database.db import get_connection, fetchall_dicts, fetchone_dict
 from models.company_defaults import get_defaults
 from views.dialogs.pdf_preview_dialog import PdfPreviewDialog
 import qtawesome as qta
@@ -131,7 +131,7 @@ class AddBatchDialog(QDialog):
             self.f_batch_no.setText(self.batch_data.get('batch_no', ''))
             self.f_item_code.setCurrentText(self.batch_data.get('part_no', ''))
             self.f_item_name.setCurrentText(self.batch_data.get('name', ''))
-            self.f_qty.setText(str(self.batch_data.get('qty', '0.00')))
+            self.f_qty.setText(f"{float(self.batch_data.get('qty') or 0):.4f}")
             
             mfg = self.batch_data.get('manufacture_date')
             if mfg: self.f_mfg_date.setDate(QDate.fromString(str(mfg), "yyyy-MM-dd"))
@@ -253,16 +253,19 @@ class BatchesScreen(QWidget):
         
         from views.reports.report_template import ReportTemplate
         self.report = ReportTemplate("Batches", is_report=False, show_date_filter=True, parent=self)
-        self.report.set_headers(["Batch #", "Product", "Qty", "Expiry Date", "Notes"])
+        self.report.set_headers(["Batch #", "Item Code", "Item Name", "Mfg Date", "Expiry Date", "Qty", "Created By"])
         
         self.table_batches = self.report.table
         hh = self.table_batches.horizontalHeader()
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        for i in [0, 2, 3, 4]: hh.setSectionResizeMode(i, QHeaderView.Fixed)
-        self.table_batches.setColumnWidth(0, 150)
-        self.table_batches.setColumnWidth(2, 100)
-        self.table_batches.setColumnWidth(3, 120)
-        self.table_batches.setColumnWidth(4, 200)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
+        for i in [0, 1, 3, 4, 5, 6]:
+            hh.setSectionResizeMode(i, QHeaderView.Interactive)
+        self.table_batches.setColumnWidth(0, 130)
+        self.table_batches.setColumnWidth(1, 120)
+        self.table_batches.setColumnWidth(3, 110)
+        self.table_batches.setColumnWidth(4, 110)
+        self.table_batches.setColumnWidth(5, 100)
+        self.table_batches.setColumnWidth(6, 120)
 
         # Filters
         self.combo_product = QComboBox()
@@ -270,6 +273,10 @@ class BatchesScreen(QWidget):
         self.combo_product.addItem("- All Products -", None)
         self.combo_product.currentIndexChanged.connect(self._load_batches)
         self.report.filters_layout.insertWidget(4, self.combo_product)
+
+        # Apply Filters Button
+        if hasattr(self.report, "btn_apply"):
+            self.report.btn_apply.clicked.connect(self._load_batches)
 
         # Add Button
         self.report.btn_add.clicked.connect(self._open_add_dialog)
@@ -281,12 +288,30 @@ class BatchesScreen(QWidget):
         self.table_batches.itemDoubleClicked.connect(self._on_row_double_clicked)
         main_lay.addWidget(self.report, 1)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._load_products()
+        self._load_batches()
+
     def _load_products(self):
         try:
             conn = get_connection(); cur = conn.cursor()
-            cur.execute("SELECT id, part_no, name FROM products WHERE ISNULL(active, 1) = 1")
+            cur.execute("SELECT id, part_no, name FROM products WHERE ISNULL(active, 1) = 1 ORDER BY name ASC")
             self._all_products = fetchall_dicts(cur)
             conn.close()
+
+            if hasattr(self, "combo_product"):
+                cur_sel = self.combo_product.currentData()
+                self.combo_product.blockSignals(True)
+                self.combo_product.clear()
+                self.combo_product.addItem("- All Products -", None)
+                for p in self._all_products:
+                    label = f"{p['name']} ({p.get('part_no', '')})"
+                    self.combo_product.addItem(label, p['id'])
+                idx = self.combo_product.findData(cur_sel)
+                if idx >= 0:
+                    self.combo_product.setCurrentIndex(idx)
+                self.combo_product.blockSignals(False)
         except Exception as e:
             print(f"Error loading products: {e}")
 
@@ -300,14 +325,21 @@ class BatchesScreen(QWidget):
             self.table_batches.removeRow(1)
         try:
             sql = """
-                SELECT b.id, b.batch_no, p.part_no, p.name, 
+                SELECT b.id, b.batch_no, b.product_id, p.part_no, p.name, 
                        b.manufacture_date, b.expiry_date, b.qty, b.created_by
                 FROM product_batches b
                 JOIN products p ON b.product_id = p.id
-                ORDER BY b.id DESC
             """
+            params = []
+            if hasattr(self, "combo_product"):
+                sel_p = self.combo_product.currentData()
+                if sel_p:
+                    sql += " WHERE b.product_id = ?"
+                    params.append(sel_p)
+
+            sql += " ORDER BY b.id DESC"
             conn = get_connection(); cur = conn.cursor()
-            cur.execute(sql)
+            cur.execute(sql, tuple(params))
             rows = fetchall_dicts(cur)
             conn.close()
 
@@ -336,12 +368,30 @@ class BatchesScreen(QWidget):
 
     def _on_row_double_clicked(self, item):
         row_idx = item.row()
+        if row_idx == 0:
+            return
         first_item = self.table_batches.item(row_idx, 0)
         if not first_item: return
         
         batch_data = first_item.data(Qt.UserRole)
         if batch_data:
             self._load_products()  # Refresh product list here too
+            # Fetch fresh batch data from DB so latest qty is guaranteed
+            try:
+                conn = get_connection(); cur = conn.cursor()
+                cur.execute("""
+                    SELECT b.id, b.batch_no, b.product_id, p.part_no, p.name, 
+                           b.manufacture_date, b.expiry_date, b.qty, b.created_by
+                    FROM product_batches b
+                    JOIN products p ON b.product_id = p.id
+                    WHERE b.id = ?
+                """, (batch_data.get('id'),))
+                fresh = fetchone_dict(cur)
+                conn.close()
+                if fresh:
+                    batch_data = fresh
+            except Exception:
+                pass
             dlg = AddBatchDialog(self.window(), self, batch_data)
             dlg.exec()
 
