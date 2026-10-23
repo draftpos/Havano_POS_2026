@@ -20,8 +20,9 @@ Previously, releasing updates required multiple manual, error-prone local steps:
 3. **Automated & Resilient Deployment Engine (`deploy.py`)**:
    - Added non-interactive CLI flags (`--current`, `--yes`, `-y`, `CI=true`).
    - Added dual WebDAV upload engine supporting both public share token WebDAV (`3kiXJJQC4LiwPrd` matching `updater.py`) and direct user WebDAV credentials.
+   - Migrated from blocking `urllib.request` buffer to streamed file upload via `requests.put()` with 1800s transfer timeout to prevent socket buffer write timeouts on large installers.
    - Configured `sys.stdout` and `sys.stderr` for UTF-8 with replace-on-error to prevent Windows cp1252 `UnicodeEncodeError`.
-   - Added 3-attempt retry loop with 300s timeout for large installer uploads.
+   - Added 3-attempt retry loop for network resilience.
 4. **PyInstaller Build Error Handling (`build_exe.py`)**:
    - Added `sys.exit(res.returncode)` on failure to guarantee build errors fail the CI/CD pipeline immediately.
 

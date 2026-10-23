@@ -48,47 +48,48 @@ RELEASE_NOTES = os.environ.get("RELEASE_NOTES", "Bug fixes and performance impro
 
 
 def _upload(local_path: Path, remote_filename: str):
-    """Upload a file to Nextcloud via WebDAV (PUT)."""
-    import urllib.request
-    import base64
+    """Upload a file to Nextcloud via WebDAV (PUT) with streamed file chunking."""
+    import requests
     import time
 
-    data = local_path.read_bytes()
-    size_mb = len(data) / (1024 * 1024)
+    total_bytes = local_path.stat().st_size
+    size_mb = total_bytes / (1024 * 1024)
     print(f"  Uploading {remote_filename} ({size_mb:.1f} MB) to Nextcloud ...")
 
-    # Strategy 1: Public share WebDAV (matches updater.py share 3kiXJJQC4LiwPrd)
-    # Strategy 2: User WebDAV (admin / app_pass)
     endpoints = []
     if NC_SHARE_TOKEN:
         endpoints.append((
             f"{NC_BASE_URL}/public.php/webdav/{remote_filename}",
-            base64.b64encode(f"{NC_SHARE_TOKEN}:".encode()).decode()
+            (NC_SHARE_TOKEN, "")
         ))
     if NC_USERNAME and NC_APP_PASS:
         endpoints.append((
             f"{NC_BASE_URL}/remote.php/dav/files/{NC_USERNAME}/{NC_FOLDER}/{remote_filename}",
-            base64.b64encode(f"{NC_USERNAME}:{NC_APP_PASS}".encode()).decode()
+            (NC_USERNAME, NC_APP_PASS)
         ))
 
     last_error = None
-    for url, creds in endpoints:
+    for url, auth in endpoints:
         for attempt in range(1, 4):
-            req = urllib.request.Request(url, data=data, method="PUT")
-            req.add_header("Authorization", f"Basic {creds}")
-            req.add_header("Content-Type", "application/octet-stream")
             try:
-                with urllib.request.urlopen(req, timeout=300) as resp:
-                    code = resp.getcode()
-                    if code in (200, 201, 204):
-                        print(f"  [OK] {remote_filename} uploaded successfully (HTTP {code})")
-                        return
-                    else:
-                        raise RuntimeError(f"Upload failed: HTTP {code}")
+                with open(local_path, "rb") as f:
+                    resp = requests.put(
+                        url,
+                        data=f,
+                        auth=auth,
+                        headers={"Content-Type": "application/octet-stream"},
+                        timeout=(30, 1800),  # 30s connect timeout, 30min transfer timeout
+                    )
+                if resp.status_code in (200, 201, 204):
+                    print(f"  [OK] {remote_filename} uploaded successfully (HTTP {resp.status_code})")
+                    return
+                else:
+                    raise RuntimeError(f"Upload failed: HTTP {resp.status_code} ({resp.text[:200]})")
             except Exception as e:
                 last_error = e
                 if attempt < 3:
-                    time.sleep(2)
+                    print(f"  Warning: Attempt {attempt} failed ({e}), retrying in 3s...")
+                    time.sleep(3)
                 else:
                     break
 
