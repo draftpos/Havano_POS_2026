@@ -244,6 +244,12 @@ def drop_all_tables_completely() -> dict:
     including schema_info, foreign keys, and constraints, to force
     setup_database.py to run all migrations from scratch right away.
     """
+    try:
+        from services.hang_watchdog import pause_hang_watchdog, resume_hang_watchdog
+        pause_hang_watchdog()
+    except Exception:
+        pass
+
     _stop_active_sync_daemons()
 
     conn = get_connection()
@@ -296,5 +302,10 @@ def drop_all_tables_completely() -> dict:
         summary["errors"].append(str(e))
     finally:
         conn.close()
+        try:
+            from services.hang_watchdog import resume_hang_watchdog
+            resume_hang_watchdog()
+        except Exception:
+            pass
 
     return summary

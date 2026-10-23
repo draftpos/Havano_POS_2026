@@ -178,6 +178,7 @@ def get_unsynced_payment_entries() -> list[dict]:
     from database.db import get_connection, fetchall_dicts
     conn = get_connection()
     cur  = conn.cursor()
+    cur.timeout = 60
     cur.execute("""
         SELECT pe.*, s.frappe_ref AS sale_frappe_ref
         FROM payment_entries pe
@@ -212,6 +213,7 @@ def refresh_frappe_refs() -> int:
     from database.db import get_connection
     conn = get_connection()
     cur  = conn.cursor()
+    cur.timeout = 60
     cur.execute("""
         UPDATE pe
         SET pe.frappe_invoice_ref = s.frappe_ref

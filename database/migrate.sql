@@ -74,12 +74,22 @@ BEGIN
     END
 END
 
--- Ensure company_defaults table has support_number and agent_number
+-- Ensure company_defaults table has support_number, agent_sales_number, agent_email, and agent_number
 IF EXISTS (SELECT * FROM sysobjects WHERE name='company_defaults' AND xtype='U')
 BEGIN
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE Name = N'support_number' AND Object_ID = Object_ID(N'company_defaults'))
     BEGIN
-        ALTER TABLE company_defaults ADD support_number NVARCHAR(255) DEFAULT '+263 773 351 6588';
+        ALTER TABLE company_defaults ADD support_number NVARCHAR(255) DEFAULT '+263 779 973 028';
+    END
+
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE Name = N'agent_sales_number' AND Object_ID = Object_ID(N'company_defaults'))
+    BEGIN
+        ALTER TABLE company_defaults ADD agent_sales_number NVARCHAR(255) DEFAULT '+263 778 078 440';
+    END
+
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE Name = N'agent_email' AND Object_ID = Object_ID(N'company_defaults'))
+    BEGIN
+        ALTER TABLE company_defaults ADD agent_email NVARCHAR(255) DEFAULT 'support@havanoerp.com';
     END
 
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE Name = N'agent_number' AND Object_ID = Object_ID(N'company_defaults'))

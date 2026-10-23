@@ -1397,7 +1397,9 @@ def _clean_frappe_error(raw: str) -> str:
 # Tabbed SI / CN / SO view.  Raw API errors shown verbatim and are copyable.
 # Header shows count per tab.  Smart open: opens the right tab automatically.
 # =============================================================================
-class UnsyncedPopup(QDialog):
+from views.components.blur_overlay import BlurredDialog
+
+class UnsyncedPopup(BlurredDialog):
     """
     kind = "SI"  -> opens on the Sales Invoices tab
     kind = "CN"  -> opens on the Credit Notes tab
@@ -2595,6 +2597,15 @@ class POSView(QWidget):
         In pharmacy mode, reroutes to save+print quotation (the "Dispense"
         path for pharmacists, "Finalize Quote" for everyone else).
         """
+        # ── 0. SAAS DEFAULT ADMIN SALE GUARD ───────────────────────────────────────────
+        try:
+            from utils.roles import check_and_warn_saas_sale_eligibility
+            _user = getattr(self, "user", getattr(getattr(self, "parent_window", None), "user", None))
+            if not check_and_warn_saas_sale_eligibility(self, _user):
+                return
+        except Exception as _e:
+            print(f"[POSView] SaaS default admin sale check error: {_e}")
+
         # ── 0. SHIFT GUARD ─────────────────────────────────────────────────────────────
         if not self._require_active_shift():
             return
@@ -3605,6 +3616,8 @@ class POSView(QWidget):
         # ── Sales button ──────────────────────────────────────────────────────
         sales_menu_btn = HoverMenuButton("Sales", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
+        sales_menu_btn.addItem("Expenses",            self._open_expenses_dialog)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Payments", self._open_customer_payment_entry)
@@ -4867,6 +4880,8 @@ class POSView(QWidget):
         # ── Sales button ──────────────────────────────────────────────────────
         sales_menu_btn = HoverMenuButton("Sales", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
+        sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
+        sales_menu_btn.addItem("Expenses",            self._open_expenses_dialog)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Payments", self._open_customer_payment_entry)
@@ -7333,6 +7348,33 @@ class POSView(QWidget):
         else:
             coming_soon(self, "Sales List - add views/dialogs/sales_list_dialog.py")
 
+    def _open_credit_notes_list(self):
+        try:
+            from views.dialogs.credit_notes_list_dialog import CreditNotesListDialog
+            dlg = CreditNotesListDialog(self.parent_window or self)
+            dlg.show()
+        except Exception as e:
+            try:
+                from views.dialogs.credit_notes_list_dialog import CreditNotesListDialog
+                dlg = CreditNotesListDialog(self)
+                dlg.show()
+            except Exception as err:
+                coming_soon(self, f"Credit Notes List: {err}")
+
+    def _open_expenses_dialog(self):
+        try:
+            from views.dialogs.expense_dialog import ProcessExpenseDialog
+            parent_window = getattr(self, "parent_window", None) or self
+            dlg = ProcessExpenseDialog(parent=parent_window)
+            dlg.exec()
+        except Exception as e:
+            try:
+                from views.dialogs.expense_dialog import ProcessExpenseDialog
+                dlg = ProcessExpenseDialog(parent=self)
+                dlg.exec()
+            except Exception as err:
+                coming_soon(self, f"Expenses: {err}")
+
     def _open_sales_order_list(self):
         """Open the Sales Orders list (laybyes + any pulled SO from Frappe).
         Cashiers can convert fully-paid orders into invoices here."""
@@ -7969,12 +8011,14 @@ class POSView(QWidget):
 
         printers = []
         if not is_a4:
-            hw_file  = Path("app_data/hardware_settings.json")
+            from database.db import get_app_data_dir
+            hw_file = get_app_data_dir() / "hardware_settings.json"
             try:
-                with open(hw_file, "r", encoding="utf-8") as f:
-                    hw = json.load(f)
-                if hw.get("main_printer") and hw["main_printer"] != "(None)":
-                    printers.append(hw["main_printer"])
+                if hw_file.exists():
+                    with open(hw_file, "r", encoding="utf-8") as f:
+                        hw = json.load(f)
+                    if hw.get("main_printer") and hw["main_printer"] != "(None)":
+                        printers.append(hw["main_printer"])
             except Exception:
                 pass
 
@@ -8011,6 +8055,30 @@ class POSView(QWidget):
             currency            = cn.get("currency", "USD"),
             footer              = co.get("footer_text", "Credit note issued. Thank you."),
         )
+
+        # Enrich customer details (email, address, TIN, VAT)
+        cust_name = str(cn.get("customer_name", "") or "").strip()
+        if cust_name and cust_name.lower() not in ("walk-in", "walk in", "walk in customer", "walk-in customer", "cash customer", "cash", "default", "default customer"):
+            try:
+                from database.db import get_connection
+                _c_conn = get_connection()
+                _c_cur = _c_conn.cursor()
+                _c_cur.execute(
+                    "SELECT custom_email_address, custom_house_no, custom_street, custom_city, custom_province, custom_customer_tin, custom_customer_vat, custom_telephone_number "
+                    "FROM customers WITH (NOLOCK) WHERE customer_name = ?", (cust_name,)
+                )
+                _c_row = _c_cur.fetchone()
+                _c_conn.close()
+                if _c_row:
+                    receipt.customerEmail = _c_row[0] or ""
+                    addr_parts = [str(p).strip() for p in (_c_row[1], _c_row[2], _c_row[3], _c_row[4]) if p and str(p).strip()]
+                    receipt.customeraddress = ", ".join(addr_parts)
+                    receipt.customerTin = _c_row[5] or ""
+                    receipt.customerVat = _c_row[6] or ""
+                    if not receipt.customerContact and _c_row[7]:
+                        receipt.customerContact = _c_row[7]
+            except Exception:
+                pass
         # Extra attributes read via getattr() in printing_service - set after construction
         receipt.originalInvoiceNo = cn.get("invoice_no", "")
         receipt.creditNoteReason  = cn.get("reason", "")
@@ -9395,7 +9463,10 @@ class MainWindow(QMainWindow):
                 self._next_window = new_win
             else:
                 QApplication.quit()
-        except Exception:
+        except Exception as e:
+            import traceback
+            print(f"[logout] Error launching LoginDialog: {e}")
+            traceback.print_exc()
             QApplication.quit()
         self.close()
 # =============================================================================

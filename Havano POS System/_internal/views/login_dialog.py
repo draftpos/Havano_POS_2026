@@ -89,7 +89,7 @@ class LoginWorker(QThread):
     # -> local credential persist.  Give it plenty of room on slow connections.
     ONLINE_TIMEOUT = 60
 
-    def __init__(self, username: str, password: str, database: str = "", system_mode: str = "frappe"):
+    def __init__(self, username: str, password: str, database: str = "", system_mode: str = "saas"):
         super().__init__()
         self.username = username
         self.password = password
@@ -803,7 +803,7 @@ class LoginDialog(QDialog):
         self._worker:        LoginWorker | None = None
         self._conn_worker:   ConnectivityWorker | None = None
         self._pin_buffer:    str = ""
-        self.system_mode:    str = "frappe"
+        self.system_mode:    str = "saas"
         self.default_db:     str = ""
         
         # 1. Primary check: get_system_mode() from company_defaults

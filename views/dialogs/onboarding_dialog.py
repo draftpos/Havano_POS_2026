@@ -231,8 +231,11 @@ class OnboardingDialog(QDialog):
                 data["api_url"] = "https://backoffice.havano.pro"
             data["system_mode"] = "saas"
             settings_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(settings_path, "w", encoding="utf-8") as f:
+            import os
+            tmp_path = settings_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
+            os.replace(tmp_path, settings_path)
             from services.site_config import invalidate_cache
             invalidate_cache()
         except Exception as e:

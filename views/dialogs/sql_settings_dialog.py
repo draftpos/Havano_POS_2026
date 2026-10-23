@@ -19,8 +19,12 @@ class SqlSettingsDialog(QDialog):
         self.setModal(True)
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        
-        self.settings_file = Path("app_data/sql_settings.json")
+
+        # ── Use the canonical helper so the path is ALWAYS correct regardless
+        # of the working directory set by Windows shortcuts or the shell.
+        from database.db import get_app_data_dir
+        self.settings_file = get_app_data_dir() / "sql_settings.json"
+
         self._load_or_create_default()
         self._apply_stylesheet()
         self._build_ui()
@@ -117,23 +121,41 @@ class SqlSettingsDialog(QDialog):
     def _load_or_create_default(self):
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
         if not self.settings_file.exists():
+            # Brand-new install — system_mode is written by the onboarding/startup
+            # block before this dialog ever opens, so the file should always exist.
+            # If somehow it doesn't, we create a minimal skeleton and leave
+            # system_mode blank so main.py's startup guard fills it correctly.
             default = {
                 "auth_mode": "windows",
                 "server":    ".\\SQLEXPRESS",
-                "database":  "havano_pos_db",
+                "database":  "",
                 "username":  "",
                 "password":  "",
-                "api_url":   "",
+                "api_url":   "https://backoffice.havano.pro",
+                # system_mode intentionally omitted — main.py startup resolves it
             }
             self.settings_file.write_text(json.dumps(default, indent=4), encoding="utf-8")
 
-        data = json.loads(self.settings_file.read_text(encoding="utf-8"))
-        self.auth_mode = data.get("auth_mode", "windows")
-        self.server    = data.get("server",    ".\\SQLEXPRESS")
-        self.database  = data.get("database",  "havano_pos_db")
-        self.username  = data.get("username",  "")
-        self.password  = data.get("password",  "")
-        self.api_url   = data.get("api_url",   "")
+        try:
+            data = json.loads(self.settings_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[sql_settings_dialog] Failed to parse {self.settings_file}: {e}")
+            data = {}
+
+        self.auth_mode   = data.get("auth_mode", "windows")
+        self.server      = data.get("server",    ".\\SQLEXPRESS")
+        self.database    = data.get("database",  "")
+        self.username    = data.get("username",  "")
+        self.password    = data.get("password",  "")
+        self.api_url     = data.get("api_url",   "https://backoffice.havano.pro")
+        # Keep a local copy of the current mode so _save_settings can preserve it
+        self._current_system_mode = data.get("system_mode", "")
+        if not self._current_system_mode:
+            try:
+                from services.credentials import get_system_mode
+                self._current_system_mode = get_system_mode()
+            except Exception:
+                pass
 
     def _build_ui(self):
         from PySide6.QtWidgets import QGraphicsDropShadowEffect, QFrame, QWidget
@@ -220,16 +242,16 @@ class SqlSettingsDialog(QDialog):
         root.setContentsMargins(30, 20, 30, 24)
 
         # ── System Mode Check ──────────────────────────────────────────────
-        system_mode = "frappe"
+        system_mode = "saas"
         try:
             if self.settings_file.exists():
                 data = json.loads(self.settings_file.read_text(encoding="utf-8"))
-                system_mode = data.get("system_mode", "frappe")
+                system_mode = data.get("system_mode", "saas")
         except Exception:
             pass
 
         # ── 1. Site URL ─────────────────────────────────────────────
-        site_title = "Odoo Site" if system_mode == "odoo" else "Frappe Site"
+        site_title = "Odoo Site" if system_mode == "odoo" else ("SaaS Site" if system_mode == "saas" else "Frappe Site")
         site_group = QGroupBox(site_title)
         site_form  = QFormLayout(site_group)
         site_form.setSpacing(12)
@@ -237,7 +259,7 @@ class SqlSettingsDialog(QDialog):
         site_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.frappe_url_input = QLineEdit(self.api_url)
-        placeholder = "https://your-odoo-site.com" if system_mode == "odoo" else "https://apk.havano.cloud"
+        placeholder = "https://your-odoo-site.com" if system_mode == "odoo" else ("https://backoffice.havano.pro" if system_mode == "saas" else "https://apk.havano.cloud")
         self.frappe_url_input.setPlaceholderText(placeholder)
         site_form.addRow("Site URL:", self.frappe_url_input)
 
@@ -506,17 +528,19 @@ class SqlSettingsDialog(QDialog):
             dbs = [row[0] for row in cur.fetchall()]
             conn.close()
             
-            curr = self.db_input.currentText()
+            curr = self.db_input.currentText().strip()
             self.db_input.clear()
             self.db_input.addItems(dbs)
-            if curr in dbs:
+            if curr:
+                if curr not in dbs:
+                    self.db_input.addItem(curr)
                 self.db_input.setCurrentText(curr)
             elif dbs:
                 self.db_input.setCurrentText(dbs[0])
         except Exception as e:
             QMessageBox.critical(self, "Fetch Failed", f"Could not fetch databases:\n{e}")
 
-    # ── NEW: Save settings to file ONLY (no migration, no DB creation)
+    # ── Save settings to file ONLY (no migration, no DB creation)
     def _save_settings(self):
         data = {}
         if self.settings_file.exists():
@@ -524,14 +548,32 @@ class SqlSettingsDialog(QDialog):
                 data = json.loads(self.settings_file.read_text(encoding="utf-8"))
             except Exception:
                 pass
-                
+
+        db_chosen = self.db_input.currentText().strip() or str(data.get("database") or "").strip()
+        if not db_chosen:
+            QMessageBox.warning(self, "No Database", "Please enter or select a database name.")
+            return False
+
         updates = {
             "auth_mode": "windows" if self.mode_combo.currentText() == "Windows Authentication" else "sql",
             "server":    self.server_input.currentText().strip() or ".\\SQLEXPRESS",
-            "database":  self.db_input.currentText().strip()     or "havano_pos_db",
+            "database":  db_chosen,
             "username":  self.user_input.text().strip(),
             "password":  self.pass_input.text().strip(),
         }
+
+        # ALWAYS preserve system_mode — use the value captured at dialog-open time
+        # so we never accidentally drop or overwrite it during a DB-config save.
+        preserved_mode = self._current_system_mode or data.get("system_mode", "")
+        if not preserved_mode:
+            try:
+                from services.credentials import get_system_mode
+                preserved_mode = get_system_mode()
+            except Exception:
+                pass
+        if not preserved_mode:
+            preserved_mode = "saas"
+        updates["system_mode"] = preserved_mode
 
         # Attempt to auto-provision the 'admin' account if using Windows Auth
         if updates["auth_mode"] == "windows":
@@ -550,18 +592,26 @@ class SqlSettingsDialog(QDialog):
                     QMessageBox.warning(self, "Connection Failed", f"Could not connect to SQL Server. Please check that the server is running and the instance name is correct.\n\nError: {e}")
                 else:
                     QMessageBox.warning(self, "Permissions Note", f"Connected via Windows, but your Windows user lacks permission to create the 'admin' SQL login automatically.\n\nError: {e}")
-        
-        # If we are offline, forcibly clear any lingering URL from the JSON
-        if data.get("system_mode") == "offline":
+
+        # Offline: clear the API URL so no stale URL leaks. Others: preserve it.
+        if preserved_mode == "offline":
             updates["api_url"] = ""
         else:
             updates["api_url"] = self.frappe_url_input.text().strip()
-            
+
         data.update(updates)
-        self.settings_file.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        import os
+        tmp_file = self.settings_file.with_suffix(".json.tmp")
+        tmp_file.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        os.replace(tmp_file, self.settings_file)
         try:
             from services.site_config import invalidate_cache
             invalidate_cache()
+        except Exception:
+            pass
+        try:
+            from services.bugsink_service import check_and_report_database_change
+            check_and_report_database_change(updates.get("database"), context="sql_settings_save")
         except Exception:
             pass
 
@@ -735,6 +785,7 @@ class SqlSettingsDialog(QDialog):
             conn_master = pyodbc.connect(self._get_connection_string(include_db=False), autocommit=True)
             cur_m = conn_master.cursor()
             cur_m.execute(f"CREATE DATABASE [{db_name}]")
+            cur_m.execute(f"ALTER DATABASE [{db_name}] SET AUTO_CLOSE OFF WITH ROLLBACK IMMEDIATE")
             conn_master.close()
 
             self._save_settings()
@@ -746,6 +797,25 @@ class SqlSettingsDialog(QDialog):
                 pass
                 
             self._run_migration_script(silent=True)
+
+            # Ensure the newly created database inherits the active system_mode
+            current_mode = self._current_system_mode
+            if not current_mode:
+                try:
+                    from services.credentials import get_system_mode
+                    current_mode = get_system_mode()
+                except Exception:
+                    current_mode = "saas"
+            try:
+                conn_new = pyodbc.connect(self._get_connection_string(include_db=True), autocommit=True, timeout=12)
+                cur_new = conn_new.cursor()
+                cur_new.execute("UPDATE company_defaults SET system_mode = ? WHERE id = (SELECT MIN(id) FROM company_defaults)", (current_mode,))
+                if current_mode == "offline":
+                    from setup_database import ensure_offline_defaults
+                    ensure_offline_defaults(conn_new)
+                conn_new.close()
+            except Exception as _e_sync:
+                print(f"[sql_settings] Error ensuring mode in blank DB: {_e_sync}")
             
             progress.close()
             QMessageBox.information(self, "Success", f"Blank database '{db_name}' created successfully.\n\nThe application will now restart to apply these changes.")
@@ -820,6 +890,25 @@ class SqlSettingsDialog(QDialog):
             return
 
         self._run_migration_script()
+
+        # Guarantee the active database's company_defaults has the exact preserved mode
+        current_mode = self._current_system_mode
+        if not current_mode:
+            try:
+                from services.credentials import get_system_mode
+                current_mode = get_system_mode()
+            except Exception:
+                current_mode = "saas"
+        try:
+            conn_new = pyodbc.connect(self._get_connection_string(include_db=True), autocommit=True, timeout=12)
+            cur_new = conn_new.cursor()
+            cur_new.execute("UPDATE company_defaults SET system_mode = ? WHERE id = (SELECT MIN(id) FROM company_defaults)", (current_mode,))
+            if current_mode == "offline":
+                from setup_database import ensure_offline_defaults
+                ensure_offline_defaults(conn_new)
+            conn_new.close()
+        except Exception as _e_sync:
+            print(f"[sql_settings] Error ensuring mode in DB: {_e_sync}")
         
         QMessageBox.information(
             self, "Settings Saved",
@@ -836,6 +925,12 @@ class SqlSettingsDialog(QDialog):
         is holding data that no longer exists. Restart the POS so the next
         launch bootstraps against the new tenant from a clean slate.
         """
+        try:
+            from utils.app_restart import restart_application
+            restart_application()
+            return
+        except Exception:
+            pass
         try:
             import main as _main_mod
             if hasattr(_main_mod, "_lock_file") and _main_mod._lock_file:
@@ -929,7 +1024,8 @@ class SqlSettingsDialog(QDialog):
                 IF NOT EXISTS (
                     SELECT name FROM sys.databases WHERE name = N'{db_name}'
                 )
-                CREATE DATABASE [{db_name}]
+                CREATE DATABASE [{db_name}];
+                ALTER DATABASE [{db_name}] SET AUTO_CLOSE OFF WITH ROLLBACK IMMEDIATE;
             """)
             cur.close()
             conn_master.close()

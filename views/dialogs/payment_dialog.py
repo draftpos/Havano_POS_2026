@@ -1746,6 +1746,15 @@ class PaymentDialog(QDialog):
         
         # [OK] Add processing flag to prevent duplicate saves
         self._processing_save = False
+
+        # Guard against default admin sales in SaaS mode
+        try:
+            from utils.roles import is_saas_default_admin
+            _init_u = getattr(parent, "user", None) or {"username": cashier_name, "id": cashier_id}
+            if is_saas_default_admin(_init_u):
+                QTimer.singleShot(0, self._block_saas_admin)
+        except Exception as _e:
+            print(f"[PaymentDialog] SaaS admin init check error: {_e}")
         
         self.accepted_method   = ""
         self.accepted_tendered = 0.0
@@ -2480,9 +2489,22 @@ class PaymentDialog(QDialog):
 
         dlg.exec()
 
+    def _block_saas_admin(self):
+        from utils.roles import check_and_warn_saas_sale_eligibility
+        _u = getattr(self.parent(), "user", None) or {"username": self.cashier_name, "id": self.cashier_id}
+        check_and_warn_saas_sale_eligibility(self, _u)
+        self.reject()
+
     def _save(self):
         """Save the sale with duplicate prevention."""
-        
+        try:
+            from utils.roles import check_and_warn_saas_sale_eligibility
+            _u = getattr(self.parent(), "user", None) or {"username": self.cashier_name, "id": self.cashier_id}
+            if not check_and_warn_saas_sale_eligibility(self, _u):
+                return
+        except Exception as _e:
+            print(f"[PaymentDialog] SaaS admin check error: {_e}")
+
         # [OK] Prevent multiple simultaneous saves
         if self._processing_save:
             print("[PaymentDialog] Save already in progress, ignoring duplicate call")

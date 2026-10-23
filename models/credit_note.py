@@ -156,8 +156,18 @@ def _ensure_tables_and_columns():
         pass
 
 
-# Call auto-migration when module loads
-_ensure_tables_and_columns()
+_cn_tables_checked = False
+
+def ensure_tables():
+    """Ensure credit note tables and columns exist (lazy, runs on demand)."""
+    global _cn_tables_checked
+    if _cn_tables_checked:
+        return
+    try:
+        _ensure_tables_and_columns()
+        _cn_tables_checked = True
+    except Exception as exc:
+        log.warning("Could not auto-migrate credit note tables: %s", exc)
 
 
 # =============================================================================
@@ -166,6 +176,7 @@ _ensure_tables_and_columns()
 
 def _next_cn_number() -> str:
     """Generate a unique credit note number"""
+    ensure_tables()
     conn = get_connection()
     cur = conn.cursor()
     now = datetime.now()
@@ -203,6 +214,7 @@ def create_credit_note(
     Create a credit note by copying EXACT values from the original sale.
     Uses SAME currency and SAME exchange rate as original sale.
     """
+    ensure_tables()
     from models.product import adjust_stock
 
     if shift_id is None:
@@ -492,6 +504,7 @@ def create_credit_note(
 
 def get_credit_note_by_id(cn_id: int) -> dict | None:
     """Fetch a single credit note by id."""
+    ensure_tables()
     conn = get_connection()
     cur = conn.cursor()
     
@@ -558,6 +571,7 @@ def get_credit_note_by_id(cn_id: int) -> dict | None:
 
 def get_credit_notes_by_sale(sale_id: int) -> list[dict]:
     """Fetch all credit notes for a specific sale."""
+    ensure_tables()
     conn = get_connection()
     cur = conn.cursor()
     
@@ -603,6 +617,7 @@ def get_credit_notes_by_sale(sale_id: int) -> list[dict]:
 
 def get_pending_credit_notes() -> list[dict]:
     """Return all CNs that are ready to sync."""
+    ensure_tables()
     conn = get_connection()
     cur = conn.cursor()
 
@@ -663,6 +678,7 @@ def get_pending_credit_notes() -> list[dict]:
 
 def get_all_credit_notes() -> list[dict]:
     """Fetch all credit notes ordered by date descending."""
+    ensure_tables()
     conn = get_connection()
     cur = conn.cursor()
     

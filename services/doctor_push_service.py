@@ -109,10 +109,13 @@ def push_unsynced_doctors() -> dict:
                 body_text = e.read().decode(errors="replace")[:300]
             except Exception:
                 body_text = ""
-            log.error("[doctor-push] ❌ HTTP %s on %s: %s - %s",
-                      e.code, d.full_name, e.reason, body_text)
-            print(f"[doctor-push] ❌ HTTP {e.code} for {d.full_name}: {body_text}")
-            result["errors"] += 1
+            if e.code == 404:
+                log.debug("[doctor-push] HTTP 404 on %s: %s - %s", d.full_name, e.reason, body_text)
+            else:
+                log.error("[doctor-push] ❌ HTTP %s on %s: %s - %s",
+                          e.code, d.full_name, e.reason, body_text)
+                print(f"[doctor-push] ❌ HTTP {e.code} for {d.full_name}: {body_text}")
+                result["errors"] += 1
             continue
         except Exception as e:
             log.error("[doctor-push] ❌ Network error pushing %s: %s",

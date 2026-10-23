@@ -213,6 +213,13 @@ class POSView(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+        if not products:
+            try:
+                from services.bugsink_service import check_and_report_saas_empty_catalog
+                check_and_report_saas_empty_catalog(context="pos_view_load_products")
+            except Exception:
+                pass
+
         for index, p in enumerate(products):
             btn = QPushButton(f"{p['name']}\n${p['price']:.2f}")
             btn.setFixedSize(170, 90)

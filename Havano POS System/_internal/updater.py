@@ -55,8 +55,13 @@ def _nc_download_url(filename: str) -> str:
 def _fetch_version_info() -> dict:
     url = _nc_download_url("version.json")
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-    with urllib.request.urlopen(req, context=_SSL_CONTEXT, timeout=2.0) as resp:
-        return json.loads(resp.read().decode())
+    with urllib.request.urlopen(req, context=_SSL_CONTEXT, timeout=10.0) as resp:
+        raw_text = resp.read().decode('utf-8', errors='ignore').strip()
+        start = raw_text.find('{')
+        end = raw_text.rfind('}')
+        if start != -1 and end != -1 and end >= start:
+            raw_text = raw_text[start:end+1]
+        return json.loads(raw_text)
 
 
 # ── Background download thread ────────────────────────────────────────────────

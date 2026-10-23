@@ -1,0 +1,106 @@
+name: Build & Deploy Havano POS to Nextcloud
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.agents/**'
+      - 'scratch/**'
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Release notes to show in update prompt'
+        required: false
+        default: 'Bug fixes and performance improvements.'
+        type: string
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    name: Build Installer & Deploy to Nextcloud
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $innoPath = "C:\Program Files (x86)\Inno Setup 6"
+          if (Test-Path "$innoPath\ISCC.exe") {
+            Write-Host "Found Inno Setup at $innoPath"
+            echo $innoPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            Write-Error "ISCC.exe not found after chocolatey install"
+          }
+
+      - name: Build Application with PyInstaller
+        run: |
+          python build_exe.py
+
+      - name: Compile Inno Setup Update Installer
+        shell: pwsh
+        run: |
+          $ver = (python -c "import deploy; print(deploy._read_current_version())").Trim()
+          Write-Host "============================================="
+          Write-Host " Building Havano POS Update Installer v$ver"
+          Write-Host "============================================="
+          
+          # Ensure combined/Output directory exists
+          New-Item -ItemType Directory -Force -Path "combined/Output" | Out-Null
+          
+          # Compile using Inno Setup Compiler CLI
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$ver" combined/HavanoPOS_Update.iss
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "ISCC compilation failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+          
+          # Verify that the generated installer exists
+          $installer = Get-ChildItem -Path "combined/Output" -Filter "*$ver*.exe" | Select-Object -First 1
+          if (-not $installer) {
+            Write-Error "Could not find compiled installer matching version $ver in combined/Output"
+            exit 1
+          }
+          Write-Host "Successfully built installer: $($installer.FullName) ($([math]::Round($installer.Length / 1MB, 2)) MB)"
+
+      - name: Deploy to Nextcloud WebDAV
+        env:
+          NEXTCLOUD_BASE_URL: ${{ secrets.NEXTCLOUD_BASE_URL }}
+          NEXTCLOUD_USERNAME: ${{ secrets.NEXTCLOUD_USERNAME }}
+          NEXTCLOUD_APP_PASS: ${{ secrets.NEXTCLOUD_APP_PASS }}
+          NEXTCLOUD_FOLDER: ${{ secrets.NEXTCLOUD_FOLDER }}
+          RELEASE_NOTES: ${{ inputs.release_notes || 'Bug fixes and performance improvements.' }}
+          CI: "true"
+        run: |
+          python deploy.py --current --yes
+
+      - name: Upload Installer as GitHub Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HavanoPOS-Update-Installer
+          path: |
+            combined/Output/*.exe
+            combined/Output/version.json
+          if-no-files-found: error

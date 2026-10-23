@@ -6,7 +6,7 @@ from services.odoo.sync_service import get_defaults, get_all_credentials
 def main():
     creds = get_all_credentials()
     defaults = get_defaults() or {}
-    host = defaults.get("server_api_host", "http://localhost:8069").rstrip("/")
+    host = defaults.get("server_api_host", "https://localhost:8069").rstrip("/")
     api_key = defaults.get("odoo_token") or creds.get("odoo_token", "")
     db = defaults.get("server_database", "")
     

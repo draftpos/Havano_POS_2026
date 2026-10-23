@@ -54,6 +54,8 @@ def ensure_snapshot_tables():
         conn.commit()
         conn.close()
     except Exception as e:
+        from database.db import reset_connection
+        reset_connection()
         log.warning("[saas_snapshot] Table creation check failed: %s", e)
 
 
@@ -122,6 +124,8 @@ def take_saas_snapshot_once(username: str = "Admin") -> bool:
         )
         return True
     except Exception as e:
+        from database.db import reset_connection
+        reset_connection()
         log.error("[saas_snapshot] Failed to take SaaS snapshot: %s", e)
         return False
 
@@ -206,6 +210,8 @@ def update_or_take_saas_snapshot(username: str = "Admin") -> bool:
         )
         return True
     except Exception as e:
+        from database.db import reset_connection
+        reset_connection()
         log.error("[saas_snapshot] Failed to update SaaS snapshot: %s", e)
         return False
 
@@ -263,6 +269,8 @@ def restore_saas_defaults_from_snapshot() -> bool:
         log.info("[saas_snapshot] Restored company defaults and sql_settings.json from SaaS snapshot.")
         return True
     except Exception as e:
+        from database.db import reset_connection
+        reset_connection()
         log.error("[saas_snapshot] Restore failed: %s", e)
         return False
 
@@ -304,6 +312,8 @@ def verify_saas_snapshot_lock_on_login() -> bool:
                 )
             return True
     except Exception as e:
+        from database.db import reset_connection
+        reset_connection()
         log.warning("[saas_snapshot] Login lock verification warning: %s", e)
     return False
 
@@ -328,6 +338,8 @@ def wipe_saas_snapshot(username: str = "Admin") -> bool:
         )
         return True
     except Exception as e:
+        from database.db import reset_connection
+        reset_connection()
         log.error("[saas_snapshot] Wipe failed: %s", e)
         return False
 
@@ -415,13 +427,8 @@ def get_saas_snapshot_mode() -> str:
 def get_sql_settings_mode() -> str:
     """Reads system_mode from app_data/sql_settings.json file."""
     try:
-        import json, sys, os
-        from pathlib import Path
-        if hasattr(sys, "_MEIPASS"):
-            app_data_dir = Path(sys.executable).parent / "app_data"
-        else:
-            app_data_dir = Path(os.path.abspath(".")) / "app_data"
-        settings_file = app_data_dir / "sql_settings.json"
+        from database.db import get_app_data_dir
+        settings_file = get_app_data_dir() / "sql_settings.json"
         if settings_file.exists():
             data = json.loads(settings_file.read_text(encoding="utf-8"))
             if data.get("system_mode"):

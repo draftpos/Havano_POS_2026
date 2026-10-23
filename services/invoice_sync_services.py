@@ -39,7 +39,7 @@ def _fetch_frappe_invoices(api_key: str, api_secret: str, host: str) -> list[dic
     page = 1
     while True:
         url = (
-            f"{host}/api/method/havano_pos_integration.api.get_sales_invoice"
+            f"{host}/api/method/erp_api.api.get_sales_invoice"
             f"?page={page}&limit={PAGE_SIZE}"
         )
         try:

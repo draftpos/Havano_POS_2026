@@ -51,11 +51,11 @@ _BLANK = {
     "server_walk_in_customer": "", "default_price_list_id": "",
     "server_terminal_id": "", "server_shop_id": "", "server_terminal_name": "",
     "server_store_name": "",
-    "api_key": "", "api_secret": "", "odoo_token": "", "system_mode": "frappe",
+    "api_key": "", "api_secret": "", "odoo_token": "", "system_mode": "saas",
     "work_offline": "0", "server_database": "",
     "pharmacy_mode": "0", "butchery_mode": "0",
     "allow_cashier_pharmacy_sales": "0",
-    "support_number": "0782168407", "agent_number": "Agent", "agent": "",
+    "support_number": "+263 779 973 028", "agent_sales_number": "+263 778 078 440", "agent_email": "support@havanoerp.com", "agent_number": "Agent", "agent": "",
     "bound_device_id": "",
     "subscription_days_left": "", "subscription_expiry": "",
 }
@@ -78,6 +78,8 @@ def _ensure_columns(cur):
                 email                          NVARCHAR(255) NULL,
                 phone                          NVARCHAR(50) NULL,
                 support_number                 NVARCHAR(50) NULL,
+                agent_sales_number             NVARCHAR(50) NULL,
+                agent_email                    NVARCHAR(255) NULL,
                 agent_number                   NVARCHAR(50) NULL,
                 agent                          NVARCHAR(255) NULL,
                 vat_number                     NVARCHAR(50) NULL,
@@ -144,6 +146,8 @@ def _ensure_columns(cur):
             ("quotation_terms", "NVARCHAR(MAX) NULL"),
             ("a4_font_size", "NVARCHAR(50) NULL"),
             ("server_store_name", "NVARCHAR(255) NULL"),
+            ("agent_sales_number", "NVARCHAR(50) NULL"),
+            ("agent_email", "NVARCHAR(255) NULL"),
         ]
         for col_name, col_type in needed:
             if col_name.lower() not in existing_cols:
@@ -225,6 +229,20 @@ def save_defaults(data: dict) -> None:
             IF NOT EXISTS (SELECT 1 FROM company_defaults)
                 INSERT INTO company_defaults DEFAULT VALUES
         """)
+        # CASHIER PROTECTION: Never overwrite existing credentials with blank values!
+        new_k = str(data.get("api_key") or "").strip()
+        new_s = str(data.get("api_secret") or "").strip()
+        if not new_k:
+            try:
+                cur.execute("SELECT api_key, api_secret FROM company_defaults WHERE id = (SELECT MIN(id) FROM company_defaults)")
+                _cr = cur.fetchone()
+                if _cr and _cr[0]:
+                    new_k = str(_cr[0] or "").strip()
+                    if not new_s:
+                        new_s = str(_cr[1] or "").strip()
+            except Exception:
+                pass
+
         cur.execute("""
             UPDATE company_defaults SET
                 company_name          = ?,
@@ -233,6 +251,8 @@ def save_defaults(data: dict) -> None:
                 email                 = ?,
                 phone                 = ?,
                 support_number        = ?,
+                agent_sales_number    = ?,
+                agent_email           = ?,
                 agent_number          = ?,
                 agent                 = ?,
                 vat_number            = ?,
@@ -294,6 +314,8 @@ def save_defaults(data: dict) -> None:
             str(data.get("email") or ""),
             str(data.get("phone") or ""),
             str(data.get("support_number") or ""),
+            str(data.get("agent_sales_number") or ""),
+            str(data.get("agent_email") or ""),
             str(data.get("agent_number") or ""),
             str(data.get("agent") or ""),
             str(data.get("vat_number") or ""),
@@ -334,10 +356,10 @@ def save_defaults(data: dict) -> None:
             str(data.get("server_terminal_id") or ""),
             str(data.get("server_terminal_name") or ""),
             str(data.get("server_shop_id") or ""),
-            str(data.get("api_key") or ""),
-            __import__("utils.crypto", fromlist=["encrypt_secret"]).encrypt_secret(str(data.get("api_secret") or "")) if str(data.get("system_mode") or "saas").lower() == "saas" else str(data.get("api_secret") or ""),
+            new_k,
+            new_s,
             str(data.get("odoo_token") or ""),
-            str(data.get("system_mode") or "frappe"),
+            str(data.get("system_mode") or "saas"),
             str(data.get("work_offline") or "0"),
             str(data.get("server_database") or ""),
             str(data.get("pharmacy_mode") or "0"),
@@ -349,13 +371,12 @@ def save_defaults(data: dict) -> None:
         ))
         conn.commit()
 
-        # Save logo_path to JSON helper
+        # Save logo_path to JSON helper using canonical path
         try:
-            import os, json
+            import json
             from database.db import get_app_data_dir
-            json_path = os.path.join(get_app_data_dir(), "logo_config.json")
-            with open(json_path, "w") as f:
-                json.dump({"logo_path": data.get("logo_path", "")}, f)
+            json_path = get_app_data_dir() / "logo_config.json"
+            json_path.write_text(json.dumps({"logo_path": data.get("logo_path", "")}), encoding="utf-8")
         except Exception as e:
             print(f"[CompanyDefaults] Error saving logo_path to JSON: {e}")
     finally:
@@ -410,3 +431,110 @@ def wipe_company_defaults(system_mode: str = None) -> None:
     finally:
         conn.close()
         invalidate_defaults_cache()
+
+
+DEFAULT_SUPPORT_NUMBER = "+263 779 973 028"
+DEFAULT_SALES_NUMBER = "+263 778 078 440"
+DEFAULT_AGENT_EMAIL = "support@havanoerp.com"
+
+
+def get_agent_contact_settings() -> dict:
+    """
+    Returns the agent & support contact info dictionary with fallback to default Havano info.
+    Reads from canonical app_data/agent_settings.json and company_defaults DB.
+    """
+    from database.db import get_app_data_dir
+    res = {
+        "agent_number": "",
+        "support_number": DEFAULT_SUPPORT_NUMBER,
+        "sales_number": DEFAULT_SALES_NUMBER,
+        "email": DEFAULT_AGENT_EMAIL,
+        "custom_support": "",
+        "custom_sales": "",
+        "custom_email": "",
+    }
+
+    # 1. Check local canonical JSON (always accessible, offline or pre-DB)
+    try:
+        p = get_app_data_dir() / "agent_settings.json"
+        if p.exists():
+            import json
+            j_data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(j_data, dict):
+                ag_num = str(j_data.get("agent_number") or "").strip()
+                if ag_num and ag_num.lower() != "agent":
+                    res["agent_number"] = ag_num
+                sup_n = str(j_data.get("support_number") or "").strip()
+                if sup_n and sup_n != "0782168407":
+                    res["custom_support"] = sup_n
+                sales_n = str(j_data.get("sales_number") or j_data.get("agent_sales_number") or "").strip()
+                if sales_n:
+                    res["custom_sales"] = sales_n
+                em = str(j_data.get("email") or j_data.get("agent_email") or "").strip()
+                if em:
+                    res["custom_email"] = em
+    except Exception as e:
+        print(f"[get_agent_contact_settings] json read error: {e}")
+
+    # 2. Check DB company_defaults
+    try:
+        d = get_defaults() or {}
+        db_agent = str(d.get("agent_number") or "").strip()
+        if db_agent and db_agent.lower() != "agent" and not res["agent_number"]:
+            res["agent_number"] = db_agent
+        db_sup = str(d.get("support_number") or "").strip()
+        if db_sup and db_sup != "0782168407" and not res["custom_support"]:
+            res["custom_support"] = db_sup
+        db_sales = str(d.get("agent_sales_number") or "").strip()
+        if db_sales and not res["custom_sales"]:
+            res["custom_sales"] = db_sales
+        db_email = str(d.get("agent_email") or "").strip()
+        if db_email and not res["custom_email"]:
+            res["custom_email"] = db_email
+    except Exception as e:
+        print(f"[get_agent_contact_settings] DB read error: {e}")
+
+    # Apply custom overrides if set
+    if res["custom_support"]:
+        res["support_number"] = res["custom_support"]
+    if res["custom_sales"]:
+        res["sales_number"] = res["custom_sales"]
+    if res["custom_email"]:
+        res["email"] = res["custom_email"]
+
+    return res
+
+
+def save_agent_contact_settings(agent_number: str = "", support_number: str = "", sales_number: str = "", email: str = "") -> bool:
+    """
+    Saves agent contact settings to canonical JSON and updates company_defaults DB.
+    """
+    import json
+    from database.db import get_app_data_dir
+    payload = {
+        "agent_number": str(agent_number or "").strip(),
+        "support_number": str(support_number or "").strip(),
+        "sales_number": str(sales_number or "").strip(),
+        "email": str(email or "").strip(),
+    }
+
+    # 1. Save canonical JSON
+    try:
+        p = get_app_data_dir() / "agent_settings.json"
+        p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[save_agent_contact_settings] JSON write error: {e}")
+
+    # 2. Save DB company_defaults
+    try:
+        d = get_defaults(force_reload=True) or {}
+        d["agent_number"] = payload["agent_number"]
+        d["support_number"] = payload["support_number"]
+        d["agent_sales_number"] = payload["sales_number"]
+        d["agent_email"] = payload["email"]
+        save_defaults(d)
+        invalidate_defaults_cache()
+    except Exception as e:
+        print(f"[save_agent_contact_settings] DB write error: {e}")
+
+    return True

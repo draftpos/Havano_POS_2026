@@ -74,8 +74,11 @@ def sync_dosages() -> dict:
             with safe_urlopen(req, timeout=REQUEST_TIMEOUT) as r:
                 data = json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
-            log.error("[dosage-sync] HTTP %s on page %d: %s", e.code, page, e.reason)
-            result["errors"].append(f"HTTP {e.code} on page {page}")
+            if e.code == 404:
+                log.debug("[dosage-sync] HTTP 404 on page %d: %s (endpoint not found or not enabled on backend)", page, e.reason)
+            else:
+                log.error("[dosage-sync] HTTP %s on page %d: %s", e.code, page, e.reason)
+                result["errors"].append(f"HTTP {e.code} on page {page}")
             break
         except Exception as e:
             log.error("[dosage-sync] Network error on page %d: %s", page, e)

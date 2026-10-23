@@ -656,7 +656,7 @@ def _push_cn(
     if get_system_mode().lower() == "saas":
         target_urls = [
             f"{host}/api/method/saas_api.www.api.create_invoice",
-            f"{host}/api/method/saas_api.www.api.create_sales_invoice",
+            f"{host}/api/method/erp_api.api.create_sales_invoice",
             f"{host}/api/method/saas_api.www.api.make_sale",
             f"{host}/api/resource/Sales%20Invoice"
         ]

@@ -42,29 +42,17 @@ ORANGE    = "#c05a00"
 
 
 def get_configured_paper_size() -> str:
-    """Robust helper to get active paper_size ('80mm', '58mm', 'A4') from all config files."""
+    """Robust helper to get active paper_size ('80mm', '58mm', 'A4') from config."""
     try:
-        import os, json
+        import json
         from database.db import get_app_data_dir
 
-        _here = os.path.dirname(os.path.abspath(__file__))
-        _root = os.path.normpath(os.path.join(_here, ".."))
-
-        candidate_paths = [
-            os.path.join(_root, "app_data", "hardware_settings.json"),
-            os.path.join(os.path.abspath("."), "app_data", "hardware_settings.json"),
-            os.path.join(get_app_data_dir(), "hardware_settings.json"),
-            os.path.join(_root, "views", "app_data", "hardware_settings.json"),
-            "app_data/hardware_settings.json",
-        ]
-
-        for p in candidate_paths:
-            if os.path.exists(p):
-                with open(p, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    val = data.get("paper_size") or data.get("paperSize")
-                    if val:
-                        return str(val).strip()
+        hw_file = get_app_data_dir() / "hardware_settings.json"
+        if hw_file.exists():
+            data = json.loads(hw_file.read_text(encoding="utf-8"))
+            val = data.get("paper_size") or data.get("paperSize")
+            if val:
+                return str(val).strip()
 
         # Check DB fallback as well
         try:
@@ -101,6 +89,88 @@ class PrintingService:
         bold_font = QFont(font)
         bold_font.setBold(True)
         return bold_font
+
+    def _configure_printer(self, printer: QPrinter, printer_name: str, paper_size: str, height_mm: float = 2000.0) -> None:
+        """
+        Configures QPrinter with printer name and matches driver's native continuous
+        roll page size (e.g. 80(72.1) x 3276 mm or 58(48) x 3276 mm) so that Qt
+        uses the true hardware printhead boundary rather than an unconstrained canvas.
+        """
+        if printer_name and printer_name != "(None)":
+            info = QPrinterInfo.printerInfo(printer_name)
+            if not info.isNull():
+                printer.setPrinterName(printer_name)
+
+        is_58 = str(paper_size).strip().lower() == "58mm"
+        matched_ps = None
+        
+        try:
+            info = QPrinterInfo(printer)
+            if not info.isNull():
+                supported = info.supportedPageSizes()
+                for ps in supported:
+                    name = ps.name().lower()
+                    if is_58:
+                        if "58(48" in name or "58 x" in name or "58mm" in name:
+                            matched_ps = ps
+                            if "3276" in name or "roll" in name or "continuous" in name:
+                                break
+                    else:
+                        if "80(72" in name or "80 x" in name or "80mm" in name or "roll paper 80" in name:
+                            matched_ps = ps
+                            if "3276" in name or "roll" in name or "continuous" in name:
+                                break
+        except Exception as e:
+            print(f"[PrintingService] Error matching page size: {e}")
+
+        if matched_ps:
+            printer.setPageSize(matched_ps)
+        else:
+            roll_w = 58 if is_58 else 80
+            printer.setPageSize(QPageSize(QSizeF(roll_w, height_mm), QPageSize.Millimeter))
+
+        printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+
+    def _update_page_geometry(self, painter: QPainter, paper_size: str = None) -> None:
+        """
+        Dynamically determine printable paper width and symmetrical margins.
+        Thermal receipt printers have physical printheads narrower than the paper roll:
+        - 80mm roll: 72mm printable head = 576 dots at 203 DPI (8 dots/mm).
+        - 58mm roll: 48mm printable head = 384 dots at 203 DPI.
+        Even if the Windows driver canvas reports full roll width (e.g. 640 or 639),
+        the printable area must NEVER exceed the physical printhead (576 dots) to avoid
+        text clipping, buffer wrap-around, and overlapping totals.
+        """
+        try:
+            if not paper_size:
+                paper_size = get_configured_paper_size()
+            
+            is_58 = str(paper_size).strip().lower() == "58mm"
+            
+            dpi = 203
+            if painter and painter.device():
+                if hasattr(painter.device(), "logicalDpiX") and painter.device().logicalDpiX():
+                    dpi = painter.device().logicalDpiX()
+                elif hasattr(painter.device(), "resolution") and painter.device().resolution():
+                    dpi = painter.device().resolution()
+
+            dpm = dpi / 25.4
+            
+            if is_58:
+                max_head_dots = int(round(48.0 * dpm))  # 384 at 203 DPI
+                dev_w = painter.device().width() if painter and painter.device() else max_head_dots
+                self.paper_width = min(dev_w, max_head_dots)
+                self.margin = 8
+            else:
+                max_head_dots = int(round(72.0 * dpm))  # 576 at 203 DPI
+                dev_w = painter.device().width() if painter and painter.device() else max_head_dots
+                self.paper_width = min(dev_w, max_head_dots)
+                self.margin = 12
+
+            print(f"[PrintingService] Geometry updated: paper_size={paper_size}, DPI={dpi}, paper_width={self.paper_width}, margin={self.margin}")
+        except Exception as e:
+            print(f"[PrintingService] _update_page_geometry error: {e}")
+
 
     def _draw_logo(self, painter: QPainter, receipt: ReceiptData, settings, y: int) -> int:
         try:
@@ -182,15 +252,10 @@ class PrintingService:
         painter = None
         try:
             printer = QPrinter(QPrinter.HighResolution)
-            if printer_name and printer_name != "(None)":
-                info = QPrinterInfo.printerInfo(printer_name)
-                if not info.isNull():
-                    printer.setPrinterName(printer_name)
-
-            printer.setPageSize(QPageSize(QSizeF(100, 1000), QPageSize.Millimeter))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+            self._configure_printer(printer, printer_name, paper_size, 1000)
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter, paper_size)
             y = 10
 
             now = datetime.now()
@@ -279,6 +344,81 @@ class PrintingService:
                                    y, _cn_row_h, bold_font, normal_font)
                 y += _cn_row_h + 4
 
+            print_customer_details = False
+            try:
+                from database.db import get_connection
+                conn = get_connection(); cur = conn.cursor()
+                cur.execute("SELECT setting_value FROM pos_settings WITH (NOLOCK) WHERE setting_key='print_customer_details'")
+                r = cur.fetchone()
+                if r and str(r[0]).strip() in ("1", "true", "True", "yes", "YES"):
+                    print_customer_details = True
+                conn.close()
+            except Exception:
+                pass
+
+            is_walkin = (
+                not receipt.customerName
+                or str(receipt.customerName).strip().lower() in (
+                    "walk-in", "walk in", "walk in customer", "walk-in customer",
+                    "cash customer", "cash", "default", "default customer"
+                )
+            )
+
+            if print_customer_details and not is_walkin:
+                # If customer details missing, enrich from DB
+                if not getattr(receipt, "customerEmail", "") or not getattr(receipt, "customerTin", "") or not getattr(receipt, "customeraddress", ""):
+                    try:
+                        from database.db import get_connection
+                        _c_conn = get_connection()
+                        _c_cur = _c_conn.cursor()
+                        _c_cur.execute(
+                            "SELECT custom_email_address, custom_house_no, custom_street, custom_city, custom_province, custom_customer_tin, custom_customer_vat "
+                            "FROM customers WITH (NOLOCK) WHERE customer_name = ?", (str(receipt.customerName).strip(),)
+                        )
+                        _c_row = _c_cur.fetchone()
+                        _c_conn.close()
+                        if _c_row:
+                            if not getattr(receipt, "customerEmail", ""):
+                                receipt.customerEmail = _c_row[0] or ""
+                            if not getattr(receipt, "customeraddress", ""):
+                                addr_parts = [str(p).strip() for p in (_c_row[1], _c_row[2], _c_row[3], _c_row[4]) if p and str(p).strip()]
+                                receipt.customeraddress = ", ".join(addr_parts)
+                            if not getattr(receipt, "customerTin", ""):
+                                receipt.customerTin = _c_row[5] or ""
+                            if not getattr(receipt, "customerVat", ""):
+                                receipt.customerVat = _c_row[6] or ""
+                    except Exception:
+                        pass
+
+                _skip_customer_tin = False
+                _skip_customer_vat = False
+                try:
+                    if receipt.customerTin and receipt.tin and str(receipt.customerTin).strip().lower() == str(receipt.tin).strip().lower():
+                        _skip_customer_tin = True
+                    if str(receipt.customerTin).strip() in ("00000000", "0"):
+                        _skip_customer_tin = True
+                    if receipt.customerVat and receipt.vatNo and str(receipt.customerVat).strip().lower() == str(receipt.vatNo).strip().lower():
+                        _skip_customer_vat = True
+                except Exception:
+                    pass
+
+                if getattr(receipt, "customerEmail", ""):
+                    self._draw_doc_row(painter, "Cust Email:", receipt.customerEmail,
+                                       y, _cn_row_h, bold_font, normal_font)
+                    y += _cn_row_h + 4
+                if getattr(receipt, "customeraddress", ""):
+                    self._draw_doc_row(painter, "Cust Addr:", receipt.customeraddress,
+                                       y, _cn_row_h, bold_font, normal_font)
+                    y += _cn_row_h + 4
+                if getattr(receipt, "customerTin", "") and not _skip_customer_tin:
+                    self._draw_doc_row(painter, "Cust TIN:", receipt.customerTin,
+                                       y, _cn_row_h, bold_font, normal_font)
+                    y += _cn_row_h + 4
+                if getattr(receipt, "customerVat", "") and not _skip_customer_vat:
+                    self._draw_doc_row(painter, "Cust VAT:", receipt.customerVat,
+                                       y, _cn_row_h, bold_font, normal_font)
+                    y += _cn_row_h + 4
+
             y += 8
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 24
@@ -342,14 +482,28 @@ class PrintingService:
                 _cur = (pay_cur or receipt.currency or "USD")
                 _val = value * (pay_rate if pay_rate > 0 else 1.0)
                 text = f"{_cur} {_val:,.2f}"
+                painter.setFont(bold_font if use_bold else normal_font)
                 fm_cn = painter.fontMetrics()
                 w = fm_cn.horizontalAdvance(text)
-                painter.setFont(bold_font if use_bold else normal_font)
-                painter.drawText(self.margin, y, 220, fm_cn.height() + 6, Qt.AlignLeft,  label)
-                painter.drawText(self.paper_width - self.margin - w, y, w, fm_cn.height() + 6, Qt.AlignRight, text)
-                y += fm_cn.height() + 6
+                row_h = fm_cn.height() + 6
+                gap = 10
+                val_x = self.paper_width - self.margin - w
+                avail = max(0, val_x - self.margin - gap)
+                painter.drawText(self.margin, y, avail, row_h, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, label)
+                painter.drawText(val_x, y, w, row_h, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, text)
+                y += row_h + 2
 
-            if receipt.totalVat > 0:
+            # VAT on credit note only when fiscalization is enabled
+            try:
+                from services.fiscalization_service import get_fiscalization_service as _get_fs_cn
+                _fs_cn = _get_fs_cn()
+                _cn_fiscal_on = bool(_fs_cn and _fs_cn.is_fiscalization_enabled())
+            except Exception:
+                _cn_fiscal_on = False
+
+            if _cn_fiscal_on and receipt.totalVat > 0:
+                _cn_net = max(float(receipt.grandTotal or 0) - float(receipt.totalVat or 0), 0.0)
+                draw_cn_total("Subtotal (excl. tax)", _cn_net)
                 draw_cn_total("VAT", receipt.totalVat)
             draw_cn_total("CREDIT TOTAL", receipt.grandTotal, use_bold=True)
 
@@ -543,23 +697,13 @@ class PrintingService:
         painter = None
         try:
             printer = QPrinter(QPrinter.HighResolution)
-            if printer_name and printer_name != "(None)":
-                info = QPrinterInfo.printerInfo(printer_name)
-                if not info.isNull():
-                    printer.setPrinterName(printer_name)
-
             paper_size = get_configured_paper_size()
             num_rows = len(expected_data or {}) + len(counted_data or {})
             page_height = max(200, 150 + (num_rows * 15))
-            if str(paper_size) == "58mm":
-                self.paper_width = 380
-                printer.setPageSize(QPageSize(QSizeF(58, page_height), QPageSize.Millimeter))
-            else:
-                self.paper_width = 550
-                printer.setPageSize(QPageSize(QSizeF(80, page_height), QPageSize.Millimeter))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+            self._configure_printer(printer, printer_name, paper_size, page_height)
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter, paper_size)
             y = 10
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
@@ -846,15 +990,10 @@ class PrintingService:
                     num_rows += len(c.get('rows', []) or c.get('payment_breakdown', [])) + 3
 
             page_height = max(200, 150 + (num_rows * 15))
-            if str(paper_size) == "58mm":
-                self.paper_width = 380
-                printer.setPageSize(QPageSize(QSizeF(58, page_height), QPageSize.Millimeter))
-            else:
-                self.paper_width = 550
-                printer.setPageSize(QPageSize(QSizeF(80, page_height), QPageSize.Millimeter))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+            self._configure_printer(printer, printer_name, paper_size, page_height)
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter, paper_size)
             y = 10
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
@@ -1549,6 +1688,7 @@ class PrintingService:
             printer.setPageMargins(QMarginsF(0, 0, 0, 0))
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter)
             y = 10
 
             now = datetime.now()
@@ -1680,15 +1820,11 @@ class PrintingService:
         painter  = None
         try:
             printer = QPrinter(QPrinter.HighResolution)
-            if printer_name and printer_name != "(None)":
-                info = QPrinterInfo.printerInfo(printer_name)
-                if not info.isNull():
-                    printer.setPrinterName(printer_name)
-
-            printer.setPageSize(QPageSize(QSizeF(80, 2000), QPageSize.Millimeter))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+            paper_size = get_configured_paper_size()
+            self._configure_printer(printer, printer_name, paper_size, 2000)
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter, paper_size)
 
             body_size  = int(getattr(settings, "kitchenBodySize", 0) or settings.contentFontSize or 10)
             normal_font = self._create_font(settings.contentFontName, body_size, settings.contentFontStyle)
@@ -1975,15 +2111,11 @@ class PrintingService:
         painter = None
         try:
             printer = QPrinter(QPrinter.HighResolution)
-            if printer_name and printer_name != "(None)":
-                info = QPrinterInfo.printerInfo(printer_name)
-                if not info.isNull():
-                    printer.setPrinterName(printer_name)
-
-            printer.setPageSize(QPageSize(QSizeF(80, 2000), QPageSize.Millimeter))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+            paper_size = get_configured_paper_size()
+            self._configure_printer(printer, printer_name, paper_size, 2000)
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter, paper_size)
 
             body_size   = int(getattr(settings, "kitchenBodySize",   0) or settings.contentFontSize or 10)
             header_size = int(getattr(settings, "kitchenHeaderSize", 0) or (body_size + 4))
@@ -2414,22 +2546,12 @@ class PrintingService:
         painter = None
         try:
             printer = QPrinter(QPrinter.HighResolution)
-            if printer_name and printer_name != "(None)":
-                info = QPrinterInfo.printerInfo(printer_name)
-                if not info.isNull():
-                    printer.setPrinterName(printer_name)
-
             num_items = len(receipt.items) if hasattr(receipt, 'items') and receipt.items else 0
-            page_height = max(200, 150 + (num_items * 15))
-            if str(paper_size) == "58mm":
-                self.paper_width = 380
-                printer.setPageSize(QPageSize(QSizeF(58, page_height), QPageSize.Millimeter))
-            else:
-                self.paper_width = 550
-                printer.setPageSize(QPageSize(QSizeF(80, page_height), QPageSize.Millimeter))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+            page_height = max(350, 220 + (num_items * 30))
+            self._configure_printer(printer, printer_name, paper_size, page_height)
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter, paper_size)
             y = 10
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
@@ -2784,10 +2906,15 @@ class PrintingService:
                 _cur = (currency or pay_cur or receipt.currency or "USD")
                 _val = value * (pay_rate if (not currency and pay_rate > 0) else 1.0)
                 text = f"{_cur} {_val:,.2f}"
-                w = fm.horizontalAdvance(text)
-                painter.drawText(self.margin, y, 260, line_h, Qt.AlignLeft,  label)
-                painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
-                y += line_h
+                fm_tot = painter.fontMetrics()
+                w = fm_tot.horizontalAdvance(text)
+                row_h = fm_tot.height() + 6
+                gap = 10
+                val_x = self.paper_width - self.margin - w
+                avail = max(0, val_x - self.margin - gap)
+                painter.drawText(self.margin, y, avail, row_h, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, label)
+                painter.drawText(val_x, y, w, row_h, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, text)
+                y += row_h + 2
 
             _grand = float(receipt.grandTotal or 0)
             _vat   = float(receipt.totalVat   or 0)
@@ -2874,11 +3001,15 @@ class PrintingService:
                     usd_amt     = float(getattr(_pi, "amount", 0) or 0)
 
                     right_text = f"{native_cur} {native_amt:,.2f}"
-                    w = fm.horizontalAdvance(right_text)
-                    painter.drawText(self.margin, y, 260, line_h, Qt.AlignLeft, method_name)
-                    painter.drawText(self.paper_width - self.margin - w, y, w, line_h,
-                                     Qt.AlignRight, right_text)
-                    y += line_h
+                    fm_pi = painter.fontMetrics()
+                    w = fm_pi.horizontalAdvance(right_text)
+                    gap = 10
+                    row_h = fm_pi.height() + 6
+                    val_x = self.paper_width - self.margin - w
+                    avail = max(0, val_x - self.margin - gap)
+                    painter.drawText(self.margin, y, avail, row_h, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, method_name)
+                    painter.drawText(val_x, y, w, row_h, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, right_text)
+                    y += row_h + 2
 
             y += 20
 
@@ -3098,15 +3229,11 @@ class PrintingService:
         painter = None
         try:
             printer = QPrinter(QPrinter.HighResolution)
-            if printer_name and printer_name != "(None)":
-                info = QPrinterInfo.printerInfo(printer_name)
-                if not info.isNull():
-                    printer.setPrinterName(printer_name)
-
-            printer.setPageSize(QPageSize(QSizeF(80, 2000), QPageSize.Millimeter))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+            paper_size = get_configured_paper_size()
+            self._configure_printer(printer, printer_name, paper_size, 2000)
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter, paper_size)
             y = 10
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
@@ -3255,11 +3382,16 @@ class PrintingService:
                     _val = value * (pay_rate if pay_rate > 0 else 1.0)
                 
                 text = f"{_cur} {_val:,.2f}"
-                w = fm.horizontalAdvance(text)
                 painter.setFont(bold_font if use_bold else normal_font)
-                painter.drawText(self.margin, y, 300, line_h, Qt.AlignLeft, label)
-                painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
-                y += line_h
+                fm_pay = painter.fontMetrics()
+                w = fm_pay.horizontalAdvance(text)
+                row_h = fm_pay.height() + 6
+                gap = 10
+                val_x = self.paper_width - self.margin - w
+                avail = max(0, val_x - self.margin - gap)
+                painter.drawText(self.margin, y, avail, row_h, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, label)
+                painter.drawText(val_x, y, w, row_h, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, text)
+                y += row_h + 2
 
             draw_pay_total("Amount Paid", float(receipt.total or 0), use_bold=True)
             y += 4
@@ -3297,15 +3429,11 @@ class PrintingService:
         painter = None
         try:
             printer = QPrinter(QPrinter.HighResolution)
-            if printer_name and printer_name != "(None)":
-                info = QPrinterInfo.printerInfo(printer_name)
-                if not info.isNull():
-                    printer.setPrinterName(printer_name)
-
-            printer.setPageSize(QPageSize(QSizeF(100, 1000), QPageSize.Millimeter))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+            paper_size = get_configured_paper_size()
+            self._configure_printer(printer, printer_name, paper_size, 1000)
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter, paper_size)
             y = 10
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
@@ -3446,10 +3574,15 @@ class PrintingService:
                 _cur = (pay_cur or receipt.currency or "USD")
                 _val = value * (pay_rate if pay_rate > 0 else 1.0)
                 text = f"{_cur} {_val:,.2f}"
-                w = fm_n.horizontalAdvance(text)
-                painter.drawText(self.margin, y, 260, n_line_h, Qt.AlignLeft,  label)
-                painter.drawText(self.paper_width - self.margin - w, y, w, n_line_h, Qt.AlignRight, text)
-                y += n_line_h
+                fm_so = painter.fontMetrics()
+                w = fm_so.horizontalAdvance(text)
+                row_h = fm_so.height() + 6
+                gap = 10
+                val_x = self.paper_width - self.margin - w
+                avail = max(0, val_x - self.margin - gap)
+                painter.drawText(self.margin, y, avail, row_h, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, label)
+                painter.drawText(val_x, y, w, row_h, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, text)
+                y += row_h + 2
 
             if receipt.multiCurrencyDetails:
                 for detail in receipt.multiCurrencyDetails:
@@ -3466,22 +3599,22 @@ class PrintingService:
                 y += 14
                 painter.setFont(bold_font)
                 painter.drawText(self.margin, y, self.paper_width - self.margin*2, n_line_h,
-                                 Qt.AlignLeft, "Forms of Payment")
+                                 Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, "Forms of Payment")
                 y += n_line_h + 4
 
                 painter.setFont(normal_font)
                 fm_p = painter.fontMetrics()
-                lh_p = fm_p.height() + 8
+                lh_p = fm_p.height() + 6
                 for pm in payment_items:
                     method_name  = pm.productName or "Payment"
                     method_value = f"{pm.amount:,.2f}"
                     w = fm_p.horizontalAdvance(method_value)
-                    painter.drawText(self.margin, y,
-                                     self.paper_width - self.margin*2 - w - 4,
-                                     lh_p, Qt.AlignLeft, method_name)
-                    painter.drawText(self.paper_width - self.margin - w, y,
-                                     w, lh_p, Qt.AlignRight, method_value)
-                    y += lh_p
+                    gap = 10
+                    val_x = self.paper_width - self.margin - w
+                    avail = max(0, val_x - self.margin - gap)
+                    painter.drawText(self.margin, y, avail, lh_p, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, method_name)
+                    painter.drawText(val_x, y, w, lh_p, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, method_value)
+                    y += lh_p + 2
                 y += 6
 
             # Footer
@@ -3517,15 +3650,11 @@ class PrintingService:
                 return False
 
             printer = QPrinter(QPrinter.HighResolution)
-            if printer_name and printer_name != "(None)":
-                info = QPrinterInfo.printerInfo(printer_name)
-                if not info.isNull():
-                    printer.setPrinterName(printer_name)
-
-            printer.setPageSize(QPageSize(QSizeF(80, 2000), QPageSize.Millimeter))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0))
+            paper_size = get_configured_paper_size()
+            self._configure_printer(printer, printer_name, paper_size, 2000)
 
             painter = QPainter(printer)
+            self._update_page_geometry(painter, paper_size)
             y = 10
 
             normal_font = self._create_font(settings.contentFontName, settings.contentFontSize, settings.contentFontStyle)
@@ -3581,24 +3710,31 @@ class PrintingService:
             y += 16
 
             # Items
+            items = order.get("items", order.get("cart_items", []))
+            fm_item = painter.fontMetrics()
+            max_amt_w = fm_item.horizontalAdvance("Amount")
+            for it in items:
+                amt_val = it.get("amount", it.get("total", 0.0))
+                max_amt_w = max(max_amt_w, fm_item.horizontalAdvance(f"{float(amt_val):,.2f}"))
+            max_amt_w += 10
+            TOTAL_X = self.paper_width - self.margin - max_amt_w
+
             painter.setFont(bold_font)
-            TOTAL_X = self.paper_width - self.margin - 80
             painter.drawText(self.margin, y, TOTAL_X - self.margin - 10, line_h, Qt.AlignLeft,  "Item")
-            painter.drawText(TOTAL_X,    y, 80,                          line_h, Qt.AlignRight, "Amount")
+            painter.drawText(TOTAL_X,    y, max_amt_w,                  line_h, Qt.AlignRight, "Amount")
             y += line_h + 4
 
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
             y += 10
 
             painter.setFont(normal_font)
-            items = order.get("items", order.get("cart_items", []))
             for item in items:
                 name   = item.get("item_name", item.get("product_name", ""))
                 qty    = item.get("qty", 1)
                 amount = item.get("amount", item.get("total", 0.0))
                 label  = f"{qty} × {name}"
                 painter.drawText(self.margin, y, TOTAL_X - self.margin - 10, line_h, Qt.AlignLeft,  label)
-                painter.drawText(TOTAL_X,    y, 80,                          line_h, Qt.AlignRight, f"{float(amount):,.2f}")
+                painter.drawText(TOTAL_X,    y, max_amt_w,                  line_h, Qt.AlignRight, f"{float(amount):,.2f}")
                 y += line_h + 4
 
             painter.drawLine(self.margin, y, self.paper_width - self.margin, y)
@@ -3608,11 +3744,16 @@ class PrintingService:
             def draw_total(label: str, value: float, use_bold: bool = False):
                 nonlocal y
                 text = f"{value:,.2f}"
-                w    = fm.horizontalAdvance(text)
                 painter.setFont(bold_font if use_bold else normal_font)
-                painter.drawText(self.margin, y, 220, line_h, Qt.AlignLeft,  label)
-                painter.drawText(self.paper_width - self.margin - w, y, w, line_h, Qt.AlignRight, text)
-                y += line_h
+                fm_lb = painter.fontMetrics()
+                w = fm_lb.horizontalAdvance(text)
+                row_h = fm_lb.height() + 6
+                gap = 10
+                val_x = self.paper_width - self.margin - w
+                avail = max(0, val_x - self.margin - gap)
+                painter.drawText(self.margin, y, avail, row_h, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, label)
+                painter.drawText(val_x, y, w, row_h, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, text)
+                y += row_h + 2
 
             order_total = float(order.get("total", 0.0))
             deposit     = float(order.get("deposit_amount", 0.0))
@@ -3628,8 +3769,8 @@ class PrintingService:
             y += 8
             painter.setFont(bold_font)
             painter.drawText(self.margin, y, self.paper_width - self.margin*2, line_h,
-                             Qt.AlignLeft, "Forms of Payment")
-            y += line_h + 2
+                             Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, "Forms of Payment")
+            y += line_h + 4
 
             painter.setFont(normal_font)
             if raw_methods:
@@ -3638,18 +3779,20 @@ class PrintingService:
                     m_amount = float(pm.get("amount", 0.0))
                     m_text   = f"{m_amount:,.2f}"
                     w        = fm.horizontalAdvance(m_text)
-                    painter.drawText(self.margin, y, self.paper_width - self.margin*2 - w - 4,
-                                     line_h, Qt.AlignLeft, m_name)
-                    painter.drawText(self.paper_width - self.margin - w, y, w,
-                                     line_h, Qt.AlignRight, m_text)
+                    gap      = 10
+                    val_x    = self.paper_width - self.margin - w
+                    avail    = max(0, val_x - self.margin - gap)
+                    painter.drawText(self.margin, y, avail, line_h, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, m_name)
+                    painter.drawText(val_x, y, w, line_h, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, m_text)
                     y += line_h + 2
             elif single_method:
                 dep_text = f"{deposit:,.2f}"
                 w        = fm.horizontalAdvance(dep_text)
-                painter.drawText(self.margin, y, self.paper_width - self.margin*2 - w - 4,
-                                 line_h, Qt.AlignLeft, single_method)
-                painter.drawText(self.paper_width - self.margin - w, y, w,
-                                 line_h, Qt.AlignRight, dep_text)
+                gap      = 10
+                val_x    = self.paper_width - self.margin - w
+                avail    = max(0, val_x - self.margin - gap)
+                painter.drawText(self.margin, y, avail, line_h, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, single_method)
+                painter.drawText(val_x, y, w, line_h, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, dep_text)
                 y += line_h + 2
 
             y += 4

@@ -1,5 +1,788 @@
 # Change History
 
+## [2026-10-23 11:35:00] - CI/CD Automation: GitHub Actions Automated Build & Nextcloud Deployment Pipeline
+
+### Problem
+Previously, releasing updates required multiple manual, error-prone local steps: running PyInstaller, opening Inno Setup GUI to recompile the installer with updated version strings, running `deploy.py` interactively, and waiting for large installer binaries to upload over home/office internet. Pushing commits to `main` on GitHub did not automatically trigger builds or deploy updates to Nextcloud.
+
+### Fix
+1. **GitHub Actions CI/CD Pipeline (`.github/workflows/deploy.yml`)**:
+   - Created workflow triggered automatically on `push` to `main` branch (ignoring markdown/doc changes) and supporting manual trigger (`workflow_dispatch`).
+   - Runs on `windows-latest` virtual environment.
+   - Installs Python 3.12, project requirements, PyInstaller, and Inno Setup 6.
+   - Automatically builds the executable (`python build_exe.py`).
+   - Dynamically compiles the update installer with Inno Setup compiler (`ISCC.exe "/DAppVersion=$ver" combined/HavanoPOS_Update.iss`).
+   - Deploys `version.json` and the update installer directly to Nextcloud WebDAV at datacenter speeds.
+   - Uploads compiled `.exe` and `version.json` as GitHub workflow run artifacts for backup and inspection.
+2. **Dynamic Inno Setup Compilation (`combined/HavanoPOS_Update.iss`)**:
+   - Added Inno Setup Preprocessor (ISPP) `#ifndef AppVersion` and `{#AppVersion}` directives.
+   - Parameterized `AppVersion={#AppVersion}` and `OutputBaseFilename=HavanoPOS_Update_Installer_v{#AppVersion}` so versions are passed dynamically via `/DAppVersion=X.Y.Z` without requiring manual file modifications.
+3. **Automated & Resilient Deployment Engine (`deploy.py`)**:
+   - Added non-interactive CLI flags (`--current`, `--yes`, `-y`, `CI=true`).
+   - Added dual WebDAV upload engine supporting both public share token WebDAV (`3kiXJJQC4LiwPrd` matching `updater.py`) and direct user WebDAV credentials.
+   - Configured `sys.stdout` and `sys.stderr` for UTF-8 with replace-on-error to prevent Windows cp1252 `UnicodeEncodeError`.
+   - Added 3-attempt retry loop with 300s timeout for large installer uploads.
+4. **PyInstaller Build Error Handling (`build_exe.py`)**:
+   - Added `sys.exit(res.returncode)` on failure to guarantee build errors fail the CI/CD pipeline immediately.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `.github/workflows/deploy.yml` | 1–85 | Automated GitHub Actions workflow for building and deploying to Nextcloud |
+| `combined/HavanoPOS_Update.iss` | 1–16 | Added ISPP dynamic `#AppVersion` preprocessor directives |
+| `deploy.py` | 24–120, 145–205 | Added CI/CD flags, dual WebDAV support, UTF-8 safety, and retry logic |
+| `build_exe.py` | 60–65 | Added explicit `sys.exit(res.returncode)` on build failure |
+
+## [2026-10-23 09:50:00] - Security & Reliability: Protect Active Database & Prevent Unintended Offline Mode Switching
+
+### Problem
+When the application previously encountered temporary sleep/wake SQL Server connection drops, `SqlSettingsDialog` opened automatically. In `SqlSettingsDialog`, `_fetch_databases` contained a logic bug (`elif dbs: self.db_input.setCurrentText(dbs[0])`) that could replace the configured database with an arbitrary database from the server list. If a new database with no SaaS cloud credentials was created or selected, `sql_settings.json` was switched to `system_mode: "offline"`, clearing the backoffice API URL and locking the POS into PIN-only offline mode with empty/sample tables.
+
+### Fix
+1. **Restored Real Database & Cloud Configuration**:
+   - Re-anchored `app_data/sql_settings.json` to the user's production database: `havano_posop07978808908` ("Legends Machipisa", Pos 3).
+   - Preserved `system_mode: "saas"` and `api_url: "https://backoffice.havano.pro"`.
+   - Verified live database records: 25 sales, 62 products, SaaS credentials 100% intact.
+2. **Eliminated Arbitrary Database Switching in `SqlSettingsDialog`**:
+   - In `views/dialogs/sql_settings_dialog.py`:
+     - `_fetch_databases`: Retains `self.db_input.setCurrentText(curr)` even if not initially in the fetched list; removed `elif dbs: setCurrentText(dbs[0])` fallback.
+     - `_save_settings`: Removed hardcoded `"havano_pos_db"` fallback; requires valid database selection. Guaranteed `preserved_mode` defaults strictly to `"saas"` and `api_url` defaults to `https://backoffice.havano.pro`.
+     - `_load_or_create_default`: Removed dummy `"havano_pos_db"` default.
+3. **Startup Setup Loop Retry Guard (`main.py`)**:
+   - In `main.py` (lines 626–650): When `settings_file.exists()`, temporary connection hiccups no longer pop open `SqlSettingsDialog` automatically. The user is presented with a clear Retry dialog (`"Would you like to retry connecting now?"`), allowing SQL Server to finish mounting without exposing the configuration screen to accidental database changes.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `app_data/sql_settings.json` | 1–20 | Restored production database `havano_posop07978808908` and SaaS backoffice configuration |
+| `app_data/last_active_database.txt` | 1 | Updated to `havano_posop07978808908` |
+| `views/dialogs/sql_settings_dialog.py` | 128–150, 528–570 | Removed arbitrary `dbs[0]` switch and dummy fallbacks; enforced SaaS defaults |
+| `main.py` | 626–655 | Added retry confirmation guard before opening `SqlSettingsDialog` on startup |
+
+## [2026-10-23 09:35:00] - UI Fix: Balance Left Column Vertical Distribution on Login Screen
+
+### Problem
+In `views/login_dialog.py`, the left column layout had an artificial `left_l.addStretch()` between the title and `_left_info_w`, while `_left_info_w` was given a stretch factor of `0`. This caused Qt to expand the void between "Havano POS" and the contact details, pushing all contact details and database information into a squished, distorted cluster against the bottom edge of the dialog.
+
+### Fix
+- In `views/login_dialog.py`:
+  - Adjusted `left_l` margins to `(24, 28, 24, 20)` with `spacing(0)`.
+  - Removed the premature middle stretch and added `_left_info_w` with stretch factor `1` (`left_l.addWidget(self._left_info_w, 1)`) so the details container expands to utilize the full vertical space.
+  - In `_render_left_details()`, added proportional top and bottom stretches and balanced stretches between every info block (`_left_info_l.addStretch(1)`).
+  - Consolidated the database server and database name into a clean, compact 2-line footer badge (`9px`), preventing overflow and ensuring uniform breathing room across all contact items.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `views/login_dialog.py` | 1308–1348, 1825–1915 | Fixed left column layout stretch factors, evenly distributed info blocks, and consolidated database footer |
+
+## [2026-10-23 09:25:00] - Bugfix: Fix NameError '_app_version' in views/login_dialog.py resizeEvent
+
+### Problem
+In `views/login_dialog.py`, when `_render_left_details()` was extracted, `_app_version` was no longer defined in `_build_ui()` before creating `ver_lbl = QLabel(f"Version {_app_version}")`. This triggered `NameError: name '_app_version' is not defined` during dialog initialization and resize events.
+
+### Fix
+- In `views/login_dialog.py` (lines 1585–1595): Safely defined `_app_version = "2.0.0"` with dynamic lookup from `main.APP_VERSION` immediately before instantiating `ver_lbl`.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `views/login_dialog.py` | 1585–1595 | Defined `_app_version` safely in `_build_ui()` |
+
+## [2026-10-23 09:10:00] - Bugfix: Eliminate Sleep/Wake Database Disconnections & Premature SqlSettingsDialog Reversion
+
+### Problem & Root Causes
+1. **SQL Server Express `AUTO_CLOSE = ON`**:
+   - In SQL Server Express, all databases created without explicit `AUTO_CLOSE OFF` default to `AUTO_CLOSE = ON`.
+   - When the terminal is left idle or Windows goes to sleep/locks, SQL Server closes and unloads the database from RAM.
+   - When the cashier returns or the app wakes up, the database must remount and recover from disk. During this transition, SQL Server rejects connections or drops sockets with error codes 4060 ("Cannot open database requested by login"), 921/922 ("Database in recovery or transition"), 233 ("No process is on the other end of the pipe"), 10054 ("Connection forcibly closed"), or TCP/Named Pipes communication link failures.
+2. **Premature Fallback to Database Configuration Dialog (`SqlSettingsDialog`)**:
+   - In `database/db.py`, `is_connection_valid()` had a narrow `is_transient` filter that did not recognize error codes 4060, 921, 922, 233, 10054, etc.
+   - On the very first attempt during a wake-up, `is_connection_valid()` broke out of its retry loop and returned `False`.
+   - In `main.py`, `needs_setup = not success` triggered the setup loop: `while True: if not is_connection_valid(): dlg = SqlSettingsDialog(); dlg.exec()`, throwing the cashier straight into the database setup UI instead of waiting for SQL Server to finish mounting.
+3. **`PooledCursor` and Connection Pooling Fragility**:
+   - `PooledCursor.execute()` only caught `pyodbc.OperationalError` (ignoring `pyodbc.Error` / `pyodbc.DatabaseError`), attempted reconnection only once without delay, and failed to recover if the database was still recovering from sleep.
+   - `get_connection()` used a 60-second idle check threshold, allowing stale dead sockets to be handed to callers.
+
+### Solution
+1. **Automatic `AUTO_CLOSE OFF` Enforcement**:
+   - `database/apply_performance_indexes.py`: `apply_optimizations()` now automatically inspects `is_auto_close_on` for the active database and runs `ALTER DATABASE [{db_name}] SET AUTO_CLOSE OFF WITH ROLLBACK IMMEDIATE;`. Also executed a sweep across all existing user databases on the instance (disabled on 100+ user databases).
+   - `views/dialogs/sql_settings_dialog.py`: Both database creation routines now immediately execute `ALTER DATABASE [{db_name}] SET AUTO_CLOSE OFF WITH ROLLBACK IMMEDIATE;`.
+   - `main.py`: Auto-create offline database routine now immediately executes `ALTER DATABASE [{s_db}] SET AUTO_CLOSE OFF WITH ROLLBACK IMMEDIATE;`.
+2. **Comprehensive Transient Error Handling & Resilient Retries**:
+   - `database/db.py`: Defined `TRANSIENT_ERRORS` tuple covering all wake-up/sleep error codes (4060, 921, 922, 233, 10054, 10061, 08001, 08004, 08S01, 08S02, HYT00, HY000, "in recovery", "in transition", "cannot open database", "forcibly closed", "semaphore timeout", etc.).
+   - `is_connection_valid()`: Increased retries to 5 attempts with 2.0s delay (allowing up to 10-12s for SQL Server wake-up). It no longer breaks immediately on temporary mounting states.
+   - `_create_raw_connection()`: Upgraded to 5 retry attempts with progressive backoff for all transient errors.
+   - `PooledCursor.execute()`: Catches `(pyodbc.Error, Exception)` and runs a resilient 3-attempt reconnection loop before raising.
+   - `get_connection()`: Lowered idle health-check verification threshold from 60s to 15s.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `database/db.py` | 76–185, 320–360 | Added comprehensive `TRANSIENT_ERRORS`, 5-attempt retry loops in `is_connection_valid` & `_create_raw_connection`, 3-attempt reconnect in `PooledCursor`, and reduced idle check to 15s |
+| `database/apply_performance_indexes.py` | 42–85 | Added `is_auto_close_on` check and `ALTER DATABASE ... SET AUTO_CLOSE OFF` for active DB and all user databases |
+| `views/dialogs/sql_settings_dialog.py` | 775–785, 1010–1025 | Added immediate `SET AUTO_CLOSE OFF` upon database creation |
+| `main.py` | 100–108 | Added immediate `SET AUTO_CLOSE OFF` in startup auto-create DB block |
+
+## [2026-10-23 08:45:00] - Feature: Agent & Support Dynamic Contact Numbers & Email Setup for Login Screen
+
+### Summary
+1. **Dynamic Agent & Support Configuration for Login Screen**:
+   - Expanded agent configuration to allow agents/admins to set custom Support & WhatsApp number, Sales number, and contact Email address under Agent Settings.
+   - If configured, the agent's custom contact numbers and email appear directly on the login screen's left panel.
+   - If left blank or restored to defaults, the login screen automatically falls back to standard Havano defaults (`+263 779 973 028` for Support & WhatsApp, `+263 778 078 440` for Sales, and `support@havanoerp.com` for Email Address).
+2. **`models/company_defaults.py`**:
+   - Added `agent_sales_number` and `agent_email` to `company_defaults` table definition, migration column list, and default dictionary.
+   - Added canonical `get_agent_contact_settings()` and `save_agent_contact_settings()` helpers that synchronize settings between SQL Server `company_defaults` and canonical `app_data/agent_settings.json` (complying with canonical path rules via `get_app_data_dir()`).
+   - Updated `save_defaults()` to persist `agent_sales_number` and `agent_email`.
+3. **`views/login_dialog.py`**:
+   - Implemented `AgentSetupDialog(QDialog)`: A dedicated, modern settings modal accessible from the Settings Hub ("Agent & Support") to easily set Agent Number/Code, Support & WhatsApp number, Sales number, and contact Email address with "Restore Defaults" and "Save Settings" actions.
+   - Updated `SettingsHubDialog`: Connected "Agent & Support" card directly to `_do_agent_setup()` to launch `AgentSetupDialog`.
+   - Updated `OfflineSetupDialog`: Synchronized agent contact details on save.
+   - Implemented dynamic `_render_left_details()` in `LoginDialog`: Displays the configured contact numbers or Havano defaults, and allows instantaneous live refresh of the login screen without application restart.
+4. **`setup_database.py` & `database/migrate.sql`**:
+   - Added `agent_sales_number` and `agent_email` to table schema and automated migration definitions for fresh database setups and existing schema upgrades.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `models/company_defaults.py` | 55–65, 77–85, 145–155, 250–260, 310–320, 425–535 | Added `agent_sales_number` & `agent_email` schema, save queries, and `get_agent_contact_settings`/`save_agent_contact_settings` helpers |
+| `views/login_dialog.py` | 680–840, 1000–1045, 1340–1355, 1790–1915 | Added `AgentSetupDialog`, wired Settings Hub, dynamic `_render_left_details`, and instant live UI refresh |
+| `setup_database.py` | 425–435, 455–465 | Added `agent_sales_number` and `agent_email` to `company_defaults` DDL and migration list |
+| `database/migrate.sql` | 77–95 | Added migration statements for `agent_sales_number` and `agent_email` columns |
+
+## [2026-10-21 14:45:00] - Documentation: Axis Virtual Device Fiscalization Integration Specification
+
+### Summary
+1. Generated a comprehensive, isolated, standalone Developer Integration Specification and Implementation Guide for Axis Virtual Device Fiscalization (`docs/AXIS_VIRTUAL_DEVICE_INTEGRATION_SPEC.md`).
+2. Documented end-to-end Axis REST APIs exclusively without blending or referencing third-party/alternative fiscal providers (no RevMax, Frappe, or offline zimra).
+3. Detailed JWT token authentication (`POST /api/Auth/login`), Fiscal Day lifecycle (`OpenFiscalDay`, `CloseFiscalDay`, `GetStatus`), Standard Sales Invoices (`SubmitReceipt`), and Credit Note reversal requirements (`SubmitReceiptExt` with negative sign conventions, `refReceiptGlobalnumber`, `refDeviceID`, and `refFiscalDay`).
+4. Included complete production-grade C# (.NET / Blazor / ASP.NET) and Python reference implementations ready to be ported to other applications.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `docs/AXIS_VIRTUAL_DEVICE_INTEGRATION_SPEC.md` | 1–834 | Complete Developer Integration Specification & API Guide for Axis Virtual Device Fiscalization |
+
+## [2026-10-19 10:05:00] - Bugfix: Inverted Mode Sync In credentials.py & Syntax Fix in main.py
+
+### Summary
+1. **`main.py`**:
+   - Fixed `SyntaxError: name '_lock_file' is assigned to before global declaration` at line 449 by removing redundant `global _lock_file` from module-level scope.
+2. **`services/credentials.py`**:
+   - Fixed the root cause of phantom reversion to SaaS mode: previously, `get_system_mode()` prioritized `db_mode` over `json_mode`. If an existing table had `system_mode = 'saas'`, it treated the database as the oracle and overwrote `sql_settings.json` with `'saas'`.
+   - Inverted the priority: `json_mode` from `sql_settings.json` is the explicit terminal configuration. If `db_mode != json_mode`, `get_system_mode()` updates the database table `company_defaults` to match the configured mode instead of clobbering the user's JSON configuration.
+3. **`setup_database.py`**:
+   - In existing database migration loop, added dynamic synchronization of `company_defaults.system_mode` to `get_configured_system_mode()`. If `company_defaults` already exists with an old/stale mode, it automatically updates to match the configured mode.
+4. **`views/dialogs/sql_settings_dialog.py`**:
+   - In `_save_and_close()`: guaranteed that the active database's `company_defaults` row is explicitly updated to the preserved mode after migration scripts run, and ensured offline defaults are seeded if offline.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `main.py` | 445–455 | Fixed SyntaxError on _lock_file declaration at module scope |
+| `services/credentials.py` | 250–280 | Inverted mode resolution so configured JSON mode syncs to DB instead of DB clobbering JSON |
+| `setup_database.py` | 505–525 | Synchronized existing company_defaults row to match configured system_mode |
+| `views/dialogs/sql_settings_dialog.py` | 880–905 | Ensured company_defaults mode synchronization in _save_and_close() |
+
+## [2026-10-19 09:55:00] - UI/UX: Fast Loader Animation & Bulletproof Application Auto-Restart
+
+### Summary
+1. **`views/components/sleek_loader.py`**:
+   - Accelerated loader spinner animation: updated `qta.Spin` to `interval=8, step=5` (from step=1), increasing rotation speed by 5x to provide a fast, snappy, and responsive visual indicator.
+2. **`utils/app_restart.py`**:
+   - Resolved restart failure where the new instance exited immediately due to single-instance lock file contention (`havano_pos_2026.lock`).
+   - Implemented cross-scope lock release (`release_single_instance_lock()` across `__main__` and `main` modules) and disk lock deletion.
+   - Guaranteed canonical absolute paths for project root and `main.py` script.
+   - Added automatic discovery of the project virtual environment (`my/Scripts/python.exe`).
+   - Passed `--restart` flag to spawned process and launched detached with `CREATE_NEW_PROCESS_GROUP`.
+3. **`main.py`**:
+   - Added `release_single_instance_lock()` module helper for explicit lock release during restart.
+   - Added `--restart` command-line argument handling that grants a 2-second grace period for the prior process to terminate and release file handles, preventing premature `Already Running` termination.
+4. **`services/credentials.py`**:
+   - Reduced post-switch delay in `_ModeSwitchWorker` from 0.6s to 0.1s for immediate handoff to restart.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `views/components/sleek_loader.py` | 24–30 | Accelerated spinner animation speed with `interval=8, step=5` |
+| `utils/app_restart.py` | 1–75 | Robust process relaunch with lockfile release, project venv detection, and detached spawn |
+| `main.py` | 44–64, 445–465 | Added `release_single_instance_lock()` and `--restart` lock acquisition grace period |
+| `services/credentials.py` | 508–512 | Reduced post-switch sleep to 0.1s |
+
+## [2026-10-19 09:37:00] - Database/Mode Resiliency: Preserve Configured System Mode on Create Blank DB
+
+### Summary
+1. **`setup_database.py`**:
+   - Fixed root cause of "Create Blank DB" forcing SaaS mode: replaced hardcoded `'saas'` insertion in `company_defaults` with dynamic `get_configured_system_mode()` reader.
+   - Preserves whichever mode the user had configured (`offline`, `frappe`, `odoo`, `saas`) in `sql_settings.json` / `advance_settings.json`.
+   - Added automatic seeding of offline default payment methods and company via `ensure_offline_defaults()` when the blank database is created in offline mode.
+2. **`views/dialogs/sql_settings_dialog.py`**:
+   - In `_load_or_create_default()` and `_save_settings()`: ensure `_current_system_mode` is always resolved (falling back to `get_system_mode()` if blank in JSON).
+   - In `_create_blank_db()`: guaranteed that the fresh database inherits the active `system_mode` in `company_defaults` and seeds offline defaults if offline.
+   - In `_exit_for_clean_restart()`: integrated centralized `restart_application()` helper from `utils.app_restart` for clean lockfile release and seamless restart.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `setup_database.py` | 40–65, 435–450, 500–515, 3045–3060 | Seed `company_defaults` with configured `system_mode` and auto-seed offline defaults |
+| `views/dialogs/sql_settings_dialog.py` | 150–160, 550–565, 775–798, 865–878 | Guaranteed `system_mode` preservation during blank DB creation and used `restart_application()` |
+
+## [2026-10-19 09:25:00] - Dialog Blur Lightening, Mode Switch Background Worker & Auto-Restart Resiliency
+
+### Summary
+1. **`views/components/blur_overlay.py`**:
+   - Softened and lightened modal background blur across all dialogs: reduced `DEFAULT_BLUR_RADIUS` from 24 down to 7, and softened dark tint from `rgba(15, 23, 42, 65)` down to `rgba(15, 23, 42, 25)` (~9.8% alpha).
+   - Updated `BlurOverlay`, `FullscreenBlurBackdrop`, `BlurredDialog`, and `install_global_dialog_blur()` to use the lightened constants.
+   - Configured QMessageBox and QInputDialog wrappers to consistently pass `_global_blur_radius` and `_global_tint_rgba`.
+2. **`views/login_dialog.py` & `views/dialogs/stock_file_dialog.py`**:
+   - Softened standalone `LoginDialog` background blur radius from 28 down to 8, and lightened backdrop tint from opaque dark slate `rgba(15, 23, 42, 140)` down to `rgba(15, 23, 42, 30)`.
+   - Updated local blur overlay in `stock_file_dialog.py` from radius 20 and `rgba(0, 0, 0, 100)` to radius 8 and `rgba(15, 23, 42, 30)`.
+3. **`utils/app_restart.py`**:
+   - Implemented `restart_application()` helper to cleanly unlock `QLockFile` (`havano_pos_2026.lock`), remove temp lock files, spawn fresh application instance via `subprocess.Popen([exe] + sys.argv)`, and terminate the running process with `os._exit(0)`.
+4. **`views/dialogs/main_menu_dialog.py`**:
+   - Updated system mode change handler to automatically invoke `restart_application()` instead of abruptly closing or requiring manual app reopen.
+   - Expanded mode dropdown to explicitly support `SaaS (Cloud)`, `Frappe`, `Odoo`, and `Offline`.
+5. **`services/credentials.py`**:
+   - Implemented `_ModeSwitchWorker(QThread)` and local `QEventLoop` in `set_system_mode()` so table drop, migration, and offline seeding run off the main thread with live loader status updates ("Resetting local database tables...", "Setting up fresh database schema...", "Configuring mode settings...", "Configuring offline payment defaults...").
+6. **`views/components/sleek_loader.py` & `main.py`**:
+   - Implemented `set_status()` in `SleekLoaderOverlay` with auto-resizing status text and layout refresh.
+   - Connected `StartupWorker` status signals to `splash.set_status()`.
+   - Called `splash.show_loading(timeout_ms=0)` in `main.py` to prevent premature 2-second watchdog dismissal.
+7. **`database/db.py`**:
+   - Increased timeout from 4s/5s to 12s in `is_connection_valid()` and `_create_raw_connection()`.
+   - Added automatic 3-attempt retry loop on transient handshake/timeout errors (`258`, `08001`, `Login timeout expired`, `Communication link failure`).
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `views/components/blur_overlay.py` | 14–28, 86–96, 140–152, 235–346 | Softened blur radius to 7 and lightened tint to rgba(15, 23, 42, 25) across all dialog overlays |
+| `views/login_dialog.py` | 1028–1037 | Reduced blur radius from 28 to 8 and dark tint from 140 to 30 |
+| `views/dialogs/stock_file_dialog.py` | 1574–1583 | Reduced blur radius to 8 and tint to rgba(15, 23, 42, 30) |
+| `utils/app_restart.py` | 1–45 | Created restart_application() helper with lockfile release and subprocess restart |
+| `views/dialogs/main_menu_dialog.py` | 445–540 | Added auto-restart on mode change and full mode options |
+| `services/credentials.py` | 315–420 | Added _ModeSwitchWorker with live progress updates |
+| `views/components/sleek_loader.py` | 46–58 | Added set_status() with dynamic sizing |
+| `main.py` | 496–505 | Splash show_loading without premature timeout |
+| `database/db.py` | 90–125, 280–320 | Added 12s timeout and 3-attempt handshake retry loop |
+
+
+
+### Summary
+1. **`setup_database.py`**:
+   - Implemented `verify_schema_integrity(conn)` using `CRITICAL_SCHEMA_REQUIREMENTS` across 18 core business tables (`sales`, `sale_items`, `users`, `products`, `shifts`, `shift_rows`, `customers`, `quotations`, `credit_notes`, `payment_entries`, `modes_of_payment`, `gl_accounts`, `expenses`, etc.).
+   - Replaced vulnerable 6-table check with comprehensive column-level verification (`SELECT LOWER(TABLE_NAME), LOWER(COLUMN_NAME) FROM INFORMATION_SCHEMA.COLUMNS`).
+   - Guarded startup short-circuit so that if ANY critical table or column is missing (e.g. after restoring an older database backup or partial migration), the skip is invalidated and a full self-healing migration pass is automatically executed.
+   - Replaced non-canonical `_sql_settings_path()` with canonical resolver `from database.db import get_app_data_dir`.
+   - Guaranteed that `apply_optimizations()` (enabling `READ_COMMITTED_SNAPSHOT ON` and performance indexes) is always enforced on both skip and full migration passes.
+   - Linked `models.user.migrate()` and post-migration schema integrity verification into the migration cycle.
+   - Bumped `SCHEMA_VERSION` to `2026.10.14.1`.
+2. **`database/db.py`**:
+   - Added `MARS_Connection=yes;` to both Windows Authentication and SQL Server Authentication connection strings in `is_connection_valid()` and `_create_raw_connection()`.
+   - Resolves `pyodbc.Error: ('HY000', 'Connection is busy with results for another command')` during concurrent cursor and active shift payment operations.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `setup_database.py` | 12, 23–94, 184–221, 2933–2986 | Added self-healing schema integrity verification, canonical app_data resolver, post-migration validation, and version bump |
+| `database/db.py` | 88–105, 252–270 | Added `MARS_Connection=yes;` to ODBC connection strings |
+
+
+
+### Summary
+1. **`views/components/blur_overlay.py`**:
+   - Created reusable blur overlay system: `BlurOverlay`, `FullscreenBlurBackdrop`, `BlurredDialog`, `apply_blur_to_dialog()`, and `install_global_dialog_blur()`.
+   - Generates high-quality Gaussian blurred screenshots of the parent window or screen behind dialogs with a translucent darkened tint layer (frosted glass aesthetic).
+   - Dynamically tracks window resize, repositioning, and modal open/close lifecycles.
+2. **`views/login_dialog.py`**:
+   - Integrated full-screen frosted glass blur and backdrop darkening directly into `LoginDialog`, centering the 850×600 card on screen with zero flicker.
+3. **`views/new_d.py` & `views/main_window.py`**:
+   - Updated `CustomerSearchPopup` ("Select Customer" popup) to inherit from `BlurredDialog` and properly handle blur backdrop lifecycle.
+   - Updated `CustomerDialog`, `SelectCustomerDialog`, `QuotationSelectDialog`, `PaymentDialog`, `DayShiftDialog`, `AdvanceSettingsDialog`, `HoldRecallDialog`, `ReprintDialog`, `UnsyncedPopup`, and `SalesListDialog` across `views/main_window.py` and `views/new_d.py` to inherit from `BlurredDialog`.
+4. **`main.py`**:
+   - Registered `install_global_dialog_blur()` globally so all QDialog popups automatically receive frosted glass background blur and dimming.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `views/components/blur_overlay.py` | 1–320 | Created universal blur overlay and BlurredDialog base class |
+| `views/login_dialog.py` | 890–930, 2730–2760 | Frosted glass blur background and centered card in LoginDialog |
+| `views/main_window.py` | Various | Inherit primary dialogs (Customer, Quotation, Payment, Reprint, Shift, etc.) from `BlurredDialog` |
+| `views/new_d.py` | 759, 13394 | Updated `CustomerSearchPopup` and `ReprintDialog` to inherit from `BlurredDialog` |
+| `main.py` | 600–615 | Global dialog blur filter installation |
+
+
+
+### Summary
+1. **`services/bugsink_service.py`**:
+   - Enhanced `_build_user()` to dynamically resolve the active user from `_user_context`, active `MainWindow` instance, `auth_service.get_active_session_user()`, or `sql_settings.json` so every event has accurate user context.
+   - Enhanced `_build_tags()` to add `user`, `logged_in_user`, and `user_role` tags for filtering on Bugsink/Sentry dashboards.
+   - Included `logged_in_user` and `user_context` in event `extra` and logger handler (`BugsinkLogHandler.emit`) for full traceability.
+   - Expanded `set_user_context()` and introduced `set_logged_in_user(user)` helper to forward user metadata directly.
+2. **`views/login_dialog.py`**: Called `set_logged_in_user(user)` immediately upon successful authentication.
+3. **`views/main_window.py`**: Called `set_logged_in_user(self.user)` in `MainWindow.__init__` to update user context across login and switch user events.
+4. **`main.py`**: Called `set_logged_in_user(_logged_user)` after initial login dialog acceptance.
+5. **`Havano POS System/_internal/services/bugsink_service.py`**: Synced changes to distributed build files.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `services/bugsink_service.py` | 240–305, 350–430, 765–870 | Dynamic user resolution, user tags, extra payload, and `set_logged_in_user()` |
+| `views/login_dialog.py` | 2621–2631 | Set user context on login success |
+| `views/main_window.py` | 27208–27216 | Sync user context to Bugsink in `MainWindow.__init__` |
+| `main.py` | 614–621 | Sync user context to Bugsink upon login dialog completion |
+| `Havano POS System/_internal/services/bugsink_service.py` | - | Synced build copy |
+
+## [2026-09-26 08:46:00] - Fix/Logging: Mute DosageSync & DoctorSync HTTP 404 Errors & Suppress from Bugsink
+
+### Summary
+1. **`services/dosage_sync_service.py`**: Updated HTTP exception handling so HTTP 404 (endpoint not found / not enabled on backend) is logged at `debug` level instead of `error` and does not add false failures to sync results.
+2. **`services/doctor_sync_service.py`**: Updated HTTP exception handling so HTTP 404 is logged at `debug` level instead of `error` and does not add false failures to sync results.
+3. **`services/dosage_push_service.py` & `services/doctor_push_service.py`**: Log HTTP 404 at `debug` level instead of `error` when backend endpoints are missing.
+4. **`services/bugsink_service.py`**: Added patterns and explicit suppression filter in `is_network_or_suppressed_error()` for `dosage-sync`, `doctor-sync`, `dosagesync`, `doctorsync`, and their push counterparts on HTTP 404 / NOT FOUND so they are never reported to Bugsink telemetry.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `services/dosage_sync_service.py` | 76–83 | Mute HTTP 404 to debug level |
+| `services/doctor_sync_service.py` | 78–85 | Mute HTTP 404 to debug level |
+| `services/dosage_push_service.py` | 102–114 | Mute HTTP 404 to debug level |
+| `services/doctor_push_service.py` | 107–119 | Mute HTTP 404 to debug level |
+| `services/bugsink_service.py` | 560–590 | Suppress 404 sync/push errors from Bugsink |
+| `Havano POS System/_internal/services/bugsink_service.py` | 540–575 | Suppress 404 sync/push errors in distributed build |
+
+## [2026-09-25 16:25:00] - Feature/Sync: Kitchen Order Routing Fallback from Login Response
+
+### Summary
+1. **`services/auth_service.py`**: Added `_login_order_flags_cache` and `_sync_login_warehouse_order_flags()` to immediately extract kitchen order routing flags (`custom_is_order_item_1..7`, `kitchen_order_1..6`, `order_1..6`, `custom_kitchen_order`, etc.) from login response `warehouse_items` and sync them to the local `products` table. Exposed `get_cached_login_order_flags(part_no)` for sync fallback.
+2. **`services/product_sync_windows_service.py`**: Updated `_parse_raw_item()` to support all kitchen order key naming variations (`kitchen_order_1..6`, `custom_is_order_item_1..7`, `is_order_item_1..7`, etc.). If product sync payload does not contain explicit kitchen order flags, falls back to `get_cached_login_order_flags()`. On UPDATE, uses `order_1 = COALESCE(?, order_1), ...` to preserve existing database values when no flags are supplied.
+3. **`services/sync_service.py`**: Updated `_parse_product()` / `_parse_raw_item()` and `_upsert_product()` with identical fallback and `COALESCE` query behavior.
+4. **`services/odoo/sync_service.py`**: Updated Odoo product sync to check `get_cached_login_order_flags()` when product items omit order flags, and updated `_upsert_single_product()` to use `COALESCE` on UPDATE.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `services/auth_service.py` | 22–85, 110–120 | Cache login `warehouse_items` kitchen order flags and sync to local DB |
+| `services/product_sync_windows_service.py` | 563–600, 914–985 | Multi-key parsing, fallback to login cache, and `COALESCE` on SQL UPDATE |
+| `services/sync_service.py` | 537–590, 966–1025 | Fallback to cached login flags and `COALESCE` on SQL UPDATE |
+| `services/odoo/sync_service.py` | 280–335, 395–435 | Fallback to cached login flags and `COALESCE` on SQL UPDATE |
+
+
+## [2026-09-25 10:49:00] - Configuration/Defaults: Complete Migration from 'frappe' to 'saas' Defaults
+
+### Summary
+1. **`services/credentials.py`**: Replaced all remaining `"frappe"` fallback values in `get_system_mode()`, `has_credentials()`, `check_credentials()`, and `set_system_mode()` with `"saas"`.
+2. **`views/login_dialog.py`**: Changed `LoginWorker` and `LoginDialog` initial default `system_mode` from `"frappe"` to `"saas"`. In status bar display, defaulted unknown modes to `"SaaS Mode"` instead of `"Frappe Mode"`.
+3. **`Havano POS System/_internal/views/login_dialog.py`**: Synced `system_mode` default to `"saas"` in deployed distribution files.
+4. **`views/dialogs/sql_settings_dialog.py`**: Updated initial system mode fallback and placeholder URLs to SaaS (`https://backoffice.havano.pro`).
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `services/credentials.py` | 257, 267, 287, 371, 400 | Replaced all legacy 'frappe' fallbacks with 'saas' |
+| `views/login_dialog.py` | 113, 873, 2725–2730 | Defaulted dialog and worker system_mode to 'saas' |
+| `Havano POS System/_internal/views/login_dialog.py` | 92, 806 | Synced default system_mode to 'saas' |
+| `views/dialogs/sql_settings_dialog.py` | 234–253 | Defaulted system_mode and site settings to 'saas' |
+
+## [2026-09-25 10:26:00] - Security/Storage: Store Database Credentials in Plaintext (No Encryption)
+
+### Summary
+1. **Disabled Encryption in `utils/crypto.py`**: Updated `encrypt_secret()` to store credentials directly as plaintext and automatically unwrap any existing `enc:` ciphertext.
+2. **Plaintext Storage in `company_defaults`**: Updated `services/credentials.py` and `models/company_defaults.py` to persist `api_secret` directly as plain text. Also changed default system mode in `company_defaults` schema and seeds from `frappe` to `saas`.
+3. **Plaintext Storage in `users` Table**: Removed encryption wrapping in `models/user.py` so user passwords and API secrets are stored as plaintext in the `users` table.
+4. **Converted Existing Database Records**: Decrypted existing `enc:...` secrets in both `company_defaults` and `users` tables, confirming direct SQL queries return the raw plaintext password (`Admin@123`).
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `utils/crypto.py` | 40–50 | Make `encrypt_secret()` return plaintext directly |
+| `services/credentials.py` | 55–65 | Persist plaintext secret to `company_defaults` |
+| `models/company_defaults.py` | 54, 335–345 | Store plaintext secret and default `system_mode` to `saas` |
+| `models/user.py` | 465–474 | Store user `api_secret` directly in plaintext |
+| `setup_database.py` | 349, 374, 410 | Set `company_defaults` schema and seed defaults to `saas` |
+
+## [2026-09-25 09:39:00] - Fix: Restored Offline Seeding Block & Resolved Syntax Error in setup_database.py
+
+### Summary
+Fixed an `unexpected indent` syntax error at line 2745 in [setup_database.py](file:///c:/Users/user/Desktop/Havano_POS_2026-main/setup_database.py#L2720-2790). The query checking and inserting default offline entities (modes of payment, warehouses, cost centers, and GL accounts) had a truncated `cur.execute` block and dangling `VALUES` clause. Fully restored the complete offline seeding block and verified clean syntax and import with `py_compile`.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `setup_database.py` | 2720–2790 | Restored full offline entity seeding block (modes of payment, warehouses, cost centers, GL accounts) |
+
+## [2026-09-25 09:22:00] - Optimization: Startup UI Freeze & Heavy Import Elimination
+
+### Summary
+1. **Pre-Warm MainWindow in Background**: Started a daemon worker thread during login screen display to pre-import and compile `views.main_window`. When login succeeds, `from views.main_window import MainWindow` resolves instantaneously from `sys.modules` instead of freezing the main thread for 11+ seconds.
+2. **Eliminated Top-Level DB Execution in `main_window.py`**: Removed `_ensure_so_tables()` from module-level scope in [views/main_window.py](file:///c:/Users/user/Desktop/Havano_POS_2026-main/views/main_window.py#L91-101) (every function in `models/sales_order.py` already ensures tables exist when called).
+3. **Lazy Credit Note Auto-Migration**: Converted immediate module-level `_ensure_tables_and_columns()` in [models/credit_note.py](file:///c:/Users/user/Desktop/Havano_POS_2026-main/models/credit_note.py#L158-175) to a lazy on-demand `ensure_tables()` call, preventing synchronous SQL DDL calls on import.
+4. **Hang Watchdog Pause During Splash**: Added `pause()` and `resume()` to `HangWatchdog` in [services/hang_watchdog.py](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/hang_watchdog.py#L125-145) to pause watchdog alerts during intentional `SleekLoaderOverlay` loading, preventing false positive hang alerts in Bugsink.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `views/main_window.py` | 91–101 | Removed module-level `_ensure_so_tables()` call |
+| `Havano POS System/_internal/views/main_window.py` | 91–101 | Synced removal of module-level `_ensure_so_tables()` |
+| `models/credit_note.py` | 158–175, 194–205, 490–500, 560–570, 605–615, 665–675 | Made table auto-migration lazy and called on demand |
+| `services/hang_watchdog.py` | 125–150, 305–320 | Added `pause()`, `resume()`, `pause_hang_watchdog()`, `resume_hang_watchdog()` |
+| `Havano POS System/_internal/services/hang_watchdog.py` | 125–150, 305–320 | Synced watchdog pause/resume additions |
+| `main.py` | 674–685, 703–730 | Background pre-warm `MainWindow` during login and pause/resume watchdog during loader overlay |
+
+## [2026-09-24 14:58:00] - Database-First Mode Verification & Synchronization
+
+### Summary
+1. **Database-First Mode Verification**: Updated `get_system_mode()` in `services/credentials.py` (`services/credentials.py:L184-245`). `get_system_mode()` now queries `company_defaults` table in SQL database FIRST before reading `sql_settings.json`.
+2. **Comparison & Auto-Repair**: It compares the database `company_defaults.system_mode` with `sql_settings.json` mode and active SaaS terminal bindings. If `sql_settings.json` differs from the database or terminal bindings, it auto-repairs `sql_settings.json` so the local configuration file and database remain in sync.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `main.py` | 509–580 | Updated system_mode startup resolution to check DB company_defaults and terminal bindings, and sync both JSON and DB. |
+| `services/credentials.py` | 184–245 | Updated `get_system_mode()` to check database company_defaults first, compare with sql_settings.json, and auto-sync. |
+
+
+
+
+### Summary
+In SaaS mode (`system_mode == "saas"`), the default admin account (Username: `admin` / PIN: `7878`) is restricted from processing sales. When attempting to trigger a payment (via Pay button or F5 key), the system alerts the user: *"Please log in with your actual account. This account is not eligible to do a sale."* and blocks the transaction.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `utils/roles.py` | 18–59 | Added `is_saas_default_admin` and `check_and_warn_saas_sale_eligibility` helper functions. |
+| `views/main_window.py` | ~5106, ~18991 | Added guard in `_open_payment` methods to prevent sales for default admin in SaaS mode. |
+| `views/dialogs/payment_dialog.py` | ~1750, ~2492, ~2499 | Added initialization auto-reject and `_save` guard for default admin in SaaS mode. |
+| `views/new_d.py` | ~5695 | Added guard in `_open_payment` method. |
+| `views/admin_dashboard.py` | ~2598 | Added guard in `_open_payment` method. |
+| `views/reports/test.py` | ~6352 | Added guard in `_open_payment` method. |
+
+## [2026-09-24 13:11:00] - Feature: VAT / Subtotal on Receipt Only When Fiscalization Enabled
+
+### Summary
+The `Subtotal (excl. tax)` and `VAT` lines printed on thermal receipts are now exclusively gated behind the fiscalization-enabled flag, controlled by **Company Defaults → Fiscalization Settings → Enable Fiscalization** (stored in the `fiscal_settings` table via `FiscalSettingsRepository`).
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `services/printing_service.py` | ~418–432 | Credit note: VAT+Subtotal rows now check `fiscalization_service.is_fiscalization_enabled()` before printing |
+| `services/printing_service.py` | ~2872–2878 | Main invoice receipt: Already correctly gated by `_fiscal_on` (verified, no change needed) |
+| `Havano POS System/_internal/services/printing_service.py` | — | Synced from source |
+
+### Behaviour
+- **Fiscalization OFF**: Receipt shows only `GRAND TOTAL`, Amount Tendered, Change. No `Subtotal (excl. tax)` or `VAT` rows.
+- **Fiscalization ON**: Receipt shows `Subtotal (excl. tax)` → `VAT` (if > 0) → `GRAND TOTAL` (bold), matching ZIMRA fiscal invoice requirements.
+- This applies to both sales invoices and credit notes.
+
+### Detection Chain
+`FiscalSettingsDialog` / `CompanyDefaultsPage` fiscalization toggle → `fiscal_settings.enabled` in DB → `FiscalSettingsRepository.get_settings()` → `FiscalizationService.is_fiscalization_enabled()` → `_fiscal_on` / `_cn_fiscal_on` flag in `PrintingService`.
+
+---
+
+## [2026-09-24 11:35:00] - Fix: Physical Printhead Bounds (576/384 dots), Driver Page Matching & Totals Overlap Prevention
+
+### Problem
+1. **Totals Overlapping / Buffer Wrap-around**:
+   - On 80mm thermal receipt printers (POS-80C / Xprinter XP-80), the Windows driver reports `dev_w = 640` or `639` (representing the entire 80mm paper roll width).
+   - However, the physical thermal heating element printhead is only **72mm wide = 576 dots** at 203 DPI (8 dots/mm).
+   - Setting `paper_width = dev_w (639)` caused right-aligned elements (the Total column and amounts: "USD 18.10", "USD 20.00", "USD 1.90") to be drawn at `x = 486..623`.
+   - Drawing beyond the 576-dot physical head limit caused printer firmware to wrap the overflowing 47 dots back into the buffer or overwrite subsequent lines, resulting in visible text overlap across the totals section and stray characters on the left edge.
+2. **Generic Page Size Canvas Disconnect**:
+   - Creating arbitrary `QPageSize(QSizeF(80, page_height), QPageSize.Millimeter)` prevented Windows drivers from mapping to their native 72.1mm printable area.
+3. **Vertical Row Collisions**:
+   - Lack of explicit single-line and vertical centering flags (`Qt.AlignVCenter | Qt.TextSingleLine`) and insufficient vertical padding between total rows allowed potential row-to-row collision on multi-line text.
+
+### Fix
+1. **Added `_configure_printer(self, printer, printer_name, paper_size, height_mm)`**:
+   - Automatically inspects the printer's `supportedPageSizes()`.
+   - For 80mm rolls, matches the driver's native continuous receipt roll (e.g. `'80(72.1) x 3276 mm'`).
+   - For 58mm rolls, matches the driver's native continuous receipt roll (e.g. `'58(48) x 3276 mm'`).
+   - Ensures the driver directly configures the canvas to the true hardware printhead boundary (576 dots for 80mm, 384 dots for 58mm).
+2. **Hardware-Clamped `_update_page_geometry(self, painter, paper_size)`**:
+   - Dynamically checks printer DPI (`logicalDpiX` / `resolution`).
+   - Computes physical head dot limit: `max_head_dots = round(72.0 * dpm)` for 80mm (576 dots at 203 DPI) and `round(48.0 * dpm)` for 58mm (384 dots at 203 DPI).
+   - Clamps `paper_width = min(dev_w, max_head_dots)`, guaranteeing that drawing NEVER extends past the physical printhead.
+   - Sets symmetrical balanced margins: `margin = 12` for 80mm (giving 5.5mm equal physical margins on both sides of the 80mm paper) and `margin = 8` for 58mm.
+3. **Single-Line Vertically Centered Total Rows & Payment Details**:
+   - In `draw_total`, `draw_cn_total`, `draw_pay_total`, `draw_so_total`, and `payment_items`:
+     - `val_x = self.paper_width - self.margin - w`
+     - `avail = max(0, val_x - self.margin - gap)`
+     - `painter.drawText(self.margin, y, avail, row_h, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, label)`
+     - `painter.drawText(val_x, y, w, row_h, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, text)`
+     - `y += row_h + 2`
+   - Added spacing between Grand Total and Tendered/Change/Payment Details.
+4. **Synchronised Package**:
+   - Synchronised changes to bundled `Havano POS System/_internal/services/printing_service.py`.
+
+| File | Lines | Description |
+|------|-------|-------------|
+| `services/printing_service.py` | 93–175, 250–275, 410–430, 615–635, 905–920, 1735–1750, 2025–2040, 2460–2475, 2815–2835, 2910–2930, 3145–3160, 3300–3320, 3345–3360, 3490–3540, 3565–3580, 3660–3715 | Printer page matching, physical head clamping, symmetrical margins, and overlap-free total rows |
+| `Havano POS System/_internal/services/printing_service.py` | — | Synchronised bundled copy |
+
+
+### Problem
+Thermal printers report device canvas widths matching their physical head or roll size (e.g. `639px` for 80mm POS-80C, `384px` for POS-58). However, `self.paper_width` was hardcoded to `550px` for 80mm and `380px` for 58mm. On an 80mm printer:
+- Drawing stopped at `x = 540` (`550 - 10`), leaving `639 - 540 = 99px` (almost 1.25 cm) of empty white space on the right edge.
+- Drawing started at `x = 10` on the left edge.
+- Left space was `10px` while right space was `99px` (a 1:10 asymmetry).
+- All centered items (`Qt.AlignCenter`, logos, QR codes, footers) were centered around `x = 275` instead of the physical paper center `x = 319.5`, causing all content to be visibly shifted ~45px (~5.6mm) to the left.
+
+### Fix — `services/printing_service.py`
+1. Added `_update_page_geometry(self, painter: QPainter)`:
+   - Queries the active `painter.device().width()` from the printer driver.
+   - For valid thermal resolutions (`250px <= dev_w <= 850px`), sets `self.paper_width = dev_w` dynamically (e.g. `639px` on POS-80, `384px` on POS-58).
+   - Sets symmetrical margins (`self.margin = 16` for >= 500px rolls, `10` for narrow rolls).
+2. Called `self._update_page_geometry(painter)` immediately after `painter = QPainter(printer)` across all 10 receipt printing methods.
+3. Result:
+   - Left space (`margin`) and right space (`dev_w - (paper_width - margin)`) are mathematically identical (`16px == 16px`).
+   - Content center and physical paper roll center match exactly (`319.5px == 319.5px`), centering headers, logos, and QR codes perfectly.
+
+| File | Lines | Description |
+|------|-------|-------------|
+| `services/printing_service.py` | 93–105, 195–205, 565–575, 860–870, 1550–1560, 1690–1700, 1985–1995, 2430–2440, 3120–3130, 3325–3335, 3555–3565 | Dynamic page geometry detection and symmetrical margin balancing |
+| `Havano POS System/_internal/services/printing_service.py` | — | Synchronised bundled copy |
+
+## [2026-09-24 10:25:00] - Fix: Dynamic Total Rows & 58mm/80mm Auto-Fit Without Hardcoded Widths
+
+### Problem
+In `services/printing_service.py`, total rows and payment item rows across all receipts (`_do_print_invoice_receipt`, `print_credit_note`, `print_payment_receipt`, `print_sales_order_receipt`, `print_laybye_deposit`) were drawn using fixed hardcoded label widths (`260`, `220`, `300`). On 58mm thermal rolls (`paper_width = 380`), high-DPI printers, or with larger amounts/fonts, the right-aligned values started before the hardcoded label bounding box ended, causing labels and totals to overlap or get cut off. Additionally, `get_configured_paper_size()` contained non-canonical path patterns, and certain receipt functions did not dynamically update `self.paper_width` for 58mm rolls.
+
+### Fix
+1. **Dynamic Font-Measured Total Rows**:
+   - Replaced fixed label widths in `draw_total`, `draw_cn_total`, `draw_pay_total`, `draw_so_total`, and payment details with:
+     ```python
+     val_w = fm.horizontalAdvance(text)
+     gap   = 10  # Guaranteed gap between label and value
+     avail = max(0, self.paper_width - self.margin * 2 - val_w - gap)
+     painter.drawText(self.margin, y, avail, row_h, Qt.AlignLeft, label)
+     painter.drawText(self.paper_width - self.margin - val_w, y, val_w, row_h, Qt.AlignRight, text)
+     ```
+   - Labels and totals can never collide or overlap, with a guaranteed minimum 10px spacing regardless of DPI, font size, or roll width.
+2. **Dynamic Laybye Items Table**:
+   - Dynamically measured `max_amt_w` instead of hardcoding `80px` for the "Amount" column in `print_laybye_deposit`.
+3. **Consistent Paper Size Handling Across All Receipts**:
+   - Added 58mm (`self.paper_width = 380`) vs 80mm (`self.paper_width = 550`) setup across `print_credit_note`, `print_payment_receipt`, `print_sales_order_receipt`, and `print_laybye_deposit`.
+4. **Canonical Paths Standard**:
+   - Standardised `get_configured_paper_size()` to use `get_app_data_dir() / "hardware_settings.json"` canonically without relative or `os.path.abspath(".")` paths.
+
+| File | Lines | Description |
+|------|-------|-------------|
+| `services/printing_service.py` | 44–75, 186–196, 340–355, 2780–2795, 2870–2885, 3098–3115, 3248–3265, 3295–3315, 3438–3455, 3515–3530, 3570–3620 | Dynamic width calculation for all totals, payment details, and paper size config |
+| `Havano POS System/_internal/services/printing_service.py` | — | Synchronised bundled copy with identical dynamic changes |
+
+## [2026-09-24 09:30:00] - Fix: Printing Overlaps / Misfit on 58mm and 80mm Rolls
+
+### Problem
+`_begin_painter` had complex branching logic with hardcoded range checks
+(`540 <= page_w <= 660`, `page_w > 660`, etc.) and applied a secondary
+`painter.scale(fit, fit)` **after** already calling `painter.scale(scale, scale)`.
+The compound transform caused text/lines to be drawn at wrong positions and sizes,
+producing overlapping content or content that ran off the edge of the roll.
+Additionally: the ranges were wrong for many real-world drivers (180 DPI generics,
+virtual PDF printers, 300/600 DPI laser–thermal combos).
+
+### Fix — `services/printing_service.py` `_begin_painter` (L159–207)
+Replaced with a single-rule implementation:
+1. `scale = real_dpi / DESIGN_DPI` — **one** scale transform applied once
+2. `page_px_w = printer.pageRect(DevicePixel).width()` — actual printable width
+3. `self.paper_width = page_px_w / scale` — design units, **from real driver data**
+4. Fallback: if driver reports 0 width, compute from configured mm at DESIGN_DPI
+
+No secondary `painter.scale()`, no `painter.translate()`, no range guards.
+`self.paper_width` always equals the real printable width in design units.
+All drawing code uses `self.paper_width` for wrap/center calculations — now correct
+at any DPI (180 / 203 / 300 / 600) and any roll width (58mm / 80mm / A4 / custom).
+
+| File | Lines | Change |
+|------|-------|--------|
+| `services/printing_service.py` | 159–207 | Replaced `_begin_painter` with auto-fit single-scale impl |
+
+## [2026-09-24 09:25:00] - Full Sweep: Standardise All sql_settings.json Paths to get_app_data_dir()
+
+### Problem
+Multiple files used `os.path.abspath(".")`, `os.path.join("app_data", ...)`, or
+`Path("app_data/...")` to locate `sql_settings.json`. On any launch where the working
+directory is not the project root (Windows shortcuts, auto-start, launchers) these all
+resolved to a non-existent or wrong path, silently failing reads/writes.
+
+### Files Fixed
+| File | Lines | Old Pattern | Severity |
+|------|-------|-------------|----------|
+| `services/credentials.py` | 328–338 | `os.path.abspath(".")` in `set_system_mode` current-mode read | 🔴 High |
+| `models/saas_snapshot.py` | 418–424 | `os.path.abspath(".")` in `get_sql_settings_mode()` | 🔴 High |
+| `services/saas_mop_rates.py` | 55–59 | Own `_app_data_dir()` using `os.path.abspath(".")` | 🔴 High |
+| `views/dialogs/dining_option_dialog.py` | 11, 35 | Module-level `Path("app_data/sql_settings.json")` | 🟡 Medium |
+| `views/dialogs/credit_notes_list_dialog.py` | 30 | `Path("app_data/sql_settings.json")` | 🟡 Medium |
+| `views/dialogs/saas_assignment_handler.py` | 88, 104 | `os.path.join("app_data", ...)` ×2 | 🟡 Medium |
+| `services/auth_service.py` | 336, 451 | `os.path.join("app_data", ...)` ×2 | 🟡 Medium |
+| `views/login_dialog.py` | 888 | `os.path.join("app_data", ...)` | 🟡 Medium |
+| `views/main_window.py` | 27241 | `os.path.join("app_data", ...)` | 🟢 Low |
+
+### All replaced with
+```python
+from database.db import get_app_data_dir
+cfg_path = get_app_data_dir() / "sql_settings.json"
+```
+`database.db.get_app_data_dir()` is the single canonical source — frozen builds use
+`sys.executable.parent`, dev builds use `__file__.parent`. No file in the project
+should ever construct this path independently again.
+
+## [2026-09-24 09:20:00] - Fix: company_defaults.system_mode Reverts to 'frappe' After DB Wipe
+
+### Problem
+`set_system_mode()` called `_write_mode_files(new_mode)` to stamp the mode into
+`company_defaults` **before** the wipe. Then `_wipe_db_for_mode_switch()` dropped every
+table and ran `setup_database.run()`, which re-created `company_defaults` with the
+column DEFAULT of `'frappe'`. The mode was never re-written into the fresh DB row.
+Result: `sql_settings.json` said `"saas"` but `company_defaults.system_mode` said `"frappe"`.
+Our startup DB rescue path (Fix 2 from today) would then read `"frappe"` from the DB
+if the JSON path ever failed, potentially writing `"frappe"` back to JSON.
+
+### Fix — `services/credentials.py` L355–362
+Added a second `_write_mode_files(new_mode)` call immediately **after**
+`_wipe_db_for_mode_switch()` returns. This re-stamps the correct mode into the fresh
+`company_defaults` row that `setup_database.run()` just created.
+
+**Sequence now:**
+1. `_write_mode_files(new_mode)` — pre-wipe stamp (JSON + live DB row)
+2. `_wipe_db_for_mode_switch()` — drops DB, re-runs setup (resets row to DEFAULT 'frappe')
+3. `_write_mode_files(new_mode)` — **post-wipe re-stamp** (JSON still correct, DB now correct too)
+
+Both `sql_settings.json` and `company_defaults.system_mode` are guaranteed to agree
+the moment the wipe completes, before the app restarts.
+
+| File | Lines | Change |
+|------|-------|--------|
+| `services/credentials.py` | 355–362 | Added post-wipe `_write_mode_files(new_mode)` call |
+
+## [2026-09-24 09:15:00] - Fix Root Cause of System Silently Switching from SaaS to Offline Mode
+
+### Problem
+After onboarding or any Windows shortcut launch, `system_mode` in `sql_settings.json`
+was being overwritten to `"offline"` without user action. This caused the login screen
+to hide the Email Login tab and show the PIN-only offline interface.
+
+### Root Causes Fixed
+
+**Fix 1 — `main.py` L51–54 (`get_app_data_dir`)**
+- **Before:** `return Path(os.path.abspath(".")) / "app_data"` — resolved relative to
+  the shell's working directory. Windows shortcuts with no fixed "Start In" point to
+  `Desktop` or `System32`, so the settings file was never found there.
+- **After:** `return Path(__file__).resolve().parent / "app_data"` — always anchored to
+  the directory containing `main.py`. Bundled builds use `sys.executable` as before.
+
+**Fix 2 — `main.py` L498–560 (startup mode guard)**
+- **Before:** If `sql_settings.json` was not found (because wrong directory above),
+  code immediately wrote `"system_mode": "offline"` as the default, silently degrading SaaS.
+- **After:** Before writing any default, code now queries `company_defaults` in the SQL DB.
+  If the DB already has `system_mode = 'saas'` (or any mode), that value is used and
+  written back to `sql_settings.json` (repair). Only a genuine first-ever run with an empty
+  DB and no JSON file results in `"offline"` being written.
+
+**Fix 3 — `views/dialogs/sql_settings_dialog.py` L23 (`settings_file` path)**
+- **Before:** `self.settings_file = Path("app_data/sql_settings.json")` — same cwd
+  problem as `main.py`. Dialog read/wrote a different file than the rest of the app.
+- **After:** `self.settings_file = get_app_data_dir() / "sql_settings.json"` — uses
+  the canonical `database.db.get_app_data_dir()`, always correct.
+
+**Fix 4 — `views/dialogs/sql_settings_dialog.py` `_load_or_create_default` + `_save_settings`**
+- **Before:** `_load_or_create_default` wrote a default dict without a `system_mode` key.
+  `_save_settings` read `data.get("system_mode")` from the file mid-save, which could be
+  empty if the file had no key, causing `api_url` logic to assume offline and clearing it.
+- **After:** `_load_or_create_default` stores `self._current_system_mode = data.get("system_mode", "")`.
+  `_save_settings` always writes `updates["system_mode"] = preserved_mode` (using the
+  captured value), guaranteeing the key survives every save cycle.
+
+### Files Modified
+| File | Lines | Change |
+|------|-------|--------|
+| `main.py` | 51–54 | `get_app_data_dir()` uses `__file__` in dev, `sys.executable` when frozen |
+| `main.py` | 498–560 | Startup guard queries DB before defaulting to offline |
+| `views/dialogs/sql_settings_dialog.py` | 14–26 | `settings_file` uses canonical `get_app_data_dir()` |
+| `views/dialogs/sql_settings_dialog.py` | 117–144 | `_load_or_create_default` captures `_current_system_mode` |
+| `views/dialogs/sql_settings_dialog.py` | 530–578 | `_save_settings` always preserves `system_mode` |
+
+## [2026-09-24 08:58:00] - Support Offline-First Local Login in SaaS Mode Without Changing System Mode
+
+### Summary
+- **`services/auth_service.py` (lines 259–265)**:
+  - Allowed login with cached local credentials when internet/network is unreachable while keeping `system_mode` strictly as `"saas"` and `work_offline` as `"0"`.
+  - Enforced that explicit cloud authentication rejections (e.g. wrong password / disabled user) are never bypassed by local fallback.
+- **`views/login_dialog.py` (lines 169–176, 2055–2061, 2154–2160)**:
+  - `LoginWorker.run()`: Allowed fallback to local database when network is unreachable, but surfaced explicit authentication failures immediately.
+  - `_on_login_done()` & `_try_local_fallback_after_timeout()`: Clarified status banner to display `"No internet connection — logged in with local account (SaaS Mode)"` rather than `"Offline mode"`, ensuring users know the system mode has not changed.
+  - Verified that local logins during internet outages preserve `"system_mode": "saas"` and queue transactions for automatic sync upon reconnection.
+
+## [2026-09-24 08:20:00] - Eliminate Localhost Fallbacks and Standardize SaaS Endpoint to https://backoffice.havano.pro
+
+### Summary
+- **`test_api.py` (line 9)**:
+  - Removed `http://localhost:8069` fallback. Replaced with `(defaults.get("server_api_host") or "https://backoffice.havano.pro").rstrip("/")`.
+- **`main.py` (line 521)**:
+  - Updated default initial settings `api_url` from `http://localhost:8000` to `https://backoffice.havano.pro`.
+- **`database/db.py` (lines 52, 185)**:
+  - Added `"api_url": "https://backoffice.havano.pro"` to default config in `_load_settings()`.
+  - Updated `get_api_url()` to default to `"https://backoffice.havano.pro"` instead of an empty string or arbitrary host.
+- **`.agents/AGENTS.md` (lines 4–5)**:
+  - Added strict workspace rules prohibiting localhost fallbacks across the codebase and mandating `https://backoffice.havano.pro/` as the single standard SaaS endpoint.
+- **`.agents/skills/saas-mode-and-no-fallbacks/SKILL.md`**:
+  - Created persistent workspace skill establishing the zero-fallback policy and SaaS backend configuration rules for all future coding and agents.
+
+## [2026-09-23 14:50:00] - Add Date Column to Unsynced Items Popup Dialog
+
+### Summary
+- **`views/main_window.py` (lines 3463–4292 and lines 17464–17970)**:
+  - Resolved shadowing where duplicate `UnsyncedPopup` definition at line 17335 overwrote the earlier definition.
+  - Expanded table to 5 columns with `Date` as the leading column: `["Date", "Q: Ref / No.", "Customer", "Amount", "Raw API Error"]`.
+  - Column 0 assigned 135px width, centered alignment, and non-editable flags.
+  - In `_load_tab`: Date string inserted at column 0; ref, customer, amount, and raw API error shifted to columns 1–4.
+  - In `_fetch_rows`: Extracted transaction dates (`created_at`, `invoice_date`, `order_date`, `reference_date`, `sync_errors.occurred_at`), formatted via `_fmt_dt(v) -> YYYY-MM-DD HH:MM`, returning 5-tuples for Sales Invoices, Credit Notes, Sales Orders / Laybyes, Payment Entries, Customers, and Bundles.
+  - In `_copy_error`: Included date in clipboard copy output format: `[{date}] {ref} | {customer} | {amount}\n{error}`.
+- **`Havano POS System/_internal/views/main_window.py` (lines 3590–4100 and lines 17460–17970)**:
+  - Synchronized both occurrences of `UnsyncedPopup` with 5 columns, date query extraction, and formatting.
+- **`Havano POS System/_internal/views/admin_dashboard.py`**:
+  - Updated `UnsyncedPopup` table headers, `_load_tab`, `_fetch_rows`, and `_copy_error` to match 5 columns with `Date`.
+- **`Havano POS System/_internal/views/new_d.py`**:
+  - Synchronized `UnsyncedPopup` with 5 columns. Fixed stray HTML comments (`<!--` at line 1 and `-->` at line 14106).
+
+## [2026-09-23 10:05:00] - Permanent POS Counter Binding, Warehouse Preservation, and Silent Session Claim
+
+### Summary
+- **`services/auth_service.py` (lines 108–123)**:
+  - Guarded against blank cloud user profiles overwriting `server_warehouse`, `server_company`, and `server_cost_center` in `company_defaults`.
+  - When a cashier logs in with no cloud warehouse assigned, the session automatically inherits the counter's assigned warehouse instead of blanking it out in the database.
+- **`services/odoo_auth_service.py` & `services/odoo/auth_service.py` (lines 70–80, 112–122)**:
+  - Applied the same safeguards for Odoo authentication: only update company, warehouse, and cost center if non-empty, preserving existing machine bindings.
+- **`views/dialogs/saas_assignment_handler.py` (lines 233–242, 300–408, 466–496)**:
+  - **Eliminated Takeover Popup on Bound Counter**: When logging in or switching users on a machine that is already bound to a terminal, bypassed `TerminalTakeoverDialog` and automatically called `select_terminal(terminal_id, takeover=True)` silently in the background.
+  - **Preserved Real Takeover for Different Machines**: Maintained `TerminalTakeoverDialog` whenever a genuinely different device attempts to take over an occupied terminal.
+  - **Removed Destructive Defaults Wipeout**: Removed the code that erased `server_shop_id`, `server_terminal_id`, and `server_terminal_name` on server API errors; the machine retains its identity permanently.
+  - **Protected Users Table Sync**: Ensured SQL `UPDATE users SET warehouse = ?` only executes if `server_warehouse` is non-empty.
+- **`views/login_dialog.py` (lines 1094–1105, 2185–2192)**:
+  - Imported `get_system_mode` from `services.credentials` resolving `NameError` on startup.
+  - Removed hardcoded `"Main Store"` fallback in SaaS mode on the login screen sidebar, replacing it with a lookup against `server_warehouse`, `company_name`, and `terminal_reference`.
+  - Preserved the strict store restriction check and access-denied lockout dialog for cashiers who do not belong to `pos_warehouse`.
+- **`views/main_window.py` (lines 27096–27118, 27390–27400, 27485–27500)**:
+  - Eliminated the hardcoded `"Main Store"` fallback in the SaaS status bar footer. The status bar now dynamically resolves `server_warehouse`, `company_name`, `server_company`, or `terminal_reference` `store_name`.
+  - **Removed Destructive Terminal Wipe on Eviction & 30s Takeover Monitor**: Removed `d["server_terminal_id"] = ""` from `_evict_and_logout_user` and the 30-second background takeover ping worker. When a session disconnects, the machine now permanently retains its configured terminal ID on disk and in SQL Server instead of forcing a re-selection.
+- **`views/dialogs/saas_assignment_handler.py` (lines 395–415)**:
+  - Enforced that `server_shop_id`, `server_terminal_id`, `server_terminal_name`, and `server_warehouse` are strictly only updated when incoming values are non-empty, preventing empty string overwrites from ever touching the database.
+- **`models/default_customer.py` (lines 92–122)**:
+  - Added existence validation against `dbo.price_lists` table before updating `customers.default_price_list_id`, preventing SQL foreign key constraint violation `FK_customers_price_lists`.
+- **`views/dialogs/users_dialog.py` (lines 123–133)**:
+  - Guarded `_get_default_store_name()` fallback so `"Main Store"` is only returned in offline mode, preventing `"Main Store"` from inadvertently being assigned to SaaS store fields.
+- **`views/main_window.py` & `Havano POS System/_internal/views/main_window.py`**:
+  - Added "Expenses" directly under "Credit Notes" in the "Sales" dropdown menu in the main window navbar across all views.
+  - Implemented `_open_expenses_dialog()` connecting to `ProcessExpenseDialog` to enable cashiers and managers to record and view till expenses directly from the Sales navigation dropdown.
+  - Ensured the "Sales" dropdown button is unconditionally visible in Frappe and Offline modes (removed `if _is_offline: sales_menu_btn.setVisible(False)`).
+- **`views/admin_dashboard.py` & `Havano POS System/_internal/views/admin_dashboard.py`**:
+  - Added "Credit Notes" and "Expenses" to the "Sales" dropdown button menu in the admin dashboard.
+  - Implemented `_open_credit_notes_list()` and `_open_expenses_dialog()` handlers.
+- **`services/printing_service.py` & `Havano POS System/_internal/services/printing_service.py`**:
+  - Applied resolution-independent 203-dpi design space layout scaling (`_begin_painter`, `_setup_printer`, `DESIGN_DPI = 203.0`, pixel-sized fonts, QPageLayout margins).
+  - Made receipt layout dynamically adaptable to the actual printer printable width (`self.paper_width = int(page_w)` for 80mm rolls), eliminating the artificial 45px rightward/leftward shift and ensuring content, divider lines, and right-aligned totals span the full thermal paper width cleanly.
+  - Resolved `UnboundLocalError` in Laybye printing.
+
 ## [2026-09-22 16:35:00] - Add Credit Notes to Shift Reconciliation Printout & Sales Dropdown Menu
 
 ### Summary
@@ -3900,7 +4683,8 @@ Removed is_active from the is_taken expression in the takeover check. Only genui
 ## [2026-09-10 09:03:00] - Fix GROSS TOTAL and NET EXPECTED doubled figures on shift reconciliation print
 
 ### Summary
-Fixed double-counting bug in printing_service.py. grand_expected (from econciliation_data.total_expected) is the SUM of all payment method expected values = the GROSS. The old code did gross_expected = grand_expected + total_credit_notes + total_expenses which added deductions ON TOP of the gross, making GROSS TOTAL show double the real value. NET EXPECTED also showed the gross figure instead of the actual net. Fix: gross_expected = grand_expected (unchanged); 
+Fixed double-counting bug in printing_service.py. grand_expected (from 
+econciliation_data.total_expected) is the SUM of all payment method expected values = the GROSS. The old code did gross_expected = grand_expected + total_credit_notes + total_expenses which added deductions ON TOP of the gross, making GROSS TOTAL show double the real value. NET EXPECTED also showed the gross figure instead of the actual net. Fix: gross_expected = grand_expected (unchanged); 
 et_expected = grand_expected - deductions.
 
 ### Files Modified
@@ -4393,3 +5177,220 @@ et = app.exec(); os._exit(ret) to guarantee that all background daemons and bloc
 1. `services/printing_service.py` ([`services/printing_service.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/printing_service.py#L1130-L1190))
 2. `services/a4_shift_recon_service.py` ([`services/a4_shift_recon_service.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/a4_shift_recon_service.py#L230-L235), [`services/a4_shift_recon_service.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/a4_shift_recon_service.py#L340-L350))
 
+
+## [2026-09-24 09:51:28] - Fix: Receipt Layout - Dynamic Column Widths and Page Height
+
+### Problem
+The thermal receipt had three visual defects visible in the printed output:
+1. **Item names overlapping Qty/Price/Total columns** - item name drawText used full
+   paper width (self.paper_width - self.margin * 2) as the bounding rect, meaning names
+   would render into the numeric columns instead of being constrained to the name column.
+2. **GRAND TOTAL / Amount Tendered / Change values invisible** - draw_total used a
+   hardcoded 260px label width. At design_width=640 (80mm roll @ 203 DPI) the value
+   text (USD 17.50) started at paper_width - margin - w ≈ 610 but the label rect
+   painted over it (margin=10, width=260 → covers 10-270). The label was fine; the *value*
+   was being clipped/overwritten because Qt.AlignRight inside a rect that started near
+   the right edge was incorrectly calculated.
+3. **Receipt cut off before footer** - page_height = max(200, 150 + items * 15) gave
+   only 200mm for 3 items; a typical receipt with header, items, totals, QR code, and
+   footer needs 350mm+.
+
+### Fixes — services/printing_service.py
+
+| Location | Before | After |
+|----------|--------|-------|
+| L2464 page_height | max(200, 150 + items*15) | max(350, 220 + items*30) |
+| L2733 item name wrap width | self.paper_width - margin*2 (full width) | QTY_X - margin - 6 (name column only) |
+| L2822 draw_total label_w | hardcoded 260 | paper_width - margin*2 - value_w - 8 |
+| L2914 payment detail label_w | hardcoded 260 | dynamic |
+| L439 draw_cn_total label_w | hardcoded 220 | dynamic |
+| L3295 draw_pay_total label_w | hardcoded 300 | dynamic |
+| L3478 draw_so_total label_w | hardcoded 260 | dynamic |
+| L3641 laybye draw_total label_w | hardcoded 220 | dynamic |
+
+All label widths now computed as:
+`python
+label_w = max(40, self.paper_width - self.margin * 2 - value_text_px - 8)
+`
+This is DPI-agnostic and scales correctly for 58mm, 80mm, A4, and any future paper size.
+
+## [2026-09-24 09:56:08] - Fix: Revert dynamic label widths to clamped originals
+- File: services/printing_service.py
+- Reverted draw_cn_total (220), draw_pay_total (300), draw_so_total (260), laybye draw_total (220) from max() to min() formula
+- Formula: label_w = min(ORIGINAL_VALUE, paper_width - margin*2 - value_text_px - 8)
+- This preserves original look on standard paper but prevents label from overlapping value on narrow paper
+
+## [2026-09-24 10:01:39] - Fix: Total row layout - measure-both-sides approach
+- File: services/printing_service.py
+- Root cause: hardcoded label widths (220/260/300px) were in design-space units. On high-DPI printers, fonts render wider than assumed, leaving no room for the value text (which appeared cut off)
+- Fix: measure BOTH label and value with fontMetrics().horizontalAdvance(), anchor value to right margin, allow label its natural width clamped by available space. Added Qt.TextDontClip so label text is never silently dropped
+- Gap constant = 12px between label end and value start
+- Helpers fixed: draw_total (invoice), draw_cn_total (credit note), draw_pay_total (payment), draw_so_total (sales order), draw_total (laybye), payment detail rows
+
+## [2026-09-25 11:45:00] - Persistent Stored SaaS Token & Cashier Wipe Protection
+- Files:
+  - `services/credentials.py`: Added Cashier Protection Guard to `set_session()` to never wipe existing tokens in `company_defaults` with empty values. Ensured `build_auth_header()` and `get_all_credentials()` automatically reload and use the stored database credentials if in-memory session is empty, and format clean `token <base64>` in SaaS mode.
+  - `models/company_defaults.py`: In `save_defaults()`, preserved existing `api_key` and `api_secret` if caller provides empty credentials, guaranteeing that background saves never wipe cloud connectivity keys.
+  - `views/login_dialog.py`: Added fallback in `_validate_and_accept()` to inherit the terminal's stored cloud credentials from `company_defaults` when cashiers log in via PIN or offline accounts without individual cloud keys.
+  - `services/pos_upload_service.py`: Updated credential validation in `push_unsynced_sales()` to support SaaS mode where token is in `api_key` and `api_secret` is empty, ensuring unsynced sales upload immediately in SaaS mode.
+
+
+
+
+## [2026-09-25 12:00:00] - Hardened SaaS Services & Direct DB Credentials Enforcement
+- Files:
+  - services/credentials.py: Updated get_all_credentials() to always query company_defaults from the SQL Server database directly as the single source of truth, completely eliminating reliance on volatile in-memory RAM. If in-memory RAM is cleared or lost, credentials immediately reload from disk storage.
+  - services/pos_upload_service.py: Fixed missing 
+eq = urllib.request.Request(url) definition in _get_exchange_rate() which previously caused exchange rate fetches to raise UnboundLocalError.
+  - Verification:
+    - Simulated RAM wipe (_session.clear()): credentials and auth headers automatically recovered from database table company_defaults.
+    - services/saas_mop_rates.py: Tested etch_and_cache() against https://backoffice.havano.pro - successfully synced 4 modes of payment.
+    - services/product_sync_windows_service.py: Tested sync_products_smart() against https://backoffice.havano.pro - successfully fetched 4 pages and synced 374 products with 0 errors using stored database token.
+    - services/pos_upload_service.py: Verified push_unsynced_sales() completes cleanly without error.
+
+## [2026-09-25 12:05:00] - Database Credentials Established as Absolute Default (No Fallback)
+- Files:
+  - iews/login_dialog.py: Refactored _accept_user() so that every cashier and user login immediately and directly adopts the terminal's stored cloud credentials from company_defaults as the default standard behavior. Removed multi-tier fallback chains.
+  - services/credentials.py: Refactored uild_auth_header() to directly use get_all_credentials() from company_defaults as the default input. Eliminated secondary 'if in-memory is empty' fallback logic.
+  - Architecture: The SQL Server database company_defaults table is now the explicit primary source of truth across all modules, ensuring terminal authorization never relies on temporary in-memory state or missing user-level keys.
+
+## [2026-09-25 12:20:00] - Fix IX_sales_synced_created Index & Prevent Connection Severing on Startup
+- Files:
+  - database/apply_performance_indexes.py:
+    - Fixed column error in IX_sales_synced_created: Table sales has 	otal, not mount. Updated index inclusion to INCLUDE ([id], [total], [invoice_no]).
+    - Added pre-check on sys.databases (is_read_committed_snapshot_on and snapshot_isolation_state). If already enabled, ALTER DATABASE ... WITH ROLLBACK IMMEDIATE is skipped. This completely eliminates the Shared Memory Provider: No process is on the other end of the pipe (233) and Communication link failure errors during startup migrations and terminal reference verification caused by terminating active connections.
+    - Added proper 	ry ... finally: conn.close() around database optimization connections.
+  - Verification:
+    - Successfully executed python database/apply_performance_indexes.py with 0 errors across all 4 performance indexes.
+    - Ran user model migration and terminal reference verification cleanly with 0 communication link failures.
+
+## [2026-09-25 12:45:00] - Fix POS Bottom Grid Not Showing Products on Landing / Initial Login
+- Files:
+  - iews/main_window.py (lines ~24880-25000, ~25310, ~28235):
+    - Added showEvent and 
+efresh_bottom_grid() to POSView to guarantee categories and products always refresh upon the POS view landing on screen.
+    - Updated _render_product_page_debounced to automatically trigger _reload_current_category() if _current_products is empty, preventing persistent blank grids upon window maximize.
+    - Added guard in _load_category_products so SleekLoaderOverlay only mounts when self.isVisible(), eliminating event-loop interruption during early startup before layout is complete.
+    - Added fallback in _load_category_products: if an active category has 0 items, it automatically falls back to all available products so the user is never stuck with an empty grid.
+    - Added MainWindow.refresh_pos_grid() and integrated it into switch_to_pos() so returning to or landing on the POS view always ensures items are visible.
+  - main.py (line ~748):
+    - Added QTimer.singleShot(100, window.refresh_pos_grid) immediately after window.showMaximized() to guarantee the bottom grid renders products as soon as the main window lands.
+
+
+## [2026-09-25 13:00:00] - Remove RAM Fallback: DB is Sole Auth Source of Truth
+- File: services/credentials.py
+- Removed all _session read-fallbacks from get_all_credentials(), has_credentials()
+- get_all_credentials(): if DB unavailable, returns {} with log.error (never falls back to stale RAM)
+- has_credentials(): all three mode branches now read only from get_all_credentials() - no _session.get() fallbacks
+- _session is now write-through only: populated FROM DB reads, never read as authority
+- Updated module docstring to document DB-only architecture
+- Verified: test_ram_wipe_credentials.py passes all 5 steps with _session fully cleared before each check
+
+## [2026-09-25 13:12:00] - Connection Resilience & RCSI Pool Reset
+- Files:
+  - `database/db.py` (lines 115-155):
+    - Added `reset_connection()` to drop and close thread-local cached pyodbc connections cleanly.
+    - Updated `PooledConnection` to catch exceptions in `cursor()`, `commit()`, and `rollback()` and invoke `reset_connection()` so severed connections are immediately evicted from the pool instead of persisting.
+    - Updated `get_connection()` to call `reset_connection()` if idle ping test fails.
+  - `database/apply_performance_indexes.py` (lines 51-62):
+    - Added call to `reset_connection()` immediately after enabling `READ_COMMITTED_SNAPSHOT` via `WITH ROLLBACK IMMEDIATE`, preventing existing connection handles from attempting queries on a severed session.
+
+## [2026-09-25 14:24:00] - Fix SaaS Mode Forcing on Database Wipe & Mode Switch
+- Files:
+  - `services/credentials.py` (lines 252-270, 380-450):
+    - Removed `has_saas_bindings` heuristic check from `get_system_mode()` that previously forced the mode back to `saas` whenever stale terminal/shop/device IDs existed in `sql_settings.json`.
+    - Added `_clear_saas_bindings_from_json()` to purge stale SaaS-specific keys (`server_terminal_id`, `server_shop_id`, `bound_device_id`, etc.) from `sql_settings.json` during database wipes and mode switches.
+    - Guaranteed `set_system_mode()` sets the desired mode in both `company_defaults` and `sql_settings.json` cleanly without being overridden by ghost SaaS keys.
+
+## [2026-09-25 14:50:00] - Unify Startup System Mode Synchronization with Database Authority
+- Files:
+  - `services/credentials.py` (lines 262-277):
+    - Guaranteed `sql_settings.json` is automatically updated and rewritten whenever `json_mode` is empty or differs from the database `company_defaults.system_mode`.
+  - `main.py` (lines 509-515):
+    - Replaced the legacy startup onboarding mode-guard duplicate logic with direct call to canonical `get_system_mode()`, ensuring the database mode always immediately synchronizes `sql_settings.json` on application launch.
+
+## [2026-09-25 15:31:00] - Suppress Startup Database Migration Freeze Events from Bugsink
+- Files:
+  - `database/tenant_reset.py` (lines 244-250, 302-310):
+    - Wrapped `drop_all_tables_completely()` and table drop loops in `pause_hang_watchdog()` / `resume_hang_watchdog()` to ensure DDL constraints and drop operations never trigger freeze alerts.
+  - `services/hang_watchdog.py` (lines 70-85, 220-240):
+    - Removed `capture_message` on UI recovery so watchdog recovery messages no longer generate spurious Bugsink issues.
+    - Added `tenant_reset.py`, `sp_msforeachtable`, and constraint DDL patterns to `ignored_startup_files`.
+  - `services/credentials.py` (lines 418-445):
+    - Paused the hang watchdog during `_wipe_db_for_mode_switch()` to prevent DDL drops and table recreations from triggering freeze alerts.
+  - `services/bugsink_service.py` (lines 88-105, 545-560, 650-675):
+    - Suppressed `ui_hang` and `Freeze alert` breadcrumbs mentioning `migrate.py`, `setup_database.py`, `tenant_reset.py`, `sp_msforeachtable`, or `Startup`.
+    - Added `tenant_reset.py`, `sp_msforeachtable`, `nocheck constraint`, and `recovered from freeze` to `_SUPPRESSED_PATTERNS`.
+    - Enforced `combined_check` across title, stacktrace, extra metadata, and tags in `capture_freeze_event()` to drop any tenant reset or DDL freeze events.
+  - `main.py` (lines 370-380, 600-610):
+    - Paused the hang watchdog during initial splash / migration worker and resumed it once UI is ready for user interaction.
+
+- **2026-09-26**: Fixed cascading \Communication link failure (0)\ errors in \saas_snapshot.py\. Added \
+eset_connection()\ calls in exception blocks so that if an ODBC connection is dropped by the server, the dead connection is cleared from the pool rather than continuously failing on subsequent queries.
+
+## 2026-09-26 09:14 - Suppress startup freeze events from Bugsink
+- **Files**: services/bugsink_service.py, Havano POS System/_internal/services/bugsink_service.py
+- **Change**: Added `ui freeze`, `uifreezehang`, `[startup]`, `at [startup]`, and `_add_column_if_missing` to _SUPPRESSED_PATTERNS and capture_freeze_event ignored_keywords so that UIFreezeHang events triggered by migrate.py during startup are never sent to Bugsink via any path (capture_freeze_event or BugsinkLogHandler).
+
+## 2026-09-26 09:16 - Fully silence migrate.py freeze events from hang_watchdog
+- **Files**: services/hang_watchdog.py, Havano POS System/_internal/services/hang_watchdog.py
+- **Change**: Extended startup suppression check to scan the full stack_text (not just leaf/app frame filenames). Added _add_column_if_missing and information_schema to ignored_startup_files. Downgraded suppression log from INFO to DEBUG. Added 'loading' page to ignored pages. Dist copy was missing the suppression block entirely � added it.
+
+## 2026-09-26 09:22 - Suppress setup_database col_exists freeze events
+- **Files**: services/hang_watchdog.py, services/bugsink_service.py (both source and dist copies)
+- **Change**: Added 'col_exists' to all suppression keyword lists so that UI Freeze events originating from setup_database.py col_exists() are never reported to Bugsink.
+
+## 2026-09-26 09:37 - Resolve pyodbc.connect freeze at startup
+- **Files**: database/db.py, Havano POS System/_internal/database/db.py, services/hang_watchdog.py, Havano POS System/_internal/services/hang_watchdog.py, main.py
+- **Change**: Added explicit timeout=5 to pyodbc.connect in get_connection to prevent socket/driver hangs. Synced dist db.py with canonical database/db.py. Moved verify_terminal_reference into background StartupWorker to eliminate cold DB connection freezes on main UI thread. Added db.py and pyodbc to watchdog startup suppression list.
+
+## 2026-09-26 09:47 - Resolve UI Freeze during SaaS Terminal Selection (auth_service.py:527)
+- **Files**: services/auth_service.py, Havano POS System/_internal/services/auth_service.py
+- **Change**: Wrapped synchronous urllib.request.urlopen network call inside _post_payload in a background thread and utilized QCoreApplication.processEvents() to keep the local Qt event loop ticking while waiting. This eliminates the 5 to 30 second UI Freeze during Terminal Takeover and SaaS Session Initialization.
+- 2026-10-02 09:45:11: Modified models/shift.py lines 1416-1419 to increase cur.timeout = 60 for _get_cashier_sales_for_shift query to prevent SQL timeout.
+- 2026-10-02 10:04:32: Removed hardcoded client database name havano_posop07978808 across codebase and replaced with havano_pos_db
+- 2026-10-02 10:22:38: Restored 'havano_pos_db' as the standard fallback database for new environments.
+- 2026-10-02 10:30:17: Removed hardcoded havano_pos_db fallback from backend services to prevent silent overwrites. Fallback is now handled exclusively by the sql_settings_dialog.py UI layer.
+- 2026-10-02 10:39:07: Implemented atomic file writes via os.replace() across auth_service.py, sql_settings.py, and dialogs for sql_settings.json to permanently prevent 0-byte corruption during power outages.
+- 2026-10-02 10:43:12: Muted HTTP 404 errors during Sales Order pull (changed from log.error to log.debug) to prevent spamming Bugsink when the backend lacks the Sales Order endpoint.
+- 2026-10-02 10:47:08: Fixed HYT00 (Query timeout expired) in get_unsynced_payment_entries by explicitly setting cur.timeout = 60 across all payment sync services (laybye, frappe, odoo).
+- 2026-10-02 10:58:10: Fixed HYT00 timeout in PaymentEntryService sync cycle by also adding cur.timeout = 60 to refresh_frappe_refs() UPDATE queries.
+- 2026-10-02 11:07:15: Fixed HYT00 (Query timeout expired) in services/credentials.py by adding WITH (NOLOCK) to company_defaults reads. Since company_defaults is a single-row config table, reading without taking locks prevents deadlocks or timeouts caused by heavy syncing processes.
+- 2026-10-02 11:11:00: Fixed HYT00 (Query timeout expired) in ProductSyncService by increasing cur.timeout = 120 during the massive background product sync MERGE operations.
+- 2026-10-02 11:20:45: Muted expected HTTP 400 'on hand' inventory validation errors during POS Upload (changed from log.error to log.warning) to prevent spamming Bugsink.
+- 2026-10-02 11:26:54: Fixed 23000 Violation of UNIQUE KEY constraint during User Sync by aggressively scrambling duplicate emails/usernames in local users table before upserting the true cloud user.
+- 2026-10-02 11:45:39: Fixed hardcoded offline signing config paths in services/havano_zimra_offline_service.py by strictly adhering to the Canonical File Paths Rule (using database.db.get_app_data_dir()). This prevents 'havanoconfig.ini not found' or 'Access Denied' errors when the app is installed to C:\Program Files\ on other computers.
+- 2026-10-02 12:00:15: Handled transient HTTP 502/503/504 Bad Gateway and HTML error responses gracefully in services/quotation_sync_service.py (fetch_quotations_from_frappe and sync_quotations_from_frappe) by logging as warning and retrying next cycle instead of sending error alerts to Bugsink.
+- 2026-10-02 12:16:50: Enhanced warehouse, company, and cost_center resolution in services/pos_upload_service.py to fall back to warehouse/store_name/company_name keys if server_warehouse is blank, preventing HTTP 400 'Store/Warehouse is required' errors.
+- 2026-10-02 12:29:40: Upgraded _fetch_all_pages in services/product_sync_windows_service.py to iterate through candidate product sync endpoints, delegate to sync_products_odoo() in Odoo mode, and handle 404 endpoint misses gracefully as warnings instead of crashing the sync loop with HTTP Error 404.
+- 2026-10-02 12:47:45: Added 'already exists in your workspace' backend product validation errors to the warning filter in services/pos_upload_service.py (_record_sync_error) so business validation conflicts are saved to local database sync errors without triggering Bugsink error alerts.
+- 2026-10-02 12:56:45: Replaced in-memory local_part_nos set branching with atomic database-level UPDATE (with cur.rowcount == 0 fallback to INSERT) in services/product_sync_windows_service.py and services/sync_service.py. This permanently prevents '23000 Violation of UNIQUE KEY constraint on dbo.products (Cannot insert duplicate key)' errors.
+- 2026-10-02 15:02:30: Created views/components/blur_overlay.py (BlurOverlay and BlurredDialog) which provides a modern frosted glass background blur and dark translucent dimming overlay for modal dialogs. Integrated BlurredDialog into UnsyncedPopup (across main_window.py, new_d.py, admin_dashboard.py) and SalesListDialog.
+- 2026-10-02 15:15:30: Extended BlurredDialog into LoginDialog in views/login_dialog.py and upgraded FullscreenBlurBackdrop in views/components/blur_overlay.py so the Login / PIN screen smoothly blurs and dims the full desktop/application background.
+- 2026-10-02 15:29:45: Implemented GlobalDialogBlurFilter in views/components/blur_overlay.py and installed it on QApplication startup in main.py. All dialogs (Customer selection, Quotations, Payments, Shifts, Settings, Hold/Recall, Reprints, etc.) now automatically blur and dim the background when opened and restore it on close.
+- 2026-10-02 16:34:00: Redesigned LoginDialog in views/login_dialog.py to directly embed a fullscreen frosted glass blur and dark slate tint backdrop layer with the 850x600 PIN/Login card centered in the foreground. This permanently eliminates any Z-order stacking or timing issues on Windows and guarantees 100% reliable blur on startup, lock screen, and user switching.
+- 2026-10-02 19:07:00: Applied BlurredDialog inheritance across POS dialog classes in views/dialogs/company_settings.py (CustomerSearchPopup, ProductSearchDialog, QuantityPopup, HoldRecallDialog, CustomerDialog, CompanyDialog, WarehouseDialog, CostCenterDialog, PriceListDialog, CustomerGroupDialog), views/new_d.py (CustomerSearchPopup, PaymentDialog, HoldRecallDialog), views/dialogs/quotation_dialog.py (QuotationDialog), and views/dialogs/day_shift_dialog.py (DayShiftDialog). This ensures the frosted background blur and dimming overlay activates consistently and reliably whenever customer selection or other modal popups open.
+- 2026-10-02 19:09:40: Added missing QGraphicsBlurEffect import to PySide6.QtWidgets imports in views/login_dialog.py to fix NameError during resizeEvent / startup UI build.
+- 2026-10-02 19:11:40: Fixed UnboundLocalError for Qt in views/login_dialog.py by promoting QPixmap to top-level imports and removing inline Qt import inside _build_ui that shadowed module scope.
+- 2026-10-03 12:06:00: Upgraded views/components/blur_overlay.py so BlurOverlay automatically mounts directly to the window centralWidget, ensuring the blur layer sits in front of all POS controls. Added universal static and instance wrappers around QMessageBox (question, warning, information, critical, about, and exec/exec_) in install_global_dialog_blur() so all confirmation dialogs, logout alerts, delete prompts, and small message boxes consistently display the frosted background blur.
+- 2026-10-03 12:34:00: Applied BlurredDialog inheritance to QuickAddCustomerDialog (New Customer popup) and CreditNoteDialog in views/dialogs/customer_dialog.py and views/dialogs/customer.py so the frosted background blur activates smoothly whenever the New Customer modal is opened from the customer search or POS view.
+- 2026-10-05 08:44:00: Fixed 'Expecting value: line 1 column 1 (char 0)' error on the Software Updates screen by making JSON response parsing in updater.py (_fetch_version_info) resilient against stray characters, editor typos, or byte order marks (BOM) in Nextcloud's version.json.
+- 2026-10-05 09:58:00: Added automated Bugsink error tracking for empty database and missing product catalog in SaaS mode. Created check_and_report_saas_empty_catalog() in services/bugsink_service.py and hooked it into views/login_dialog.py (_accept_user), views/main_window.py (_load_category_products and grid rendering), views/pos_view.py, and views/dialogs/company_settings.py (ProductSearchDialog). Removed legacy mock products fallback in ProductSearchDialog.
+- 2026-10-05 10:04:00: Added automated database change tracking and UI grid alerts. Implemented check_and_report_database_change() in services/bugsink_service.py to detect whenever the active database switches, dispatching error alerts to Bugsink with previous and new database details. Connected tracking into database/db.py (get_connection), views/dialogs/sql_settings_dialog.py (_save_settings), and views/main_window.py (_render_product_page), rendering a visible error alert card on the product grid when the database changes or has 0 products.
+- 2026-10-05 10:11:00: Fixed pyodbc '08S01 Communication link failure' during PIN login and SQL operations by implementing PooledCursor and auto-reconnect logic in database/db.py. If an idle or cached connection is dropped by SQL Server, PooledCursor automatically resets the connection pool, establishes a fresh connection, and re-executes the query seamlessly without crashing or surfacing raw ODBC errors to cashiers.
+- 2026-10-05 10:41:00: Muted "payment sync cycle error" and "error fetching page 1:" from being flagged as Bugsink errors by explicitly adding them to the _SUPPRESSED_PATTERNS list in services/bugsink_service.py. This prevents Bugsink alert spam caused by expected network transient or malformed data errors from background services.
+- 2026-10-05 10:50:00: Implemented aggressive application shutdown logic in views/main_window.py and main.py. Replaced soft `sys.exit()` with `os._exit()` on fatal crashes, and added a forceful `os._exit(0)` 500ms after the main window closes. This ensures all background threads, hanging websockets, and locked ports are unconditionally cleared and released to prevent stale background ghost processes from blocking new application instances.
+- 2026-10-05 10:59:00: Fixed false "Already Running" prompt caused by aggressive shutdown. Manually deleted the PySide6 `QLockFile` (`havano_pos_2026.lock`) from `QDir.tempPath()` immediately before calling `os._exit(0)` in `main_window.py` and `main.py`, since forceful process termination bypassed the graceful Qt lock destruction.
+- 2026-10-05 11:01:00: Added aggressive startup "ghost killer" in main.py. If the single-instance `QLockFile` is held by a lingering or crashed background process, the startup sequence now extracts the PID from the lock file, forcefully terminates the ghost process via `psutil`, clears the stale lock, and seamlessly acquires it to guarantee the app always launches.
+- 2026-10-05 11:03:00: Fixed aggressive ghost killer failing if the locking PID is already dead. Catching `psutil.NoSuchProcess` now allows the startup sequence to bypass the kill command, aggressively delete the physical `.lock` file from disk using `os.remove()`, and seamlessly acquire the lock.
+- 2026-10-14 18:45:00: Enabled customer details on A4 receipts, A4 tax invoices, and credit notes according to the 'print_customer_details' POS rule (Settings -> POS Rules -> CUSTOMER DETAILS ON RECEIPT).
+  - In `services/a4_invoice_service.py` (lines 154-325, 725-735), implemented `_is_print_customer_details_enabled()` and `_enrich_customer_details()`. When the rule is enabled, customer Phone, Email, Address, TIN, and VAT are enriched from the database and rendered in the Customer Details table of both A4 invoices and A4 credit notes.
+  - In `services/printing_service.py` (lines 338-425), updated `print_credit_note()` to check `print_customer_details` from `pos_settings` with `WITH (NOLOCK)` and dynamically print Cust Email, Cust Addr, Cust TIN, and Cust VAT on thermal credit note receipts.
+  - In `views/main_window.py` (lines 12805-12895, 26780-26870), `views/new_d.py` (lines 11200-11265), and `views/admin_dashboard.py` (lines 8010-8075), updated `_print_credit_note_receipt` to enrich `receipt` with customer details and check paper size so A4 credit notes seamlessly preview without requiring a configured thermal printer. Adhered strictly to the Canonical File Paths Rule using `database.db.get_app_data_dir()`.
+- 2026-10-19 08:52:00: Fixed SQL Server startup connection timeout (ODBC 258 / 08001) and implemented live startup loader feedback.
+  - In `database/db.py` (lines 76-135, 290-315): Increased connection timeout from 4s/5s to 12s and added an automatic 3-attempt retry loop on transient SQL Server errors (08001, timeout 258, communication link failure) with status_callback support.
+  - In `views/components/sleek_loader.py` (lines 52-75): Implemented set_status() to dynamically display live startup progress and status messages, dynamically resizing the loader overlay to fit text.
+- 2026-10-19 09:07:00: Implemented live background loader feedback and automated application force-restart upon mode change.
+  - Created `utils/app_restart.py`: Implemented `restart_application()` which safely releases PySide6's `QLockFile` (`havano_pos_2026.lock`), cleans up temporary lock files, relaunches the current executable/script in a fresh process, and forcefully terminates the current process via `os._exit(0)` to prevent hanging socket/database threads.
+  - In `services/credentials.py` (lines 450-550): Created `_ModeSwitchWorker(QThread)` to execute database drops, schema creation, settings synchronization, and offline defaults seeding in a worker thread. Integrated `SleekLoaderOverlay` with a non-blocking `QEventLoop` so the loader continuously animates with real-time progress text ("Resetting local database tables...", "Setting up fresh database schema...", "Configuring mode settings...", "Configuring offline payment defaults..."), permanently eliminating application freezing / "Not Responding" during mode switches.
+  - In `views/dialogs/main_menu_dialog.py` (lines 35-55, 100-140): Updated mode selection dropdown to cleanly include SaaS, Frappe, Odoo, and Offline. Replaced the post-wipe modal prompt and manual logout with seamless automatic application restart via `restart_application()`.

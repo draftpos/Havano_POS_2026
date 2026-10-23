@@ -27,7 +27,8 @@ class CreditNotesListDialog(QMainWindow):
         import json
         from pathlib import Path
         try:
-            settings_data = json.loads(Path("app_data/sql_settings.json").read_text(encoding="utf-8"))
+            from database.db import get_app_data_dir
+            settings_data = json.loads((get_app_data_dir() / "sql_settings.json").read_text(encoding="utf-8"))
             self._is_offline = (settings_data.get("system_mode") == "offline")
         except Exception:
             self._is_offline = False

@@ -1413,6 +1413,12 @@ def _get_cashier_sales_for_shift(shift_id: int, cur) -> list[dict]:
     start_time = shift_row[0]
     end_time = shift_row[1] if shift_row[1] else datetime.now()
 
+    # Increase timeout for this potentially heavy query
+    try:
+        cur.timeout = 60
+    except Exception:
+        pass
+
     cur.execute("""
         SELECT 
             s.id as sale_id,

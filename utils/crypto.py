@@ -39,22 +39,15 @@ def _get_cipher() -> Fernet:
 
 def encrypt_secret(plain_text: str) -> str:
     """
-    Encrypt secret string for DB persistence (SaaS mode).
-    Returns ciphertext prefixed with 'enc:'.
+    Store secret directly as plain text without encryption.
+    Unwraps any legacy 'enc:...' ciphertext to plain text.
     """
     if not plain_text:
         return ""
-    plain_text = str(plain_text).strip()
-    if plain_text.startswith("enc:"):
-        return plain_text  # Already encrypted
-
-    try:
-        cipher = _get_cipher()
-        encrypted_bytes = cipher.encrypt(plain_text.encode("utf-8"))
-        return f"enc:{encrypted_bytes.decode('utf-8')}"
-    except Exception as e:
-        log.warning("[crypto] Could not encrypt secret: %s", e)
-        return plain_text
+    s = str(plain_text).strip()
+    if s.startswith("enc:"):
+        return decrypt_secret(s)
+    return s
 
 
 def decrypt_secret(cipher_text: str) -> str:

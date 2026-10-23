@@ -281,14 +281,65 @@ def _upsert_products(items: list[dict]):
                 
             active = 1 if item.get("active", True) else 0
             is_pharmacy = 1 if item.get("is_pharmacy_product") or item.get("is_pharmacy") else 0
-            order_flags = [
-                1 if (
-                    str(item.get(f"kitchen_order_{i}") if item.get(f"kitchen_order_{i}") is not None else item.get(f"custom_is_order_item_{i}")).strip().lower() in ("1", "true", "yes", "t", "y")
-                    or item.get(f"kitchen_order_{i}") is True or item.get(f"kitchen_order_{i}") == 1
-                    or item.get(f"custom_is_order_item_{i}") is True or item.get(f"custom_is_order_item_{i}") == 1
-                ) else 0
+            has_explicit_order = any(
+                item.get(f"kitchen_order_{i}") is not None or
+                item.get(f"kitchen_order{i}") is not None or
+                item.get(f"custom_is_order_item_{i}") is not None or
+                item.get(f"custom_is_order_item{i}") is not None or
+                item.get(f"is_order_item_{i}") is not None or
+                item.get(f"is_order_item{i}") is not None or
+                item.get(f"custom_kitchen_order_{i}") is not None or
+                item.get(f"order_{i}") is not None or
+                item.get(f"order{i}") is not None
                 for i in range(1, 7)
-            ]
+            ) or any(
+                item.get(k) is not None
+                for k in ("kitchen_order", "is_kitchen_order", "custom_kitchen_order", "custom_is_order_item")
+            )
+
+            if has_explicit_order:
+                order_flags = [
+                    1 if (
+                        str(
+                            item.get(f"kitchen_order_{i}")
+                            if item.get(f"kitchen_order_{i}") is not None
+                            else item.get(f"kitchen_order{i}")
+                            if item.get(f"kitchen_order{i}") is not None
+                            else item.get(f"custom_is_order_item_{i}")
+                            if item.get(f"custom_is_order_item_{i}") is not None
+                            else item.get(f"custom_is_order_item{i}")
+                            if item.get(f"custom_is_order_item{i}") is not None
+                            else item.get(f"is_order_item_{i}")
+                            if item.get(f"is_order_item_{i}") is not None
+                            else item.get(f"is_order_item{i}")
+                            if item.get(f"is_order_item{i}") is not None
+                            else item.get(f"custom_kitchen_order_{i}")
+                            if item.get(f"custom_kitchen_order_{i}") is not None
+                            else item.get(f"order_{i}")
+                            if item.get(f"order_{i}") is not None
+                            else item.get(f"order{i}")
+                            if item.get(f"order{i}") is not None
+                            else (item.get("kitchen_order") or item.get("is_kitchen_order") or item.get("custom_kitchen_order") or item.get("custom_is_order_item"))
+                            if i == 1
+                            else None
+                        ).strip().lower() in ("1", "true", "yes", "t", "y")
+                        or item.get(f"kitchen_order_{i}") is True or item.get(f"kitchen_order_{i}") == 1
+                        or item.get(f"custom_is_order_item_{i}") is True or item.get(f"custom_is_order_item_{i}") == 1
+                    ) else 0
+                    for i in range(1, 7)
+                ]
+            else:
+                # Check login cached flags
+                try:
+                    from services.auth_service import get_cached_login_order_flags
+                    cached_flags = get_cached_login_order_flags(parent_part_no)
+                except Exception:
+                    cached_flags = None
+
+                if cached_flags is not None:
+                    order_flags = list(cached_flags)
+                else:
+                    order_flags = [None] * 6
 
             # Taxes
             taxes = item.get("taxes") or []
@@ -393,18 +444,24 @@ def _upsert_products(items: list[dict]):
 
 def _upsert_single_product(cur, local_part_nos: set[str], part_no: str, name: str, base_price: float, stock: float,
                            category: str, uom: str, tax_rate: float, tax_type: str, active: int, is_pharmacy: int,
-                           order_flags: list[int], is_template: int, has_variants: int, variant_of: str | None,
+                           order_flags: list[int | None], is_template: int, has_variants: int, variant_of: str | None,
                            attributes: str, prices_list: list, lots: list,
                            is_bundle: int = 0, expand_bundle: int = 1, bundle_sale: float = 0.0,
                            bundle_cost: float = 0.0, bundle_override: int = 0, bundle_lines_json: str = None,
                            odoo_id: int | None = None, hs_code: str = ""):
+    order_flags_insert = tuple(int(x or 0) for x in order_flags)
     # Upsert products table
     if part_no in local_part_nos:
         cur.execute("""
             UPDATE products SET
                 name = ?, price = ?, stock = ?, category = ?, uom = ?,
                 tax_rate = ?, tax_type = ?, hs_code = ?, active = ?, is_pharmacy_product = ?,
-                order_1 = ?, order_2 = ?, order_3 = ?, order_4 = ?, order_5 = ?, order_6 = ?,
+                order_1 = COALESCE(?, order_1),
+                order_2 = COALESCE(?, order_2),
+                order_3 = COALESCE(?, order_3),
+                order_4 = COALESCE(?, order_4),
+                order_5 = COALESCE(?, order_5),
+                order_6 = COALESCE(?, order_6),
                 is_template = ?, has_variants = ?, variant_of = ?, attributes = ?,
                 is_product_bundle = ?, expand_bundle_in_so = ?, bundle_sale_total = ?,
                 bundle_cost_total = ?, bundle_price_overridden = ?,
@@ -425,10 +482,11 @@ def _upsert_single_product(cur, local_part_nos: set[str], part_no: str, name: st
                 is_product_bundle, expand_bundle_in_so, bundle_sale_total,
                 bundle_cost_total, bundle_price_overridden, bundle_lines, odoo_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (part_no, name, base_price, stock, category, uom, tax_rate, tax_type, hs_code, active, is_pharmacy, *order_flags,
+        """, (part_no, name, base_price, stock, category, uom, tax_rate, tax_type, hs_code, active, is_pharmacy, *order_flags_insert,
               is_template, has_variants, variant_of, attributes,
               is_bundle, expand_bundle, bundle_sale, bundle_cost, bundle_override,
               bundle_lines_json, odoo_id))
+        local_part_nos.add(part_no)
         local_part_nos.add(part_no)
 
     # item_prices upsert

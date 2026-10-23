@@ -47,5 +47,8 @@ class SQLSettings:
             "api_key": self.api_key,
             "api_secret": self.api_secret,
         }
-        with open("app_data/sql_settings.json", "w", encoding="utf-8") as f:
+        import os
+        tmp_path = "app_data/sql_settings.json.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
+        os.replace(tmp_path, "app_data/sql_settings.json")

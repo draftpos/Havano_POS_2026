@@ -142,7 +142,10 @@ def sync_customers() -> dict:
 
         if customer_list is None:
             if last_error:
-                log.error("[customer-sync] Network or Server error on page %d: %s", page, last_error)
+                if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 404:
+                    log.warning("[customer-sync] Backend endpoints missing (404) on page %d: %s", page, last_error)
+                else:
+                    log.warning("[customer-sync] Network or Server error on page %d: %s", page, last_error)
             break
 
         if not customer_list:

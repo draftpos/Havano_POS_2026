@@ -81,14 +81,19 @@ BACKUP_DIR = get_backup_dir()
 
 def _get_db_name() -> str:
     from database.db import _load_settings
-    return _load_settings().get("database", "havano_posop07978808")
+    db = str(_load_settings().get("database") or "").strip()
+    if not db:
+        raise ValueError("No database configured (strict no-fallback policy)")
+    return db
 
 
 def _get_backup_db_connection():
     from database.db import _load_settings, DRIVER
     import pyodbc
     cfg = _load_settings()
-    db_name = cfg.get("database", "havano_posop07978808")
+    db_name = str(cfg.get("database") or "").strip()
+    if not db_name:
+        raise ValueError("No database configured (strict no-fallback policy)")
     server_val = cfg.get("server") or ".\\SQLEXPRESS"
     if cfg.get("auth_mode") == "windows":
         conn_str = (

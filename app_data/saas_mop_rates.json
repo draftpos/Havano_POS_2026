@@ -83,12 +83,12 @@
       "name": "Test",
       "account_name": "Test",
       "type": "Cash",
-      "currency": "AMD",
-      "currency_id": 239,
+      "currency": "USD",
+      "currency_id": 1,
       "exchange_rate": 1.0,
       "rate": 1.0,
       "inverse_rate": 1.0,
-      "symbol": "AMD",
+      "symbol": "USD",
       "on_account": false
     },
     {
@@ -122,12 +122,12 @@
       "name": "No Currency Acc Test",
       "account_name": "No Currency Acc Test",
       "type": "Cash",
-      "currency": "AMD",
-      "currency_id": 239,
+      "currency": "USD",
+      "currency_id": 1,
       "exchange_rate": 1.0,
       "rate": 1.0,
       "inverse_rate": 1.0,
-      "symbol": "AMD",
+      "symbol": "USD",
       "on_account": false
     },
     {

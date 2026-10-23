@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFrame, QWidget, QGraphicsDropShadowEffect,
+    QPushButton, QFrame, QWidget, QGraphicsDropShadowEffect, QGraphicsBlurEffect,
     QStackedWidget, QGridLayout, QSizePolicy, QApplication, QMessageBox, QFormLayout,
     QComboBox,
 )
@@ -8,7 +8,7 @@ from PySide6.QtCore import (
     Qt, QTimer, QEvent,
     QThread, Signal, QSize, QObject,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 import sys
 import os
 from utils.icon_utils import safe_icon, safe_pixmap
@@ -110,7 +110,7 @@ class LoginWorker(QThread):
     # -> local credential persist.  Give it plenty of room on slow connections.
     ONLINE_TIMEOUT = 180
 
-    def __init__(self, username: str, password: str, database: str = "", system_mode: str = "frappe"):
+    def __init__(self, username: str, password: str, database: str = "", system_mode: str = "saas"):
         super().__init__()
         self.username = username
         self.password = password
@@ -136,7 +136,10 @@ class LoginWorker(QThread):
         # 3. Fallback to local only if online fails due to network/timeout.
         
         is_cloud_mode = (self.system_mode in ("saas", "frappe", "odoo"))
-        should_try_local_first = (self.username.lower() == 'admin' or is_offline_mode or self.system_mode == "offline")
+        should_try_local_first = (
+            self.system_mode != "saas" and
+            (self.username.lower() == 'admin' or is_offline_mode or self.system_mode == "offline")
+        )
         
         if should_try_local_first:
             print(f"[LoginWorker] prioritizing local auth (admin, work_offline, or system_mode=offline)")
@@ -163,12 +166,12 @@ class LoginWorker(QThread):
             result.get("source") in ("timeout", "exception") or
             any(k in err_str for k in ["timeout", "timed out", "network", "connect", "refused", "unreachable", "getaddrinfo", "connection reset"])
         )
-        if result.get("source") == "online" and not is_net_error:
+        if result.get("source") == "online" and not is_net_error and result.get("auth_failed"):
             print(f"[LoginWorker] online error surfaced: {result.get('error')}")
             self.finished.emit(result)
             return
 
-        print(f"[LoginWorker] online attempt failed ({result.get('error')}), falling back to local auth...")
+        print(f"[LoginWorker] network unreachable ({result.get('error')}), authenticating with cached local credentials...")
         result = self._try_local()
         self.finished.emit(result)
 
@@ -676,7 +679,242 @@ class OfflineSetupDialog(QDialog):
             QMessageBox.critical(self, "Database Error", f"Failed to update local master data: {e}")
             return # Don't accept if DB update failed
 
+        try:
+            from models.company_defaults import save_agent_contact_settings, get_agent_contact_settings
+            ac = get_agent_contact_settings()
+            save_agent_contact_settings(
+                agent_number=defaults.get("agent_number", ""),
+                support_number=ac.get("custom_support", ""),
+                sales_number=ac.get("custom_sales", ""),
+                email=ac.get("custom_email", "")
+            )
+        except Exception:
+            pass
+
+        if self.parent() and hasattr(self.parent(), "_render_left_details"):
+            self.parent()._render_left_details()
+
         self.accept()
+
+
+# =============================================================================
+# Agent & Support Setup Dialog
+# =============================================================================
+class AgentSetupDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Agent & Support Setup")
+        self.setFixedSize(480, 640)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setStyleSheet(f"background: {WHITE};")
+        self._build_ui()
+
+    def _build_ui(self):
+        main_lay = QVBoxLayout(self)
+        main_lay.setContentsMargins(10, 10, 10, 10)
+
+        card = QFrame()
+        card.setObjectName("agentCard")
+        card.setStyleSheet(f"""
+            QFrame#agentCard {{
+                background:#ffffff; border-radius:24px;
+                border: 1px solid #e2e8f0;
+            }}
+        """)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(30); shadow.setXOffset(0); shadow.setYOffset(10)
+        shadow.setColor(QColor(0, 0, 0, 25))
+        card.setGraphicsEffect(shadow)
+        main_lay.addWidget(card)
+
+        cl = QVBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
+
+        # Header
+        hdr = QWidget(); hdr.setFixedHeight(100)
+        hdr.setStyleSheet(f"background: {WHITE}; border-top-left-radius:24px; border-top-right-radius:24px;")
+        hl = QHBoxLayout(hdr); hl.setContentsMargins(36, 20, 24, 0); hl.setSpacing(15)
+
+        v_ttl = QVBoxLayout(); v_ttl.setSpacing(3); v_ttl.setAlignment(Qt.AlignVCenter)
+        ttl = QLabel("Agent & Support")
+        ttl.setStyleSheet(f"color:{NAVY}; font-size:24px; font-weight:800; background:transparent;")
+        sub = QLabel("Customize contact numbers & email shown on login screen.")
+        sub.setStyleSheet(f"color:{MUTED}; font-size:12px; background:transparent;")
+        v_ttl.addWidget(ttl); v_ttl.addWidget(sub)
+        hl.addLayout(v_ttl)
+        hl.addStretch()
+
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(30, 30)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {LIGHT}; color: {NAVY}; border-radius: 15px; border: none; font-size: 13px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {BORDER}; }}
+        """)
+        close_btn.clicked.connect(self.reject)
+        hl.addWidget(close_btn)
+        cl.addWidget(hdr)
+
+        # Body
+        body = QWidget()
+        bl = QVBoxLayout(body); bl.setContentsMargins(36, 6, 36, 20); bl.setSpacing(14)
+
+        from models.company_defaults import (
+            get_agent_contact_settings,
+            DEFAULT_SUPPORT_NUMBER,
+            DEFAULT_SALES_NUMBER,
+            DEFAULT_AGENT_EMAIL
+        )
+        current = get_agent_contact_settings()
+
+        def _field_group(label, initial, placeholder="", help_text=""):
+            group = QVBoxLayout(); group.setSpacing(6)
+            top_h = QHBoxLayout(); top_h.setSpacing(6)
+            lbl = QLabel(label.upper())
+            lbl.setStyleSheet("color:#64748b; font-size:11px; font-weight:700; letter-spacing:0.5px;")
+            top_h.addWidget(lbl)
+            if help_text:
+                hlbl = QLabel(f"({help_text})")
+                hlbl.setStyleSheet("color:#94a3b8; font-size:10px; font-style:italic;")
+                top_h.addWidget(hlbl)
+            top_h.addStretch()
+            group.addLayout(top_h)
+
+            edit = QLineEdit()
+            edit.setFixedHeight(46)
+            edit.setPlaceholderText(placeholder)
+            edit.setText(initial)
+            edit.setStyleSheet(f"""
+                QLineEdit {{
+                    background:#f8fafc; color:#1e293b;
+                    border:1px solid #e2e8f0; border-radius:12px;
+                    padding:0 14px; font-size:14px;
+                }}
+                QLineEdit:focus {{ border:2px solid {ACCENT}; background:#ffffff; }}
+            """)
+            group.addWidget(edit)
+            return group, edit
+
+        # 1. Agent Number / Code
+        ag_init = current.get("agent_number", "")
+        if ag_init.lower() == "agent":
+            ag_init = ""
+        g_ag, self.agent_input = _field_group(
+            "Agent Number / Code",
+            ag_init,
+            placeholder="e.g. AGT-101 (Leave blank to hide)",
+            help_text="Optional"
+        )
+        bl.addLayout(g_ag)
+
+        # 2. Support & WhatsApp
+        sup_init = current.get("custom_support", "")
+        g_sup, self.sup_input = _field_group(
+            "Support & WhatsApp Number",
+            sup_init,
+            placeholder=f"Default: {DEFAULT_SUPPORT_NUMBER}",
+            help_text="Number 1"
+        )
+        bl.addLayout(g_sup)
+
+        # 3. Sales Number
+        sales_init = current.get("custom_sales", "")
+        if sales_init == DEFAULT_SALES_NUMBER:
+            sales_init = ""
+        g_sales, self.sales_input = _field_group(
+            "Sales Number",
+            sales_init,
+            placeholder=f"Default: {DEFAULT_SALES_NUMBER}",
+            help_text="Number 2"
+        )
+        bl.addLayout(g_sales)
+
+        # 4. Email Address
+        em_init = current.get("custom_email", "")
+        if em_init == DEFAULT_AGENT_EMAIL:
+            em_init = ""
+        g_em, self.email_input = _field_group(
+            "Email Address",
+            em_init,
+            placeholder=f"Default: {DEFAULT_AGENT_EMAIL}",
+            help_text="Support / Sales Email"
+        )
+        bl.addLayout(g_em)
+
+        hint = QLabel("Note: If left blank, Havano POS default support contact details will appear on the login screen.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:{MUTED}; font-size:11px; margin-top:2px;")
+        bl.addWidget(hint)
+
+        cl.addWidget(body, 1)
+
+        # Actions
+        actions = QWidget()
+        al = QHBoxLayout(actions)
+        al.setContentsMargins(36, 0, 36, 25)
+        al.setSpacing(10)
+
+        restore_btn = QPushButton("Restore Defaults")
+        restore_btn.setFixedHeight(44)
+        restore_btn.setCursor(Qt.PointingHandCursor)
+        restore_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{OFF_WHITE}; color:{NAVY}; font-size:12px; font-weight:600;
+                border:1px solid {BORDER}; border-radius:10px; padding: 0 12px;
+            }}
+            QPushButton:hover {{ background:{LIGHT}; border-color:{MID}; }}
+        """)
+        restore_btn.clicked.connect(self._restore_defaults)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedSize(80, 44)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet(f"background:{LIGHT}; color:{NAVY}; font-size:13px; font-weight:600; border:none; border-radius:10px;")
+        cancel_btn.clicked.connect(self.reject)
+
+        save_btn = QPushButton("Save Settings")
+        save_btn.setFixedHeight(44)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{SUCCESS}; color:#ffffff; font-size:13px; font-weight:bold;
+                border-radius:10px; border:none; padding: 0 18px;
+            }}
+            QPushButton:hover {{ background:#1f9447; }}
+        """)
+        save_btn.clicked.connect(self._save)
+
+        al.addWidget(restore_btn)
+        al.addStretch()
+        al.addWidget(cancel_btn)
+        al.addWidget(save_btn)
+        cl.addWidget(actions)
+
+    def _restore_defaults(self):
+        self.agent_input.clear()
+        self.sup_input.clear()
+        self.sales_input.clear()
+        self.email_input.clear()
+
+    def _save(self):
+        from models.company_defaults import save_agent_contact_settings
+        ag = self.agent_input.text().strip()
+        sup = self.sup_input.text().strip()
+        sales = self.sales_input.text().strip()
+        em = self.email_input.text().strip()
+
+        save_agent_contact_settings(
+            agent_number=ag,
+            support_number=sup,
+            sales_number=sales,
+            email=em
+        )
+        if self.parent() and hasattr(self.parent(), "_render_left_details"):
+            self.parent()._render_left_details()
+        self.accept()
+
 
 # =============================================================================
 # Settings Hub Dialog
@@ -763,7 +1001,7 @@ class SettingsHubDialog(QDialog):
 
         items = [
             ("Local POS Setup", "Set company, warehouse & cost center.", self._do_local_setup),
-            ("Agent & Support", "Configure agent number & contact info.", self._do_local_setup),
+            ("Agent & Support", "Configure agent number & contact info.", self._do_agent_setup),
             ("Mode Setup",      "Switch system modes.", self._do_mode_setup),
             ("Database",        "Configure SQL Server connection.",      self._do_database),
             ("License",         "Activate or view software license.",    self._do_license),
@@ -833,6 +1071,10 @@ class SettingsHubDialog(QDialog):
         self.accept()
         self._login._open_quick_setup()
 
+    def _do_agent_setup(self):
+        self.accept()
+        self._login._open_agent_setup()
+
     def _do_mode_setup(self):
         self.accept()
         self._login._open_onboarding()
@@ -858,16 +1100,29 @@ class LoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Havano POS")
-        self.setFixedSize(850, 600)
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        screen = QApplication.primaryScreen()
+        if screen:
+            self.setGeometry(screen.geometry())
+        else:
+            self.setFixedSize(850, 600)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_bg_widget") and self._bg_widget:
+            self._bg_widget.setGeometry(self.rect())
+            if hasattr(self, "_bg_label") and self._bg_label:
+                self._bg_label.setGeometry(self.rect())
+            if hasattr(self, "_tint") and self._tint:
+                self._tint.setGeometry(self.rect())
 
         self.logged_in_user: dict | None  = None
         self.login_source:   str  | None  = None
         self._worker:        LoginWorker | None = None
         self._conn_worker:   ConnectivityWorker | None = None
         self._pin_buffer:    str = ""
-        self.system_mode:    str = "frappe"
+        self.system_mode:    str = "saas"
         self.default_db:     str = ""
         
         # 1. Primary check: get_system_mode() from company_defaults
@@ -881,12 +1136,12 @@ class LoginDialog(QDialog):
 
         # Also grab the database name from sql_settings.json as a fallback default
         try:
-            import json, os
-            path = os.path.join("app_data", "sql_settings.json")
-            if os.path.exists(path):
-                with open(path, "r") as f:
-                    data = json.load(f)
-                    self.default_db = data.get("database", "")
+            import json
+            from database.db import get_app_data_dir
+            _p = get_app_data_dir() / "sql_settings.json"
+            if _p.exists():
+                data = json.loads(_p.read_text(encoding="utf-8"))
+                self.default_db = data.get("database", "")
         except Exception:
             pass
 
@@ -961,6 +1216,7 @@ class LoginDialog(QDialog):
     # =========================================================================
     def closeEvent(self, event):
         self._cleanup()
+        super().closeEvent(event)
         if not self.parent():
             QApplication.quit()
         event.accept()
@@ -988,17 +1244,51 @@ class LoginDialog(QDialog):
     # UI construction
     # =========================================================================
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        screen = QApplication.primaryScreen()
+
+        # 1. Background Frosted Blur Layer
+        self._bg_widget = QWidget(self)
+        self._bg_widget.setGeometry(self.rect())
+
+        self._bg_label = QLabel(self._bg_widget)
+        self._bg_label.setGeometry(self._bg_widget.rect())
+        try:
+            if self.parent() and hasattr(self.parent(), "grab"):
+                pix = self.parent().grab()
+            elif screen:
+                pix = screen.grabWindow(0)
+            else:
+                pix = None
+            if pix and not pix.isNull():
+                self._bg_label.setPixmap(pix)
+                self._bg_label.setScaledContents(True)
+        except Exception:
+            pass
+
+        self._blur_effect = QGraphicsBlurEffect(self)
+        self._blur_effect.setBlurRadius(8)
+        self._bg_label.setGraphicsEffect(self._blur_effect)
+
+        # 2. Dark Slate Translucent Tint Layer (Lightened)
+        self._tint = QWidget(self._bg_widget)
+        self._tint.setStyleSheet("background-color: rgba(15, 23, 42, 30);")
+        self._tint.setGeometry(self._bg_widget.rect())
+
+        # 3. Centered Layout with 850x600 Card
+        root = QGridLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
 
         card = QFrame()
+        card.setFixedSize(850, 600)
         card.setObjectName("card")
         card.setStyleSheet(f"QFrame#card {{ background:{WHITE}; border-radius:20px; }}")
 
         shadow = QGraphicsDropShadowEffect()
         shadow.setBlurRadius(60); shadow.setXOffset(0); shadow.setYOffset(16)
-        shadow.setColor(QColor(13, 31, 60, 100))
+        shadow.setColor(QColor(13, 31, 60, 140))
         card.setGraphicsEffect(shadow)
+
+        root.addWidget(card, 0, 0, Qt.AlignCenter)
         
         main_h = QHBoxLayout(card)
         main_h.setContentsMargins(0, 0, 0, 0)
@@ -1016,125 +1306,44 @@ class LoginDialog(QDialog):
             }}
         """)
         left_l = QVBoxLayout(left_w)
-        left_l.setContentsMargins(30, 40, 30, 30)
-        left_l.setSpacing(15)
+        left_l.setContentsMargins(24, 28, 24, 20)
+        left_l.setSpacing(0)
 
         # Logo
-        import os
-        from PySide6.QtGui import QPixmap
-        from PySide6.QtCore import Qt
-        
         logo_lbl = QLabel()
         logo_lbl.setAlignment(Qt.AlignCenter)
-        logo_lbl.setFixedSize(64, 64)
+        logo_lbl.setFixedSize(60, 60)
         
         logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "havano_new_blue.png"))
         pix = QPixmap(logo_path)
         if not pix.isNull():
-            logo_lbl.setPixmap(pix.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            logo_lbl.setPixmap(pix.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             logo_lbl.setText("H")
-            logo_lbl.setStyleSheet(f"background:{ACCENT}; color:{WHITE}; border-radius:16px; font-size:32px; font-weight:900;")
+            logo_lbl.setStyleSheet(f"background:{ACCENT}; color:{WHITE}; border-radius:16px; font-size:30px; font-weight:900;")
         
         logo_row = QHBoxLayout()
         logo_row.addStretch(); logo_row.addWidget(logo_lbl); logo_row.addStretch()
         
         title = QLabel("Havano POS")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet(f"color:{NAVY}; font-size:24px; font-weight:800; background:transparent; margin-top:10px;")
+        title.setStyleSheet(f"color:{NAVY}; font-size:22px; font-weight:800; background:transparent; margin-top:6px;")
         
         title_row = QHBoxLayout()
         title_row.addStretch(); title_row.addWidget(title); title_row.addStretch()
         
-        left_l.addStretch()
         left_l.addLayout(logo_row)
         left_l.addLayout(title_row)
-        left_l.addStretch()
         
-        # Details column
-        _app_version = "2.0.0"
-        try:
-            import main as _main_mod
-            _app_version = getattr(_main_mod, "APP_VERSION", _app_version)
-        except: pass
-            
-        try:
-            from models.company_defaults import get_defaults
-            d = get_defaults() or {}
-            _sup_num = "+263 779 973 028"
-            _agent_num = d.get("agent_number", "Agent")
-        except:
-            _sup_num = "+263 779 973 028"
-            _agent_num = "Agent"
-            
-        if _sup_num == "0782168407":
-            _sup_num = "+263 779 973 028"
+        # Details container expands with stretch factor 1 to evenly distribute all items
+        self._left_info_w = QWidget()
+        self._left_info_w.setStyleSheet("background:transparent; border:none;")
+        self._left_info_l = QVBoxLayout(self._left_info_w)
+        self._left_info_l.setContentsMargins(0, 0, 0, 0)
+        self._left_info_l.setSpacing(0)
+        left_l.addWidget(self._left_info_w, 1)
 
-        def add_info(label, value, link=False, font_size=14, label_size=10, value_color=NAVY_2, add_stretch=True):
-            w = QWidget(); w.setStyleSheet("background:transparent; border:none;")
-            l = QVBoxLayout(w); l.setContentsMargins(0,0,0,0); l.setSpacing(2)
-            lbl1 = QLabel(label); lbl1.setStyleSheet(f"color:{MUTED}; font-size:{label_size}px; font-weight:800; letter-spacing:0.8px;")
-            lbl1.setAlignment(Qt.AlignCenter)
-            
-            if link:
-                lbl2 = QLabel(f'<a href="https://{value}/" style="color:{ACCENT}; text-decoration:none; font-weight:bold;">{value}</a>')
-                lbl2.setOpenExternalLinks(True)
-            else:
-                lbl2 = QLabel(str(value))
-                
-            lbl2.setAlignment(Qt.AlignCenter)
-            lbl2.setStyleSheet(f"color:{value_color}; font-size:{font_size}px; font-weight:600;")
-            lbl2.setWordWrap(True)
-            lbl2.setToolTip(str(value))
-            l.addWidget(lbl1); l.addWidget(lbl2)
-            left_l.addWidget(w)
-            if add_stretch:
-                left_l.addStretch()
-
-        _configured_store = (
-            d.get("server_warehouse") or 
-            d.get("warehouse") or 
-            d.get("server_shop_id") or 
-            "Main Store"
-        )
-
-        import socket
-        try:
-            from models.sql_settings import SQLSettings
-            _sql_cfg = SQLSettings.load()
-            _db_server = _sql_cfg.server or "."
-            _db_name = _sql_cfg.database or "POS_DB"
-        except Exception:
-            _db_server = "."
-            _db_name = "POS_DB"
-
-        _comp_name = os.environ.get("COMPUTERNAME") or socket.gethostname()
-        if not _db_server or _db_server.strip() in (".", "(local)", "localhost", "127.0.0.1"):
-            _server_display = _comp_name
-        else:
-            _s = _db_server.strip()
-            _matched = False
-            for _pfx in (".\\", "./", "localhost\\", "localhost/", "(local)\\", "(local)/", "127.0.0.1\\", "127.0.0.1/"):
-                if _s.lower().startswith(_pfx.lower()):
-                    _server_display = f"{_comp_name}\\\\{_s[len(_pfx):]}"
-                    _matched = True
-                    break
-            if not _matched:
-                if "\\" in _s and "\\\\" not in _s:
-                    _server_display = _s.replace("\\", "\\\\")
-                else:
-                    _server_display = _s
-
-        if _agent_num and str(_agent_num).strip().lower() != "agent":
-            add_info("AGENT NUMBER", _agent_num)
-            
-        add_info("STORE / WAREHOUSE", _configured_store)
-        add_info("SUPPORT & WHATSAPP", _sup_num)
-        add_info("SALES", "+263 778 078 440")
-        add_info("EMAIL ADDRESS", "support@havanoerp.com")
-        add_info("WEBSITE", "www.havanoerp.com", link=True)
-        add_info("DATABASE SERVER", _server_display, font_size=9, label_size=8, value_color="#64748b", add_stretch=False)
-        add_info("DATABASE NAME", _db_name, font_size=9, label_size=8, value_color="#64748b", add_stretch=True)
+        self._render_left_details()
         
         # ── Download Progress ──────────────────────────────────────────────────
         self.download_lbl = QLabel("")
@@ -1373,6 +1582,13 @@ class LoginDialog(QDialog):
         gear_l = QHBoxLayout(gear_w)
         gear_l.setContentsMargins(40, 0, 20, 20); gear_l.setSpacing(0)
         
+        _app_version = "2.0.0"
+        try:
+            import main as _main_mod
+            _app_version = getattr(_main_mod, "APP_VERSION", _app_version)
+        except Exception:
+            pass
+
         ver_lbl = QLabel(f"Version {_app_version}")
         ver_lbl.setStyleSheet(f"color:{MUTED}; font-size:11px; font-weight:bold; background:transparent;")
         gear_l.addWidget(ver_lbl)
@@ -1579,10 +1795,139 @@ class LoginDialog(QDialog):
                             "sql_settings_dialog.py could not be located.\n"
                             "Place it in views/dialogs/ and restart.")
 
+    def _render_left_details(self):
+        """Builds or dynamically refreshes contact & store information in the left column."""
+        if not hasattr(self, "_left_info_l") or self._left_info_l is None:
+            return
+
+        while self._left_info_l.count():
+            item = self._left_info_l.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        from models.company_defaults import (
+            get_defaults,
+            get_agent_contact_settings,
+            DEFAULT_SUPPORT_NUMBER,
+            DEFAULT_SALES_NUMBER,
+            DEFAULT_AGENT_EMAIL
+        )
+        try:
+            d = get_defaults() or {}
+        except Exception:
+            d = {}
+        agent_cfg = get_agent_contact_settings()
+
+        _sup_num = agent_cfg.get("support_number") or DEFAULT_SUPPORT_NUMBER
+        _sales_num = agent_cfg.get("sales_number") or DEFAULT_SALES_NUMBER
+        _email_addr = agent_cfg.get("email") or DEFAULT_AGENT_EMAIL
+        _agent_num = agent_cfg.get("agent_number") or d.get("agent_number", "")
+
+        # Initial stretch to balance spacing from the title
+        self._left_info_l.addStretch(1)
+
+        def add_info(label, value, link=False, font_size=13, label_size=10, value_color=NAVY_2):
+            w = QWidget(); w.setStyleSheet("background:transparent; border:none;")
+            l = QVBoxLayout(w); l.setContentsMargins(0,0,0,0); l.setSpacing(2)
+            lbl1 = QLabel(label); lbl1.setStyleSheet(f"color:{MUTED}; font-size:{label_size}px; font-weight:800; letter-spacing:0.8px;")
+            lbl1.setAlignment(Qt.AlignCenter)
+            
+            if link:
+                lbl2 = QLabel(f'<a href="https://{value}/" style="color:{ACCENT}; text-decoration:none; font-weight:bold;">{value}</a>')
+                lbl2.setOpenExternalLinks(True)
+            else:
+                lbl2 = QLabel(str(value))
+                
+            lbl2.setAlignment(Qt.AlignCenter)
+            lbl2.setStyleSheet(f"color:{value_color}; font-size:{font_size}px; font-weight:600;")
+            lbl2.setWordWrap(True)
+            lbl2.setToolTip(str(value))
+            l.addWidget(lbl1); l.addWidget(lbl2)
+            self._left_info_l.addWidget(w)
+            self._left_info_l.addStretch(1)
+
+        from services.credentials import get_system_mode
+        _is_saas = (get_system_mode().lower() == "saas")
+        _configured_store = (
+            d.get("server_warehouse") or 
+            d.get("company_name") or 
+            d.get("server_company") or 
+            d.get("warehouse") or 
+            ""
+        ).strip()
+        if not _configured_store and _is_saas:
+            try:
+                from database.db import get_connection
+                conn = get_connection(); cur = conn.cursor()
+                cur.execute("SELECT TOP 1 store_name FROM terminal_reference WHERE store_name IS NOT NULL AND store_name <> ''")
+                r_tr = cur.fetchone(); conn.close()
+                if r_tr and r_tr[0]:
+                    _configured_store = str(r_tr[0]).strip()
+            except Exception:
+                pass
+        if not _configured_store:
+            _configured_store = "Main Store" if not _is_saas else "Store Not Configured"
+
+        import socket
+        try:
+            from models.sql_settings import SQLSettings
+            _sql_cfg = SQLSettings.load()
+            _db_server = _sql_cfg.server or "."
+            _db_name = _sql_cfg.database or "POS_DB"
+        except Exception:
+            _db_server = "."
+            _db_name = "POS_DB"
+
+        _comp_name = os.environ.get("COMPUTERNAME") or socket.gethostname()
+        if not _db_server or _db_server.strip() in (".", "(local)", "localhost", "127.0.0.1"):
+            _server_display = _comp_name
+        else:
+            _s = _db_server.strip()
+            _matched = False
+            for _pfx in (".\\", "./", "localhost\\", "localhost/", "(local)\\", "(local)/", "127.0.0.1\\", "127.0.0.1/"):
+                if _s.lower().startswith(_pfx.lower()):
+                    _server_display = f"{_comp_name}\\\\{_s[len(_pfx):]}"
+                    _matched = True
+                    break
+            if not _matched:
+                if "\\" in _s and "\\\\" not in _s:
+                    _server_display = _s.replace("\\", "\\\\")
+                else:
+                    _server_display = _s
+
+        if _agent_num and str(_agent_num).strip().lower() != "agent":
+            add_info("AGENT NUMBER", _agent_num)
+            
+        add_info("STORE / WAREHOUSE", _configured_store)
+        add_info("SUPPORT & WHATSAPP", _sup_num)
+        add_info("SALES", _sales_num)
+        add_info("EMAIL ADDRESS", _email_addr, font_size=12)
+        add_info("WEBSITE", "www.havanoerp.com", link=True)
+
+        # Database & Server footer badge
+        db_w = QWidget(); db_w.setStyleSheet("background:transparent; border:none;")
+        db_l = QVBoxLayout(db_w); db_l.setContentsMargins(0,0,0,0); db_l.setSpacing(1)
+        srv_lbl = QLabel(_server_display.lower())
+        srv_lbl.setAlignment(Qt.AlignCenter)
+        srv_lbl.setStyleSheet("color:#64748b; font-size:9px; font-weight:600;")
+        db_lbl = QLabel(_db_name.lower())
+        db_lbl.setAlignment(Qt.AlignCenter)
+        db_lbl.setStyleSheet("color:#94a3b8; font-size:9px; font-weight:500;")
+        db_l.addWidget(srv_lbl)
+        db_l.addWidget(db_lbl)
+        self._left_info_l.addWidget(db_w)
+        self._left_info_l.addStretch(1)
+
     def _open_quick_setup(self):
         if OfflineSetupDialog(self).exec():
+            self._render_left_details()
             if hasattr(self, "password_input"):
                 self.password_input.setFocus()
+
+    def _open_agent_setup(self):
+        if AgentSetupDialog(self).exec():
+            self._render_left_details()
 
     def _open_onboarding(self):
         try:
@@ -2030,7 +2375,11 @@ class LoginDialog(QDialog):
                     user["raw_data"] = result["raw_data"]
                 source = result.get("source", "online")
                 if source == "offline":
-                    self._show_info("Offline mode - using local account.")
+                    from services.credentials import get_system_mode
+                    if get_system_mode() == "saas" or getattr(self, "system_mode", "") == "saas":
+                        self._show_info("No internet connection — logged in with local account (SaaS Mode).")
+                    else:
+                        self._show_info("Offline mode - using local account.")
                 self._validate_and_accept(user, source)
                 return
 
@@ -2041,17 +2390,26 @@ class LoginDialog(QDialog):
             # Always show the real error for transparency, especially for Odoo setup
             display = f"Login Failed: {err}"
             
+            from services.credentials import get_system_mode
+            is_saas_mode = (get_system_mode() == "saas" or getattr(self, "system_mode", "") == "saas")
+
             if "timeout" in err.lower() or source == "timeout":
-                display = "Server took too long to respond - trying local account…"
-                # Transparent retry with local-only flag
-                self._try_local_fallback_after_timeout(
-                    self.username_input.text().strip(),
-                    self.password_input.text().strip(),
-                )
-                return
+                if is_saas_mode:
+                    display = "Unable to connect to https://backoffice.havano.pro (Server timed out).\nPlease check your internet connection and try again."
+                else:
+                    display = "Server took too long to respond - trying local account…"
+                    # Transparent retry with local-only flag
+                    self._try_local_fallback_after_timeout(
+                        self.username_input.text().strip(),
+                        self.password_input.text().strip(),
+                    )
+                    return
             elif source in ("offline", "local_error"):
-                display = ("No internet connection and no matching local account found.\n"
-                           "Check your credentials or connect to the network.")
+                if is_saas_mode:
+                    display = "Connection error to https://backoffice.havano.pro.\nPlease check your network connection and try again."
+                else:
+                    display = ("No internet connection and no matching local account found.\n"
+                               "Check your credentials or connect to the network.")
             else:
                 display = err
 
@@ -2121,7 +2479,11 @@ class LoginDialog(QDialog):
                 print(f"[login] fallback raw DB: {e}")
 
         if user:
-            self._show_info("Server slow - logged in with saved local account.")
+            from services.credentials import get_system_mode
+            if get_system_mode() == "saas" or getattr(self, "system_mode", "") == "saas":
+                self._show_info("No internet connection — logged in with local account (SaaS Mode).")
+            else:
+                self._show_info("Server slow - logged in with saved local account.")
             self._validate_and_accept(user, "offline")
             return
 
@@ -2586,6 +2948,28 @@ class LoginDialog(QDialog):
         self.logged_in_user = user
         self.login_source   = source
 
+        # Set Bugsink user context for error tracking
+        try:
+            from services.bugsink_service import set_logged_in_user
+            set_logged_in_user(user)
+        except Exception:
+            pass
+
+        # ── SaaS Empty Database Error Detection ────────────────────────────────────
+        try:
+            from services.bugsink_service import check_and_report_saas_empty_catalog
+            check_and_report_saas_empty_catalog(
+                context="login",
+                extra_info={
+                    "user_username": user.get("username"),
+                    "user_email": user.get("email"),
+                    "login_source": source,
+                }
+            )
+        except Exception as _e_chk:
+            print(f"[login] SaaS empty database check error: {_e_chk}")
+        # ───────────────────────────────────────────────────────────────────────────
+
         # Aggressively lock in active cashier email in session & sql_settings BEFORE background sync starts
         u_identifier = (user.get("email") or user.get("frappe_user") or user.get("username") or "").strip()
         if u_identifier:
@@ -2599,35 +2983,20 @@ class LoginDialog(QDialog):
         try:
             from services.credentials import get_all_credentials, set_session, has_credentials
             
-            u_api_key = str(user.get("api_key") or "").strip()
-            u_api_secret = str(user.get("api_secret") or "").strip()
-            u_cloud_id = user.get("cloud_user_id") or user.get("id")
+            # The terminal's stored cloud credentials in company_defaults are the primary,
+            # default credentials for this POS terminal. All cashiers and users operate
+            # using this terminal cloud authorization by default.
+            term_creds = get_all_credentials()
+            def_api_key = term_creds.get("api_key", "").strip()
+            def_api_secret = term_creds.get("api_secret", "").strip()
 
-            # SaaS mode: api_secret is always empty — only fall back to DB when api_key is also missing.
-            # Frappe/Odoo mode: fall back to DB when either key or secret is missing.
-            is_saas_mode = (self.system_mode or "").lower() == "saas"
-            needs_db_fallback = (not u_api_key) if is_saas_mode else (not u_api_key or not u_api_secret)
-            if needs_db_fallback:
-                try:
-                    from database.db import get_connection
-                    from utils.crypto import decrypt_secret
-                    conn = get_connection(); cur = conn.cursor()
-                    cur.execute("""
-                        SELECT api_key, api_secret, cloud_user_id 
-                        FROM users 
-                        WHERE (email = ? AND email <> '') OR username = ? OR frappe_user = ?
-                    """, (user.get("email"), user.get("username"), user.get("username")))
-                    row = cur.fetchone(); conn.close()
-                    if row:
-                        u_api_key = str(row[0] or "").strip()
-                        raw_sec = str(row[1] or "").strip()
-                        u_api_secret = decrypt_secret(raw_sec)
-                        if row[2]: u_cloud_id = row[2]
-                except Exception as _dbe:
-                    print(f"[login] User token DB lookup error: {_dbe}")
+            u_api_key = str(user.get("api_key") or "").strip() or def_api_key
+            u_api_secret = str(user.get("api_secret") or "").strip() or def_api_secret
+            u_cloud_id = user.get("cloud_user_id") or user.get("id")
 
             # SaaS: token is in api_key only (api_secret is empty or plaintext password — both supported).
             # Frappe/Odoo: both api_key and api_secret are required.
+            is_saas_mode = (self.system_mode or "").lower() == "saas"
             if u_api_key and (u_api_secret or is_saas_mode):
                 set_session(u_api_key, u_api_secret, system_mode=self.system_mode, cloud_user_id=u_cloud_id)
                 print(f"[login] [OK] Activated session API token for '{user.get('username') or user.get('email')}': {u_api_key[:8]}...")
@@ -2689,10 +3058,10 @@ class LoginDialog(QDialog):
             
         if self.system_mode == "odoo":
             mode_str = "Havano Mode"
-        elif self.system_mode == "saas":
-            mode_str = "SaaS Mode"
-        else:
+        elif self.system_mode == "frappe":
             mode_str = "Frappe Mode"
+        else:
+            mode_str = "SaaS Mode"
             
         if online:
             url_disp = get_current_site_url().replace("https://", "").replace("http://", "")

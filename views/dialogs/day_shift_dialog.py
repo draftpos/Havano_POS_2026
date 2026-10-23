@@ -9,10 +9,13 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QTime
 from PySide6.QtGui import QFont, QColor
-from theme import *
+try:
+    from views.components.blur_overlay import BlurredDialog
+except ImportError:
+    BlurredDialog = QDialog
 
 
-class DayShiftDialog(QDialog):
+class DayShiftDialog(BlurredDialog):
     def __init__(self, parent=None, user=None):
         super().__init__(parent)
         self.user = user or {"id": None, "username": "admin"}

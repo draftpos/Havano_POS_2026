@@ -95,7 +95,6 @@ try:
         get_unsynced_orders as _get_unsynced_so,
         get_order_by_id as _get_order_by_id,
     )
-    _ensure_so_tables()
     _HAS_SALES_ORDER = True
 except Exception:
     _HAS_SALES_ORDER = False
@@ -3460,7 +3459,9 @@ def _clean_frappe_error(raw: str) -> str:
 # Tabbed SI / CN / SO view.  Raw API errors shown verbatim and are copyable.
 # Header shows count per tab.  Smart open: opens the right tab automatically.
 # =============================================================================
-class UnsyncedPopup(QDialog):
+from views.components.blur_overlay import BlurredDialog
+
+class UnsyncedPopup(BlurredDialog):
     """
     kind = "SI"  -> opens on the Sales Invoices tab
     kind = "CN"  -> opens on the Credit Notes tab
@@ -3589,14 +3590,15 @@ class UnsyncedPopup(QDialog):
         setattr(self, f"_count_lbl_{kind}", count_lbl)
         bl.addWidget(count_lbl)
 
-        # Table - 4 columns: Q: Ref | Customer | Amount | Raw Error
-        tbl = QTableWidget(0, 4)
-        tbl.setHorizontalHeaderLabels(["Q: Ref / No.", "Customer", "Amount", "Raw API Error"])
+        # Table - 5 columns: Date | Q: Ref | Customer | Amount | Raw Error
+        tbl = QTableWidget(0, 5)
+        tbl.setHorizontalHeaderLabels(["Date", "Q: Ref / No.", "Customer", "Amount", "Raw API Error"])
         hh = tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed);  tbl.setColumnWidth(0, 150)
-        hh.setSectionResizeMode(1, QHeaderView.Fixed);  tbl.setColumnWidth(1, 160)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed);  tbl.setColumnWidth(2, 90)
-        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+        hh.setSectionResizeMode(0, QHeaderView.Fixed);  tbl.setColumnWidth(0, 135)
+        hh.setSectionResizeMode(1, QHeaderView.Fixed);  tbl.setColumnWidth(1, 140)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed);  tbl.setColumnWidth(2, 150)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed);  tbl.setColumnWidth(3, 90)
+        hh.setSectionResizeMode(4, QHeaderView.Stretch)
         tbl.verticalHeader().setVisible(False)
         tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
         tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -3717,7 +3719,7 @@ class UnsyncedPopup(QDialog):
         if lbl:
             lbl.setText(f"{n} item{'s' if n != 1 else ''} pending sync")
 
-        for ref, customer, amount, raw_error in rows:
+        for dt_str, ref, customer, amount, raw_error in rows:
             r = tbl.rowCount()
             tbl.insertRow(r)
             tbl.setRowHeight(r, 42)
@@ -3732,20 +3734,21 @@ class UnsyncedPopup(QDialog):
                     it.setForeground(QColor(color))
                 return it
 
-            tbl.setItem(r, 0, _cell(ref, ACCENT))
-            tbl.setItem(r, 1, _cell(customer))
-            tbl.setItem(r, 2, _cell(amount, align=Qt.AlignRight | Qt.AlignVCenter))
+            tbl.setItem(r, 0, _cell(dt_str, MUTED))
+            tbl.setItem(r, 1, _cell(ref, ACCENT))
+            tbl.setItem(r, 2, _cell(customer))
+            tbl.setItem(r, 3, _cell(amount, align=Qt.AlignRight | Qt.AlignVCenter))
             # Raw error - red, full text in tooltip too
             err_item = _cell(raw_error or "-", DANGER if raw_error else MUTED)
             if raw_error:
                 err_item.setToolTip(str(raw_error))   # full text on hover
-            tbl.setItem(r, 3, err_item)
+            tbl.setItem(r, 4, err_item)
 
         return n
 
     def _fetch_rows(self, kind: str):
         """
-        Returns list of (ref, customer, amount_str, raw_error_str).
+        Returns list of (dt_str, ref, customer, amount_str, raw_error_str).
         Every query mirrors the badge SQL so popup count == badge count.
         Raw error_msg is pulled verbatim from sync_errors table - no cleaning,
         no truncation.  Falls back to "Pending" only when no error row exists.
@@ -3753,10 +3756,25 @@ class UnsyncedPopup(QDialog):
         rows = []
         try:
             from database.db import get_connection
+            from datetime import datetime, date
+
+            def _fmt_dt(val):
+                if not val:
+                    return "-"
+                if isinstance(val, (datetime, date)):
+                    return val.strftime("%Y-%m-%d %H:%M")
+                s = str(val).strip()
+                if not s:
+                    return "-"
+                try:
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    return dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    return s[:16]
 
             def _get_raw_errors(conn, doc_type_code: str) -> dict:
                 """
-                Returns {doc_ref: error_msg} for all unresolved rows of
+                Returns {doc_ref: (error_msg, occurred_at)} for all unresolved rows of
                 this doc_type.  Verbatim - newest row wins per ref.
                 """
                 errors = {}
@@ -3764,7 +3782,7 @@ class UnsyncedPopup(QDialog):
                     cur2 = conn.cursor()
                     cur2.execute(
                         """
-                        SELECT doc_ref, error_msg
+                        SELECT doc_ref, error_msg, occurred_at
                         FROM   sync_errors
                         WHERE  doc_type = ?
                           AND  resolved = 0
@@ -3772,26 +3790,29 @@ class UnsyncedPopup(QDialog):
                         """,
                         (doc_type_code,),
                     )
-                    for doc_ref, error_msg in cur2.fetchall():
+                    for doc_ref, error_msg, occ_at in cur2.fetchall():
                         if doc_ref not in errors:
-                            errors[doc_ref] = error_msg or ""
+                            errors[doc_ref] = (error_msg or "", occ_at)
                 except Exception:
                     pass
                 return errors
 
-            def _match_error(error_map: dict, key: str) -> str:
-                """Exact match first, then substring fallback."""
+            def _match_error_info(error_map: dict, key: str):
+                """Exact match first, then substring fallback. Returns (error_msg, occurred_at)."""
                 if not key:
-                    return ""
+                    return ("", None)
                 if key in error_map:
-                    return str(error_map[key])
-                key_str = str(key).lower()
+                    val = error_map[key]
+                    return val if isinstance(val, tuple) else (str(val), None)
+                key_l = key.lower()
                 for k, v in error_map.items():
-                    if k is not None:
-                        k_str = str(k).lower()
-                        if k_str in key_str or key_str in k_str:
-                            return str(v)
-                return ""
+                    if k and (k.lower() in key_l or key_l in k.lower()):
+                        return v if isinstance(v, tuple) else (str(v), None)
+                return ("", None)
+
+            def _match_error(error_map: dict, key: str) -> str:
+                err_msg, _ = _match_error_info(error_map, key)
+                return err_msg
 
             if kind == "SI":
                 try:
@@ -3802,19 +3823,22 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT invoice_no, customer_name, total, method
+                        SELECT COALESCE(created_at, invoice_date), invoice_no, customer_name, total, method
                         FROM   sales
                         WHERE  synced = 0 OR synced IS NULL
                         ORDER  BY id DESC
                     """)
-                    for inv, cust, amt, meth in cur.fetchall():
+                    for dt, inv, cust, amt, meth in cur.fetchall():
                         inv_key = inv or ""
-                        raw_err = _match_error(error_map, inv_key)
+                        err_msg, err_dt = _match_error_info(error_map, inv_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else f"Pending - not yet attempted  (method: {meth or 'unknown'})"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             inv_key or "-",
                             cust or "Walk-in",
                             f"{self._get_currency_symbol()}{float(amt or 0):.2f}",
@@ -3822,7 +3846,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "CN":
                 try:
@@ -3832,19 +3856,22 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT cn_number, customer_name, total, cn_status
+                        SELECT created_at, cn_number, customer_name, total, cn_status
                         FROM   credit_notes
                         WHERE  cn_status IN ('ready','pending_sync')
                         ORDER  BY id DESC
                     """)
-                    for cn_no, cust, amt, status in cur.fetchall():
+                    for dt, cn_no, cust, amt, status in cur.fetchall():
                         cn_key = cn_no or ""
-                        raw_err = _match_error(error_map, cn_key)
+                        err_msg, err_dt = _match_error_info(error_map, cn_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else f"Pending - status: {status or 'ready'}"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             cn_key or "-",
                             cust or "-",
                             f"{self._get_currency_symbol()}{float(amt or 0):.2f}",
@@ -3852,8 +3879,8 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
-            
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
+
             elif kind == "SO":
                 try:
                     conn = get_connection()
@@ -3862,19 +3889,22 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT order_no, customer_name, total
+                        SELECT COALESCE(created_at, order_date), order_no, customer_name, total
                         FROM   sales_order
                         WHERE  synced = 0 OR synced IS NULL
                         ORDER  BY id DESC
                     """)
-                    for ono, cust, amt in cur.fetchall():
+                    for dt, ono, cust, amt in cur.fetchall():
                         so_key = ono or ""
-                        raw_err = _match_error(error_map, so_key)
+                        err_msg, err_dt = _match_error_info(error_map, so_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else "Pending - not yet attempted"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             so_key or "-",
                             cust or "-",
                             f"{self._get_currency_symbol()}{float(amt or 0):.2f}",
@@ -3882,7 +3912,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "PAY":
                 try:
@@ -3894,25 +3924,23 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     
                     cur = conn.cursor()
-                    # Show ALL unsynced payment entries - including sale-linked ones.
-                    # Currency column included so ZiG/ZWD entries are clearly labelled.
                     cur.execute("""
-                        SELECT reference_no, party_name, paid_amount, currency, last_error, sync_attempts FROM (
-                            SELECT pe.reference_no, pe.party_name, pe.paid_amount,
+                        SELECT dt, reference_no, party_name, paid_amount, currency, last_error, sync_attempts FROM (
+                            SELECT COALESCE(pe.created_at, pe.reference_date) as dt, pe.reference_no, pe.party_name, pe.paid_amount,
                                    pe.currency, ISNULL(pe.sync_error, pe.last_error) as last_error, pe.sync_attempts, pe.id
                             FROM   payment_entries pe
                             WHERE  (pe.synced = 0 OR pe.synced IS NULL)
                             
                             UNION ALL
                             
-                            SELECT le.order_no as reference_no, le.customer_name as party_name, le.deposit_amount as paid_amount,
+                            SELECT le.created_at as dt, le.order_no as reference_no, le.customer_name as party_name, le.deposit_amount as paid_amount,
                                    le.deposit_currency as currency, ISNULL(le.sync_error, le.error_message) as last_error, le.sync_attempts, le.id
                             FROM   laybye_payment_entries le
                             WHERE  le.status != 'synced'
 
                             UNION ALL
 
-                            SELECT cp.reference as reference_no, c.customer_name as party_name, cp.amount as paid_amount,
+                            SELECT COALESCE(cp.created_at, cp.payment_date) as dt, cp.reference as reference_no, c.customer_name as party_name, cp.amount as paid_amount,
                                    cp.currency, cp.sync_error as last_error, cp.sync_attempts, cp.id
                             FROM   customer_payments cp
                             LEFT JOIN customers c ON cp.customer_id = c.id
@@ -3920,9 +3948,10 @@ class UnsyncedPopup(QDialog):
                         ) as combined
                         ORDER BY id DESC
                     """)
-                    for ref, cust, amt, curr, db_err, attempts in cur.fetchall():
+                    for dt, ref, cust, amt, curr, db_err, attempts in cur.fetchall():
                         pay_key = ref or ""
-                        raw_err = (db_err or "").strip() or _match_error(error_map, pay_key)
+                        err_msg, err_dt = _match_error_info(error_map, pay_key)
+                        raw_err = (db_err or "").strip() or err_msg
                         att = attempts or 0
                         if att >= 60:
                             attempt_str = f" (Max retries reached - click Retry to reset)"
@@ -3935,7 +3964,9 @@ class UnsyncedPopup(QDialog):
                             else "Pending - not yet attempted"
                         )
                         curr_display = (curr or "USD").upper()
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             pay_key or "-",
                             cust or "Walk-in",
                             f"{curr_display}  {float(amt or 0):,.2f}",
@@ -3943,7 +3974,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "CUST":
                 try:
@@ -3960,16 +3991,19 @@ class UnsyncedPopup(QDialog):
                     """)
                     for cid, cname, phone in cur.fetchall():
                         cust_key = f"CUST-{cid}"
-                        raw_err = (
-                            _match_error(error_map, cust_key)
-                            or _match_error(error_map, str(cid))
-                            or (_match_error(error_map, cname) if cname else "")
-                        )
+                        err_msg, err_dt = _match_error_info(error_map, cust_key)
+                        if not err_msg:
+                            err_msg, err_dt = _match_error_info(error_map, str(cid))
+                        if not err_msg and cname:
+                            err_msg, err_dt = _match_error_info(error_map, cname)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else "Not yet synced to server"
                         )
+                        final_dt = _fmt_dt(err_dt)
                         rows.append((
+                            final_dt,
                             cust_key,
                             cname or "-",
                             phone or "-",
@@ -3977,7 +4011,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "BUNDLE":
                 try:
@@ -3987,19 +4021,22 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT id, name, description
+                        SELECT created_at, id, name, description
                         FROM   product_bundles
                         WHERE  sync_status = 'pending' OR sync_status = 'failed'
                         ORDER  BY id DESC
                     """)
-                    for bid, bname, bdesc in cur.fetchall():
+                    for dt, bid, bname, bdesc in cur.fetchall():
                         bundle_key = bname or str(bid)
-                        raw_err = _match_error(error_map, bundle_key)
+                        err_msg, err_dt = _match_error_info(error_map, bundle_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else "Pending push to server"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             f"BNDL-{bid}",
                             bname or "-",
                             "Bundle",
@@ -4007,7 +4044,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
         except Exception:
             pass
@@ -4038,11 +4075,12 @@ class UnsyncedPopup(QDialog):
             # copy all errors for this tab
             lines = []
             for r in range(tbl.rowCount()):
-                ref   = (tbl.item(r, 0) or QTableWidgetItem("")).text()
-                cust  = (tbl.item(r, 1) or QTableWidgetItem("")).text()
-                amt   = (tbl.item(r, 2) or QTableWidgetItem("")).text()
-                err   = (tbl.item(r, 3) or QTableWidgetItem("")).text()
-                lines.append(f"{ref} | {cust} | {amt} | {err}")
+                dt    = (tbl.item(r, 0) or QTableWidgetItem("")).text()
+                ref   = (tbl.item(r, 1) or QTableWidgetItem("")).text()
+                cust  = (tbl.item(r, 2) or QTableWidgetItem("")).text()
+                amt   = (tbl.item(r, 3) or QTableWidgetItem("")).text()
+                err   = (tbl.item(r, 4) or QTableWidgetItem("")).text()
+                lines.append(f"{dt} | {ref} | {cust} | {amt} | {err}")
             text = "\n".join(lines) if lines else ""
         else:
             # copy error column of selected row(s)
@@ -4053,11 +4091,12 @@ class UnsyncedPopup(QDialog):
                 if r in seen:
                     continue
                 seen.add(r)
-                ref  = (tbl.item(r, 0) or QTableWidgetItem("")).text()
-                cust = (tbl.item(r, 1) or QTableWidgetItem("")).text()
-                amt  = (tbl.item(r, 2) or QTableWidgetItem("")).text()
-                err  = (tbl.item(r, 3) or QTableWidgetItem("")).text()
-                parts.append(f"{ref} | {cust} | {amt}\n{err}")
+                dt   = (tbl.item(r, 0) or QTableWidgetItem("")).text()
+                ref  = (tbl.item(r, 1) or QTableWidgetItem("")).text()
+                cust = (tbl.item(r, 2) or QTableWidgetItem("")).text()
+                amt  = (tbl.item(r, 3) or QTableWidgetItem("")).text()
+                err  = (tbl.item(r, 4) or QTableWidgetItem("")).text()
+                parts.append(f"[{dt}] {ref} | {cust} | {amt}\n{err}")
             text = "\n\n".join(parts)
 
         if text:
@@ -5068,6 +5107,15 @@ class POSView(QWidget):
         In pharmacy mode, reroutes to save+print quotation (the "Dispense"
         path for pharmacists, "Finalize Quote" for everyone else).
         """
+        # ── 0. SAAS DEFAULT ADMIN SALE GUARD ───────────────────────────────────────────
+        try:
+            from utils.roles import check_and_warn_saas_sale_eligibility
+            _user = getattr(self, "user", getattr(getattr(self, "parent_window", None), "user", None))
+            if not check_and_warn_saas_sale_eligibility(self, _user):
+                return
+        except Exception as _e:
+            print(f"[POSView] SaaS default admin sale check error: {_e}")
+
         # ── 0. SHIFT GUARD ─────────────────────────────────────────────────────────────
         if not self._require_active_shift():
             return
@@ -5184,6 +5232,20 @@ class POSView(QWidget):
         discount_amt = getattr(self, "current_discount_amount", 0.0)
         
         # ── 4. OPEN PAYMENT DIALOG WITH ITEMS ──────────────────────────────────
+        dining_option = ""
+        if hasattr(self, "_get_pos_rule") and self._get_pos_rule("takeaway_or_sitin", default=False):
+            from views.dialogs.dining_option_dialog import is_dining_prompt_hidden, DiningOptionDialog
+            if is_dining_prompt_hidden():
+                dining_option = "TAKE AWAY"
+            else:
+                try:
+                    dlg_dining = DiningOptionDialog(self)
+                    if dlg_dining.exec() != QDialog.Accepted or not dlg_dining.selected_option:
+                        return
+                    dining_option = dlg_dining.selected_option
+                except Exception as e:
+                    print(f"[POSView] DiningOptionDialog error: {e}")
+
         is_restaurant = getattr(self, "_restaurant_mode", False)
         _prefill = getattr(self, "_prefill_amounts", None)
         self._prefill_amounts = None  # consume it so next open is clean
@@ -5206,6 +5268,7 @@ class POSView(QWidget):
                 table_id=getattr(self, "_current_table_id", None),
                 warehouse_id=self.warehouse_id,
                 cost_center_id=self.cost_center_id,
+                dining_option=dining_option,
             )
         else:
             dlg = PaymentDialog(
@@ -5226,6 +5289,7 @@ class POSView(QWidget):
                 table_id=getattr(self, "_current_table_id", None),
                 warehouse_id=self.warehouse_id,
                 cost_center_id=self.cost_center_id,
+                dining_option=dining_option,
             )
         
         print(f"[DEBUG] _open_payment: Opening dialog with waiter_name='{getattr(self, '_current_waiter_name', '')}'")
@@ -6095,7 +6159,7 @@ class POSView(QWidget):
             if mode in ("frappe", "odoo", "saas"):
                 adv_settings = AdvanceSettings.load_from_file()
                 toggles = {
-                    "sales": adv_settings.showAppSales,
+                    "sales": True,
                     "finance": adv_settings.showAppFinance,
                     "inventory": adv_settings.showAppInventory,
                 }
@@ -6118,6 +6182,7 @@ class POSView(QWidget):
         sales_menu_btn = HoverMenuButton("Sales", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
         sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
+        sales_menu_btn.addItem("Expenses",            self._open_expenses_dialog)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         
         # Hide "Sales Report" (which reveals total sales) from cashiers
@@ -6335,6 +6400,65 @@ class POSView(QWidget):
             quote_btn.setVisible(False)
         
         # ── Options dropdown (replaces right-panel Options button) ───────────────
+        # ── Expenses button ───────────────────────────────────────────────────
+        self.expenses_btn = _nb("Expenses", self._on_expenses_clicked, color=ORANGE, hov=AMBER)
+        self.expenses_btn.setToolTip("Record Till Expenses")
+        layout.addWidget(self.expenses_btn)
+        layout.addSpacing(4)
+        try:
+            if not getattr(adv_settings, "enableExpenses", False):
+                self.expenses_btn.setVisible(False)
+        except Exception:
+            self.expenses_btn.setVisible(False)
+
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
         options_menu_btn = HoverMenuButton("Options", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
         options_menu_btn.addItem("Sync from Server",    self._do_nav_sync_products)
@@ -7921,11 +8045,7 @@ class POSView(QWidget):
             from models.company_defaults import get_defaults
             mode = get_system_mode()
             _is_offline = (get_defaults() or {}).get("work_offline") == "1" or "offline" in mode.lower()
-            if mode in ("frappe", "odoo"):
-                adv_settings = AdvanceSettings.load_from_file()
-                toggles = {"sales": adv_settings.showAppSales}
-            else:
-                toggles = {"sales": True}
+            toggles = {"sales": True}
         except Exception:
             pass
 
@@ -7933,6 +8053,7 @@ class POSView(QWidget):
         sales_menu_btn = HoverMenuButton("Sales", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
         sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
+        sales_menu_btn.addItem("Expenses",            self._open_expenses_dialog)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Sales Report", self._open_sales_report_tab)
@@ -7940,9 +8061,8 @@ class POSView(QWidget):
         sales_menu_btn.addItem("Payments", self._open_customer_payment_entry)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Reprint Shift Reconciliation", self._open_shift_reprint)
-        if toggles.get("sales"):
+        if toggles.get("sales", True):
             layout.addWidget(sales_menu_btn)
-            if _is_offline: sales_menu_btn.setVisible(False)
         
 
         # ── Admin Check ───────────────────────────────────────────────────────
@@ -8123,6 +8243,65 @@ class POSView(QWidget):
         
         
 # ── Options dropdown ──────────────────────────────────────────────────────
+        # ── Expenses button ───────────────────────────────────────────────────
+        self.expenses_btn = _nb("Expenses", self._on_expenses_clicked, color=ORANGE, hov=AMBER)
+        self.expenses_btn.setToolTip("Record Till Expenses")
+        layout.addWidget(self.expenses_btn)
+        layout.addSpacing(4)
+        try:
+            if not getattr(adv_settings, "enableExpenses", False):
+                self.expenses_btn.setVisible(False)
+        except Exception:
+            self.expenses_btn.setVisible(False)
+
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
         options_menu_btn = HoverMenuButton("Options", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
         options_menu_btn.addItem("Sync from Server",    self._do_nav_sync_products)
@@ -8780,7 +8959,8 @@ class POSView(QWidget):
             from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton
             from PySide6.QtCore import Qt
             
-            dlg = QDialog(self)
+            from views.components.blur_overlay import BlurredDialog
+            dlg = BlurredDialog(self)
             dlg.setWindowTitle("Update Quantity")
             dlg.setModal(True)
             dlg.setFixedSize(400, 450)
@@ -8859,7 +9039,9 @@ class POSView(QWidget):
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, _setup_cursor)
             
-            if dlg.exec() == QDialog.Accepted:
+            res = dlg.exec()
+            
+            if res == QDialog.Accepted:
                 new_qty = spin.value()
                 
                 block_rule = not getattr(self, "_get_pos_rule", lambda k, default: default)("allow_negative_stock", default=True)
@@ -11306,11 +11488,25 @@ class POSView(QWidget):
             if hidden_no_price:
                 print(f"[grid] {hidden_no_price} item(s) show 0 - no rate in "
                       f"price list '{active_list}'")
+            if len(tuples) == 0 and name == "All":
+                try:
+                    from services.bugsink_service import check_and_report_saas_empty_catalog
+                    check_and_report_saas_empty_catalog(
+                        context="secondary_grid_all",
+                        extra_info={"warehouse_id": wh_id, "price_list": active_list}
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[grid] Error loading products: {e}")
             self._current_products   = []
             self._product_meta_by_pn = {}
             self._has_any_product_image = False
+            try:
+                from services.bugsink_service import capture_exception
+                capture_exception(e, extra={"action": "secondary_load_products_grid", "category": name})
+            except Exception:
+                pass
 
         self._product_page = 0
         self._render_product_page()
@@ -11746,6 +11942,20 @@ class POSView(QWidget):
                 dlg.show()
             except Exception as e:
                 coming_soon(self, f"Credit Notes List: {e}")
+
+    def _open_expenses_dialog(self):
+        try:
+            from views.dialogs.expense_dialog import ProcessExpenseDialog
+            parent_window = getattr(self, "parent_window", None) or self
+            dlg = ProcessExpenseDialog(parent=parent_window)
+            dlg.exec()
+        except Exception as e:
+            try:
+                from views.dialogs.expense_dialog import ProcessExpenseDialog
+                dlg = ProcessExpenseDialog(parent=self)
+                dlg.exec()
+            except Exception as err:
+                coming_soon(self, f"Expenses: {err}")
 
     def _open_sales_report(self):
         try:
@@ -12596,31 +12806,36 @@ class POSView(QWidget):
                                    fiscal_qr: str = "", fiscal_vc: str = ""):
         """Build a proper ReceiptData credit note and send it to printing_service."""
         import json
-        from pathlib import Path
         from models.receipt import ReceiptData, Item
         from models.company_defaults import get_defaults
-        from services.printing_service import printing_service
+        from services.printing_service import printing_service, get_configured_paper_size
+        from database.db import get_app_data_dir
 
         co = get_defaults() or {}
 
-        # ── Resolve printer ──────────────────────────────────────────────────
-        hw_file  = Path("app_data/hardware_settings.json")
-        printers = []
-        try:
-            with open(hw_file, "r", encoding="utf-8") as f:
-                hw = json.load(f)
-            if hw.get("main_printer") and hw["main_printer"] != "(None)":
-                printers.append(hw["main_printer"])
-        except Exception:
-            pass
+        # ── Resolve printer & paper size ─────────────────────────────────────
+        paper_size = get_configured_paper_size()
+        is_a4 = str(paper_size).upper() == "A4"
 
-        if not printers:
-            QMessageBox.warning(
-                self, "No Printer",
-                "No active printer configured in hardware settings.\n"
-                "Go to Settings -> Hardware to configure a printer."
-            )
-            return
+        printers = []
+        if not is_a4:
+            hw_file = get_app_data_dir() / "hardware_settings.json"
+            try:
+                if hw_file.exists():
+                    with open(hw_file, "r", encoding="utf-8") as f:
+                        hw = json.load(f)
+                    if hw.get("main_printer") and hw["main_printer"] != "(None)":
+                        printers.append(hw["main_printer"])
+            except Exception:
+                pass
+
+            if not printers:
+                QMessageBox.warning(
+                    self, "No Printer",
+                    "No active printer configured in hardware settings.\n"
+                    "Go to Settings -> Hardware to configure a printer."
+                )
+                return
 
         # ── Build ReceiptData ────────────────────────────────────────────────
         subtotal = sum(float(it.get("total", 0)) for it in items)
@@ -12647,6 +12862,31 @@ class POSView(QWidget):
             currency            = cn.get("currency", "USD"),
             footer              = co.get("footer_text", "Credit note issued. Thank you."),
         )
+
+        # Enrich customer details (email, address, TIN, VAT)
+        cust_name = str(cn.get("customer_name", "") or "").strip()
+        if cust_name and cust_name.lower() not in ("walk-in", "walk in", "walk in customer", "walk-in customer", "cash customer", "cash", "default", "default customer"):
+            try:
+                from database.db import get_connection
+                _c_conn = get_connection()
+                _c_cur = _c_conn.cursor()
+                _c_cur.execute(
+                    "SELECT custom_email_address, custom_house_no, custom_street, custom_city, custom_province, custom_customer_tin, custom_customer_vat, custom_telephone_number "
+                    "FROM customers WITH (NOLOCK) WHERE customer_name = ?", (cust_name,)
+                )
+                _c_row = _c_cur.fetchone()
+                _c_conn.close()
+                if _c_row:
+                    receipt.customerEmail = _c_row[0] or ""
+                    addr_parts = [str(p).strip() for p in (_c_row[1], _c_row[2], _c_row[3], _c_row[4]) if p and str(p).strip()]
+                    receipt.customeraddress = ", ".join(addr_parts)
+                    receipt.customerTin = _c_row[5] or ""
+                    receipt.customerVat = _c_row[6] or ""
+                    if not receipt.customerContact and _c_row[7]:
+                        receipt.customerContact = _c_row[7]
+            except Exception:
+                pass
+
         # Extra attributes read via getattr() in printing_service - set after construction
         receipt.originalInvoiceNo = cn.get("invoice_no", "")
         receipt.creditNoteReason  = cn.get("reason", "")
@@ -12668,6 +12908,12 @@ class POSView(QWidget):
         receipt.itemlist = receipt.items
 
         # ── Print ────────────────────────────────────────────────────────────
+        if is_a4:
+            if printing_service.print_credit_note(receipt):
+                QMessageBox.information(self, "Credit Note Preview",
+                                        "Credit note A4 document opened in preview.")
+            return
+
         ok = False
         for p in printers:
             if printing_service.print_credit_note(receipt, printer_name=p):
@@ -13091,6 +13337,18 @@ class POSView(QWidget):
     # =========================================================================
     # QUOTATION FLOW
     # =========================================================================
+    def _on_expenses_clicked(self):
+        try:
+            from views.dialogs.expense_dialog import ProcessExpenseDialog
+            parent_window = getattr(self, "parent_window", None) or getattr(self, "parent", lambda: self)() 
+            if not isinstance(parent_window, type(self)):
+                parent_window = self
+            dlg = ProcessExpenseDialog(parent=parent_window)
+            dlg.exec()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to open Expenses dialog: {e}")
+
     def _on_quotation(self):
         """
         Quotation flow:
@@ -17283,7 +17541,7 @@ def _clean_frappe_error(raw: str) -> str:
 # Tabbed SI / CN / SO view.  Raw API errors shown verbatim and are copyable.
 # Header shows count per tab.  Smart open: opens the right tab automatically.
 # =============================================================================
-class UnsyncedPopup(QDialog):
+class UnsyncedPopup(BlurredDialog):
     """
     kind = "SI"  -> opens on the Sales Invoices tab
     kind = "CN"  -> opens on the Credit Notes tab
@@ -17412,14 +17670,15 @@ class UnsyncedPopup(QDialog):
         setattr(self, f"_count_lbl_{kind}", count_lbl)
         bl.addWidget(count_lbl)
 
-        # Table - 4 columns: Q: Ref | Customer | Amount | Raw Error
-        tbl = QTableWidget(0, 4)
-        tbl.setHorizontalHeaderLabels(["Q: Ref / No.", "Customer", "Amount", "Raw API Error"])
+        # Table - 5 columns: Date | Q: Ref | Customer | Amount | Raw Error
+        tbl = QTableWidget(0, 5)
+        tbl.setHorizontalHeaderLabels(["Date", "Q: Ref / No.", "Customer", "Amount", "Raw API Error"])
         hh = tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed);  tbl.setColumnWidth(0, 150)
-        hh.setSectionResizeMode(1, QHeaderView.Fixed);  tbl.setColumnWidth(1, 160)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed);  tbl.setColumnWidth(2, 90)
-        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+        hh.setSectionResizeMode(0, QHeaderView.Fixed);  tbl.setColumnWidth(0, 135)
+        hh.setSectionResizeMode(1, QHeaderView.Fixed);  tbl.setColumnWidth(1, 140)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed);  tbl.setColumnWidth(2, 150)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed);  tbl.setColumnWidth(3, 90)
+        hh.setSectionResizeMode(4, QHeaderView.Stretch)
         tbl.verticalHeader().setVisible(False)
         tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
         tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -17536,7 +17795,7 @@ class UnsyncedPopup(QDialog):
         if lbl:
             lbl.setText(f"{n} item{'s' if n != 1 else ''} pending sync")
 
-        for ref, customer, amount, raw_error in rows:
+        for dt_str, ref, customer, amount, raw_error in rows:
             r = tbl.rowCount()
             tbl.insertRow(r)
             tbl.setRowHeight(r, 42)
@@ -17551,20 +17810,21 @@ class UnsyncedPopup(QDialog):
                     it.setForeground(QColor(color))
                 return it
 
-            tbl.setItem(r, 0, _cell(ref, ACCENT))
-            tbl.setItem(r, 1, _cell(customer))
-            tbl.setItem(r, 2, _cell(amount, align=Qt.AlignRight | Qt.AlignVCenter))
+            tbl.setItem(r, 0, _cell(dt_str, MUTED))
+            tbl.setItem(r, 1, _cell(ref, ACCENT))
+            tbl.setItem(r, 2, _cell(customer))
+            tbl.setItem(r, 3, _cell(amount, align=Qt.AlignRight | Qt.AlignVCenter))
             # Raw error - red, full text in tooltip too
             err_item = _cell(raw_error or "-", DANGER if raw_error else MUTED)
             if raw_error:
                 err_item.setToolTip(str(raw_error))   # full text on hover
-            tbl.setItem(r, 3, err_item)
+            tbl.setItem(r, 4, err_item)
 
         return n
 
     def _fetch_rows(self, kind: str):
         """
-        Returns list of (ref, customer, amount_str, raw_error_str).
+        Returns list of (dt_str, ref, customer, amount_str, raw_error_str).
         Every query mirrors the badge SQL so popup count == badge count.
         Raw error_msg is pulled verbatim from sync_errors table - no cleaning,
         no truncation.  Falls back to "Pending" only when no error row exists.
@@ -17572,10 +17832,25 @@ class UnsyncedPopup(QDialog):
         rows = []
         try:
             from database.db import get_connection
+            from datetime import datetime, date
+
+            def _fmt_dt(val):
+                if not val:
+                    return "-"
+                if isinstance(val, (datetime, date)):
+                    return val.strftime("%Y-%m-%d %H:%M")
+                s = str(val).strip()
+                if not s:
+                    return "-"
+                try:
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    return dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    return s[:16]
 
             def _get_raw_errors(conn, doc_type_code: str) -> dict:
                 """
-                Returns {doc_ref: error_msg} for all unresolved rows of
+                Returns {doc_ref: (error_msg, occurred_at)} for all unresolved rows of
                 this doc_type.  Verbatim - newest row wins per ref.
                 """
                 errors = {}
@@ -17583,7 +17858,7 @@ class UnsyncedPopup(QDialog):
                     cur2 = conn.cursor()
                     cur2.execute(
                         """
-                        SELECT doc_ref, error_msg
+                        SELECT doc_ref, error_msg, occurred_at
                         FROM   sync_errors
                         WHERE  doc_type = ?
                           AND  resolved = 0
@@ -17591,26 +17866,29 @@ class UnsyncedPopup(QDialog):
                         """,
                         (doc_type_code,),
                     )
-                    for doc_ref, error_msg in cur2.fetchall():
+                    for doc_ref, error_msg, occ_at in cur2.fetchall():
                         if doc_ref not in errors:
-                            errors[doc_ref] = error_msg or ""
+                            errors[doc_ref] = (error_msg or "", occ_at)
                 except Exception:
                     pass
                 return errors
 
-            def _match_error(error_map: dict, key: str) -> str:
-                """Exact match first, then substring fallback."""
+            def _match_error_info(error_map: dict, key: str):
+                """Exact match first, then substring fallback. Returns (error_msg, occurred_at)."""
                 if not key:
-                    return ""
+                    return ("", None)
                 if key in error_map:
-                    return str(error_map[key])
-                key_str = str(key).lower()
+                    val = error_map[key]
+                    return val if isinstance(val, tuple) else (str(val), None)
+                key_l = key.lower()
                 for k, v in error_map.items():
-                    if k is not None:
-                        k_str = str(k).lower()
-                        if k_str in key_str or key_str in k_str:
-                            return str(v)
-                return ""
+                    if k and (k.lower() in key_l or key_l in k.lower()):
+                        return v if isinstance(v, tuple) else (str(v), None)
+                return ("", None)
+
+            def _match_error(error_map: dict, key: str) -> str:
+                err_msg, _ = _match_error_info(error_map, key)
+                return err_msg
 
             if kind == "SI":
                 try:
@@ -17621,19 +17899,22 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT invoice_no, customer_name, total, method
+                        SELECT COALESCE(created_at, invoice_date), invoice_no, customer_name, total, method
                         FROM   sales
                         WHERE  synced = 0 OR synced IS NULL
                         ORDER  BY id DESC
                     """)
-                    for inv, cust, amt, meth in cur.fetchall():
+                    for dt, inv, cust, amt, meth in cur.fetchall():
                         inv_key = inv or ""
-                        raw_err = _match_error(error_map, inv_key)
+                        err_msg, err_dt = _match_error_info(error_map, inv_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else f"Pending - not yet attempted  (method: {meth or 'unknown'})"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             inv_key or "-",
                             cust or "Walk-in",
                             f"{self._get_currency_symbol()}{float(amt or 0):.2f}",
@@ -17641,7 +17922,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "CN":
                 try:
@@ -17651,19 +17932,22 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT cn_number, customer_name, total, cn_status
+                        SELECT created_at, cn_number, customer_name, total, cn_status
                         FROM   credit_notes
                         WHERE  cn_status IN ('ready','pending_sync')
                         ORDER  BY id DESC
                     """)
-                    for cn_no, cust, amt, status in cur.fetchall():
+                    for dt, cn_no, cust, amt, status in cur.fetchall():
                         cn_key = cn_no or ""
-                        raw_err = _match_error(error_map, cn_key)
+                        err_msg, err_dt = _match_error_info(error_map, cn_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else f"Pending - status: {status or 'ready'}"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             cn_key or "-",
                             cust or "-",
                             f"{self._get_currency_symbol()}{float(amt or 0):.2f}",
@@ -17671,7 +17955,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
             
             elif kind == "SO":
                 try:
@@ -17681,19 +17965,22 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT order_no, customer_name, total
+                        SELECT COALESCE(created_at, order_date), order_no, customer_name, total
                         FROM   sales_order
                         WHERE  synced = 0 OR synced IS NULL
                         ORDER  BY id DESC
                     """)
-                    for ono, cust, amt in cur.fetchall():
+                    for dt, ono, cust, amt in cur.fetchall():
                         so_key = ono or ""
-                        raw_err = _match_error(error_map, so_key)
+                        err_msg, err_dt = _match_error_info(error_map, so_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else "Pending - not yet attempted"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             so_key or "-",
                             cust or "-",
                             f"{self._get_currency_symbol()}{float(amt or 0):.2f}",
@@ -17701,7 +17988,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "PAY":
                 try:
@@ -17716,22 +18003,22 @@ class UnsyncedPopup(QDialog):
                     # Show ALL unsynced payment entries - including sale-linked ones.
                     # Currency column included so ZiG/ZWD entries are clearly labelled.
                     cur.execute("""
-                        SELECT reference_no, party_name, paid_amount, currency, last_error, sync_attempts FROM (
-                            SELECT pe.reference_no, pe.party_name, pe.paid_amount,
+                        SELECT dt, reference_no, party_name, paid_amount, currency, last_error, sync_attempts FROM (
+                            SELECT COALESCE(pe.created_at, pe.reference_date) as dt, pe.reference_no, pe.party_name, pe.paid_amount,
                                    pe.currency, ISNULL(pe.sync_error, pe.last_error) as last_error, pe.sync_attempts, pe.id
                             FROM   payment_entries pe
                             WHERE  (pe.synced = 0 OR pe.synced IS NULL)
                             
                             UNION ALL
                             
-                            SELECT le.order_no as reference_no, le.customer_name as party_name, le.deposit_amount as paid_amount,
+                            SELECT le.created_at as dt, le.order_no as reference_no, le.customer_name as party_name, le.deposit_amount as paid_amount,
                                    le.deposit_currency as currency, ISNULL(le.sync_error, le.error_message) as last_error, le.sync_attempts, le.id
                             FROM   laybye_payment_entries le
                             WHERE  le.status != 'synced'
 
                             UNION ALL
 
-                            SELECT cp.reference as reference_no, c.customer_name as party_name, cp.amount as paid_amount,
+                            SELECT COALESCE(cp.created_at, cp.payment_date) as dt, cp.reference as reference_no, c.customer_name as party_name, cp.amount as paid_amount,
                                    cp.currency, cp.sync_error as last_error, cp.sync_attempts, cp.id
                             FROM   customer_payments cp
                             LEFT JOIN customers c ON cp.customer_id = c.id
@@ -17739,9 +18026,10 @@ class UnsyncedPopup(QDialog):
                         ) as combined
                         ORDER BY id DESC
                     """)
-                    for ref, cust, amt, curr, db_err, attempts in cur.fetchall():
+                    for dt, ref, cust, amt, curr, db_err, attempts in cur.fetchall():
                         pay_key = ref or ""
-                        raw_err = (db_err or "").strip() or _match_error(error_map, pay_key)
+                        err_msg, err_dt = _match_error_info(error_map, pay_key)
+                        raw_err = (db_err or "").strip() or err_msg
                         att = attempts or 0
                         if att >= 60:
                             attempt_str = f" (Max retries reached - click Retry to reset)"
@@ -17754,7 +18042,9 @@ class UnsyncedPopup(QDialog):
                             else "Pending - not yet attempted"
                         )
                         curr_display = (curr or "USD").upper()
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             pay_key or "-",
                             cust or "Walk-in",
                             f"{curr_display}  {float(amt or 0):,.2f}",
@@ -17762,7 +18052,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "CUST":
                 try:
@@ -17779,16 +18069,19 @@ class UnsyncedPopup(QDialog):
                     """)
                     for cid, cname, phone in cur.fetchall():
                         cust_key = f"CUST-{cid}"
-                        raw_err = (
-                            _match_error(error_map, cust_key)
-                            or _match_error(error_map, str(cid))
-                            or (_match_error(error_map, cname) if cname else "")
-                        )
+                        err_msg, err_dt = _match_error_info(error_map, cust_key)
+                        if not err_msg:
+                            err_msg, err_dt = _match_error_info(error_map, str(cid))
+                        if not err_msg and cname:
+                            err_msg, err_dt = _match_error_info(error_map, cname)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else "Not yet synced to server"
                         )
+                        final_dt = _fmt_dt(err_dt)
                         rows.append((
+                            final_dt,
                             cust_key,
                             cname or "-",
                             phone or "-",
@@ -17796,7 +18089,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "BUNDLE":
                 try:
@@ -17806,19 +18099,22 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT id, name, description
+                        SELECT created_at, id, name, description
                         FROM   product_bundles
                         WHERE  sync_status = 'pending' OR sync_status = 'failed'
                         ORDER  BY id DESC
                     """)
-                    for bid, bname, bdesc in cur.fetchall():
+                    for dt, bid, bname, bdesc in cur.fetchall():
                         bundle_key = bname or str(bid)
-                        raw_err = _match_error(error_map, bundle_key)
+                        err_msg, err_dt = _match_error_info(error_map, bundle_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else "Pending push to server"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             f"BNDL-{bid}",
                             bname or "-",
                             "Bundle",
@@ -17826,7 +18122,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
         except Exception:
             pass
@@ -17857,11 +18153,12 @@ class UnsyncedPopup(QDialog):
             # copy all errors for this tab
             lines = []
             for r in range(tbl.rowCount()):
-                ref   = (tbl.item(r, 0) or QTableWidgetItem("")).text()
-                cust  = (tbl.item(r, 1) or QTableWidgetItem("")).text()
-                amt   = (tbl.item(r, 2) or QTableWidgetItem("")).text()
-                err   = (tbl.item(r, 3) or QTableWidgetItem("")).text()
-                lines.append(f"{ref} | {cust} | {amt} | {err}")
+                dt    = (tbl.item(r, 0) or QTableWidgetItem("")).text()
+                ref   = (tbl.item(r, 1) or QTableWidgetItem("")).text()
+                cust  = (tbl.item(r, 2) or QTableWidgetItem("")).text()
+                amt   = (tbl.item(r, 3) or QTableWidgetItem("")).text()
+                err   = (tbl.item(r, 4) or QTableWidgetItem("")).text()
+                lines.append(f"{dt} | {ref} | {cust} | {amt} | {err}")
             text = "\n".join(lines) if lines else ""
         else:
             # copy error column of selected row(s)
@@ -17872,11 +18169,12 @@ class UnsyncedPopup(QDialog):
                 if r in seen:
                     continue
                 seen.add(r)
-                ref  = (tbl.item(r, 0) or QTableWidgetItem("")).text()
-                cust = (tbl.item(r, 1) or QTableWidgetItem("")).text()
-                amt  = (tbl.item(r, 2) or QTableWidgetItem("")).text()
-                err  = (tbl.item(r, 3) or QTableWidgetItem("")).text()
-                parts.append(f"{ref} | {cust} | {amt}\n{err}")
+                dt   = (tbl.item(r, 0) or QTableWidgetItem("")).text()
+                ref  = (tbl.item(r, 1) or QTableWidgetItem("")).text()
+                cust = (tbl.item(r, 2) or QTableWidgetItem("")).text()
+                amt  = (tbl.item(r, 3) or QTableWidgetItem("")).text()
+                err  = (tbl.item(r, 4) or QTableWidgetItem("")).text()
+                parts.append(f"[{dt}] {ref} | {cust} | {amt}\n{err}")
             text = "\n\n".join(parts)
 
         if text:
@@ -18893,7 +19191,16 @@ class POSView(QWidget):
         In pharmacy mode, reroutes to save+print quotation (the "Dispense"
         path for pharmacists, "Finalize Quote" for everyone else).
         """
-        # ΓöÇΓöÇ 0. SHIFT GUARD ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── 0. SAAS DEFAULT ADMIN SALE GUARD ───────────────────────────────────────────
+        try:
+            from utils.roles import check_and_warn_saas_sale_eligibility
+            _user = getattr(self, "user", getattr(getattr(self, "parent_window", None), "user", None))
+            if not check_and_warn_saas_sale_eligibility(self, _user):
+                return
+        except Exception as _e:
+            print(f"[POSView] SaaS default admin sale check error: {_e}")
+
+        # ── 0. SHIFT GUARD ─────────────────────────────────────────────────────────────
         if not self._require_active_shift():
             return
 
@@ -19009,6 +19316,20 @@ class POSView(QWidget):
         discount_amt = getattr(self, "current_discount_amount", 0.0)
         
         # ΓöÇΓöÇ 4. OPEN PAYMENT DIALOG WITH ITEMS ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        dining_option = ""
+        if hasattr(self, "_get_pos_rule") and self._get_pos_rule("takeaway_or_sitin", default=False):
+            from views.dialogs.dining_option_dialog import is_dining_prompt_hidden, DiningOptionDialog
+            if is_dining_prompt_hidden():
+                dining_option = "TAKE AWAY"
+            else:
+                try:
+                    dlg_dining = DiningOptionDialog(self)
+                    if dlg_dining.exec() != QDialog.Accepted or not dlg_dining.selected_option:
+                        return
+                    dining_option = dlg_dining.selected_option
+                except Exception as e:
+                    print(f"[POSView] DiningOptionDialog error: {e}")
+
         is_restaurant = getattr(self, "_restaurant_mode", False)
         _prefill = getattr(self, "_prefill_amounts", None)
         self._prefill_amounts = None  # consume it so next open is clean
@@ -19031,6 +19352,7 @@ class POSView(QWidget):
                 table_id=getattr(self, "_current_table_id", None),
                 warehouse_id=self.warehouse_id,
                 cost_center_id=self.cost_center_id,
+                dining_option=dining_option,
             )
         else:
             dlg = PaymentDialog(
@@ -19051,6 +19373,7 @@ class POSView(QWidget):
                 table_id=getattr(self, "_current_table_id", None),
                 warehouse_id=self.warehouse_id,
                 cost_center_id=self.cost_center_id,
+                dining_option=dining_option,
             )
         
         print(f"[DEBUG] _open_payment: Opening dialog with waiter_name='{getattr(self, '_current_waiter_name', '')}'")
@@ -19906,7 +20229,7 @@ class POSView(QWidget):
             if mode in ("frappe", "odoo", "saas"):
                 adv_settings = AdvanceSettings.load_from_file()
                 toggles = {
-                    "sales": adv_settings.showAppSales,
+                    "sales": True,
                     "finance": adv_settings.showAppFinance,
                     "inventory": adv_settings.showAppInventory,
                 }
@@ -19920,6 +20243,7 @@ class POSView(QWidget):
         sales_menu_btn = HoverMenuButton("Sales ", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
         sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
+        sales_menu_btn.addItem("Expenses",            self._open_expenses_dialog)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Sales Report", self._open_sales_report_tab)
@@ -20138,6 +20462,65 @@ class POSView(QWidget):
             quote_btn.setVisible(False)
         
         # ΓöÇΓöÇ Options dropdown (replaces right-panel Options button) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Expenses button ───────────────────────────────────────────────────
+        self.expenses_btn = _nb("Expenses", self._on_expenses_clicked, color=ORANGE, hov=AMBER)
+        self.expenses_btn.setToolTip("Record Till Expenses")
+        layout.addWidget(self.expenses_btn)
+        layout.addSpacing(4)
+        try:
+            if not getattr(adv_settings, "enableExpenses", False):
+                self.expenses_btn.setVisible(False)
+        except Exception:
+            self.expenses_btn.setVisible(False)
+
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
         options_menu_btn = HoverMenuButton("Options ", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
         options_menu_btn.addItem("Sync from Server",    self._do_nav_sync_products)
@@ -21650,11 +22033,7 @@ class POSView(QWidget):
             from models.company_defaults import get_defaults
             mode = get_system_mode()
             _is_offline = (get_defaults() or {}).get("work_offline") == "1" or "offline" in get_system_mode().lower()
-            if mode in ("frappe", "odoo"):
-                adv_settings = AdvanceSettings.load_from_file()
-                toggles = {"sales": adv_settings.showAppSales}
-            else:
-                toggles = {"sales": True}
+            toggles = {"sales": True}
         except Exception:
             pass
 
@@ -21662,6 +22041,7 @@ class POSView(QWidget):
         sales_menu_btn = HoverMenuButton("Sales ", color=ACCENT, hov=ACCENT_H, height=NAV_H)
         sales_menu_btn.addItem("Sales Invoice List", self._open_sales_list)
         sales_menu_btn.addItem("Credit Notes",        self._open_credit_notes_list)
+        sales_menu_btn.addItem("Expenses",            self._open_expenses_dialog)
         sales_menu_btn.addItem("Sales Orders",        self._open_sales_order_list)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Sales Report", self._open_sales_report_tab)
@@ -21669,9 +22049,8 @@ class POSView(QWidget):
         sales_menu_btn.addItem("Payments", self._open_customer_payment_entry)
         sales_menu_btn.addSeparator()
         sales_menu_btn.addItem("Reprint Shift Reconciliation", self._open_shift_reprint)
-        if toggles.get("sales"):
+        if toggles.get("sales", True):
             layout.addWidget(sales_menu_btn)
-            if _is_offline: sales_menu_btn.setVisible(False)
         
 
         # ΓöÇΓöÇ Admin Check ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -21852,6 +22231,65 @@ class POSView(QWidget):
         
         
 # ΓöÇΓöÇ Options dropdown ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Expenses button ───────────────────────────────────────────────────
+        self.expenses_btn = _nb("Expenses", self._on_expenses_clicked, color=ORANGE, hov=AMBER)
+        self.expenses_btn.setToolTip("Record Till Expenses")
+        layout.addWidget(self.expenses_btn)
+        layout.addSpacing(4)
+        try:
+            if not getattr(adv_settings, "enableExpenses", False):
+                self.expenses_btn.setVisible(False)
+        except Exception:
+            self.expenses_btn.setVisible(False)
+
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
         options_menu_btn = HoverMenuButton("Options ", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
         options_menu_btn.addItem("Sync from Server",    self._do_nav_sync_products)
@@ -22495,7 +22933,8 @@ class POSView(QWidget):
             from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton
             from PySide6.QtCore import Qt
             
-            dlg = QDialog(self)
+            from views.components.blur_overlay import BlurredDialog
+            dlg = BlurredDialog(self)
             dlg.setWindowTitle("Update Quantity")
             dlg.setModal(True)
             dlg.setFixedSize(400, 450)
@@ -22575,7 +23014,9 @@ class POSView(QWidget):
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, _setup_cursor)
             
-            if dlg.exec() == QDialog.Accepted:
+            res = dlg.exec()
+            
+            if res == QDialog.Accepted:
                 new_qty = spin.value()
                 
                 if not getattr(self, "_get_pos_rule", lambda k, default: default)("allow_negative_stock", default=True):
@@ -24775,8 +25216,40 @@ class POSView(QWidget):
         outer.addWidget(page_bar)
 
         self._refresh_cat_tabs()
-        QTimer.singleShot(100, lambda: self._load_category_products(0, self._category_names[0] if self._category_names else "All"))
+        QTimer.singleShot(50, self.refresh_bottom_grid)
         return container
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Ensure bottom product grid refreshes immediately upon landing on screen
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(50, self.refresh_bottom_grid)
+
+    def refresh_bottom_grid(self, force: bool = False):
+        """Ensure categories and products in the bottom grid are always loaded and visible on landing."""
+        try:
+            from models.product import get_categories
+            fresh_cats = get_categories() or []
+            _disabled = load_disabled_categories()
+            if _disabled:
+                fresh_cats = [c for c in fresh_cats if c not in _disabled]
+
+            if fresh_cats:
+                self._category_names = fresh_cats
+            elif not getattr(self, "_category_names", None):
+                self._category_names = []
+
+            self._refresh_cat_tabs()
+
+            idx = getattr(self, "_active_cat_idx", 0)
+            if idx >= len(self._category_names):
+                idx = 0
+                self._active_cat_idx = 0
+
+            cat_name = self._category_names[idx] if self._category_names else "All"
+            self._load_category_products(idx, cat_name)
+        except Exception as e:
+            print(f"[POSView] refresh_bottom_grid error: {e}")
     
     def _on_grid_resize(self, event):
         """Debounced resize handler to prevent excessive re-renders"""
@@ -24786,8 +25259,10 @@ class POSView(QWidget):
     
     def _render_product_page_debounced(self):
         """Debounced version that ensures layout is ready before rendering"""
-        # Small delay to ensure layout is fully processed
-        QTimer.singleShot(10, self._render_product_page)
+        if not getattr(self, "_current_products", None):
+            self._reload_current_category()
+        else:
+            QTimer.singleShot(10, self._render_product_page)
 
     def _cat_scroll(self, direction):
         total_pages = max(1, (len(self._category_names) + self._CATS_VISIBLE - 1) // self._CATS_VISIBLE)
@@ -24842,27 +25317,52 @@ class POSView(QWidget):
         price-list prices, and stash variant metadata for tap-time lookup.
         """
         loader = None
-        try:
-            from views.components.sleek_loader import SleekLoaderOverlay
-            loader = SleekLoaderOverlay(self)
-            loader.set_status("Loading...", "")
-            loader.show_loading(timeout_ms=2000)
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
-        except Exception:
-            loader = None
+        if self.isVisible():
+            try:
+                from views.components.sleek_loader import SleekLoaderOverlay
+                loader = SleekLoaderOverlay(self)
+                loader.set_status("Loading...", "")
+                loader.show_loading(timeout_ms=2000)
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents()
+            except Exception:
+                loader = None
 
         try:
             from models.product import get_products_by_category, get_all_products
             wh_id = self._get_active_warehouse_id()
             active_list = self._get_active_price_list()
+            
+            import threading
+            from PySide6.QtCore import QCoreApplication
+            
+            def run_with_events(func, *args, **kwargs):
+                res = []
+                def worker():
+                    try: res.append(func(*args, **kwargs))
+                    except Exception as e: res.append(e)
+                t = threading.Thread(target=worker, daemon=True)
+                t.start()
+                while t.is_alive():
+                    if QCoreApplication.instance(): QCoreApplication.instance().processEvents()
+                    t.join(0.05)
+                out = res[0]
+                if isinstance(out, Exception): raise out
+                return out
+
             if name == "All":
-                db_products = get_all_products(warehouse_id=wh_id, price_list_name=active_list)
+                db_products = run_with_events(get_all_products, warehouse_id=wh_id, price_list_name=active_list)
                 _disabled = load_disabled_categories()
                 if _disabled:
                     db_products = [p for p in db_products if p.get("category") not in _disabled]
             else:
-                db_products = get_products_by_category(name, warehouse_id=wh_id, price_list_name=active_list)
+                db_products = run_with_events(get_products_by_category, name, warehouse_id=wh_id, price_list_name=active_list)
+                if not db_products:
+                    # If active category returned 0 products, fallback to all available products
+                    all_prods = run_with_events(get_all_products, warehouse_id=wh_id, price_list_name=active_list)
+                    if all_prods:
+                        print(f"[grid] Category '{name}' returned 0 items, showing all available products.")
+                        db_products = all_prods
             price_map: dict[str, float] = {}
             if active_list:
                 try:
@@ -24936,11 +25436,25 @@ class POSView(QWidget):
             if hidden_no_price:
                 print(f"[grid] {hidden_no_price} item(s) show 0 - no rate in "
                       f"price list '{active_list}'")
+            if len(tuples) == 0 and name == "All":
+                try:
+                    from services.bugsink_service import check_and_report_saas_empty_catalog
+                    check_and_report_saas_empty_catalog(
+                        context="product_grid_all",
+                        extra_info={"warehouse_id": wh_id, "price_list": active_list}
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[grid] Error loading products: {e}")
             self._current_products   = []
             self._product_meta_by_pn = {}
             self._has_any_product_image = False
+            try:
+                from services.bugsink_service import capture_exception
+                capture_exception(e, extra={"action": "load_products_grid", "category": name})
+            except Exception:
+                pass
         finally:
             self._product_page = 0
             self._render_product_page()
@@ -24979,6 +25493,38 @@ class POSView(QWidget):
         per_page    = ROWS * COLS
         total       = len(self._current_products)
         total_pages = max(1, (total + per_page - 1) // per_page)
+
+        if total == 0:
+            try:
+                from database.db import _load_settings
+                from services.bugsink_service import check_and_report_database_change, check_and_report_saas_empty_catalog
+                cfg = _load_settings()
+                db_name = cfg.get("database") or "Unknown"
+                changed, chg_msg = check_and_report_database_change(db_name, context="product_grid_render")
+                check_and_report_saas_empty_catalog(context="product_grid_empty")
+
+                empty_card = QFrame()
+                border_color = "#ef4444" if changed else "#cbd5e1"
+                bg_color = "#fef2f2" if changed else "#ffffff"
+                empty_card.setStyleSheet(f"QFrame {{ background-color: {bg_color}; border: 1.5px dashed {border_color}; border-radius: 8px; padding: 20px; }}")
+                e_layout = QVBoxLayout(empty_card)
+                e_layout.setAlignment(Qt.AlignCenter)
+                e_layout.setSpacing(6)
+
+                msg_txt = f"⚠️ DATABASE CHANGED: Switched to '{db_name}'\nNo products found in this database. Error reported to Bugsink." if changed else f"No products found in active database: '{db_name}'"
+                e_lbl = QLabel(msg_txt)
+                e_lbl.setAlignment(Qt.AlignCenter)
+                text_color = "#b91c1c" if changed else "#64748b"
+                e_lbl.setStyleSheet(f"color: {text_color}; font-size: 13px; font-weight: bold; background: transparent;")
+                e_layout.addWidget(e_lbl)
+
+                self._product_grid.addWidget(empty_card, 0, 0, ROWS, COLS)
+            except Exception:
+                pass
+            self._grid_page_lbl.setText("0 / 0")
+            self._grid_prev_btn.setEnabled(False)
+            self._grid_next_btn.setEnabled(False)
+            return
 
         start         = self._product_page * per_page
         page_products = self._current_products[start: start + per_page]
@@ -25164,8 +25710,18 @@ class POSView(QWidget):
         self._reload_current_category()
 
     def _reload_current_category(self):
+        if not getattr(self, "_category_names", None):
+            try:
+                from models.product import get_categories
+                self._category_names = get_categories() or []
+                _disabled = load_disabled_categories()
+                if _disabled:
+                    self._category_names = [c for c in self._category_names if c not in _disabled]
+                self._refresh_cat_tabs()
+            except Exception:
+                pass
         idx  = getattr(self, "_active_cat_idx", 0)
-        name = self._category_names[idx] if idx < len(self._category_names) else "All"
+        name = self._category_names[idx] if (getattr(self, "_category_names", None) and idx < len(self._category_names)) else "All"
         self._load_category_products(idx, name)
 
     # =========================================================================
@@ -25337,6 +25893,20 @@ class POSView(QWidget):
                 dlg.show()
             except Exception as err:
                 coming_soon(self, f"Credit Notes List: {err}")
+
+    def _open_expenses_dialog(self):
+        try:
+            from views.dialogs.expense_dialog import ProcessExpenseDialog
+            parent_window = getattr(self, "parent_window", None) or self
+            dlg = ProcessExpenseDialog(parent=parent_window)
+            dlg.exec()
+        except Exception as e:
+            try:
+                from views.dialogs.expense_dialog import ProcessExpenseDialog
+                dlg = ProcessExpenseDialog(parent=self)
+                dlg.exec()
+            except Exception as err:
+                coming_soon(self, f"Expenses: {err}")
 
     def _open_sales_report(self):
         try:
@@ -26211,33 +26781,38 @@ class POSView(QWidget):
                                    fiscal_qr: str = "", fiscal_vc: str = ""):
         """Build a proper ReceiptData credit note and send it to printing_service."""
         import json
-        from pathlib import Path
         from models.receipt import ReceiptData, Item
         from models.company_defaults import get_defaults
-        from services.printing_service import printing_service
+        from services.printing_service import printing_service, get_configured_paper_size
+        from database.db import get_app_data_dir
 
         co = get_defaults() or {}
 
-        # ΓöÇΓöÇ Resolve printer ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-        hw_file  = Path("app_data/hardware_settings.json")
+        # ── Resolve printer & paper size ─────────────────────────────────────
+        paper_size = get_configured_paper_size()
+        is_a4 = str(paper_size).upper() == "A4"
+
         printers = []
-        try:
-            with open(hw_file, "r", encoding="utf-8") as f:
-                hw = json.load(f)
-            if hw.get("main_printer") and hw["main_printer"] != "(None)":
-                printers.append(hw["main_printer"])
-        except Exception:
-            pass
+        if not is_a4:
+            hw_file = get_app_data_dir() / "hardware_settings.json"
+            try:
+                if hw_file.exists():
+                    with open(hw_file, "r", encoding="utf-8") as f:
+                        hw = json.load(f)
+                    if hw.get("main_printer") and hw["main_printer"] != "(None)":
+                        printers.append(hw["main_printer"])
+            except Exception:
+                pass
 
-        if not printers:
-            QMessageBox.warning(
-                self, "No Printer",
-                "No active printer configured in hardware settings.\n"
-                "Go to Settings -> Hardware to configure a printer."
-            )
-            return
+            if not printers:
+                QMessageBox.warning(
+                    self, "No Printer",
+                    "No active printer configured in hardware settings.\n"
+                    "Go to Settings -> Hardware to configure a printer."
+                )
+                return
 
-        # ΓöÇΓöÇ Build ReceiptData ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Build ReceiptData ────────────────────────────────────────────────
         subtotal = sum(float(it.get("total", 0)) for it in items)
 
         receipt = ReceiptData(
@@ -26262,6 +26837,31 @@ class POSView(QWidget):
             currency            = cn.get("currency", "USD"),
             footer              = co.get("footer_text", "Credit note issued. Thank you."),
         )
+
+        # Enrich customer details (email, address, TIN, VAT)
+        cust_name = str(cn.get("customer_name", "") or "").strip()
+        if cust_name and cust_name.lower() not in ("walk-in", "walk in", "walk in customer", "walk-in customer", "cash customer", "cash", "default", "default customer"):
+            try:
+                from database.db import get_connection
+                _c_conn = get_connection()
+                _c_cur = _c_conn.cursor()
+                _c_cur.execute(
+                    "SELECT custom_email_address, custom_house_no, custom_street, custom_city, custom_province, custom_customer_tin, custom_customer_vat, custom_telephone_number "
+                    "FROM customers WITH (NOLOCK) WHERE customer_name = ?", (cust_name,)
+                )
+                _c_row = _c_cur.fetchone()
+                _c_conn.close()
+                if _c_row:
+                    receipt.customerEmail = _c_row[0] or ""
+                    addr_parts = [str(p).strip() for p in (_c_row[1], _c_row[2], _c_row[3], _c_row[4]) if p and str(p).strip()]
+                    receipt.customeraddress = ", ".join(addr_parts)
+                    receipt.customerTin = _c_row[5] or ""
+                    receipt.customerVat = _c_row[6] or ""
+                    if not receipt.customerContact and _c_row[7]:
+                        receipt.customerContact = _c_row[7]
+            except Exception:
+                pass
+
         # Extra attributes read via getattr() in printing_service - set after construction
         receipt.originalInvoiceNo = cn.get("invoice_no", "")
         receipt.creditNoteReason  = cn.get("reason", "")
@@ -26282,7 +26882,13 @@ class POSView(QWidget):
             ))
         receipt.itemlist = receipt.items
 
-        # ΓöÇΓöÇ Print ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Print ────────────────────────────────────────────────────────────
+        if is_a4:
+            if printing_service.print_credit_note(receipt):
+                QMessageBox.information(self, "Credit Note Preview",
+                                        "Credit note A4 document opened in preview.")
+            return
+
         ok = False
         for p in printers:
             if printing_service.print_credit_note(receipt, printer_name=p):
@@ -26705,6 +27311,18 @@ class POSView(QWidget):
     # =========================================================================
     # QUOTATION FLOW
     # =========================================================================
+    def _on_expenses_clicked(self):
+        try:
+            from views.dialogs.expense_dialog import ProcessExpenseDialog
+            parent_window = getattr(self, "parent_window", None) or getattr(self, "parent", lambda: self)() 
+            if not isinstance(parent_window, type(self)):
+                parent_window = self
+            dlg = ProcessExpenseDialog(parent=parent_window)
+            dlg.exec()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to open Expenses dialog: {e}")
+
     def _on_quotation(self):
         """
         Quotation flow:
@@ -27038,6 +27656,12 @@ class MainWindow(QMainWindow):
             import sys; sys.exit(0)
 
         self.user = user or {"username": "admin", "role": "admin"}
+        try:
+            from services.bugsink_service import set_logged_in_user
+            set_logged_in_user(self.user)
+        except Exception:
+            pass
+
         self.setWindowTitle("Havano POS System")
 
         # Dismiss any leftover top-level sleek loaders from startup
@@ -27096,9 +27720,26 @@ class MainWindow(QMainWindow):
         _sys_mode_lower = get_system_mode().lower()
         if _sys_mode_lower == "saas":
             _defs = get_defaults() or {}
-            _wh = _defs.get("server_warehouse") or ""
+            _wh = (
+                _defs.get("server_warehouse") or 
+                _defs.get("company_name") or 
+                _defs.get("server_company") or 
+                ""
+            ).strip()
+            if not _wh and isinstance(self.user, dict):
+                _wh = str(self.user.get("warehouse") or "").strip()
             if not _wh:
-                _wh = _defs.get("server_shop_id") or "Main Store"
+                try:
+                    from database.db import get_connection
+                    conn = get_connection(); cur = conn.cursor()
+                    cur.execute("SELECT TOP 1 store_name FROM terminal_reference WHERE store_name IS NOT NULL AND store_name <> ''")
+                    r_tr = cur.fetchone(); conn.close()
+                    if r_tr and r_tr[0]:
+                        _wh = str(r_tr[0]).strip()
+                except Exception:
+                    pass
+            if not _wh:
+                _wh = str(_defs.get("server_shop_id") or "Store").strip()
 
             # Check all subscription expiry sources (defaults, sql_settings.json, user dict)
             _raw_exp = (
@@ -27120,13 +27761,13 @@ class MainWindow(QMainWindow):
 
             if _days_left is None or str(_days_left).strip() == "":
                 try:
-                    import os, json
-                    cfg_p = os.path.join("app_data", "sql_settings.json")
-                    if os.path.exists(cfg_p):
-                        with open(cfg_p, "r", encoding="utf-8") as f:
-                            cfg_data = json.load(f)
-                            _days_left = cfg_data.get("subscription_days_left") or cfg_data.get("days_left")
-                            _raw_exp = _raw_exp or cfg_data.get("subscription_expiry") or cfg_data.get("expiry_date")
+                    import json
+                    from database.db import get_app_data_dir
+                    cfg_p = get_app_data_dir() / "sql_settings.json"
+                    if cfg_p.exists():
+                        cfg_data = json.loads(cfg_p.read_text(encoding="utf-8"))
+                        _days_left = cfg_data.get("subscription_days_left") or cfg_data.get("days_left")
+                        _raw_exp = _raw_exp or cfg_data.get("subscription_expiry") or cfg_data.get("expiry_date")
                 except Exception:
                     pass
 
@@ -27365,21 +28006,13 @@ class MainWindow(QMainWindow):
 
         # Close any open child modal dialogs so they do not block eviction
         try:
-            from PySide6.QtWidgets import QDialog
             for child in self.findChildren(QDialog):
                 if child.isVisible():
                     child.reject()
         except Exception:
             pass
 
-        # Clear server_terminal_id from local defaults so next login requires re-selection
-        try:
-            from models.company_defaults import get_defaults, save_defaults
-            d = get_defaults() or {}
-            d["server_terminal_id"] = ""
-            save_defaults(d)
-        except Exception:
-            pass
+        # Retain server_terminal_id so machine remembers its configured counter identity
 
         # Notify the user that their session was taken over
         try:
@@ -27477,8 +28110,6 @@ class MainWindow(QMainWindow):
                     ]
                     if any(k in err_lower for k in takeover_err_keywords):
                         print(f"[takeover_monitor] EVICTION TRIGGERED — server rejected terminal session: {err}")
-                        d["server_terminal_id"] = ""
-                        save_defaults(d)
                         QMetaObject.invokeMethod(self, "_evict_and_logout_user", Qt.QueuedConnection)
                         return
                     return
@@ -28056,11 +28687,19 @@ class MainWindow(QMainWindow):
         else:
             coming_soon(self, "Stock Entry - add views/dialogs/stock_file_dialog.py")
 
+    def refresh_pos_grid(self):
+        """Triggered on startup/landing to ensure bottom grid is loaded and displayed."""
+        if hasattr(self, "_pos_view") and hasattr(self._pos_view, "refresh_bottom_grid"):
+            self._pos_view.refresh_bottom_grid()
+
     def switch_to_pos(self):
         self._stack.setCurrentWidget(self._pos_view)
         if hasattr(self._pos_view, 'orders_btn'):
             self._pos_view.orders_btn.setChecked(False)
         self._set_status("POS mode  -  ready to sell.")
+        if hasattr(self._pos_view, "refresh_bottom_grid"):
+            if not getattr(self._pos_view, "_current_products", None):
+                self._pos_view.refresh_bottom_grid()
 
     def switch_to_orders(self):
         rv = self._ensure_restaurant_view_created()
@@ -28963,6 +29602,14 @@ class MainWindow(QMainWindow):
         except Exception as e:
             coming_soon(self, f"Credit Notes List: {e}")
 
+    def _open_expenses_dialog(self):
+        try:
+            from views.dialogs.expense_dialog import ProcessExpenseDialog
+            dlg = ProcessExpenseDialog(parent=self)
+            dlg.exec()
+        except Exception as e:
+            coming_soon(self, f"Expenses: {e}")
+
     def _release_instance_lock(self):
         # The class-level socket is intentionally kept alive for the whole
         # process lifetime so that logout + re-login does NOT drop the lock
@@ -29086,6 +29733,23 @@ class MainWindow(QMainWindow):
             app_inst = QApplication.instance()
             if app_inst:
                 app_inst.quit()
+            
+            # Aggressive background thread termination: force exit to ensure ports are cleared
+            import os
+            import threading
+            def _force_exit():
+                import time
+                time.sleep(0.5)
+                # Ensure the lock file is released so the user doesn't get 'Already Running'
+                try:
+                    from PySide6.QtCore import QDir
+                    lock_path = QDir.tempPath() + "/havano_pos_2026.lock"
+                    if os.path.exists(lock_path):
+                        os.remove(lock_path)
+                except Exception:
+                    pass
+                os._exit(0)
+            threading.Thread(target=_force_exit, daemon=True).start()
 
     def _logout(self):
         msg = QMessageBox(self)
@@ -29123,6 +29787,18 @@ class MainWindow(QMainWindow):
             return
         self._is_logging_out = True
 
+        # ── Smart Loader: show while logging out ──
+        _logout_loader = None
+        try:
+            from views.components.sleek_loader import SleekLoaderOverlay
+            _logout_loader = SleekLoaderOverlay()
+            _logout_loader.set_status("Logging out...")
+            _logout_loader.show_loading()
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+        except Exception:
+            pass
+
         self.hide()
         
         # Trigger an automated database backup on logout
@@ -29138,6 +29814,13 @@ class MainWindow(QMainWindow):
         try:
             from views.login_dialog import LoginDialog
             dlg = LoginDialog()
+            
+            if _logout_loader:
+                try:
+                    _logout_loader.hide_loading()
+                except Exception:
+                    pass
+
             if dlg.exec() == QDialog.Accepted:
                 # ── Smart Loader: show while MainWindow initializes ──
                 try:
@@ -29170,7 +29853,9 @@ class MainWindow(QMainWindow):
             QApplication.quit()
         finally:
             self.close()
-            self._is_logging_out = False
+            # Do NOT set self._is_logging_out = False here!
+            # If the event loop processes the closeEvent asynchronously later,
+            # we want the window to STILL remember it was logging out so it doesn't kill the app!
 
         
 # =============================================================================
@@ -30071,10 +30756,12 @@ class FiscalWaitDialog(QDialog):
             self.thread.wait()
         super().closeEvent(event)
 
-# # =============================================================================
-# REPRINT DIALOG  -  two tabs: Sales Invoice  |  Sales Order
-# =============================================================================
-class ReprintDialog(QDialog):
+try:
+    from views.components.blur_overlay import BlurredDialog
+except ImportError:
+    BlurredDialog = QDialog
+
+class ReprintDialog(BlurredDialog):
     """
     Two-tab reprint dialog.
       Tab 1 - Sales Invoice : search by invoice number or customer name

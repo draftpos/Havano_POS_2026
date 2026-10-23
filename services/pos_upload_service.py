@@ -80,6 +80,7 @@ def _get_exchange_rate(from_currency: str, to_currency: str,
             f"&to_currency={urllib.parse.quote(to_currency)}"
             f"&transaction_date={transaction_date}"
         )
+        req = urllib.request.Request(url)
         from services.credentials import build_auth_header
         auth_hdr = build_auth_header(api_key, api_secret) or f"token {api_key}:{api_secret}"
         req.add_header("Authorization", auth_hdr)
@@ -565,10 +566,10 @@ def _base_payload_fields(sale: dict, defaults: dict,
     Assemble the non-item fields shared by all three builders.
     Items and currency-specific values are injected by each builder.
     """
-    company           = defaults.get("server_company", "")
-    warehouse         = defaults.get("server_warehouse", "")
-    cost_center       = defaults.get("server_cost_center", "")
-    taxes_and_charges = defaults.get("server_taxes_and_charges", "")
+    company           = (defaults.get("server_company") or defaults.get("company_name") or "").strip()
+    warehouse         = (defaults.get("server_warehouse") or defaults.get("warehouse") or defaults.get("server_store_name") or defaults.get("store_name") or defaults.get("server_company") or defaults.get("company_name") or "").strip()
+    cost_center       = (defaults.get("server_cost_center") or defaults.get("cost_center") or "").strip()
+    taxes_and_charges = (defaults.get("server_taxes_and_charges") or "").strip()
     walk_in           = defaults.get("server_walk_in_customer", "").strip() or "Cash Customer"
     customer          = (sale.get("customer_name") or "").strip()
     if not customer or customer.lower() in ("walk-in customer", "walk-in"):
@@ -1171,7 +1172,11 @@ def _push_sale(sale: dict, api_key: str, api_secret: str,
     def _record_sync_error(code: str, raw_msg: str):
         customer_name = sale.get("customer_name") or walk_in
         amount        = float(sale.get("total") or 0)
-        log.error("❌ Sale %s  %s: %s", inv_no, code, raw_msg)
+        lower_msg = raw_msg.lower()
+        if "on hand" in lower_msg or "already exists in your workspace" in lower_msg:
+            log.warning("❌ Sale %s  %s: %s", inv_no, code, raw_msg)
+        else:
+            log.error("❌ Sale %s  %s: %s", inv_no, code, raw_msg)
         try:
             from database.db import get_connection
             conn = get_connection()
@@ -1269,12 +1274,14 @@ def push_unsynced_sales() -> dict:
     result = {"pushed": 0, "failed": 0, "total": 0}
 
     from services.credentials import get_system_mode
-    if get_system_mode() == "odoo":
+    sys_mode = (get_system_mode() or "saas").lower()
+    if sys_mode == "odoo":
         return result
         
     api_key, api_secret = _get_credentials()
-    if not api_key or not api_secret:
-        log.warning("No API credentials - skipping upload cycle.")
+    has_valid_creds = bool(api_key) if sys_mode == "saas" else bool(api_key and api_secret)
+    if not has_valid_creds:
+        log.warning("No API credentials for mode '%s' - skipping upload cycle.", sys_mode)
         return result
 
     host     = _get_host()

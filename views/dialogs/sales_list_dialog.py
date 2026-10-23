@@ -1107,9 +1107,9 @@ class SalesListPage(QWidget):
 
 # =============================================================================
 # MAIN DIALOG
-# =============================================================================
+from views.components.blur_overlay import BlurredDialog
 
-class SalesListDialog(QDialog):
+class SalesListDialog(BlurredDialog):
     """
     Usage:
         dlg = SalesListDialog(pos_view)

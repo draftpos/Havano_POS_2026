@@ -50,6 +50,11 @@ try:
 except ImportError:
     _HAS_SETTINGS_DIALOG = False
 
+try:
+    from views.components.blur_overlay import BlurredDialog
+except ImportError:
+    BlurredDialog = QDialog
+
 from theme import *
 
 # =============================================================================
@@ -229,7 +234,7 @@ def numpad_btn(text, kind="digit"):
 # =============================================================================
 # PRODUCT SEARCH DIALOG
 # =============================================================================
-class ProductSearchDialog(QDialog):
+class ProductSearchDialog(BlurredDialog):
     def __init__(self, parent=None, initial_query=""):
         super().__init__(parent)
         self.setWindowTitle("Product Search")
@@ -345,16 +350,19 @@ class ProductSearchDialog(QDialog):
         try:
             from models.product import search_products, get_all_products
             products = search_products(query) if query else get_all_products()
-        except Exception:
-            products = [
-                {"id": 1, "part_no": "S",    "name": "SERVICE CHARGE",   "category": "Services", "price": 50.00, "stock": 0},
-                {"id": 2, "part_no": "1",     "name": "Swiss Army Knife", "category": "General",  "price": 10.00, "stock": 5},
-                {"id": 3, "part_no": "GR001", "name": "Cooking Oil",      "category": "Grocery",  "price": 3.50,  "stock": 12},
-                {"id": 4, "part_no": "DK001", "name": "Coke 500ml",       "category": "Drinks",   "price": 1.20,  "stock": 30},
-            ]
-            if query:
-                ql = query.lower()
-                products = [p for p in products if ql in p["part_no"].lower() or ql in p["name"].lower()]
+            if not products and not query:
+                try:
+                    from services.bugsink_service import check_and_report_saas_empty_catalog
+                    check_and_report_saas_empty_catalog(context="product_search_dialog")
+                except Exception:
+                    pass
+        except Exception as e:
+            products = []
+            try:
+                from services.bugsink_service import capture_exception
+                capture_exception(e, extra={"action": "product_search", "query": query})
+            except Exception:
+                pass
 
         self.results.setRowCount(0)
         for p in products:
@@ -399,7 +407,7 @@ class ProductSearchDialog(QDialog):
 # =============================================================================
 # CUSTOMER SEARCH POPUP
 # =============================================================================
-class CustomerSearchPopup(QDialog):
+class CustomerSearchPopup(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.selected_customer = None
@@ -566,7 +574,7 @@ class CustomerSearchPopup(QDialog):
 # =============================================================================
 # _InlineSettingsDialog  -  fallback
 # =============================================================================
-class _InlineSettingsDialog(QDialog):
+class _InlineSettingsDialog(BlurredDialog):
     def __init__(self, parent=None, user=None):
         super().__init__(parent)
         self.user = user or {}
@@ -733,7 +741,7 @@ class _InlineSettingsDialog(QDialog):
         return w
 
 
-class QuantityPopup(QDialog):
+class QuantityPopup(BlurredDialog):
     def __init__(self, parent=None, product_name: str = "", current_qty: float = 1.0):
         super().__init__(parent)
         self.product_name = product_name
@@ -908,7 +916,7 @@ def _settings_dialog_base(parent, title: str, width=700, height=520) -> tuple:
     return dlg, layout
 
 
-class CompanyDialog(QDialog):
+class CompanyDialog(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Companies")
@@ -992,7 +1000,7 @@ class CompanyDialog(QDialog):
         except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
 
 
-class CustomerGroupDialog(QDialog):
+class CustomerGroupDialog(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Customer Groups"); self.setMinimumSize(560, 420)
@@ -1058,7 +1066,7 @@ class CustomerGroupDialog(QDialog):
         except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
 
 
-class WarehouseDialog(QDialog):
+class WarehouseDialog(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Warehouses"); self.setMinimumSize(560,420)
@@ -1123,7 +1131,7 @@ class WarehouseDialog(QDialog):
         except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
 
 
-class CostCenterDialog(QDialog):
+class CostCenterDialog(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Cost Centers"); self.setMinimumSize(560,420)
@@ -1188,7 +1196,7 @@ class CostCenterDialog(QDialog):
         except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
 
 
-class PriceListDialog(QDialog):
+class PriceListDialog(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Price Lists"); self.setMinimumSize(480,380)
@@ -1252,7 +1260,7 @@ class PriceListDialog(QDialog):
         except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
 
 
-class CustomerDialog(QDialog):
+class CustomerDialog(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Customers"); self.setMinimumSize(860,560)
@@ -1392,7 +1400,7 @@ class CustomerDialog(QDialog):
         except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
 
 
-class PaymentDialog(QDialog):
+class PaymentDialog(BlurredDialog):
     def __init__(self, parent=None, total=0.0, customer=None):
         super().__init__(parent)
         self.total    = total
@@ -1515,7 +1523,7 @@ class PaymentDialog(QDialog):
 # =============================================================================
 # HOLD / RECALL DIALOG
 # =============================================================================
-class HoldRecallDialog(QDialog):
+class HoldRecallDialog(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Hold / Recall Orders")

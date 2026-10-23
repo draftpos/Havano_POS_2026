@@ -80,10 +80,13 @@ class AdvanceSettings:
     def load_from_file(cls, file_path: str = None) -> "AdvanceSettings":
         settings = cls()
         if file_path is None:
-            import os
-            _here = os.path.dirname(os.path.abspath(__file__))
-            _root = os.path.normpath(os.path.join(_here, ".."))
-            file_path = os.path.join(_root, "settings", "advance_settings.json")
+            import sys
+            def get_app_data_dir():
+                from pathlib import Path
+                if getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
+                    return Path(sys.executable).parent / 'app_data'
+                return Path(__file__).resolve().parent.parent / 'app_data'
+            file_path = str(get_app_data_dir() / "advance_settings.json")
             
         path = Path(file_path)
         if not path.exists():
@@ -104,10 +107,13 @@ class AdvanceSettings:
 
     def save_to_file(self, file_path: str = None) -> None:
         if file_path is None:
-            import os
-            _here = os.path.dirname(os.path.abspath(__file__))
-            _root = os.path.normpath(os.path.join(_here, ".."))
-            file_path = os.path.join(_root, "settings", "advance_settings.json")
+            import sys
+            def get_app_data_dir():
+                from pathlib import Path
+                if getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
+                    return Path(sys.executable).parent / 'app_data'
+                return Path(__file__).resolve().parent.parent / 'app_data'
+            file_path = str(get_app_data_dir() / "advance_settings.json")
             
         path = Path(file_path)
         path.parent.mkdir(parents=True, exist_ok=True)

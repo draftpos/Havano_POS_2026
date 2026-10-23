@@ -60,6 +60,7 @@ def build():
         print("\n" + "=" * 60)
         print(f" [FAIL] Build failed with exit code: {res.returncode}")
         print("=" * 60)
+        sys.exit(res.returncode)
 
 if __name__ == "__main__":
     build()

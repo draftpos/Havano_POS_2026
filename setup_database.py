@@ -9,7 +9,7 @@ import time
 # table / index. Mismatches between this constant and schema_info.version
 # trigger a full migration pass on next launch; matches short-circuit so
 # startup doesn't burn 5–15s on INFORMATION_SCHEMA round-trips every time.
-SCHEMA_VERSION = "2026.09.19.2"
+SCHEMA_VERSION = "2026.10.14.1"
 
 
 def _hash(pw: str) -> str:
@@ -17,15 +17,12 @@ def _hash(pw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Startup skip helpers
+# Startup skip helpers & Schema Integrity Requirements
 # ---------------------------------------------------------------------------
 
 def _sql_settings_path() -> str:
-    # Mirrors database/db.py's resolution — works in dev and PyInstaller builds
-    here = os.path.dirname(os.path.abspath(__file__))
-    if hasattr(sys, "_MEIPASS"):
-        return os.path.join(os.path.dirname(sys.executable), "app_data", "sql_settings.json")
-    return os.path.join(here, "app_data", "sql_settings.json")
+    from database.db import get_app_data_dir
+    return str(get_app_data_dir() / "sql_settings.json")
 
 
 def _force_migrations_flag() -> bool:
@@ -40,6 +37,84 @@ def _force_migrations_flag() -> bool:
     except Exception:
         pass
     return False
+
+
+def get_configured_system_mode() -> str:
+    """Read the active/configured system_mode from sql_settings.json or advance_settings.json."""
+    try:
+        from database.db import get_app_data_dir
+        settings_file = get_app_data_dir() / "sql_settings.json"
+        if settings_file.exists():
+            data = json.loads(settings_file.read_text(encoding="utf-8"))
+            m = data.get("system_mode")
+            if m and str(m).strip():
+                return str(m).strip().lower()
+    except Exception:
+        pass
+    try:
+        from database.db import get_app_data_dir
+        adv_path = get_app_data_dir().parent / "settings" / "advance_settings.json"
+        if adv_path.exists():
+            data = json.loads(adv_path.read_text(encoding="utf-8"))
+            m = data.get("systemModeOverride")
+            if m and str(m).strip():
+                return str(m).strip().lower()
+    except Exception:
+        pass
+    return "saas"
+
+
+# Full dictionary of critical business tables and their mandatory columns
+CRITICAL_SCHEMA_REQUIREMENTS = {
+    "companies": ["id", "name", "abbreviation", "default_currency", "country"],
+    "company_defaults": ["id", "company_name", "vat_number", "system_mode", "invoice_prefix", "server_warehouse"],
+    "users": ["id", "username", "password", "active", "role", "cloud_user_id"],
+    "products": ["id", "part_no", "name", "price", "cost_price", "stock", "tax_rate", "active", "is_template", "has_variants", "variant_of", "attributes", "order_1", "print_after_order"],
+    "product_barcodes": ["id", "part_no", "barcode"],
+    "product_taxes": ["id", "part_no", "tax_category"],
+    "item_prices": ["id", "part_no", "price_list", "price"],
+    "modes_of_payment": ["id", "name", "type", "enabled"],
+    "sales": ["id", "invoice_no", "cashier_id", "total", "tendered", "change_amount", "fiscal_status", "synced", "created_at"],
+    "sale_items": ["id", "sale_id", "part_no", "qty", "price", "total", "tax_amount"],
+    "shifts": ["id", "shift_number", "station", "cashier_id", "date", "created_at", "end_time", "station_name"],
+    "shift_rows": ["id", "shift_id", "method", "currency", "start_float", "income", "counted"],
+    "customers": ["id", "customer_name"],
+    "quotations": ["id", "name", "synced"],
+    "quotation_items": ["id", "quotation_id", "item_code", "qty", "rate", "amount"],
+    "credit_notes": ["id", "cn_number", "frappe_ref", "cn_status"],
+    "payment_entries": ["id", "sale_id", "synced", "payment_type", "paid_amount"],
+    "gl_accounts": ["id", "account_number", "name"],
+    "expenses": ["id", "name", "amount", "synced"],
+}
+
+
+def verify_schema_integrity(conn) -> tuple[bool, list[str]]:
+    """
+    Fast verification that all critical tables and columns required by Havano POS
+    exist in the target database. Returns (is_complete, missing_items).
+    This guarantees that restored backups, freshly created databases, or corrupted
+    schemas can never be falsely skipped, preventing runtime crashes.
+    """
+    try:
+        c_check = conn.cursor()
+        c_check.execute("""
+            SELECT LOWER(TABLE_NAME), LOWER(COLUMN_NAME)
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+        """)
+        existing = set((r[0].lower(), r[1].lower()) for r in c_check.fetchall() if r[0] and r[1])
+        c_check.close()
+
+        missing = []
+        for tbl, cols in CRITICAL_SCHEMA_REQUIREMENTS.items():
+            tbl_lower = tbl.lower()
+            for col in cols:
+                if (tbl_lower, col.lower()) not in existing:
+                    missing.append(f"{tbl}.{col}")
+        return len(missing) == 0, missing
+    except Exception as e:
+        print(f"[setup_database] ! Schema integrity check query error: {e}")
+        return False, [f"ERROR: {e}"]
 
 
 def _read_stored_schema_version(conn) -> str | None:
@@ -181,26 +256,19 @@ def run():
     stored = _read_stored_schema_version(conn)
     forced = _force_migrations_flag()
 
-    # Verify that core tables actually exist before skipping
-    required_tables = ['company_defaults', 'modes_of_payment', 'products', 'users', 'sales', 'gl_accounts']
-    tables_missing = False
-    try:
-        c_check = conn.cursor()
-        c_check.execute("""
-            SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
-            WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME IN ('company_defaults', 'modes_of_payment', 'products', 'users', 'sales', 'gl_accounts')
-        """)
-        row = c_check.fetchone()
-        if not row or row[0] < 6:
-            tables_missing = True
-    except Exception:
-        tables_missing = True
+    # Verify that core tables and all critical columns actually exist before skipping
+    is_schema_complete, missing_schema_items = verify_schema_integrity(conn)
 
-    if stored == SCHEMA_VERSION and not forced and not tables_missing:
-        print(f"[setup_database] schema at {SCHEMA_VERSION} — skipping migrations "
+    if stored == SCHEMA_VERSION and not forced and is_schema_complete:
+        print(f"[setup_database] schema verified 100% complete at {SCHEMA_VERSION} — skipping migrations "
               f"({int((time.perf_counter() - _t0) * 1000)} ms)")
         try:
             ensure_offline_defaults(conn)
+        except Exception:
+            pass
+        try:
+            from database.apply_performance_indexes import apply_optimizations
+            apply_optimizations()
         except Exception:
             pass
         try:
@@ -216,8 +284,13 @@ def run():
         except Exception:
             pass
         return
-    print(f"[setup_database] schema stored={stored!r} current={SCHEMA_VERSION!r} "
-          f"forced={forced} — running full migration pass")
+
+    if not is_schema_complete:
+        print(f"[setup_database] Schema verification detected {len(missing_schema_items)} missing items: "
+              f"{missing_schema_items[:8]} ... — running full self-healing migration pass!")
+    else:
+        print(f"[setup_database] schema stored={stored!r} current={SCHEMA_VERSION!r} "
+              f"forced={forced} — running full migration pass")
 
     cur = conn.cursor()
 
@@ -346,12 +419,14 @@ def run():
                 [server_walk_in_customer]  NVARCHAR(255) NOT NULL DEFAULT 'default',
                 [default_price_list_id]    INT           NULL,
                 [odoo_token]               NVARCHAR(MAX) NOT NULL DEFAULT '',
-                [system_mode]              NVARCHAR(20)  NOT NULL DEFAULT 'frappe',
+                [system_mode]              NVARCHAR(20)  NOT NULL DEFAULT 'saas',
                 [work_offline]             NVARCHAR(10)  NOT NULL DEFAULT '0',
                 [pharmacy_mode]            NVARCHAR(10)  NOT NULL DEFAULT '0',
                 [allow_cashier_pharmacy_sales] NVARCHAR(10) NOT NULL DEFAULT '0',
                 [butchery_mode]            NVARCHAR(10)  NOT NULL DEFAULT '0',
                 [support_number]           NVARCHAR(255) NULL DEFAULT '',
+                [agent_sales_number]       NVARCHAR(255) NULL DEFAULT '',
+                [agent_email]              NVARCHAR(255) NULL DEFAULT '',
                 [agent_number]             NVARCHAR(255) NULL DEFAULT '',
                 [agent]                    NVARCHAR(255) NULL DEFAULT '',
                 [server_database]          NVARCHAR(100) NOT NULL DEFAULT '',
@@ -367,19 +442,24 @@ def run():
                 PRIMARY KEY CLUSTERED ([id] ASC)
             )
         """)
-        # Always seed one blank row so the app has a settings row to read
+        # Always seed one blank row with the CURRENT system_mode so creating a blank DB
+        # preserves offline, frappe, or odoo modes rather than hijacking the system into SaaS
         try:
             import random, string
             prefix = ''.join(random.choices(string.ascii_uppercase, k=3))
-            cur.execute("INSERT INTO [dbo].[company_defaults] (invoice_prefix) VALUES (?)", (prefix,))
-        except Exception:
-            pass
+            active_mode = get_configured_system_mode()
+            cur.execute("INSERT INTO [dbo].[company_defaults] (invoice_prefix, system_mode) VALUES (?, ?)", (prefix, active_mode))
+            print(f"[setup_database] Seeded company_defaults with system_mode = '{active_mode}'")
+        except Exception as _e_seed:
+            print(f"[setup_database] Error seeding company_defaults: {_e_seed}")
         ok("company_defaults")
     else:
         skip("company_defaults")
         # Migration loop for existing databases
         for col, defn in [
             ("support_number",           "NVARCHAR(255) NULL DEFAULT ''"),
+            ("agent_sales_number",       "NVARCHAR(255) NULL DEFAULT ''"),
+            ("agent_email",              "NVARCHAR(255) NULL DEFAULT ''"),
             ("agent_number",             "NVARCHAR(255) NULL DEFAULT ''"),
             ("agent",                    "NVARCHAR(255) NULL DEFAULT ''"),
             ("phone",                    "NVARCHAR(100) NOT NULL DEFAULT ''"),
@@ -407,7 +487,7 @@ def run():
             ("receipt_header",            "NVARCHAR(200) NOT NULL DEFAULT ''"),
             ("default_price_list_id",     "INT           NULL"),
             ("odoo_token",                "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
-            ("system_mode",               "NVARCHAR(20) NOT NULL DEFAULT 'frappe'"),
+            ("system_mode",               "NVARCHAR(20) NOT NULL DEFAULT 'saas'"),
             ("work_offline",              "NVARCHAR(10) NOT NULL DEFAULT '0'"),
             ("pharmacy_mode",             "NVARCHAR(10) NOT NULL DEFAULT '0'"),
             ("allow_cashier_pharmacy_sales", "NVARCHAR(10) NOT NULL DEFAULT '0'"),
@@ -428,15 +508,24 @@ def run():
         ]:
             add_col("company_defaults", col, defn)
         
-        # Ensure at least one settings row exists
+        # Ensure at least one settings row exists and its system_mode matches configured mode
         try:
-            cur.execute("SELECT COUNT(*) FROM [dbo].[company_defaults]")
-            if cur.fetchone()[0] == 0:
+            active_mode = get_configured_system_mode()
+            cur.execute("SELECT id, system_mode FROM [dbo].[company_defaults] ORDER BY id ASC")
+            rows = cur.fetchall()
+            if not rows:
                 import random, string
                 prefix = ''.join(random.choices(string.ascii_uppercase, k=3))
-                cur.execute("INSERT INTO [dbo].[company_defaults] (invoice_prefix) VALUES (?)", (prefix,))
-        except Exception:
-            pass
+                cur.execute("INSERT INTO [dbo].[company_defaults] (invoice_prefix, system_mode) VALUES (?, ?)", (prefix, active_mode))
+            else:
+                first_id = rows[0][0]
+                cur_mode = str(rows[0][1] or "").strip().lower()
+                if active_mode and cur_mode != active_mode:
+                    cur.execute("UPDATE [dbo].[company_defaults] SET system_mode = ? WHERE id = ?", (active_mode, first_id))
+                    conn.commit()
+                    print(f"[setup_database] Synchronized company_defaults system_mode: {cur_mode!r} -> {active_mode!r}")
+        except Exception as _ex_m_sync:
+            print(f"[setup_database] Error syncing company_defaults mode: {_ex_m_sync}")
 
     # ==================================================================
     # 2b. gl_accounts
@@ -2717,13 +2806,16 @@ def run():
         current_mode = get_system_mode().lower()
 
         # Ensure at least 1 company exists for Foreign Key (company_id)
-        cur.execute("SELECT TOP 1 id FROM [dbo].[companies] ORDER BY id ASC")
+        cur.execute("SELECT TOP 1 id, name FROM [dbo].[companies] ORDER BY id ASC")
         comp_row = cur.fetchone()
         comp_id = comp_row[0] if comp_row else None
+        comp_name = comp_row[1] if comp_row else "Default Company"
         if not comp_id:
             cur.execute("INSERT INTO [dbo].[companies] (name, abbreviation, default_currency, country) VALUES ('Default Company', 'DC', 'USD', 'Zimbabwe')")
-            cur.execute("SELECT TOP 1 id FROM [dbo].[companies] ORDER BY id DESC")
-            comp_id = int(cur.fetchone()[0])
+            cur.execute("SELECT TOP 1 id, name FROM [dbo].[companies] ORDER BY id DESC")
+            r = cur.fetchone()
+            comp_id = int(r[0])
+            comp_name = str(r[1])
             print("  [+] Default Company created")
 
         # Auto insertion of default categories, payment methods, warehouses is STRICTLY OFFLINE ONLY
@@ -2933,6 +3025,12 @@ def run():
     except Exception as e:
         print(f"[setup_database] ! restaurant_order migrations failed: {e}")
 
+    try:
+        from models.user import migrate as _apply_user_migrations
+        _apply_user_migrations()
+    except Exception as e:
+        print(f"[setup_database] ! user migrations failed: {e}")
+
     # Stamp the new schema version so next launch short-circuits. Opens a
     # fresh connection because the earlier one was closed above.
     try:
@@ -2973,13 +3071,27 @@ def run():
     except Exception as _e_opt:
         print(f"[setup_database] ! database optimization notice: {_e_opt}")
 
+    # Post-migration verification
     try:
-        from services.credentials import get_system_mode
-        if (get_system_mode() or "").strip().lower() == "saas":
+        _v_check = get_connection()
+        is_ok, final_missing = verify_schema_integrity(_v_check)
+        _v_check.close()
+        if is_ok:
+            print("[setup_database] All critical tables and columns successfully verified (100% migrated)!")
+        else:
+            print(f"[setup_database] ! Notice: Following items still missing after migrations: {final_missing}")
+    except Exception as _e_ver:
+        print(f"[setup_database] ! Post-migration verification note: {_e_ver}")
+
+    try:
+        active_mode = get_configured_system_mode()
+        if active_mode == "offline":
+            ensure_offline_defaults()
+        elif active_mode == "saas":
             from models.saas_snapshot import take_saas_snapshot_once
             take_saas_snapshot_once(username="System/Setup")
     except Exception as _e_snap:
-        print(f"[setup_database] ! SaaS initial snapshot setup note: {_e_snap}")
+        print(f"[setup_database] ! Post-setup mode initialization note: {_e_snap}")
 
 if __name__ == "__main__":
     run()

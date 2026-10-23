@@ -659,7 +659,15 @@ def get_unsynced_payment_entries() -> list[dict]:
     """Return all pending/retry laybye payment entries."""
     try:
         conn = _ensure_table()
+        try:
+            conn.timeout = 60
+        except Exception:
+            pass
         cur  = conn.cursor()
+        try:
+            cur.timeout = 60
+        except Exception:
+            pass
         cur.execute("""
             SELECT id, order_no, customer_name,
                    deposit_amount, deposit_method, deposit_currency,

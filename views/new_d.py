@@ -745,18 +745,12 @@ class ProductSearchDialog(QDialog):
         if item:
             self.selected_product = item.data(Qt.UserRole)
             self.accept()
-# =============================================================================
-# CUSTOMER SEARCH POPUP - Updated with Sync, Quick-Add & Database Linking
-# =============================================================================
-from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QWidget, QLabel, 
-    QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, 
-    QAbstractItemView, QMessageBox
-)
+try:
+    from views.components.blur_overlay import BlurredDialog
+except ImportError:
+    BlurredDialog = QDialog
 
-class CustomerSearchPopup(QDialog):
+class CustomerSearchPopup(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.selected_customer = None
@@ -2026,7 +2020,7 @@ class CustomerDialog(QDialog):
             super().keyPressEvent(event)
 
 
-class PaymentDialog(QDialog):
+class PaymentDialog(BlurredDialog):
     def __init__(self, parent=None, total=0.0, customer=None, **kwargs):
         super().__init__(parent)
         self.total    = total
@@ -2152,7 +2146,7 @@ class PaymentDialog(QDialog):
 # =============================================================================
 # HOLD / RECALL DIALOG
 # =============================================================================
-class HoldRecallDialog(QDialog):
+class HoldRecallDialog(BlurredDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Hold / Recall Orders")
@@ -4495,7 +4489,9 @@ def _clean_frappe_error(raw: str) -> str:
 # Tabbed SI / CN / SO view.  Raw API errors shown verbatim and are copyable.
 # Header shows count per tab.  Smart open: opens the right tab automatically.
 # =============================================================================
-class UnsyncedPopup(QDialog):
+from views.components.blur_overlay import BlurredDialog
+
+class UnsyncedPopup(BlurredDialog):
     """
     kind = "SI"  -> opens on the Sales Invoices tab
     kind = "CN"  -> opens on the Credit Notes tab
@@ -5692,6 +5688,15 @@ class POSView(QWidget):
         In pharmacy mode, reroutes to save+print quotation (the "Dispense"
         path for pharmacists, "Finalize Quote" for everyone else).
         """
+        # ── 0. SAAS DEFAULT ADMIN SALE GUARD ───────────────────────────────────────────
+        try:
+            from utils.roles import check_and_warn_saas_sale_eligibility
+            _user = getattr(self, "user", getattr(getattr(self, "parent_window", None), "user", None))
+            if not check_and_warn_saas_sale_eligibility(self, _user):
+                return
+        except Exception as _e:
+            print(f"[POSView] SaaS default admin sale check error: {_e}")
+
         # ── 0. SHIFT GUARD ─────────────────────────────────────────────────────────────
         if not self._require_active_shift():
             return
@@ -6932,7 +6937,59 @@ class POSView(QWidget):
         except Exception:
             self.expenses_btn.setVisible(False)
         
-        # ── Options dropdown (replaces right-panel Options button) ───────────────
+        
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        # Hide Monitors button if KDS & Takeaway monitors are both disabled
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+                    
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
+
+# ── Options dropdown (replaces right-panel Options button) ───────────────
         options_menu_btn = HoverMenuButton("Options", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
         options_menu_btn.addItem("Create Credit Note  (Return)", self._open_credit_note_dialog)
@@ -8160,6 +8217,58 @@ class POSView(QWidget):
         
         
         
+
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        # Hide Monitors button if KDS & Takeaway monitors are both disabled
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+                    
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
+
 # ── Options dropdown ──────────────────────────────────────────────────────
         options_menu_btn = HoverMenuButton("Options", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
@@ -11095,12 +11204,14 @@ class POSView(QWidget):
 
         printers = []
         if not is_a4:
-            hw_file  = Path("app_data/hardware_settings.json")
+            from database.db import get_app_data_dir
+            hw_file = get_app_data_dir() / "hardware_settings.json"
             try:
-                with open(hw_file, "r", encoding="utf-8") as f:
-                    hw = json.load(f)
-                if hw.get("main_printer") and hw["main_printer"] != "(None)":
-                    printers.append(hw["main_printer"])
+                if hw_file.exists():
+                    with open(hw_file, "r", encoding="utf-8") as f:
+                        hw = json.load(f)
+                    if hw.get("main_printer") and hw["main_printer"] != "(None)":
+                        printers.append(hw["main_printer"])
             except Exception:
                 pass
 
@@ -11137,6 +11248,30 @@ class POSView(QWidget):
             currency            = cn.get("currency", "USD"),
             footer              = co.get("footer_text", "Credit note issued. Thank you."),
         )
+
+        # Enrich customer details (email, address, TIN, VAT)
+        cust_name = str(cn.get("customer_name", "") or "").strip()
+        if cust_name and cust_name.lower() not in ("walk-in", "walk in", "walk in customer", "walk-in customer", "cash customer", "cash", "default", "default customer"):
+            try:
+                from database.db import get_connection
+                _c_conn = get_connection()
+                _c_cur = _c_conn.cursor()
+                _c_cur.execute(
+                    "SELECT custom_email_address, custom_house_no, custom_street, custom_city, custom_province, custom_customer_tin, custom_customer_vat, custom_telephone_number "
+                    "FROM customers WITH (NOLOCK) WHERE customer_name = ?", (cust_name,)
+                )
+                _c_row = _c_cur.fetchone()
+                _c_conn.close()
+                if _c_row:
+                    receipt.customerEmail = _c_row[0] or ""
+                    addr_parts = [str(p).strip() for p in (_c_row[1], _c_row[2], _c_row[3], _c_row[4]) if p and str(p).strip()]
+                    receipt.customeraddress = ", ".join(addr_parts)
+                    receipt.customerTin = _c_row[5] or ""
+                    receipt.customerVat = _c_row[6] or ""
+                    if not receipt.customerContact and _c_row[7]:
+                        receipt.customerContact = _c_row[7]
+            except Exception:
+                pass
         # Extra attributes read via getattr() in printing_service - set after construction
         receipt.originalInvoiceNo = cn.get("invoice_no", "")
         receipt.creditNoteReason  = cn.get("reason", "")
@@ -13280,9 +13415,12 @@ class CustomerPaymentDialog(QDialog):
         if self._active_method:
             self._activate_method(self._active_method)
 # # =============================================================================
-# REPRINT DIALOG  -  two tabs: Sales Invoice  |  Sales Order
-# =============================================================================
-class ReprintDialog(QDialog):
+try:
+    from views.components.blur_overlay import BlurredDialog
+except ImportError:
+    BlurredDialog = QDialog
+
+class ReprintDialog(BlurredDialog):
     """
     Two-tab reprint dialog.
       Tab 1 - Sales Invoice : search by invoice number or customer name

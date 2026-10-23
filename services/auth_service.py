@@ -19,6 +19,141 @@ _session = {
     "raw_login_data": None,
 }
 
+_login_order_flags_cache: dict[str, tuple[int, int, int, int, int, int]] = {}
+_login_order_flags_loaded: bool = False
+
+def _ensure_login_order_flags_loaded():
+    global _login_order_flags_cache, _login_order_flags_loaded
+    if _login_order_flags_loaded:
+        return
+    try:
+        from database.db import get_app_data_dir
+        cache_file = get_app_data_dir() / "login_order_flags.json"
+        if cache_file.exists():
+            with open(cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, (list, tuple)) and len(v) == 6:
+                            _login_order_flags_cache[str(k).strip()] = tuple(int(x) for x in v)
+    except Exception as e:
+        print(f"[auth_service] Error reading login_order_flags.json: {e}")
+    finally:
+        _login_order_flags_loaded = True
+
+def _save_login_order_flags_to_disk():
+    global _login_order_flags_cache
+    try:
+        from database.db import get_app_data_dir
+        cache_file = get_app_data_dir() / "login_order_flags.json"
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(_login_order_flags_cache, f, indent=2)
+    except Exception as e:
+        print(f"[auth_service] Error writing login_order_flags.json: {e}")
+
+def get_cached_login_order_flags(part_no: str) -> tuple[int, int, int, int, int, int] | None:
+    """Retrieve fallback order_1..6 flags for an item parsed from the login response."""
+    global _login_order_flags_cache
+    _ensure_login_order_flags_loaded()
+    return _login_order_flags_cache.get(str(part_no or "").strip())
+
+def _extract_login_warehouse_items(raw: dict) -> list[dict]:
+    """Extract warehouse items or product list from all possible login response payload nesting."""
+    if not isinstance(raw, dict):
+        return []
+    user_block = raw.get("user") if isinstance(raw.get("user"), dict) else {}
+    msg_block = raw.get("message") if isinstance(raw.get("message"), dict) else {}
+    msg_user = msg_block.get("user") if isinstance(msg_block.get("user"), dict) else {}
+
+    candidates = [
+        user_block.get("warehouse_items"),
+        raw.get("warehouse_items"),
+        msg_user.get("warehouse_items"),
+        msg_block.get("warehouse_items"),
+        raw.get("products"),
+        user_block.get("products"),
+        msg_block.get("products"),
+    ]
+    for c in candidates:
+        if isinstance(c, list) and c:
+            return c
+    return []
+
+def _sync_login_warehouse_order_flags(warehouse_items: list[dict]):
+    """
+    Parse custom_is_order_item_1..7 / kitchen_order_1..6 / order_1..6 from login warehouse_items
+    and update local products table as fallback routing flags.
+    """
+    if not warehouse_items or not isinstance(warehouse_items, list):
+        return
+
+    global _login_order_flags_cache, _login_order_flags_loaded
+    _ensure_login_order_flags_loaded()
+    updated_count = 0
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+
+        for item in warehouse_items:
+            if not isinstance(item, dict):
+                continue
+            item_code = str(item.get("item_code") or item.get("itemcode") or item.get("part_no") or "").strip()
+            if not item_code:
+                continue
+
+            flags = []
+            has_any_flag = False
+            for i in range(1, 7):
+                val = (
+                    item.get(f"kitchen_order_{i}")
+                    if item.get(f"kitchen_order_{i}") is not None
+                    else item.get(f"kitchen_order{i}")
+                    if item.get(f"kitchen_order{i}") is not None
+                    else item.get(f"custom_is_order_item_{i}")
+                    if item.get(f"custom_is_order_item_{i}") is not None
+                    else item.get(f"custom_is_order_item{i}")
+                    if item.get(f"custom_is_order_item{i}") is not None
+                    else item.get(f"is_order_item_{i}")
+                    if item.get(f"is_order_item_{i}") is not None
+                    else item.get(f"is_order_item{i}")
+                    if item.get(f"is_order_item{i}") is not None
+                    else item.get(f"custom_kitchen_order_{i}")
+                    if item.get(f"custom_kitchen_order_{i}") is not None
+                    else item.get(f"order_{i}")
+                    if item.get(f"order_{i}") is not None
+                    else item.get(f"order{i}")
+                    if item.get(f"order{i}") is not None
+                    else (item.get("kitchen_order") or item.get("is_kitchen_order") or item.get("custom_kitchen_order") or item.get("custom_is_order_item"))
+                    if i == 1
+                    else None
+                )
+                if val is not None:
+                    has_any_flag = True
+                    int_val = 1 if (str(val).strip().lower() in ("1", "true", "yes", "t", "y") or val is True or val == 1) else 0
+                else:
+                    int_val = 0
+                flags.append(int_val)
+
+            if has_any_flag:
+                _login_order_flags_cache[item_code] = tuple(flags)
+                # Update existing product in SQL Server if already present
+                cur.execute("""
+                    UPDATE products
+                    SET order_1 = ?, order_2 = ?, order_3 = ?, order_4 = ?, order_5 = ?, order_6 = ?
+                    WHERE part_no = ?
+                """, (*flags, item_code))
+                if cur.rowcount > 0:
+                    updated_count += cur.rowcount
+
+        conn.commit()
+        conn.close()
+        _save_login_order_flags_to_disk()
+        if updated_count > 0 or len(_login_order_flags_cache) > 0:
+            print(f"[auth_service] Synced {len(_login_order_flags_cache)} kitchen order item mappings from login response (updated {updated_count} local products).")
+    except Exception as e:
+        print(f"[auth_service] Error updating login warehouse order flags in DB: {e}")
+
 
 # =============================================================================
 # PUBLIC
@@ -105,9 +240,22 @@ def login(username: str, password: str) -> dict:
             from models.company_defaults import save_defaults, get_defaults
             existing = get_defaults()
 
-            existing["server_company"]          = _str(user_block.get("company"))
-            existing["server_warehouse"]        = _str(user_block.get("warehouse"))
-            existing["server_cost_center"]      = _str(user_block.get("cost_center"))
+            new_comp = _str(user_block.get("company")).strip()
+            if new_comp:
+                existing["server_company"] = new_comp
+
+            new_wh = _str(user_block.get("warehouse")).strip()
+            if new_wh:
+                existing["server_warehouse"] = new_wh
+            elif existing.get("server_warehouse"):
+                # Inherit the counter's assigned warehouse
+                user_block["warehouse"] = existing.get("server_warehouse")
+                if "user" in online and isinstance(online["user"], dict):
+                    online["user"]["warehouse"] = existing.get("server_warehouse")
+
+            new_cc = _str(user_block.get("cost_center")).strip()
+            if new_cc:
+                existing["server_cost_center"] = new_cc
             existing["server_username"]         = _str(user_block.get("username"))
             existing["server_email"]            = _str(user_block.get("email"))
             existing["server_role"]             = _str(user_block.get("role") or user_rights.get("profile_name"))
@@ -121,7 +269,7 @@ def login(username: str, password: str) -> dict:
             existing["server_api_host"]         = _str(_site_get_host())
             existing["server_default_customer"] = _str(user_block.get("default_customer"))
                 
-            # ── Base Currency & Symbol Extraction in SaaS mode ────────────────
+            # ── Base Currency & Symbol Extraction in SaaS mode ────────
             primary_ccy = _str(user_block.get("currency") or raw.get("currency")).strip()
             currencies_arr = user_block.get("currencies") or raw.get("currencies") or []
             primary_symbol = ""
@@ -199,6 +347,14 @@ def login(username: str, password: str) -> dict:
                         existing["subscription_days_left"] = str(sub_info.get("days_left"))
                     if sub_info.get("end_date"):
                         existing["subscription_expiry"] = str(sub_info.get("end_date"))[:10]
+
+                # ── Sync Kitchen Order Routing from Login warehouse_items ─────────
+                try:
+                    wh_items = _extract_login_warehouse_items(raw)
+                    if isinstance(wh_items, list) and wh_items:
+                        _sync_login_warehouse_order_flags(wh_items)
+                except Exception as _wo_err:
+                    print(f"[auth_service] Error syncing login warehouse order flags: {_wo_err}")
 
                 save_defaults(existing)
                 print("[auth] [OK] Server defaults saved.")
@@ -320,8 +476,9 @@ def get_active_session_user() -> str:
     if active:
         return active
     try:
-        cfg_path = os.path.join("app_data", "sql_settings.json")
-        if os.path.exists(cfg_path):
+        from database.db import get_app_data_dir
+        cfg_path = get_app_data_dir() / "sql_settings.json"
+        if cfg_path.exists():
             with open(cfg_path, "r", encoding="utf-8") as f:
                 cfg_d = json.load(f)
                 res = str(cfg_d.get("active_user_email") or cfg_d.get("user_email") or cfg_d.get("last_logged_in_user") or "").strip()
@@ -378,12 +535,15 @@ def set_active_session_user(email: str):
         cfg_data["user_email"] = email
         cfg_data["last_logged_in_user"] = email
         cfg_data["email"] = email
-        with open(cfg_path, "w", encoding="utf-8") as f:
+        import os
+        tmp_path = cfg_path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(cfg_data, f, indent=4)
+        os.replace(tmp_path, cfg_path)
     except Exception:
         pass
 
-    # 2. Update company_defaults in SQLite
+    # 2. Update company_defaults
     try:
         from database.db import get_connection
         conn = get_connection()
@@ -435,8 +595,9 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
 
     if not resolved_email or "@" not in resolved_email:
         try:
-            cfg_path = os.path.join("app_data", "sql_settings.json")
-            if os.path.exists(cfg_path):
+            from database.db import get_app_data_dir
+            cfg_path = get_app_data_dir() / "sql_settings.json"
+            if cfg_path.exists():
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     cfg_d = json.load(f)
                     resolved_email = str(cfg_d.get("active_user_email") or cfg_d.get("user_email") or cfg_d.get("last_logged_in_user") or "").strip()
@@ -506,17 +667,38 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
     ctx.verify_mode = ssl.CERT_NONE
 
     def _post_payload(p_dict, attempt=1):
-        p_bytes = json.dumps(p_dict).encode("utf-8")
-        req = urllib.request.Request(url=endpoint, data=p_bytes, method="POST", headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, OSError) as net_err:
-            if attempt < 2:
+        import threading
+        from PySide6.QtCore import QCoreApplication
+        
+        result = []
+        error = []
+        def worker():
+            try:
+                p_bytes = json.dumps(p_dict).encode("utf-8")
+                req = urllib.request.Request(url=endpoint, data=p_bytes, method="POST", headers=headers)
+                with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                    result.append(json.loads(resp.read().decode("utf-8")))
+            except Exception as e:
+                error.append(e)
+                
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        
+        # Spin local event loop to keep UI responsive while waiting for network
+        while t.is_alive():
+            app = QCoreApplication.instance()
+            if app:
+                app.processEvents()
+            t.join(0.05)
+            
+        if error:
+            err = error[0]
+            if isinstance(err, (urllib.error.URLError, TimeoutError, OSError)) and attempt < 2:
                 import time
                 time.sleep(1.0)
                 return _post_payload(p_dict, attempt=attempt + 1)
-            raise net_err
+            raise err
+        return result[0]
 
     try:
         try:
@@ -580,8 +762,11 @@ def select_terminal(terminal_id: int | str, takeover: bool = False, user_email: 
 
             cfg_data["bound_device_id"] = str(dev_id).strip()
 
-            with open(cfg_path, "w", encoding="utf-8") as f:
+            import os
+            tmp_path = cfg_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(cfg_data, f, indent=4)
+            os.replace(tmp_path, cfg_path)
 
             # Update company_defaults in SQL
             try:
@@ -763,13 +948,35 @@ def _try_online_login(username: str, password: str) -> dict:
 
     try:
         import ssl
+        import threading
+        from PySide6.QtCore import QCoreApplication
+        
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT, context=ctx) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return _parse_online_success(data, username)
+        
+        result = []
+        error = []
+        def worker():
+            try:
+                with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT, context=ctx) as resp:
+                    result.append(json.loads(resp.read().decode("utf-8")))
+            except Exception as e:
+                error.append(e)
+                
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        
+        # Keep login screen responsive while waiting for online login or timeout
+        while t.is_alive():
+            app = QCoreApplication.instance()
+            if app: app.processEvents()
+            t.join(0.05)
+            
+        if error:
+            raise error[0]
+            
+        return _parse_online_success(result[0], username, password)
     except urllib.error.HTTPError as e:
         try:
             msg = json.loads(e.read().decode()).get("message", f"HTTP {e.code}")
@@ -784,7 +991,7 @@ def _try_online_login(username: str, password: str) -> dict:
         return {"success": False, "auth_failed": False, "error": str(e)}
 
 
-def _parse_online_success(data: dict, username: str) -> dict:
+def _parse_online_success(data: dict, username: str, password: str = "") -> dict:
     msg_block = data.get("message") if isinstance(data.get("message"), dict) else {}
     token_b64 = data.get("token") or data.get("access_token") or msg_block.get("token") or msg_block.get("access_token") or ""
     
@@ -793,6 +1000,7 @@ def _parse_online_success(data: dict, username: str) -> dict:
 
     # If the server returned a plain token_string (key:secret), extract it properly for Frappe mode!
     token_string = data.get("token_string") or msg_block.get("token_string") or ""
+    user_block = data.get("user") or {}
     if token_string and ":" in token_string:
         api_key, api_secret = token_string.split(":", 1)
     else:
@@ -804,6 +1012,11 @@ def _parse_online_success(data: dict, username: str) -> dict:
             if token_string:
                 import base64
                 api_key = base64.b64encode(token_string.encode("utf-8")).decode("utf-8")
+                api_secret = ""
+            elif password:
+                import base64
+                u_email = (user_block.get("email") or username).strip()
+                api_key = base64.b64encode(f"{u_email}:{password}".encode("utf-8")).decode("utf-8")
                 api_secret = ""
 
 

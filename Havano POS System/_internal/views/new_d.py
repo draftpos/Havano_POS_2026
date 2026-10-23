@@ -1,4 +1,4 @@
-<!-- from PySide6.QtWidgets import (
+from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QPushButton, QLabel, QFrame, QTableWidget, QTableWidgetItem,
     QLineEdit, QGridLayout, QMessageBox, QStatusBar, QSizePolicy,
@@ -4513,6 +4513,14 @@ class UnsyncedPopup(QDialog):
         self._load_all()
         self._select_smart_tab()
 
+    def _get_currency_symbol(self) -> str:
+        try:
+            from models.company_defaults import get_defaults
+            d = get_defaults() or {}
+            return str(d.get("server_company_currency_symbol") or d.get("server_company_currency") or d.get("currency") or "").strip()
+        except Exception:
+            return ""
+
     # ── UI ────────────────────────────────────────────────────────────────────
     def _build(self):
         root = QVBoxLayout(self)
@@ -4597,14 +4605,15 @@ class UnsyncedPopup(QDialog):
         setattr(self, f"_count_lbl_{kind}", count_lbl)
         bl.addWidget(count_lbl)
 
-        # Table - 4 columns: Q: Ref | Customer | Amount | Raw Error
-        tbl = QTableWidget(0, 4)
-        tbl.setHorizontalHeaderLabels(["Q: Ref / No.", "Customer", "Amount", "Raw API Error"])
+        # Table - 5 columns: Date | Q: Ref | Customer | Amount | Raw Error
+        tbl = QTableWidget(0, 5)
+        tbl.setHorizontalHeaderLabels(["Date", "Q: Ref / No.", "Customer", "Amount", "Raw API Error"])
         hh = tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed);  tbl.setColumnWidth(0, 150)
-        hh.setSectionResizeMode(1, QHeaderView.Fixed);  tbl.setColumnWidth(1, 160)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed);  tbl.setColumnWidth(2, 90)
-        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+        hh.setSectionResizeMode(0, QHeaderView.Fixed);  tbl.setColumnWidth(0, 130)
+        hh.setSectionResizeMode(1, QHeaderView.Fixed);  tbl.setColumnWidth(1, 140)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed);  tbl.setColumnWidth(2, 150)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed);  tbl.setColumnWidth(3, 90)
+        hh.setSectionResizeMode(4, QHeaderView.Stretch)
         tbl.verticalHeader().setVisible(False)
         tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
         tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -4710,7 +4719,7 @@ class UnsyncedPopup(QDialog):
         if lbl:
             lbl.setText(f"{n} item{'s' if n != 1 else ''} pending sync")
 
-        for ref, customer, amount, raw_error in rows:
+        for dt_str, ref, customer, amount, raw_error in rows:
             r = tbl.rowCount()
             tbl.insertRow(r)
             tbl.setRowHeight(r, 42)
@@ -4725,20 +4734,21 @@ class UnsyncedPopup(QDialog):
                     it.setForeground(QColor(color))
                 return it
 
-            tbl.setItem(r, 0, _cell(ref, ACCENT))
-            tbl.setItem(r, 1, _cell(customer))
-            tbl.setItem(r, 2, _cell(amount, align=Qt.AlignRight | Qt.AlignVCenter))
+            tbl.setItem(r, 0, _cell(dt_str, MUTED))
+            tbl.setItem(r, 1, _cell(ref, ACCENT))
+            tbl.setItem(r, 2, _cell(customer))
+            tbl.setItem(r, 3, _cell(amount, align=Qt.AlignRight | Qt.AlignVCenter))
             # Raw error - red, full text in tooltip too
             err_item = _cell(raw_error or "-", DANGER if raw_error else MUTED)
             if raw_error:
                 err_item.setToolTip(raw_error)   # full text on hover
-            tbl.setItem(r, 3, err_item)
+            tbl.setItem(r, 4, err_item)
 
         return n
 
     def _fetch_rows(self, kind: str):
         """
-        Returns list of (ref, customer, amount_str, raw_error_str).
+        Returns list of (dt_str, ref, customer, amount_str, raw_error_str).
         Every query mirrors the badge SQL so popup count == badge count.
         Raw error_msg is pulled verbatim from sync_errors table - no cleaning,
         no truncation.  Falls back to "Pending" only when no error row exists.
@@ -4746,10 +4756,25 @@ class UnsyncedPopup(QDialog):
         rows = []
         try:
             from database.db import get_connection
+            from datetime import datetime, date
+
+            def _fmt_dt(val):
+                if not val:
+                    return "-"
+                if isinstance(val, (datetime, date)):
+                    return val.strftime("%Y-%m-%d %H:%M")
+                s = str(val).strip()
+                if not s:
+                    return "-"
+                try:
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    return dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    return s[:16]
 
             def _get_raw_errors(conn, doc_type_code: str) -> dict:
                 """
-                Returns {doc_ref: error_msg} for all unresolved rows of
+                Returns {doc_ref: (error_msg, occurred_at)} for all unresolved rows of
                 this doc_type.  Verbatim - newest row wins per ref.
                 """
                 errors = {}
@@ -4757,7 +4782,7 @@ class UnsyncedPopup(QDialog):
                     cur2 = conn.cursor()
                     cur2.execute(
                         """
-                        SELECT doc_ref, error_msg
+                        SELECT doc_ref, error_msg, occurred_at
                         FROM   sync_errors
                         WHERE  doc_type = ?
                           AND  resolved = 0
@@ -4765,24 +4790,29 @@ class UnsyncedPopup(QDialog):
                         """,
                         (doc_type_code,),
                     )
-                    for doc_ref, error_msg in cur2.fetchall():
+                    for doc_ref, error_msg, occ_at in cur2.fetchall():
                         if doc_ref not in errors:
-                            errors[doc_ref] = error_msg or ""
+                            errors[doc_ref] = (error_msg or "", occ_at)
                 except Exception:
                     pass
                 return errors
 
-            def _match_error(error_map: dict, key: str) -> str:
-                """Exact match first, then substring fallback."""
+            def _match_error_info(error_map: dict, key: str):
+                """Exact match first, then substring fallback. Returns (error_msg, occurred_at)."""
                 if not key:
-                    return ""
+                    return ("", None)
                 if key in error_map:
-                    return error_map[key]
+                    val = error_map[key]
+                    return val if isinstance(val, tuple) else (str(val), None)
                 key_l = key.lower()
                 for k, v in error_map.items():
                     if k and (k.lower() in key_l or key_l in k.lower()):
-                        return v
-                return ""
+                        return v if isinstance(v, tuple) else (str(v), None)
+                return ("", None)
+
+            def _match_error(error_map: dict, key: str) -> str:
+                err_msg, _ = _match_error_info(error_map, key)
+                return err_msg
 
             if kind == "SI":
                 try:
@@ -4793,27 +4823,30 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT invoice_no, customer_name, total, method
+                        SELECT COALESCE(created_at, invoice_date), invoice_no, customer_name, total, method
                         FROM   sales
                         WHERE  synced = 0 OR synced IS NULL
                         ORDER  BY id DESC
                     """)
-                    for inv, cust, amt, meth in cur.fetchall():
+                    for dt, inv, cust, amt, meth in cur.fetchall():
                         inv_key = inv or ""
-                        raw_err = _match_error(error_map, inv_key)
+                        err_msg, err_dt = _match_error_info(error_map, inv_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else f"Pending - not yet attempted  (method: {meth or 'unknown'})"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             inv_key or "-",
                             cust or "Walk-in",
-                            f"${float(amt or 0):.2f}",
+                            f"{self._get_currency_symbol()}{float(amt or 0):.2f}",
                             display_err,
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "CN":
                 try:
@@ -4823,27 +4856,30 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT cn_number, customer_name, total, cn_status
+                        SELECT created_at, cn_number, customer_name, total, cn_status
                         FROM   credit_notes
                         WHERE  cn_status IN ('ready','pending_sync')
                         ORDER  BY id DESC
                     """)
-                    for cn_no, cust, amt, status in cur.fetchall():
+                    for dt, cn_no, cust, amt, status in cur.fetchall():
                         cn_key = cn_no or ""
-                        raw_err = _match_error(error_map, cn_key)
+                        err_msg, err_dt = _match_error_info(error_map, cn_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else f"Pending - status: {status or 'ready'}"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             cn_key or "-",
                             cust or "-",
-                            f"${float(amt or 0):.2f}",
+                            f"{self._get_currency_symbol()}{float(amt or 0):.2f}",
                             display_err,
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "SO":
                 try:
@@ -4853,27 +4889,30 @@ class UnsyncedPopup(QDialog):
                         error_map.setdefault(k, v)
                     cur = conn.cursor()
                     cur.execute("""
-                        SELECT order_no, customer_name, total
+                        SELECT COALESCE(created_at, order_date), order_no, customer_name, total
                         FROM   sales_order
                         WHERE  synced = 0 OR synced IS NULL
                         ORDER  BY id DESC
                     """)
-                    for ono, cust, amt in cur.fetchall():
+                    for dt, ono, cust, amt in cur.fetchall():
                         so_key = ono or ""
-                        raw_err = _match_error(error_map, so_key)
+                        err_msg, err_dt = _match_error_info(error_map, so_key)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else "Pending - not yet attempted"
                         )
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             so_key or "-",
                             cust or "-",
-                            f"${float(amt or 0):.2f}",
+                            f"{self._get_currency_symbol()}{float(amt or 0):.2f}",
                             display_err,
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "PAY":
                 try:
@@ -4888,22 +4927,22 @@ class UnsyncedPopup(QDialog):
                     # Show ALL unsynced payment entries - including sale-linked ones.
                     # Currency column included so ZiG/ZWD entries are clearly labelled.
                     cur.execute("""
-                        SELECT reference_no, party_name, paid_amount, currency, last_error, sync_attempts FROM (
-                            SELECT pe.reference_no, pe.party_name, pe.paid_amount,
+                        SELECT dt, reference_no, party_name, paid_amount, currency, last_error, sync_attempts FROM (
+                            SELECT COALESCE(pe.created_at, pe.reference_date) as dt, pe.reference_no, pe.party_name, pe.paid_amount,
                                    pe.currency, ISNULL(pe.sync_error, pe.last_error) as last_error, pe.sync_attempts, pe.id
                             FROM   payment_entries pe
                             WHERE  (pe.synced = 0 OR pe.synced IS NULL)
                             
                             UNION ALL
                             
-                            SELECT le.order_no as reference_no, le.customer_name as party_name, le.deposit_amount as paid_amount,
+                            SELECT le.created_at as dt, le.order_no as reference_no, le.customer_name as party_name, le.deposit_amount as paid_amount,
                                    le.deposit_currency as currency, ISNULL(le.sync_error, le.error_message) as last_error, le.sync_attempts, le.id
                             FROM   laybye_payment_entries le
                             WHERE  le.status != 'synced'
 
                             UNION ALL
 
-                            SELECT cp.reference as reference_no, c.customer_name as party_name, cp.amount as paid_amount,
+                            SELECT COALESCE(cp.created_at, cp.payment_date) as dt, cp.reference as reference_no, c.customer_name as party_name, cp.amount as paid_amount,
                                    cp.currency, cp.sync_error as last_error, cp.sync_attempts, cp.id
                             FROM   customer_payments cp
                             LEFT JOIN customers c ON cp.customer_id = c.id
@@ -4911,9 +4950,10 @@ class UnsyncedPopup(QDialog):
                         ) as combined
                         ORDER BY id DESC
                     """)
-                    for ref, cust, amt, curr, db_err, attempts in cur.fetchall():
+                    for dt, ref, cust, amt, curr, db_err, attempts in cur.fetchall():
                         pay_key = ref or ""
-                        raw_err = (db_err or "").strip() or _match_error(error_map, pay_key)
+                        err_msg, err_dt = _match_error_info(error_map, pay_key)
+                        raw_err = (db_err or "").strip() or err_msg
                         att = attempts or 0
                         if att >= 60:
                             attempt_str = f" (Max retries reached - click Retry to reset)"
@@ -4926,7 +4966,9 @@ class UnsyncedPopup(QDialog):
                             else "Pending - not yet attempted"
                         )
                         curr_display = (curr or "USD").upper()
+                        final_dt = _fmt_dt(dt or err_dt)
                         rows.append((
+                            final_dt,
                             pay_key or "-",
                             cust or "Walk-in",
                             f"{curr_display}  {float(amt or 0):,.2f}",
@@ -4934,7 +4976,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
             elif kind == "CUST":
                 try:
@@ -4952,16 +4994,19 @@ class UnsyncedPopup(QDialog):
                     """)
                     for cid, cname, phone in cur.fetchall():
                         cust_key = str(cid)
-                        raw_err = (
-                            _match_error(error_map, cust_key)
-                            or _match_error(error_map, str(cid))
-                            or (_match_error(error_map, cname) if cname else "")
-                        )
+                        err_msg, err_dt = _match_error_info(error_map, cust_key)
+                        if not err_msg:
+                            err_msg, err_dt = _match_error_info(error_map, str(cid))
+                        if not err_msg and cname:
+                            err_msg, err_dt = _match_error_info(error_map, cname)
+                        raw_err = err_msg
                         display_err = (
                             raw_err if raw_err
                             else "Not yet synced to server"
                         )
+                        final_dt = _fmt_dt(err_dt)
                         rows.append((
+                            final_dt,
                             cust_key,
                             cname or "-",
                             phone or "-",
@@ -4969,7 +5014,7 @@ class UnsyncedPopup(QDialog):
                         ))
                     conn.close()
                 except Exception as e:
-                    rows.append(("-", "-", "-", f"DB error: {e}"))
+                    rows.append(("-", "-", "-", "-", f"DB error: {e}"))
 
         except Exception:
             pass
@@ -5000,11 +5045,12 @@ class UnsyncedPopup(QDialog):
             # copy all errors for this tab
             lines = []
             for r in range(tbl.rowCount()):
-                ref   = (tbl.item(r, 0) or QTableWidgetItem("")).text()
-                cust  = (tbl.item(r, 1) or QTableWidgetItem("")).text()
-                amt   = (tbl.item(r, 2) or QTableWidgetItem("")).text()
-                err   = (tbl.item(r, 3) or QTableWidgetItem("")).text()
-                lines.append(f"{ref} | {cust} | {amt} | {err}")
+                dt    = (tbl.item(r, 0) or QTableWidgetItem("")).text()
+                ref   = (tbl.item(r, 1) or QTableWidgetItem("")).text()
+                cust  = (tbl.item(r, 2) or QTableWidgetItem("")).text()
+                amt   = (tbl.item(r, 3) or QTableWidgetItem("")).text()
+                err   = (tbl.item(r, 4) or QTableWidgetItem("")).text()
+                lines.append(f"{dt} | {ref} | {cust} | {amt} | {err}")
             text = "\n".join(lines) if lines else ""
         else:
             # copy error column of selected row(s)
@@ -5015,11 +5061,12 @@ class UnsyncedPopup(QDialog):
                 if r in seen:
                     continue
                 seen.add(r)
-                ref  = (tbl.item(r, 0) or QTableWidgetItem("")).text()
-                cust = (tbl.item(r, 1) or QTableWidgetItem("")).text()
-                amt  = (tbl.item(r, 2) or QTableWidgetItem("")).text()
-                err  = (tbl.item(r, 3) or QTableWidgetItem("")).text()
-                parts.append(f"{ref} | {cust} | {amt}\n{err}")
+                dt   = (tbl.item(r, 0) or QTableWidgetItem("")).text()
+                ref  = (tbl.item(r, 1) or QTableWidgetItem("")).text()
+                cust = (tbl.item(r, 2) or QTableWidgetItem("")).text()
+                amt  = (tbl.item(r, 3) or QTableWidgetItem("")).text()
+                err  = (tbl.item(r, 4) or QTableWidgetItem("")).text()
+                parts.append(f"{dt} | {ref} | {cust} | {amt}\n{err}")
             text = "\n\n".join(parts)
 
         if text:
@@ -5043,60 +5090,78 @@ class UnsyncedPopup(QDialog):
         def _do():
             try:
                 from database.db import get_connection
-                conn = get_connection()
 
                 # ── STEP 1: Release all stale locks for this kind ──────────────
                 try:
                     if kind == "PAY":
-                        # Reset stuck 'syncing' laybye entries -> retry
-                        conn.execute("""
+                        conn = get_connection()
+                        conn.cursor().execute("""
                             UPDATE laybye_payment_entries
                             SET status = 'retry'
-                            WHERE status = 'syncing'
-                              OR  status = 'failed'
+                            WHERE status = 'syncing' OR status = 'failed'
                         """)
-                        # Reset stuck standard payment entries
-                        conn.execute("""
+                        conn.commit(); conn.close()
+                        conn = get_connection()
+                        conn.cursor().execute("""
                             UPDATE payment_entries
                             SET synced = 0, syncing = 0
-                            WHERE (synced = 0 OR synced IS NULL)
-                              AND syncing = 1
+                            WHERE (synced = 0 OR synced IS NULL) AND syncing = 1
                         """)
-                        # Reset stuck customer payments (dialog)
-                        conn.execute("""
+                        conn.commit(); conn.close()
+                        conn = get_connection()
+                        conn.cursor().execute("""
                             UPDATE customer_payments
                             SET syncing = 0, sync_attempts = 0
-                            WHERE (synced = 0 OR synced IS NULL)
-                              AND syncing = 1
+                            WHERE (synced = 0 OR synced IS NULL) AND syncing = 1
                         """)
-                        conn.commit()
+                        conn.commit(); conn.close()
+                        conn = get_connection()
+                        conn.cursor().execute("UPDATE sync_errors SET resolved = 1 WHERE doc_type IN ('PE', 'PAY')")
+                        conn.commit(); conn.close()
                     elif kind == "SI":
-                        conn.execute("UPDATE sales SET syncing = 0 WHERE syncing = 1")
-                        conn.commit()
+                        conn = get_connection()
+                        conn.cursor().execute("UPDATE sales SET syncing = 0 WHERE syncing = 1 AND synced = 0")
+                        conn.commit(); conn.close()
+                        conn = get_connection()
+                        conn.cursor().execute("UPDATE sales SET sync_error = NULL WHERE synced = 0")
+                        conn.commit(); conn.close()
+                        conn = get_connection()
+                        conn.cursor().execute("UPDATE sync_errors SET resolved = 1 WHERE doc_type IN ('SI', 'sales_invoice')")
+                        conn.commit(); conn.close()
+                        conn = get_connection()
+                        cur = conn.cursor()
+                        cur.execute("SELECT COUNT(*) FROM sales WHERE synced = 0 AND (syncing IS NULL OR syncing = 0)")
+                        unlocked_count = cur.fetchone()[0]
+                        conn.close()
+                        print(f"[retry] SI locks reset. Ready to push: {unlocked_count} sale(s)")
                     elif kind == "CN":
-                        conn.execute("UPDATE credit_notes SET syncing = 0 WHERE syncing = 1")
-                        conn.commit()
+                        conn = get_connection()
+                        conn.cursor().execute("UPDATE credit_notes SET syncing = 0 WHERE syncing = 1")
+                        conn.commit(); conn.close()
+                        conn = get_connection()
+                        conn.cursor().execute("UPDATE sync_errors SET resolved = 1 WHERE doc_type IN ('CN', 'credit_note')")
+                        conn.commit(); conn.close()
                     elif kind == "SO":
-                        conn.execute("""
-                            UPDATE sales_order
-                            SET synced = 0
-                            WHERE synced = 2
-                        """)
-                        conn.commit()
+                        conn = get_connection()
+                        conn.cursor().execute("UPDATE sales_order SET synced = 0 WHERE synced = 2")
+                        conn.commit(); conn.close()
+                        conn = get_connection()
+                        conn.cursor().execute("UPDATE sync_errors SET resolved = 1 WHERE doc_type IN ('SO', 'sales_order')")
+                        conn.commit(); conn.close()
                 except Exception as lock_e:
                     print(f"[retry] Lock reset error for {kind}: {lock_e}")
-                finally:
-                    try: conn.close()
-                    except: pass
+                    import traceback; traceback.print_exc()
 
                 # ── STEP 2: Trigger the sync service ──────────────────────────
+                print(f"[retry] Starting upload for kind={kind}...")
                 if kind == "SI":
                     try:
                         from services.pos_upload_service import push_unsynced_sales
-                        push_unsynced_sales()
-                    except ImportError:
-                        from services.pos_upload_service import push_unsynced_invoices
-                        push_unsynced_invoices()
+                        result = push_unsynced_sales()
+                        print(f"[retry] SI done: pushed={result.get('pushed',0)} failed={result.get('failed',0)} total={result.get('total',0)}")
+                    except Exception as _si_e:
+                        print(f"[retry] SI push error: {_si_e}")
+                        import traceback; traceback.print_exc()
                 elif kind == "CN":
                     from services.credit_note_sync_service import push_unsynced_credit_notes
                     push_unsynced_credit_notes(force=True)
@@ -5115,10 +5180,16 @@ class UnsyncedPopup(QDialog):
                     except Exception as e:
                         print(f"[retry] laybye PE sync error: {e}")
                 elif kind == "CUST":
-                    from services.customer_sync_service import push_unsynced_customers
-                    push_unsynced_customers()
+                    try:
+                        from services.customer_sync_service import sync_customers
+                        sync_customers()
+                        from models.customer import retry_unsynced_customers
+                        retry_unsynced_customers()
+                    except Exception as e:
+                        print(f"[retry] CUST sync error: {e}")
             except Exception as e:
                 print(f"[retry] _on_retry error for kind={kind}: {e}")
+                import traceback; traceback.print_exc()
 
             from PySide6.QtCore import QMetaObject, Qt as _Qt2
             QMetaObject.invokeMethod(self, "_after_retry", _Qt2.QueuedConnection)
@@ -14032,4 +14103,4 @@ class AdvanceSettingsDialog(QDialog):
             "Logo has been copied to:\n"
             f"app_data\\logos\\{self.default_logo_name}\n\n"
             "Changes take effect on the next receipt print.")
-        self.accept() -->
+        self.accept()

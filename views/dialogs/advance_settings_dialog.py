@@ -236,7 +236,6 @@ class AdvanceSettingsDialog(QDialog):
         tabs.addTab(self._receipt_tab(), "Receipt")
         tabs.addTab(self._kitchen_tab(), "Kitchen Order")
         tabs.addTab(self._ui_tab(), "UI Features")
-        tabs.addTab(self._system_mode_tab(), "System Mode")
         return tabs
 
     def _system_mode_tab(self) -> QWidget:
@@ -624,25 +623,13 @@ class AdvanceSettingsDialog(QDialog):
         self._settings.showSalesReport    = self._cb_sales_report.isChecked()
         self._settings.showSalesList      = self._cb_sales_list.isChecked()
         self._settings.capitalizeItemNames = self._cb_capitalize.isChecked()
-        new_mode = self._mode_combo.currentText().lower()
-        
         mode_changed = False
         try:
-            from services.credentials import set_system_mode, get_system_mode
-            if new_mode != get_system_mode().lower():
-                mode_ok = set_system_mode(new_mode, parent=self)
-                if not mode_ok:
-                    # Revert combo box
-                    saved_mode = get_system_mode().capitalize()
-                    idx = self._mode_combo.findText(saved_mode, Qt.MatchContains)
-                    if idx >= 0:
-                        self._mode_combo.setCurrentIndex(idx)
-                    return
-                mode_changed = True
-        except Exception as _ex_mode:
-            print(f"[advance_settings_dialog] set_system_mode error: {_ex_mode}")
-
-        self._settings.systemModeOverride = new_mode
+            from services.credentials import get_system_mode
+            new_mode = get_system_mode().lower()
+            self._settings.systemModeOverride = new_mode
+        except Exception:
+            new_mode = "offline"
 
         self._settings.showAppSales       = self._cb_app_sales.isChecked()
         self._settings.showAppSuppliers   = self._cb_app_suppliers.isChecked()
@@ -652,12 +639,7 @@ class AdvanceSettingsDialog(QDialog):
         self._settings.showAppExpenses    = self._cb_app_expenses.isChecked()
 
         try:
-            # Use a path relative to THIS file so CWD never matters
-            import os
-            _here = os.path.dirname(os.path.abspath(__file__))
-            _root = os.path.normpath(os.path.join(_here, "..", ".."))
-            _path = os.path.join(_root, "settings", "advance_settings.json")
-            self._settings.save_to_file(_path)
+            self._settings.save_to_file()
 
             # Also propagate system mode to credentials so get_system_mode() returns the new value
             try:

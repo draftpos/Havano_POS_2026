@@ -1876,7 +1876,8 @@ def print_s(sale: dict, is_cancelled: bool = False, skip_print_after_order: bool
             print(f"[KITCHEN DEBUG]     order_4={it.get('order_4', 0)}, order_5={it.get('order_5', 0)}, order_6={it.get('order_6', 0)}")
         
         # Check hardware settings file
-        hw_file = Path("app_data/hardware_settings.json")
+        from database.db import get_app_data_dir
+        hw_file = get_app_data_dir() / "hardware_settings.json"
         print(f"[KITCHEN DEBUG] Looking for hardware file at: {hw_file.absolute()}")
         print(f"[KITCHEN DEBUG] File exists: {hw_file.exists()}")
         

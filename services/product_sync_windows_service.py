@@ -166,7 +166,6 @@ def _get(url: str, api_key: str, api_secret: str) -> dict:
 def _fetch_all_pages(api_key: str, api_secret: str, host: str) -> list[dict]:
     """Pages through the API using the real pagination structure."""
     products: list[dict] = []
-    page = 1
     
     # Select base_endpoint according to system mode
     try:
@@ -175,52 +174,76 @@ def _fetch_all_pages(api_key: str, api_secret: str, host: str) -> list[dict]:
     except Exception:
         sys_mode = "saas"
 
-    if sys_mode == "saas" or sys_mode != "frappe":
-        base_endpoint = f"{host}/api/method/saas_api.www.api.get_my_products"
-        fallback_endpoint = f"{host}/api/method/havano_pos_integration.api.get_products"
-    else:
-        base_endpoint = f"{host}/api/method/havano_pos_integration.api.get_products"
-        fallback_endpoint = f"{host}/api/method/saas_api.www.api.get_my_products"
-    use_fallback = False
-
-    while True:
-        endpoint = fallback_endpoint if use_fallback else base_endpoint
-        url = f"{endpoint}?page={page}&limit={PAGE_SIZE}"
-        log.info("[sync] Fetching page %d (limit=%d)...", page, PAGE_SIZE)
-
+    if sys_mode == "odoo":
         try:
-            data        = _get(url, api_key, api_secret)
-            msg         = data.get("message", {})
-            page_items  = msg.get("products", []) if isinstance(msg, dict) else []
-            pagination  = msg.get("pagination", {}) if isinstance(msg, dict) else {}
-            total_pages = pagination.get("total_pages", 1)
-            has_next    = pagination.get("has_next_page", False)
-        except urllib.error.HTTPError as e:
-            if not use_fallback:
-                log.info(f"[sync] Endpoint {endpoint} failed with {e.code}, trying fallback.")
-                use_fallback = True
-                continue
-            raise e
+            from services.odoo.sync_service import sync_products_odoo
+            sync_products_odoo()
+            return []
         except Exception as e:
-            log.error("[sync] Page %d fetch failed: %s", page, e)
+            log.warning("[sync] Odoo product sync encountered an error: %s", e)
+            return []
+
+    candidate_endpoints = [
+        f"{host}/api/method/saas_api.www.api.get_my_products",
+        f"{host}/api/method/havano_pos_integration.api.get_products",
+        f"{host}/api/method/saas_api.www.api.get_products",
+        f"{host}/api/method/saas_api.api.get_products",
+    ]
+
+    working_endpoint = None
+
+    for endpoint in candidate_endpoints:
+        page = 1
+        page_products: list[dict] = []
+        endpoint_failed = False
+
+        while True:
+            url = f"{endpoint}?page={page}&limit={PAGE_SIZE}"
+            log.info("[sync] Fetching page %d (limit=%d) from %s...", page, PAGE_SIZE, endpoint)
+
+            try:
+                data        = _get(url, api_key, api_secret)
+                msg         = data.get("message", {})
+                page_items  = msg.get("products", []) if isinstance(msg, dict) else []
+                pagination  = msg.get("pagination", {}) if isinstance(msg, dict) else {}
+                total_pages = pagination.get("total_pages", 1)
+                has_next    = pagination.get("has_next_page", False)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    log.info("[sync] Endpoint %s returned 404, trying next candidate...", endpoint)
+                else:
+                    log.warning("[sync] Endpoint %s returned HTTP %d: %s", endpoint, e.code, e)
+                endpoint_failed = True
+                break
+            except Exception as e:
+                log.warning("[sync] Page %d fetch failed on %s: %s", page, endpoint, e)
+                endpoint_failed = True
+                break
+
+            # TAX DEBUG: log a sample raw product on first page
+            if page == 1 and page_items:
+                sample       = page_items[0]
+                sample_taxes = sample.get("taxes", [])
+                log.info(
+                    "[TAX FIELD DEBUG] Sample product '%s' taxes raw: %s",
+                    sample.get("itemcode", "?"),
+                    json.dumps(sample_taxes, default=str),
+                )
+
+            page_products.extend(page_items)
+            log.info("[sync]   %d products on page %d/%d", len(page_items), page, total_pages)
+
+            if not has_next:
+                break
+            page += 1
+
+        if not endpoint_failed:
+            working_endpoint = endpoint
+            products = page_products
             break
 
-        # TAX DEBUG: log a sample raw product on first page
-        if page == 1 and page_items:
-            sample       = page_items[0]
-            sample_taxes = sample.get("taxes", [])
-            log.info(
-                "[TAX FIELD DEBUG] Sample product '%s' taxes raw: %s",
-                sample.get("itemcode", "?"),
-                json.dumps(sample_taxes, default=str),
-            )
-
-        products.extend(page_items)
-        log.info("[sync]   %d products on page %d/%d", len(page_items), page, total_pages)
-
-        if not has_next:
-            break
-        page += 1
+    if working_endpoint is None and not products:
+        log.warning("[sync] All product sync candidate endpoints returned 404 or failed on host %s. Skipping this cycle.", host)
 
     return products
 
@@ -561,9 +584,63 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
     }
 
     # Kitchen-printer routing flags (kitchen_order_1..6 for SaaS / custom_is_order_item_1..6 for Frappe)
-    for i in range(1, 7):
-        val = p.get(f"kitchen_order_{i}") if p.get(f"kitchen_order_{i}") is not None else p.get(f"custom_is_order_item_{i}")
-        result[f"order_{i}"] = 1 if (str(val).strip().lower() in ("1", "true", "yes", "t", "y") or val is True or val == 1) else 0
+    has_explicit_order = any(
+        p.get(f"kitchen_order_{i}") is not None or
+        p.get(f"kitchen_order{i}") is not None or
+        p.get(f"custom_is_order_item_{i}") is not None or
+        p.get(f"custom_is_order_item{i}") is not None or
+        p.get(f"is_order_item_{i}") is not None or
+        p.get(f"is_order_item{i}") is not None or
+        p.get(f"custom_kitchen_order_{i}") is not None or
+        p.get(f"order_{i}") is not None or
+        p.get(f"order{i}") is not None
+        for i in range(1, 7)
+    ) or any(
+        p.get(k) is not None
+        for k in ("kitchen_order", "is_kitchen_order", "custom_kitchen_order", "custom_is_order_item")
+    )
+
+    if has_explicit_order:
+        for i in range(1, 7):
+            val = (
+                p.get(f"kitchen_order_{i}")
+                if p.get(f"kitchen_order_{i}") is not None
+                else p.get(f"kitchen_order{i}")
+                if p.get(f"kitchen_order{i}") is not None
+                else p.get(f"custom_is_order_item_{i}")
+                if p.get(f"custom_is_order_item_{i}") is not None
+                else p.get(f"custom_is_order_item{i}")
+                if p.get(f"custom_is_order_item{i}") is not None
+                else p.get(f"is_order_item_{i}")
+                if p.get(f"is_order_item_{i}") is not None
+                else p.get(f"is_order_item{i}")
+                if p.get(f"is_order_item{i}") is not None
+                else p.get(f"custom_kitchen_order_{i}")
+                if p.get(f"custom_kitchen_order_{i}") is not None
+                else p.get(f"order_{i}")
+                if p.get(f"order_{i}") is not None
+                else p.get(f"order{i}")
+                if p.get(f"order{i}") is not None
+                else (p.get("kitchen_order") or p.get("is_kitchen_order") or p.get("custom_kitchen_order") or p.get("custom_is_order_item"))
+                if i == 1
+                else None
+            )
+            result[f"order_{i}"] = 1 if (str(val).strip().lower() in ("1", "true", "yes", "t", "y") or val is True or val == 1) else 0
+    else:
+        # Fallback 1: check cached order flags from login response
+        try:
+            from services.auth_service import get_cached_login_order_flags
+            cached_flags = get_cached_login_order_flags(part_no)
+        except Exception:
+            cached_flags = None
+
+        if cached_flags is not None:
+            for i in range(1, 7):
+                result[f"order_{i}"] = cached_flags[i - 1]
+        else:
+            # Fallback 2: None indicates to leave existing DB column value untouched on UPDATE
+            for i in range(1, 7):
+                result[f"order_{i}"] = None
 
     if tax_info:
         result["tax_rate"]          = tax_info["tax_rate"]
@@ -818,6 +895,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
         from database.db import get_connection
         conn = get_connection()
         cur  = conn.cursor()
+        cur.timeout = 120
     except Exception as e:
         log.error("DB connection failed: %s", e)
         return result
@@ -860,7 +938,8 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
 
             is_pharm = 1 if p.get("is_pharmacy_product") else 0
 
-            order_flags = tuple(int(p.get(f"order_{i}", 0) or 0) for i in range(1, 7))
+            order_flags_update = tuple(p.get(f"order_{i}") for i in range(1, 7))
+            order_flags_insert = tuple(int(p.get(f"order_{i}") or 0) for i in range(1, 7))
             print_after_order = int(p.get("print_after_order", 0) or 0)
 
             # Variant fields (default-safe so existing products get flags=0)
@@ -869,53 +948,59 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
             variant_of   = p.get("variant_of")  # may be None
             attributes   = p.get("attributes") or "[]"
 
-            if p["part_no"] in local_part_nos:
-                cur.execute("""
-                    UPDATE products
-                    SET    name                = ?,
-                           description         = ?,
-                           price               = ?,
-                           cost_price          = ?,
-                           reorder_level       = ?,
-                           stock               = ?,
-                           track_stock         = ?,
-                           category            = ?,
-                           tax_rate            = ?,
-                           tax_type            = ?,
-                           item_tax_template   = ?,
-                           hs_code             = ?,
-                           is_pharmacy_product = ?,
-                           is_butchery_product = ?,
-                           is_product_bundle   = ?,
-                           conversion_factor   = ?,
-                           uom                 = ?,
-                           print_after_order   = ?,
-                           order_1             = ?,
-                           order_2             = ?,
-                           order_3             = ?,
-                           order_4             = ?,
-                           order_5             = ?,
-                           order_6             = ?,
-                           is_template         = ?,
-                           has_variants        = ?,
-                           variant_of          = ?,
-                           attributes          = ?,
-                           active              = 1
-                    WHERE  part_no = ?
-                """, (
-                    p["name"], p["description"], p["price"], p["cost_price"], p["reorder_level"],
-                    p["stock"], p["track_stock"], p["category"],
-                    tax_rate, tax_type, item_tax_template, hs_code_val, is_pharm,
-                    int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
-                    p.get("uom") or None,
-                    print_after_order,
-                    *order_flags,
-                    is_template, has_variants, variant_of, attributes,
-                    p["part_no"],
-                ))
+            clean_part_no = str(p["part_no"]).strip()
+            p["part_no"] = clean_part_no
+            norm_part_no = clean_part_no.upper()
+
+            cur.execute("""
+                UPDATE products
+                SET    name                = ?,
+                       description         = ?,
+                       price               = ?,
+                       cost_price          = ?,
+                       reorder_level       = ?,
+                       stock               = ?,
+                       track_stock         = ?,
+                       category            = ?,
+                       tax_rate            = ?,
+                       tax_type            = ?,
+                       item_tax_template   = ?,
+                       hs_code             = ?,
+                       is_pharmacy_product = ?,
+                       is_butchery_product = ?,
+                       is_product_bundle   = ?,
+                       conversion_factor   = ?,
+                       uom                 = ?,
+                       print_after_order   = ?,
+                       order_1             = COALESCE(?, order_1),
+                       order_2             = COALESCE(?, order_2),
+                       order_3             = COALESCE(?, order_3),
+                       order_4             = COALESCE(?, order_4),
+                       order_5             = COALESCE(?, order_5),
+                       order_6             = COALESCE(?, order_6),
+                       is_template         = ?,
+                       has_variants        = ?,
+                       variant_of          = ?,
+                       attributes          = ?,
+                       active              = 1
+                WHERE  UPPER(LTRIM(RTRIM(part_no))) = ?
+            """, (
+                p["name"], p["description"], p["price"], p["cost_price"], p["reorder_level"],
+                p["stock"], p["track_stock"], p["category"],
+                tax_rate, tax_type, item_tax_template, hs_code_val, is_pharm,
+                int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
+                p.get("uom") or None,
+                print_after_order,
+                *order_flags_update,
+                is_template, has_variants, variant_of, attributes,
+                norm_part_no,
+            ))
+            
+            if cur.rowcount > 0:
                 result["updated"] += 1
+                local_part_nos.add(norm_part_no)
                 log.debug("[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  pharmacy=%d  orders=%s  tmpl=%d var_of=%s",
-                          p["part_no"], tax_rate, tax_type, is_pharm, order_flags,
+                          p["part_no"], tax_rate, tax_type, is_pharm, order_flags_update,
                           is_template, variant_of)
             else:
                 cur.execute("""
@@ -933,13 +1018,13 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                     int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
                     p.get("uom") or None,
                     print_after_order,
-                    *order_flags,
+                    *order_flags_insert,
                     is_template, has_variants, variant_of, attributes,
                 ))
-                local_part_nos.add(p["part_no"])
+                local_part_nos.add(norm_part_no)
                 result["inserted"] += 1
                 log.debug("[sync] Inserted: %s  tax_rate=%.4f  tax_type=%s  orders=%s  tmpl=%d var_of=%s",
-                          p["part_no"], tax_rate, tax_type, order_flags,
+                          p["part_no"], tax_rate, tax_type, order_flags_insert,
                           is_template, variant_of)
 
             # ── Upsert full price-list cache for this item ───────────────────

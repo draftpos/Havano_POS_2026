@@ -88,6 +88,12 @@ def add_breadcrumb(
     Record a breadcrumb for Bugsink / Sentry error context.
     Also forwards to sentry_sdk.add_breadcrumb if sentry_sdk is available.
     """
+    # Suppress startup / migration / schema DDL freeze breadcrumbs completely
+    if category == "ui_hang" or "freeze alert" in str(message).lower():
+        msg_lower = (str(message) + " " + str(data or "")).lower()
+        if any(ig in msg_lower for ig in ("setup_database", "migrate.py", "apply_performance_indexes", "information_schema", "startup", "fontintegrity")):
+            return
+
     crumb = {
         "timestamp": datetime.now(timezone.utc).timestamp(),
         "type": "default",
@@ -143,7 +149,7 @@ def _load_config() -> dict:
     """
     cfg: dict = {
         "enabled": True,
-        "dsn": "",
+        "dsn": "https://54ee3e24f4bd4da79ecd8336094a8312@bugsink.havano.cloud/4",
         "environment": "production",
         "sample_rate": 1.0,
         "max_queue_size": 200,
@@ -234,6 +240,16 @@ def _build_tags() -> Dict[str, str]:
         "page":        _current_page,
     }
 
+    # User context
+    u = _build_user()
+    if u:
+        user_ident = u.get("username") or u.get("email") or u.get("name")
+        if user_ident:
+            tags["user"] = str(user_ident)
+            tags["logged_in_user"] = str(user_ident)
+        if u.get("role"):
+            tags["user_role"] = str(u["role"])
+
     # Tenant context (cached after first call)
     global _tenant_context
     if not _tenant_context:
@@ -248,8 +264,55 @@ def _build_tags() -> Dict[str, str]:
 
 
 def _build_user() -> Dict[str, str]:
-    """Return the current user context block."""
-    return dict(_user_context) if _user_context else {}
+    """Return the current user context block, resolving dynamically if not yet cached."""
+    global _user_context
+    u = dict(_user_context) if _user_context else {}
+
+    # If username or email is missing, attempt to resolve from active app / session state
+    if not u.get("username") and not u.get("email"):
+        try:
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app:
+                mw = getattr(app, "_main_window", None)
+                if mw and hasattr(mw, "user") and isinstance(mw.user, dict):
+                    app_user = mw.user
+                    if app_user.get("username"):
+                        u["username"] = str(app_user.get("username"))
+                    if app_user.get("email") or app_user.get("frappe_user"):
+                        u["email"] = str(app_user.get("email") or app_user.get("frappe_user"))
+                    if app_user.get("role"):
+                        u["role"] = str(app_user.get("role"))
+                    if app_user.get("id"):
+                        u["id"] = str(app_user.get("id"))
+                    if app_user.get("full_name"):
+                        u["name"] = str(app_user.get("full_name"))
+        except Exception:
+            pass
+
+    if not u.get("username") and not u.get("email"):
+        try:
+            from services.auth_service import get_active_session_user
+            sess_user = get_active_session_user()
+            if sess_user:
+                if "@" in sess_user:
+                    u["email"] = sess_user
+                else:
+                    u["username"] = sess_user
+        except Exception:
+            pass
+
+    if not u.get("username") and not u.get("email"):
+        try:
+            from database.db import _load_settings
+            s = _load_settings()
+            email = s.get("active_user_email") or s.get("user_email") or s.get("last_logged_in_user")
+            if email:
+                u["email"] = str(email)
+        except Exception:
+            pass
+
+    return {k: str(v) for k, v in u.items() if v}
 
 
 # ─── Event Building ───────────────────────────────────────────────────────────
@@ -285,6 +348,12 @@ def _build_exception_event(
         })
         tb_obj = tb_obj.tb_next
 
+    event_extra = dict(extra) if extra else {}
+    u = _build_user()
+    if u and "logged_in_user" not in event_extra:
+        event_extra["logged_in_user"] = u.get("username") or u.get("email") or u.get("name") or "unknown"
+        event_extra["user_context"] = u
+
     event = {
         "event_id": event_id,
         "timestamp": now,
@@ -294,7 +363,7 @@ def _build_exception_event(
         "environment": _environment,
         "server_name": socket.gethostname(),
         "tags": _build_tags(),
-        "user": _build_user(),
+        "user": u,
         "exception": {
             "values": [{
                 "type": exc_type,
@@ -305,7 +374,7 @@ def _build_exception_event(
                 } if frames else None,
             }],
         },
-        "extra": extra or {},
+        "extra": event_extra,
         "contexts": {
             "os": {
                 "name": platform.system(),
@@ -348,6 +417,12 @@ def _build_message_event(
     if tags:
         merged_tags.update({str(k): str(v) for k, v in tags.items() if v is not None})
 
+    event_extra = dict(extra) if extra else {}
+    u = _build_user()
+    if u and "logged_in_user" not in event_extra:
+        event_extra["logged_in_user"] = u.get("username") or u.get("email") or u.get("name") or "unknown"
+        event_extra["user_context"] = u
+
     event = {
         "event_id": event_id,
         "timestamp": now,
@@ -357,9 +432,9 @@ def _build_message_event(
         "environment": _environment,
         "server_name": socket.gethostname(),
         "tags": merged_tags,
-        "user": _build_user(),
+        "user": u,
         "message": {"formatted": message},
-        "extra": extra or {},
+        "extra": event_extra,
         "contexts": {
             "os": {
                 "name": platform.system(),
@@ -541,6 +616,46 @@ _SUPPRESSED_PATTERNS = [
     "could not fetch users from any endpoint",
     "[user-sync] could not fetch users from any endpoint",
     "failed to sync quotation",
+    "freeze alert",
+    "ui_hang",
+    "ui recovered from",
+    "recovered from freeze",
+    "migrate.py",
+    "_add_column_if_missing",
+    "setup_database.py",
+    "tenant_reset.py",
+    "sp_msforeachtable",
+    "nocheck constraint",
+    "information_schema",
+    "if not exists (select 1 from information_schema",
+    "[dosage-sync] http 404",
+    "[doctor-sync] http 404",
+    "[dosage-push] http 404",
+    "[doctor-push] http 404",
+    "dosagesync: [dosage-sync] http 404",
+    "doctorsync: [doctor-sync] http 404",
+    "dosage-sync] http 404",
+    "doctor-sync] http 404",
+    "[saas_snapshot] failed to take saas snapshot",
+    "[saas_snapshot] failed to update saas snapshot",
+    "ui freeze",
+    "uifreezehang",
+    "[startup]",
+    "at [startup]",
+    "col_exists",
+    "object has no attribute 'quantity'",
+    'object has no attribute "quantity"',
+    "object has no attribute quantity",
+    "havanoposdesk.sale.line",
+    "havanoposdesk.sale",
+    "object has no attribute 'timeout'",
+    'object has no attribute "timeout"',
+    "object has no attribute timeout",
+    "has no attribute 'timeout'",
+    "has no attribute timeout",
+    "laybye_payment_entry_service: get_unsynced_payment_entries failed",
+    "payment sync cycle error",
+    "error fetching page 1:",
 ]
 
 
@@ -565,6 +680,11 @@ def is_network_or_suppressed_error(message: str = "", exc: Optional[BaseExceptio
             pass
 
     combined_text = f"{str(message)} {str(exc) if exc else ''}".lower()
+
+    # Mute 404 / NOT FOUND errors for pharmacy/dosage/doctor sync and push endpoints
+    if any(k in combined_text for k in ("dosage-sync", "dosagesync", "dosage-push", "doctor-sync", "doctorsync", "doctor-push")) and ("404" in combined_text or "not found" in combined_text):
+        return True
+
     for pat in _NETWORK_PATTERNS + _SUPPRESSED_PATTERNS:
         if pat in combined_text:
             return True
@@ -635,6 +755,29 @@ def capture_freeze_event(
     if not _enabled or not _event_queue:
         return None
 
+    # Filter out deliberate startup initialization, migrations, tenant reset, and DDL setup
+    ignored_keywords = (
+        "setup_database",
+        "migrate.py",
+        "_add_column_if_missing",
+        "tenant_reset",
+        "drop_all_tables",
+        "wipe_all_tenant_data",
+        "apply_performance_indexes",
+        "verify_and_heal_fonts",
+        "updater.py",
+        "sp_msforeachtable",
+        "nocheck constraint",
+        "information_schema",
+        "[startup]",
+        "at [startup]",
+        "col_exists",
+    )
+    combined_check = f"{title or ''} {str(extra or '')} {str(tags or '')} {raw_traceback or ''}".lower()
+    if any(ig in combined_check for ig in ignored_keywords):
+        _logger.debug("Suppressed Bugsink freeze reporting for startup/migration/reset operation.")
+        return None
+
     try:
         event_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
@@ -645,6 +788,12 @@ def capture_freeze_event(
 
         blocked_code = extra.get("exact_code_line", "") if extra else ""
 
+        freeze_extra = dict(extra) if extra else {}
+        u = _build_user()
+        if u and "logged_in_user" not in freeze_extra:
+            freeze_extra["logged_in_user"] = u.get("username") or u.get("email") or u.get("name") or "unknown"
+            freeze_extra["user_context"] = u
+
         event = {
             "event_id": event_id,
             "timestamp": now,
@@ -654,7 +803,7 @@ def capture_freeze_event(
             "environment": _environment,
             "server_name": socket.gethostname(),
             "tags": merged_tags,
-            "user": _build_user(),
+            "user": u,
             "message": {"formatted": title},
             "exception": {
                 "values": [{
@@ -666,7 +815,7 @@ def capture_freeze_event(
                     } if frames else None,
                 }],
             },
-            "extra": extra or {},
+            "extra": freeze_extra,
             "contexts": {
                 "os": {
                     "name": platform.system(),
@@ -700,20 +849,155 @@ def capture_freeze_event(
         return None
 
 
-def set_user_context(username: str = "", role: str = ""):
+def set_user_context(
+    username: str = "",
+    role: str = "",
+    email: str = "",
+    user_id: str = "",
+    name: str = "",
+    **extra_attrs,
+):
     """Attach the currently logged-in user to all future events."""
     global _user_context
-    _user_context = {}
+    ctx: Dict[str, str] = {}
     if username:
-        _user_context["username"] = username
+        ctx["username"] = str(username)
     if role:
-        _user_context["role"] = role
+        ctx["role"] = str(role)
+    if email:
+        ctx["email"] = str(email)
+    if user_id:
+        ctx["id"] = str(user_id)
+    if name:
+        ctx["name"] = str(name)
+    for k, v in extra_attrs.items():
+        if v is not None:
+            ctx[str(k)] = str(v)
+    _user_context = ctx
+
+    try:
+        import sentry_sdk
+        sentry_sdk.set_user(ctx if ctx else None)
+    except Exception:
+        pass
+
+
+def set_logged_in_user(user: dict | None):
+    """Helper to set user context directly from a user dict or object."""
+    if not user or not isinstance(user, dict):
+        set_user_context()
+        return
+    set_user_context(
+        username=user.get("username") or user.get("full_name") or "",
+        role=user.get("role") or "",
+        email=user.get("email") or user.get("frappe_user") or "",
+        user_id=str(user.get("id") or ""),
+        name=user.get("full_name") or "",
+    )
 
 
 def refresh_tenant_context():
     """Force re-reading tenant/company data from DB (e.g., after login)."""
     global _tenant_context
     _tenant_context = _collect_tenant_context()
+
+
+def check_and_report_saas_empty_catalog(context: str = "general", extra_info: dict | None = None) -> bool:
+    """
+    Checks if the system is in SaaS mode and if the local database is empty or has 0 products.
+    If empty, sends an error alert to Bugsink and returns True (indicating empty).
+    """
+    try:
+        from services.credentials import get_system_mode
+        if get_system_mode() != "saas":
+            return False
+
+        from database.db import get_connection, _load_settings
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM products WITH (NOLOCK)")
+        p_cnt = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(*) FROM users WITH (NOLOCK)")
+        u_cnt = int(cur.fetchone()[0] or 0)
+        conn.close()
+
+        if p_cnt == 0:
+            cfg = _load_settings()
+            db_name = cfg.get("database") or "unknown_db"
+            extra = {
+                "database": db_name,
+                "server": cfg.get("server"),
+                "system_mode": "saas",
+                "product_count": p_cnt,
+                "user_count": u_cnt,
+                "check_context": context,
+                "error_type": "empty_database_saas",
+            }
+            if extra_info:
+                extra.update(extra_info)
+            capture_message(
+                f"Empty database / Missing products in SaaS mode ({context}): Database '{db_name}' has 0 products",
+                level="error",
+                extra=extra
+            )
+            return True
+        return False
+    except Exception as e:
+        _logger.warning("[bugsink] check_and_report_saas_empty_catalog error: %s", e)
+        return False
+
+
+_last_known_db: str | None = None
+
+
+def check_and_report_database_change(current_db: str = None, context: str = "general") -> tuple[bool, str]:
+    """
+    Checks if the active database has changed compared to the last known database.
+    If changed, sends an error alert to Bugsink and persists the new database name.
+    Returns (changed: bool, message: str).
+    """
+    global _last_known_db
+    try:
+        from database.db import get_app_data_dir, _load_settings
+        cfg = _load_settings()
+        curr = str(current_db or cfg.get("database") or "").strip()
+        if not curr:
+            return (False, "")
+
+        tracker_file = get_app_data_dir() / "last_active_database.txt"
+        prev_db = ""
+        if tracker_file.exists():
+            try:
+                prev_db = tracker_file.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+
+        if not prev_db and _last_known_db:
+            prev_db = _last_known_db
+
+        _last_known_db = curr
+
+        if prev_db and prev_db.lower() != curr.lower():
+            tracker_file.write_text(curr, encoding="utf-8")
+            msg = f"Database configuration changed ({context}): Switched from '{prev_db}' to '{curr}'"
+            extra = {
+                "previous_database": prev_db,
+                "current_database": curr,
+                "server": cfg.get("server"),
+                "system_mode": cfg.get("system_mode"),
+                "context": context,
+                "error_type": "database_switched",
+            }
+            capture_message(msg, level="error", extra=extra)
+            _logger.error("[bugsink] %s", msg)
+            return (True, f"Database changed from '{prev_db}' to '{curr}'")
+        else:
+            if not tracker_file.exists():
+                tracker_file.write_text(curr, encoding="utf-8")
+            return (False, "")
+    except Exception as e:
+        _logger.warning("[bugsink] check_and_report_database_change error: %s", e)
+        return (False, "")
 
 
 # ─── Logging Handler ──────────────────────────────────────────────────────────
@@ -751,6 +1035,10 @@ class BugsinkLogHandler(logging.Handler):
             "lineno": record.lineno,
             "funcName": record.funcName,
         }
+        u = _build_user()
+        if u:
+            extra["logged_in_user"] = u.get("username") or u.get("email") or u.get("name") or "unknown"
+            extra["user_context"] = u
 
         capture_message(msg, level=level, extra=extra)
 

@@ -6349,6 +6349,14 @@ class POSView(QWidget):
         dlg.exec()
 
     def _open_payment(self):
+        try:
+            from utils.roles import check_and_warn_saas_sale_eligibility
+            _user = getattr(self, "user", getattr(getattr(self, "parent_window", None), "user", None))
+            if not check_and_warn_saas_sale_eligibility(self, _user):
+                return
+        except Exception as _e:
+            print(f"[POSView] SaaS default admin sale check error: {_e}")
+
         if not self._check_permission("allow_receipt", "Process Payment / Print Receipt"):
             return
         try:

@@ -1571,14 +1571,14 @@ class StockFileDialog(QDialog):
         self._bg_label.setPixmap(main_win.grab())
         self._bg_label.resize(main_win.size())
         
-        # Apply blur to background
+        # Apply blur to background (Lightened)
         self._blur_effect = QGraphicsBlurEffect()
-        self._blur_effect.setBlurRadius(20)
+        self._blur_effect.setBlurRadius(8)
         self._bg_label.setGraphicsEffect(self._blur_effect)
         
-        # Add dark tint
+        # Add light translucent dark tint
         self._tint_overlay = QWidget(self._blur_container)
-        self._tint_overlay.setStyleSheet("background-color: rgba(0, 0, 0, 100);")
+        self._tint_overlay.setStyleSheet("background-color: rgba(15, 23, 42, 30);")
         self._tint_overlay.resize(main_win.size())
         
         self._blur_container.show()

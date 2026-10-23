@@ -350,6 +350,18 @@ def upsert_frappe_user(u: dict) -> dict | None:
     u_api_key    = str(u.get("api_key")    or "").strip()
     u_api_secret = str(u.get("api_secret") or "").strip()
 
+    # Aggressively resolve UNIQUE KEY constraint violations
+    # If any other user is squatting on the email, username, or frappe_user we are about to save,
+    # we rename them so the true cloud data can be inserted/updated successfully.
+    _target_id = existing[0] if existing else -1
+    
+    if email:
+        cur.execute("UPDATE users SET email = email + '_dup_' + CAST(id AS VARCHAR) WHERE email = ? AND id != ?", (email, _target_id))
+    if username:
+        cur.execute("UPDATE users SET username = username + '_dup_' + CAST(id AS VARCHAR) WHERE username = ? AND id != ?", (username, _target_id))
+    if frappe_name:
+        cur.execute("UPDATE users SET frappe_user = frappe_user + '_dup_' + CAST(id AS VARCHAR) WHERE frappe_user = ? AND id != ?", (frappe_name, _target_id))
+
     if existing:
         user_id = existing[0]
         if user_pin:
@@ -463,14 +475,6 @@ def update_user_credentials_from_online(username_or_email: str, password: str, u
     user_pin    = str(u.get("pin") or u.get("user_pin") or "").strip()
 
     db_secret = api_secret
-    if api_secret:
-        try:
-            from services.credentials import get_system_mode
-            from utils.crypto import encrypt_secret
-            if get_system_mode().lower() == "saas":
-                db_secret = encrypt_secret(api_secret)
-        except Exception:
-            pass
 
     cur.execute(
         "SELECT id FROM users WHERE (username = ? OR email = ? OR frappe_user = ?)",

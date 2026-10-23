@@ -2480,6 +2480,11 @@ from PySide6.QtGui  import QColor
 import qtawesome as qta
 from theme import *
 
+try:
+    from views.components.blur_overlay import BlurredDialog
+except ImportError:
+    BlurredDialog = QDialog
+
 REASONS = [
     "Customer Return",
     "Damaged Goods",
@@ -2490,7 +2495,7 @@ REASONS = [
 ]
 
 
-class CreditNoteDialog(QDialog):
+class CreditNoteDialog(BlurredDialog):
     """
     Smart credit note dialog.
     After confirmation emits credit_note_ready(cn_dict) so the caller
@@ -3008,7 +3013,7 @@ class CreditNoteDialog(QDialog):
 # QuickAddCustomerDialog  - small "New Customer" popup launched from + New
 # =============================================================================
 
-class QuickAddCustomerDialog(QDialog):
+class QuickAddCustomerDialog(BlurredDialog):
     """
     Lightweight 3-field popup: Name · Phone · City.
     Everything else (warehouse, cost center, price list, group) is resolved

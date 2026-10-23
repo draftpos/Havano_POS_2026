@@ -39,7 +39,12 @@ class OdooInvoiceFetchWorker(QObject):
         finally:
             self.finished.emit()
 
-class QuotationDialog(QDialog):
+try:
+    from views.components.blur_overlay import BlurredDialog
+except ImportError:
+    BlurredDialog = QDialog
+
+class QuotationDialog(BlurredDialog):
 
     quotation_converted = Signal(dict)
 

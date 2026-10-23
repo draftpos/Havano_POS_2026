@@ -39,8 +39,27 @@ from database.db import is_connection_valid, get_connection
 #  on Nextcloud. Example: "2.0.0" → "2.1.0" for next release.
 # ────────────────────────────────────────────────────────s────
 
-APP_VERSION = "2.0.8.60"
+APP_VERSION = "2.0.8.77"
 Debug = False
+
+_lock_file = None
+
+def release_single_instance_lock():
+    """Explicitly release the single instance QLockFile and remove it from temp directory."""
+    global _lock_file
+    try:
+        if _lock_file:
+            _lock_file.unlock()
+            _lock_file = None
+    except Exception:
+        pass
+    try:
+        from PySide6.QtCore import QDir
+        p = os.path.join(QDir.tempPath(), "havano_pos_2026.lock")
+        if os.path.exists(p):
+            os.remove(p)
+    except Exception:
+        pass
 
 
 def resource_path(relative_path: str) -> str:
@@ -49,9 +68,14 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(os.path.abspath("."), relative_path)
 
 def get_app_data_dir() -> Path:
-    if hasattr(sys, "_MEIPASS"):
+    """
+    Always resolves relative to the executable (bundled) or this source file
+    (dev). Never uses os.getcwd() / os.path.abspath('.') so that Windows
+    shortcuts with any 'Start In' directory cannot corrupt the path.
+    """
+    if getattr(sys, 'frozen', False) or hasattr(sys, "_MEIPASS"):
         return Path(sys.executable).parent / "app_data"
-    return Path(os.path.abspath(".")) / "app_data"
+    return Path(__file__).resolve().parent / "app_data"
 
 class StartupWorker(QThread):
     status_changed = Signal(str)
@@ -60,7 +84,7 @@ class StartupWorker(QThread):
 
     def run(self):
         try:
-            self.status_changed.emit("Verifying database...")
+            self.status_changed.emit("Connecting to database...")
             # --- AUTO CREATE OFFLINE DB ---
             try:
                 import json
@@ -71,18 +95,21 @@ class StartupWorker(QThread):
                     if cfg.get("system_mode") == "offline" and cfg.get("auth_mode") == "windows":
                         import pyodbc
                         s_server = cfg.get("server") or ".\\SQLEXPRESS"
-                        s_db = cfg.get("database") or "havano_posop07978808"
+                        s_db = str(cfg.get("database") or "").strip()
+                        if not s_db:
+                            raise ValueError("No database configured in sql_settings.json")
                         conn_str = f"DRIVER={{{DRIVER}}};SERVER={s_server};Trusted_Connection=yes;TrustServerCertificate=yes;Encrypt=no;"
-                        conn = pyodbc.connect(conn_str, autocommit=True, timeout=5)
+                        conn = pyodbc.connect(conn_str, autocommit=True, timeout=12)
                         cur = conn.cursor()
                         cur.execute(f"IF NOT EXISTS (SELECT name FROM master.sys.databases WHERE name = N'{s_db}') CREATE DATABASE [{s_db}]")
+                        cur.execute(f"ALTER DATABASE [{s_db}] SET AUTO_CLOSE OFF WITH ROLLBACK IMMEDIATE")
                         conn.close()
             except Exception as e:
                 print(f"[startup] Auto-create DB error: {e}")
             # ------------------------------
 
-            # 1. Connection check
-            if not is_connection_valid():
+            # 1. Connection check with live loader feedback
+            if not is_connection_valid(status_callback=lambda msg: self.status_changed.emit(msg)):
                 self.finished.emit(False) # Needs setup
                 return
 
@@ -108,9 +135,14 @@ class StartupWorker(QThread):
                 print(f"[startup] Fast stock cache error: {e}")
 
             self.status_changed.emit("Checking configuration...")
-            # 3. Site config
+            # 3. Site config & terminal verification
             from services.site_config import check_url_changed, save_current_url
             save_current_url()
+            try:
+                from services.auth_service import verify_terminal_reference
+                verify_terminal_reference()
+            except Exception as _vtre:
+                print(f"[startup] Terminal reference verification skipped: {_vtre}")
 
             self.finished.emit(True)
         except Exception as e:
@@ -273,7 +305,16 @@ def global_exception_handler(exctype, value, tb):
         """)
         msg.exec()
     sys.__excepthook__(exctype, value, tb)
-    sys.exit(1)
+    try:
+        from PySide6.QtCore import QDir
+        import os
+        lock_path = QDir.tempPath() + "/havano_pos_2026.lock"
+        if os.path.exists(lock_path):
+            os.remove(lock_path)
+    except Exception:
+        pass
+    import os
+    os._exit(1)
 
 def apply_global_styles(app: QApplication):
     app.setStyleSheet("""
@@ -365,8 +406,9 @@ if __name__ == "__main__":
 
     # Start In-Process UI Freeze & Hang Watchdog (monitors main GUI thread unresponsiveness)
     try:
-        from services.hang_watchdog import start_hang_watchdog
+        from services.hang_watchdog import start_hang_watchdog, pause_hang_watchdog
         start_hang_watchdog(check_interval_seconds=1.0)
+        pause_hang_watchdog()  # Paused during initial splash / migration sequence
     except Exception as _wd_err:
         print(f"[main] Hang watchdog start skipped: {_wd_err}")
 
@@ -405,17 +447,62 @@ if __name__ == "__main__":
     
     # Enforce Single Instance (Crash-safe QLockFile)
     from PySide6.QtCore import QLockFile, QDir
-    global _lock_file
     _lock_path = QDir.tempPath() + "/havano_pos_2026.lock"
     _lock_file = QLockFile(_lock_path)
     _lock_file.setStaleLockTime(3000)
     
     is_locked = False
-    for _ in range(3):
-        if _lock_file.tryLock(500):
-            is_locked = True
-            break
-        _lock_file.removeStaleLockFile()
+
+    # If launched with --restart, wait up to 2 seconds for previous instance to exit
+    if "--restart" in sys.argv:
+        try:
+            sys.argv.remove("--restart")
+        except Exception:
+            pass
+        for _ in range(20):
+            if _lock_file.tryLock(100):
+                is_locked = True
+                break
+            _lock_file.removeStaleLockFile()
+            _timing.sleep(0.1)
+
+    if not is_locked:
+        for _ in range(3):
+            if _lock_file.tryLock(500):
+                is_locked = True
+                break
+            _lock_file.removeStaleLockFile()
+
+    if not is_locked:
+        # Aggressive cleanup: if it's still locked, forcefully kill the process holding the lock
+        try:
+            import psutil
+            success, pid, hostname, appname = _lock_file.getLockInfo()
+            if success and pid:
+                try:
+                    p = psutil.Process(pid)
+                    if "python" in p.name().lower() or "havano" in p.name().lower() or "main" in p.name().lower():
+                        p.kill()
+                        import time
+                        time.sleep(0.5)
+                except psutil.NoSuchProcess:
+                    pass
+                except Exception:
+                    pass
+                
+                # In all cases (killed or already dead), attempt to clear the stale lock and retry
+                try:
+                    import os
+                    if os.path.exists(_lock_path):
+                        os.remove(_lock_path)
+                except Exception:
+                    pass
+                
+                _lock_file.removeStaleLockFile()
+                if _lock_file.tryLock(500):
+                    is_locked = True
+        except Exception:
+            pass
 
     if not is_locked:
         from PySide6.QtWidgets import QMessageBox
@@ -433,16 +520,15 @@ if __name__ == "__main__":
         pass
     app.setWindowIcon(QIcon(resource_path(icon_file)))
     try:
-        pass
-        # from utils.title_bar import install_global_title_bar_hook
-        # install_global_title_bar_hook(app)  # Blue title bar on all dialogs / windows
+        from views.components.blur_overlay import install_global_dialog_blur
+        install_global_dialog_blur()
     except Exception as _e:
-        print(f"[main] Title bar hook skipped: {_e}")
+        print(f"[main] Global dialog blur hook skipped: {_e}")
 
     # 2. Show Splash Screen ASAP
     from views.components.sleek_loader import SleekLoaderOverlay
     splash = SleekLoaderOverlay()
-    splash.show_loading()
+    splash.show_loading(timeout_ms=0)
     app.processEvents()
 
     # 3. Check System Time and Updates
@@ -499,34 +585,12 @@ if __name__ == "__main__":
     app_data_dir = get_app_data_dir()
     app_data_dir.mkdir(exist_ok=True)
     settings_file = app_data_dir / "sql_settings.json"
-    # 3.5 Onboarding Check (Reads from json)
     import json
-    _saved_mode = None
-    if settings_file.exists():
-        try:
-            _saved_mode = json.loads(settings_file.read_text(encoding="utf-8")).get("system_mode")
-        except Exception:
-            pass
 
-    if not _saved_mode:
-        import json
-        print("[startup] No settings found. Auto-configuring as OFFLINE mode with default SQLEXPRESS.")
-        default_settings = {
-            "auth_mode": "windows",
-            "server": ".\\SQLEXPRESS",
-            "database": "havano_pos_db",
-            "username": "",
-            "password": "",
-            "system_mode": "offline",
-            "api_url": "http://localhost:8000"
-        }
-        try:
-            settings_file.write_text(json.dumps(default_settings), encoding="utf-8")
-            _saved_mode = "offline"
-        except Exception as e:
-            print(f"[startup] Failed to write default settings: {e}")
-    else:
-        print(f"[startup] System mode already set: {_saved_mode} — skipping onboarding.")
+    # ── System Mode Initialization & Database-First Synchronization ────────
+    from services.credentials import get_system_mode
+    _saved_mode = get_system_mode()
+    print(f"[startup] System mode confirmed: {_saved_mode}")
 
     initialization_done = False
     needs_setup = False
@@ -562,7 +626,29 @@ if __name__ == "__main__":
     # 4. Connection Setup Loop (if needed)
     if needs_setup or not settings_file.exists():
         while True:
-            if not settings_file.exists() or not is_connection_valid():
+            if not settings_file.exists():
+                dlg = SqlSettingsDialog()
+                if dlg.exec() != QDialog.Accepted:
+                    sys.exit(0)
+                continue
+            if not is_connection_valid():
+                from PySide6.QtWidgets import QMessageBox
+                cfg = _load_settings()
+                configured_db = cfg.get("database", "Unknown")
+                resp = QMessageBox.question(
+                    None,
+                    "Database Server Unreachable",
+                    f"Could not connect to configured database '{configured_db}'.\n\n"
+                    "The SQL Server service may still be starting up after sleep.\n\n"
+                    "Would you like to retry connecting now?\n\n"
+                    "(Select 'No' only if you want to open System Configuration to change database settings.)",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if resp == QMessageBox.Yes:
+                    if is_connection_valid(retries=5, timeout=15):
+                        break
+                    continue
                 dlg = SqlSettingsDialog()
                 if dlg.exec() != QDialog.Accepted:
                     sys.exit(0)
@@ -599,18 +685,33 @@ if __name__ == "__main__":
     except Exception as _sc_err:
         print(f"[main] Site config check failed: {_sc_err}")
 
-    # Verify write-once terminal reference vs active company defaults
-    try:
-        from services.auth_service import verify_terminal_reference
-        verify_terminal_reference()
-    except Exception as _vtre:
-        print(f"[main] Terminal reference verification skipped: {_vtre}")
-
     # 6. Login -> Main
+    # Pre-warm MainWindow in background while user enters credentials to eliminate freeze upon login
+    def _prewarm_main_window():
+        try:
+            import views.main_window
+        except Exception:
+            pass
+
+    import threading
+    _prewarm_thread = threading.Thread(target=_prewarm_main_window, daemon=True, name="PrewarmMainWindow")
+    _prewarm_thread.start()
+
     from views.login_dialog import LoginDialog
     login_dlg = LoginDialog()
+    try:
+        from services.hang_watchdog import resume_hang_watchdog
+        resume_hang_watchdog()
+    except Exception:
+        pass
     if login_dlg.exec() == QDialog.Accepted:
         _logged_user = login_dlg.logged_in_user or {}
+        try:
+            from services.bugsink_service import set_logged_in_user
+            set_logged_in_user(_logged_user)
+        except Exception:
+            pass
+
         _role = (_logged_user.get("role") or "").lower()
         _allow_pos = _logged_user.get("allow_pos", True)  # default True for safety
 
@@ -637,6 +738,12 @@ if __name__ == "__main__":
 
         try:
             # 💡 Smart Loader: show while MainWindow initializes 💡──────────
+            try:
+                from services.hang_watchdog import pause_hang_watchdog, resume_hang_watchdog
+                pause_hang_watchdog()
+            except Exception:
+                pass
+
             from views.components.sleek_loader import SleekLoaderOverlay
             login_loader = SleekLoaderOverlay()
             login_loader.set_status("Havano POS Loading...")
@@ -656,9 +763,15 @@ if __name__ == "__main__":
             window.raise_()
             window.activateWindow()
 
+            try:
+                resume_hang_watchdog()
+            except Exception:
+                pass
+
             # Keep the loader visible while MainWindow processes its initial heavy 0ms timers.
             # QTimer ensures it only hides AFTER the event loop unblocks and is running smoothly.
             from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, window.refresh_pos_grid)
             QTimer.singleShot(500, login_loader.hide_loading)
             QTimer.singleShot(1000, login_loader.deleteLater)
             app.processEvents()

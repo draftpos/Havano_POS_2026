@@ -110,8 +110,14 @@ def login(username: str, password: str, database: str) -> dict:
                 return str(val)
 
             existing = get_defaults()
-            existing["server_company"]          = _str(data_block.get("company", {}).get("name"))
-            existing["server_warehouse"]        = _str(user.get("warehouse"))
+            new_comp = _str(data_block.get("company", {}).get("name")).strip()
+            if new_comp:
+                existing["server_company"] = new_comp
+            new_wh = _str(user.get("warehouse")).strip()
+            if new_wh:
+                existing["server_warehouse"] = new_wh
+            elif existing.get("server_warehouse"):
+                user["warehouse"] = existing.get("server_warehouse")
             existing["server_username"]         = _str(data_block.get("username"))
             existing["server_email"]            = _str(data_block.get("email"))
             existing["server_role"]             = _str(user.get("role"))

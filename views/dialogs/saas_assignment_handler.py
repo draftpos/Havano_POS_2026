@@ -84,30 +84,30 @@ def handle_saas_shop_and_terminal_selection(parent_widget, user: dict, raw_data:
         # Check sql_settings.json if empty in company_defaults
         if not term_id or term_id == "1":
             try:
-                import os, json
-                cfg_path = os.path.join("app_data", "sql_settings.json")
-                if os.path.exists(cfg_path):
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        cfg_d = json.load(f)
-                        saved_tid = str(cfg_d.get("server_terminal_id") or "").strip()
-                        if saved_tid and saved_tid != "1":
-                            term_id = saved_tid
-                        if not shop_id:
-                            shop_id = str(cfg_d.get("server_shop_id") or "").strip()
+                import json
+                from database.db import get_app_data_dir
+                cfg_path = get_app_data_dir() / "sql_settings.json"
+                if cfg_path.exists():
+                    cfg_d = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    saved_tid = str(cfg_d.get("server_terminal_id") or "").strip()
+                    if saved_tid and saved_tid != "1":
+                        term_id = saved_tid
+                    if not shop_id:
+                        shop_id = str(cfg_d.get("server_shop_id") or "").strip()
             except Exception:
                 pass
 
         bound_dev = str(existing_defaults.get("bound_device_id") or existing_defaults.get("device_hardware_id") or "").strip()
         if not bound_dev:
             try:
-                import os, json
-                cfg_path = os.path.join("app_data", "sql_settings.json")
-                if os.path.exists(cfg_path):
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        cfg_d = json.load(f)
-                        saved_b = str(cfg_d.get("bound_device_id") or "").strip()
-                        if saved_b:
-                            bound_dev = saved_b
+                import json
+                from database.db import get_app_data_dir
+                cfg_path = get_app_data_dir() / "sql_settings.json"
+                if cfg_path.exists():
+                    cfg_d = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    saved_b = str(cfg_d.get("bound_device_id") or "").strip()
+                    if saved_b:
+                        bound_dev = saved_b
             except Exception:
                 pass
 
@@ -234,12 +234,11 @@ def handle_saas_shop_and_terminal_selection(parent_widget, user: dict, raw_data:
     if not shop_res.get("success") and not shop_res.get("skipped"):
         err_msg = shop_res.get("error") or shop_res.get("message") or f"Access denied for Store '{shop_name}'."
         print(f"[saas_assignment] select_shop failed for Store '{shop_name}' (ID: {shop_id}): {err_msg}")
-        existing_defaults["server_shop_id"] = ""
-        existing_defaults["server_terminal_id"] = ""
-        existing_defaults["server_terminal_name"] = ""
-        save_defaults(existing_defaults)
-        show_store_access_denied_dialog(parent_widget, f"Access denied for Store '{shop_name}':\n\n{err_msg}")
-        return False
+        if saved_shop_id and str(saved_shop_id) == str(shop_id):
+            print(f"[saas_assignment] Store '{shop_name}' is already bound to this counter. Retaining store configuration.")
+        else:
+            show_store_access_denied_dialog(parent_widget, f"Access denied for Store '{shop_name}':\n\n{err_msg}")
+            return False
 
     if shop_res.get("data", {}).get("user", {}).get("shops"):
         updated_shops = shop_res["data"]["user"]["shops"]
@@ -300,10 +299,9 @@ def handle_saas_shop_and_terminal_selection(parent_widget, user: dict, raw_data:
     # ── 5. TAKEOVER CHECK (MATCHES MOBILE POS LOGIC) ─────────────────────────
     # Determine if terminal is occupied by a *different* device/user.
     saved_bound_id = str(existing_defaults.get("bound_device_id") or existing_defaults.get("device_hardware_id") or "").strip()
-    is_already_saved_in_defaults = (
+    is_counter_already_bound = (
         bool(saved_term_id) and 
-        str(saved_term_id) == str(terminal_id) and 
-        (not saved_bound_id or is_same_device(saved_bound_id, current_device_id))
+        str(saved_term_id) == str(terminal_id)
     )
 
     taken_by_field = (
@@ -334,72 +332,61 @@ def handle_saas_shop_and_terminal_selection(parent_widget, user: dict, raw_data:
     from utils.hardware import is_same_device
     is_same_dev = bool(term_dev) and is_same_device(term_dev, current_device_id)
 
-    # Require takeover whenever terminal is active on another device or marked occupied
-    takeover_required = (is_taken and not is_same_dev) or (bool(term_dev) and not is_same_dev)
-
-    if takeover_required:
-        msg = f"Terminal '{terminal_name}' is currently active on another device (User: {taken_by}).\n\nConnecting here will switch the active session to this device. Continue?"
-        dlg = TerminalTakeoverDialog(msg, is_admin=is_admin, parent=parent_widget)
-        dlg.exec()
-        action = dlg.result_action
-
-        if action is True:  # Switch session (takeover)
-            print(f"[saas_assignment] Executing session takeover for terminal '{terminal_name}' (ID: {terminal_id}) on device '{current_device_id}'...")
-            term_res = select_terminal(terminal_id, takeover=True, user_email=user_email)
-            if not isinstance(term_res, dict) or (not term_res.get("success") and not term_res.get("skipped")):
-                err_str = term_res.get("error", "Failed to switch terminal session.") if isinstance(term_res, dict) else "No response from server."
-                QMessageBox.warning(parent_widget, "Terminal Switch Error", err_str)
-                return False
-            print(f"[saas_assignment] [OK] Session takeover accepted for device '{current_device_id}'.")
-        else:  # Cancelled
-            print("[saas_assignment] Session takeover cancelled by user.")
-            return False
-    else:
-        term_res = select_terminal(terminal_id, takeover=False, user_email=user_email)
+    # If this physical machine is already bound to this terminal (or same hardware),
+    # never show the takeover popup during user login or user switching.
+    # Silently maintain and claim the cloud session with takeover=True.
+    if is_counter_already_bound or is_same_dev:
+        print(f"[saas_assignment] Machine is already bound to '{terminal_name}' (ID: {terminal_id}). Silently maintaining session...")
+        term_res = select_terminal(terminal_id, takeover=True, user_email=user_email)
         if not isinstance(term_res, dict) or (not term_res.get("success") and not term_res.get("skipped")):
             err_msg = (term_res.get("error") or term_res.get("message")) if isinstance(term_res, dict) else "No response from server."
-            print(f"[saas_assignment] select_terminal response: {err_msg}")
-            
-            # If server indicates takeover or session re-claim is needed:
-            is_takeover_conflict = any(kw in str(err_msg).lower() for kw in [
-                "assigned to another", "taken over", "already in use", "take over", "occupied", "another device"
-            ])
-            if is_takeover_conflict:
-                msg = f"Terminal '{terminal_name}' is active on another device.\n\nConnecting here will switch the active session to this device. Continue?"
-                dlg = TerminalTakeoverDialog(msg, is_admin=is_admin, parent=parent_widget)
-                dlg.exec()
-                if dlg.result_action is True:
-                    print(f"[saas_assignment] User confirmed takeover after server conflict. Retrying with takeover=True...")
-                    term_res = select_terminal(terminal_id, takeover=True, user_email=user_email)
-                else:
-                    print("[saas_assignment] Session takeover declined after server conflict.")
-                    return False
+            print(f"[saas_assignment] Cloud select_terminal note: {err_msg}. Retaining local counter binding.")
+    else:
+        # Genuinely a DIFFERENT machine attempting takeover:
+        # Prompt the user with TerminalTakeoverDialog as required!
+        takeover_required = is_taken or bool(term_dev)
 
+        if takeover_required:
+            msg = f"Terminal '{terminal_name}' is currently active on another device (User: {taken_by}).\n\nConnecting here will switch the active session to this device. Continue?"
+            dlg = TerminalTakeoverDialog(msg, is_admin=is_admin, parent=parent_widget)
+            dlg.exec()
+            action = dlg.result_action
+
+            if action is True:  # Switch session (takeover)
+                print(f"[saas_assignment] Executing session takeover for terminal '{terminal_name}' (ID: {terminal_id}) on device '{current_device_id}'...")
+                term_res = select_terminal(terminal_id, takeover=True, user_email=user_email)
+                if not isinstance(term_res, dict) or (not term_res.get("success") and not term_res.get("skipped")):
+                    err_str = term_res.get("error", "Failed to switch terminal session.") if isinstance(term_res, dict) else "No response from server."
+                    QMessageBox.warning(parent_widget, "Terminal Switch Error", err_str)
+                    return False
+                print(f"[saas_assignment] [OK] Session takeover accepted for device '{current_device_id}'.")
+            else:  # Cancelled
+                print("[saas_assignment] Session takeover cancelled by user.")
+                return False
+        else:
+            term_res = select_terminal(terminal_id, takeover=False, user_email=user_email)
             if not isinstance(term_res, dict) or (not term_res.get("success") and not term_res.get("skipped")):
                 err_msg = (term_res.get("error") or term_res.get("message")) if isinstance(term_res, dict) else "No response from server."
-                # If terminal is already bound to this device or user is a cashier on configured terminal,
-                # do not wipe existing configuration on server hiccups or store permission mismatch
-                if is_same_dev or (not is_admin and str(existing_defaults.get("server_terminal_id") or "") == str(terminal_id)):
-                    print(f"[saas_assignment] Server select_terminal returned ({err_msg}), but terminal is already bound to this device. Proceeding with local binding.")
-                else:
-                    existing_defaults["server_shop_id"] = ""
-                    existing_defaults["server_terminal_id"] = ""
-                    existing_defaults["server_terminal_name"] = ""
-                    save_defaults(existing_defaults)
-                    try:
-                        import os, json
-                        from database.db import get_app_data_dir
-                        cfg_p = os.path.join(get_app_data_dir(), "sql_settings.json")
-                        if not os.path.exists(cfg_p):
-                            cfg_p = os.path.join("app_data", "sql_settings.json")
-                        if os.path.exists(cfg_p):
-                            with open(cfg_p, "r", encoding="utf-8") as _f:
-                                _cfg = json.load(_f)
-                            _cfg["server_terminal_id"] = ""
-                            with open(cfg_p, "w", encoding="utf-8") as _f:
-                                json.dump(_cfg, _f, indent=4)
-                    except Exception:
-                        pass
+                print(f"[saas_assignment] select_terminal response: {err_msg}")
+                
+                # If server indicates takeover or session re-claim is needed:
+                is_takeover_conflict = any(kw in str(err_msg).lower() for kw in [
+                    "assigned to another", "taken over", "already in use", "take over", "occupied", "another device"
+                ])
+                if is_takeover_conflict:
+                    msg = f"Terminal '{terminal_name}' is active on another device.\n\nConnecting here will switch the active session to this device. Continue?"
+                    dlg = TerminalTakeoverDialog(msg, is_admin=is_admin, parent=parent_widget)
+                    dlg.exec()
+                    if dlg.result_action is True:
+                        print(f"[saas_assignment] User confirmed takeover after server conflict. Retrying with takeover=True...")
+                        term_res = select_terminal(terminal_id, takeover=True, user_email=user_email)
+                    else:
+                        print("[saas_assignment] Session takeover declined after server conflict.")
+                        return False
+
+                if not isinstance(term_res, dict) or (not term_res.get("success") and not term_res.get("skipped")):
+                    err_msg = (term_res.get("error") or term_res.get("message")) if isinstance(term_res, dict) else "No response from server."
+                    # NEVER wipe local configuration!
                     QMessageBox.critical(
                         parent_widget,
                         "Terminal Assignment Error",
@@ -408,18 +395,22 @@ def handle_saas_shop_and_terminal_selection(parent_widget, user: dict, raw_data:
                     return False
 
     # ── 6. PERSIST DEFAULTS ────────────────────────────────────────────────────
-    existing_defaults["server_shop_id"]       = str(shop_id or "")
-    existing_defaults["server_terminal_id"]   = str(terminal_id or "")
-    existing_defaults["server_terminal_name"] = str(terminal_name or "")
-    existing_defaults["bound_device_id"]      = str(current_device_id or "").strip()
-    existing_defaults["device_hardware_id"]  = str(current_device_id or "").strip()
+    if shop_id:
+        existing_defaults["server_shop_id"]       = str(shop_id)
+    if terminal_id:
+        existing_defaults["server_terminal_id"]   = str(terminal_id)
+    if terminal_name:
+        existing_defaults["server_terminal_name"] = str(terminal_name)
+    if current_device_id:
+        existing_defaults["bound_device_id"]      = str(current_device_id).strip()
+        existing_defaults["device_hardware_id"]   = str(current_device_id).strip()
     if shop_name:
-        existing_defaults["server_warehouse"] = shop_name
-        existing_defaults["warehouse"] = shop_name
-        existing_defaults["server_cost_center"] = shop_name
-        existing_defaults["cost_center"] = shop_name
-        existing_defaults["server_company"] = shop_name
-        existing_defaults["company_name"] = shop_name
+        existing_defaults["server_warehouse"]     = str(shop_name).strip()
+        existing_defaults["warehouse"]            = str(shop_name).strip()
+        existing_defaults["server_cost_center"]   = str(shop_name).strip()
+        existing_defaults["cost_center"]          = str(shop_name).strip()
+        existing_defaults["server_company"]       = str(shop_name).strip()
+        existing_defaults["company_name"]         = str(shop_name).strip()
 
     # Lock initial terminal reference (write-once policy)
     try:
@@ -476,25 +467,38 @@ def handle_saas_shop_and_terminal_selection(parent_widget, user: dict, raw_data:
     save_defaults(existing_defaults)
     print(f"[saas_assignment] [OK] Successfully saved SaaS store '{shop_name}' (Company: '{company_val}', CostCenter: '{cost_center_val}', Currency: '{primary_ccy}') & terminal '{terminal_name}' (ID: {terminal_id}).")
 
+    # ── Sync exchange rates and MOPs from login response ────────────────────
+    try:
+        payment_methods_arr = user_block.get("payment_methods") or raw_data.get("payment_methods") or selected_shop.get("payment_methods") or []
+        from services.saas_mop_rates import sync_db_with_mops
+        if payment_methods_arr or currencies_arr:
+            sync_db_with_mops(payment_methods_arr, currencies=currencies_arr)
+    except Exception as _mop_e:
+        print(f"[saas_assignment] Warning syncing MOPs and FX rates on login: {_mop_e}")
+
     if user_email and not is_admin:
-        try:
-            from database.db import get_connection
-            conn = get_connection()
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE users SET 
-                    company = ?, 
-                    warehouse = ?, 
-                    cost_center = ?
-                WHERE (email = ? AND email <> '') OR username = ? OR frappe_user = ?
-            """, (existing_defaults.get("server_company", ""),
-                  existing_defaults.get("server_warehouse", ""),
-                  existing_defaults.get("server_cost_center", ""),
-                  user_email, user_email, user_email))
-            conn.commit()
-            conn.close()
-        except Exception as _ue:
-            print(f"[saas_assignment] User store sync warning: {_ue}")
+        active_wh = str(existing_defaults.get("server_warehouse") or "").strip()
+        active_comp = str(existing_defaults.get("server_company") or "").strip()
+        active_cc = str(existing_defaults.get("server_cost_center") or "").strip()
+        if active_wh:
+            try:
+                from database.db import get_connection
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("""
+                    UPDATE users SET 
+                        company = ?, 
+                        warehouse = ?, 
+                        cost_center = ?
+                    WHERE (email = ? AND email <> '') OR username = ? OR frappe_user = ?
+                """, (active_comp,
+                      active_wh,
+                      active_cc,
+                      user_email, user_email, user_email))
+                conn.commit()
+                conn.close()
+            except Exception as _ue:
+                print(f"[saas_assignment] User store sync warning: {_ue}")
 
     # ── 7. UPSERT CUSTOMERS FROM PAYLOAD ──────────────────────────────────────
     payload_custs = user_block.get("customers") or raw_data.get("customers") or []

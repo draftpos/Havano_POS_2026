@@ -292,9 +292,15 @@ def push_unsynced_quotations() -> dict:
 # =============================================================================
 
 def _is_muted_quotation_error(err: str) -> bool:
-    """Return True if the error is the known backend product default_code attribute issue."""
+    """Return True if the error is a known backend schema or missing attribute issue."""
     err_lower = str(err).lower()
-    return "default_code" in err_lower and "havanoposdesk.product" in err_lower
+    return (
+        ("default_code" in err_lower and "havanoposdesk" in err_lower)
+        or ("havanoposdesk.sale.line" in err_lower)
+        or ("object has no attribute 'quantity'" in err_lower)
+        or ("object has no attribute" in err_lower and "havanoposdesk" in err_lower)
+    )
+
 
 
 def fetch_quotations_from_frappe(page: int = 1, limit: int = 100) -> dict:
@@ -356,17 +362,21 @@ def fetch_quotations_from_frappe(page: int = 1, limit: int = 100) -> dict:
             msg = e.read().decode("utf-8", errors="replace")
         except Exception:
             msg = f"HTTP {e.code}"
+        
+        is_transient = e.code in (502, 503, 504, 429) or "<html" in msg.lower()
         if _is_muted_quotation_error(msg):
             log.debug("Muted quotation fetch error (known backend attribute error): %s", msg[:200])
+        elif is_transient:
+            log.warning("Server temporarily unavailable while fetching quotations (HTTP %d). Will retry next cycle.", e.code)
         else:
             log.error("Failed to fetch quotations: %s", msg[:200])
-        return {"quotations": [], "total": 0, "page": page, "has_next": False, "error": msg}
+        return {"quotations": [], "total": 0, "page": page, "has_next": False, "error": f"HTTP {e.code}: Gateway/Server Unavailable" if is_transient else msg}
         
     except urllib.error.URLError as e:
         if "SSL" in str(e):
             log.warning("Network: SSL error fetching quotations (skipping)")
         else:
-            log.error("Network error fetching quotations: %s", e.reason)
+            log.warning("Network error fetching quotations: %s", e.reason)
         return {"quotations": [], "total": 0, "page": page, "has_next": False, "error": str(e.reason)}
         
     except Exception as e:
@@ -397,6 +407,8 @@ def sync_quotations_from_frappe() -> dict:
                 err_msg = str(response["error"])
                 if _is_muted_quotation_error(err_msg):
                     log.debug("QuotationSync: Muted known error fetching page %d: %s", page, err_msg[:200])
+                elif "502" in err_msg or "503" in err_msg or "504" in err_msg or "Gateway" in err_msg or "<html" in err_msg.lower():
+                    log.warning("QuotationSync: Server temporarily unavailable fetching page %d: %s", page, err_msg[:200])
                 else:
                     log.error(f"Error fetching page {page}: {response['error']}")
                 result["errors"] += 1

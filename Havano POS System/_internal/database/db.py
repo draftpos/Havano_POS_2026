@@ -1,5 +1,6 @@
 # database/db.py  —  Dynamic SQL Server connection (Windows or SQL Auth)
 
+import sys
 import json
 import pyodbc
 from pathlib import Path
@@ -8,13 +9,13 @@ from pathlib import Path
 # CONFIG  —  edit these two lines only
 # =============================================================================
 SERVER = r"."
-DATABASE = "pos_db"
+DATABASE = "havano_posop07978808"
 # =============================================================================
 
 def _best_driver() -> str:
     preferred = [
-        "ODBC Driver 18 for SQL Server",
         "ODBC Driver 17 for SQL Server",
+        "ODBC Driver 18 for SQL Server",
         "ODBC Driver 13 for SQL Server",
         "SQL Server",
     ]
@@ -25,76 +26,203 @@ def _best_driver() -> str:
 
 DRIVER = _best_driver()
 
-def _load_settings():
-    path = Path("app_data/sql_settings.json")
+def get_app_data_dir() -> Path:
+    """
+    Returns the writable app_data directory next to the .exe (or next to
+    main.py in dev mode). Mirrors the same logic used in main.py so that
+    both dev and bundled builds always find sql_settings.json in the right place.
+    """
+    if hasattr(sys, "_MEIPASS"):
+        # Running as a bundled .exe — use the folder that contains the exe
+        return Path(sys.executable).parent / "app_data"
+    # Dev mode — go two levels up from database/db.py to reach the project root
+    return Path(__file__).resolve().parent.parent / "app_data"
+
+_cached_settings = None
+_cached_settings_mtime = 0.0
+
+def _load_settings() -> dict:
+    defaults = {
+        "auth_mode": "windows",
+        "server": ".\\SQLEXPRESS",
+        "database": "havano_posop07978808",
+        "username": "",
+        "password": "",
+        "system_mode": "saas",
+        "api_url": "https://backoffice.havano.pro"
+    }
+    path = get_app_data_dir() / "sql_settings.json"
     if not path.exists():
-        return {
-            "auth_mode": "windows",
-            "server": ".",
-            "database": "pos_db",
-            "username": "",
-            "password": ""
-        }
-    return json.loads(path.read_text(encoding="utf-8"))
+        return defaults
+    try:
+        mtime = path.stat().st_mtime
+        global _cached_settings, _cached_settings_mtime
+        if _cached_settings is not None and mtime == _cached_settings_mtime:
+            return _cached_settings
+        data = json.loads(path.read_text(encoding="utf-8")) or {}
+        merged = {**defaults, **data}
+        _cached_settings = merged
+        _cached_settings_mtime = mtime
+        return merged
+    except Exception:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+            return {**defaults, **data}
+        except Exception:
+            return defaults
 
 def is_connection_valid() -> bool:
-    """Returns True only if settings file exists AND connection works"""
-    path = Path("app_data/sql_settings.json")
+    """Returns True only if settings file exists AND connection works."""
+    path = get_app_data_dir() / "sql_settings.json"
+    print(f"[db] is_connection_valid() — checking: {path}")
     if not path.exists():
+        print("[db] Settings file not found.")
         return False
     try:
         cfg = _load_settings()
+        server_val = cfg.get("server") or ".\\SQLEXPRESS"
+        db_val = cfg.get("database") or "havano_posop07978808"
         if cfg.get("auth_mode") == "windows":
             conn_str = (
                 f"DRIVER={{{DRIVER}}};"
-                f"SERVER={cfg['server']};"
-                f"DATABASE={cfg['database']};"
+                f"SERVER={server_val};"
+                f"DATABASE={db_val};"
                 "Trusted_Connection=yes;"
                 "TrustServerCertificate=yes;"
+                "Encrypt=no;"
             )
         else:
             conn_str = (
                 f"DRIVER={{{DRIVER}}};"
-                f"SERVER={cfg['server']};"
-                f"DATABASE={cfg['database']};"
-                f"UID={cfg['username']};"
-                f"PWD={cfg['password']};"
+                f"SERVER={server_val};"
+                f"DATABASE={db_val};"
+                f"UID={cfg.get('username', '')};"
+                f"PWD={cfg.get('password', '')};"
                 "TrustServerCertificate=yes;"
+                "Encrypt=no;"
             )
         conn = pyodbc.connect(conn_str, timeout=4)
         conn.close()
+        print("[db] Connection valid.")
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[db] Connection failed: {e}")
         return False
 
+import threading
+import time
+
+def reset_connection():
+    """Drops and closes the current thread's cached pooled connection."""
+    if hasattr(_thread_local, "conn"):
+        try:
+            _thread_local.conn.close()
+        except Exception:
+            pass
+        try:
+            delattr(_thread_local, "conn")
+        except AttributeError:
+            pass
+
+class PooledConnection:
+    def __init__(self, conn):
+        self._conn = conn
+    def cursor(self):
+        try:
+            return self._conn.cursor()
+        except Exception:
+            reset_connection()
+            raise
+    def commit(self):
+        try:
+            self._conn.commit()
+        except Exception:
+            reset_connection()
+            raise
+    def rollback(self):
+        try:
+            self._conn.rollback()
+        except Exception:
+            reset_connection()
+            raise
+    def close(self):
+        pass # Ignore close to keep the connection alive in the pool
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+_thread_local = threading.local()
+
 def get_connection() -> pyodbc.Connection:
+    now = time.time()
+    
+    # Return cached thread-local connection if valid
+    if hasattr(_thread_local, "conn"):
+        last_check = getattr(_thread_local, "last_check", 0.0)
+        if now - last_check < 60.0:
+            return PooledConnection(_thread_local.conn)
+        try:
+            # Re-verify idle connection only once every 60s
+            c = _thread_local.conn.cursor()
+            c.execute("SELECT 1")
+            c.fetchone()
+            c.close()
+            _thread_local.last_check = now
+            return PooledConnection(_thread_local.conn)
+        except Exception:
+            reset_connection()
+
     cfg = _load_settings()
+    server_val = cfg.get("server") or ".\\SQLEXPRESS"
+    db_val = cfg.get("database") or "havano_posop07978808"
+
     if cfg.get("auth_mode") == "windows":
         conn_str = (
             f"DRIVER={{{DRIVER}}};"
-            f"SERVER={cfg['server']};"
-            f"DATABASE={cfg['database']};"
+            f"SERVER={server_val};"
+            f"DATABASE={db_val};"
             "Trusted_Connection=yes;"
             "TrustServerCertificate=yes;"
-            "Application Name=POSSystem;"
+            "Encrypt=no;"
         )
     else:
         conn_str = (
             f"DRIVER={{{DRIVER}}};"
-            f"SERVER={cfg['server']};"
-            f"DATABASE={cfg['database']};"
-            f"UID={cfg['username']};"
-            f"PWD={cfg['password']};"
+            f"SERVER={server_val};"
+            f"DATABASE={db_val};"
+            f"UID={cfg.get('username', '')};"
+            f"PWD={cfg.get('password', '')};"
             "TrustServerCertificate=yes;"
-            "Application Name=POSSystem;"
+            "Encrypt=no;"
         )
-    return pyodbc.connect(conn_str)
+    
+    conn = pyodbc.connect(conn_str, timeout=5)
+    conn.timeout = 5  # Ensure all subsequent queries fail fast on network drops
+    _thread_local.conn = conn
+    _thread_local.last_check = now
+    return PooledConnection(conn)
 
-def fetchall_dicts(cursor) -> list:
+def get_api_url() -> str:
+    """Returns the Frappe API base URL from sql_settings.json."""
+    cfg = _load_settings()
+    return str(cfg.get("api_url") or "https://backoffice.havano.pro").strip().rstrip("/")
+
+def fetchall_dicts(cursor, sql: str = None, params: tuple = ()) -> list:
+    if sql:
+        cursor.execute(sql, params)
+    if not getattr(cursor, "description", None):
+        return []
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
-def fetchone_dict(cursor) -> dict | None:
+fetchall_dict = fetchall_dicts
+
+def fetchone_dict(cursor, sql: str = None, params: tuple = ()) -> dict | None:
+    if sql:
+        cursor.execute(sql, params)
+    if not getattr(cursor, "description", None):
+        return None
     row = cursor.fetchone()
     if row is None:
         return None

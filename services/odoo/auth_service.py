@@ -67,13 +67,18 @@ def login(username: str, password: str, database: str) -> dict:
 
             existing = get_defaults()
             # Map Odoo data to Havano company defaults
-            odoo_company = _str(data_block.get("company") or data_block.get("company_name"))
-            existing["company_name"]            = odoo_company
-            existing["server_company"]          = odoo_company
+            odoo_company = _str(data_block.get("company") or data_block.get("company_name")).strip()
+            if odoo_company:
+                existing["company_name"]   = odoo_company
+                existing["server_company"] = odoo_company
             
             # Warehouse and Cost Center
-            existing["server_warehouse"]        = _str(data_block.get("warehouse") or data_block.get("server_warehouse"))
-            existing["server_cost_center"]      = _str(data_block.get("cost_center") or data_block.get("server_cost_center"))
+            new_wh = _str(data_block.get("warehouse") or data_block.get("server_warehouse")).strip()
+            if new_wh:
+                existing["server_warehouse"] = new_wh
+            new_cc = _str(data_block.get("cost_center") or data_block.get("server_cost_center")).strip()
+            if new_cc:
+                existing["server_cost_center"] = new_cc
             
             existing["server_username"]         = _str(data_block.get("username") or data_block.get("full_name"))
             existing["server_email"]            = _str(data_block.get("email"))

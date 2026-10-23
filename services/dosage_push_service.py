@@ -104,10 +104,13 @@ def push_unsynced_dosages() -> dict:
                 body_text = e.read().decode(errors="replace")[:300]
             except Exception:
                 body_text = ""
-            log.error("[dosage-push] ❌ HTTP %s on %s: %s - %s",
-                      e.code, d.code, e.reason, body_text)
-            print(f"[dosage-push] ❌ HTTP {e.code} for {d.code}: {body_text}")
-            result["errors"] += 1
+            if e.code == 404:
+                log.debug("[dosage-push] HTTP 404 on %s: %s - %s", d.code, e.reason, body_text)
+            else:
+                log.error("[dosage-push] ❌ HTTP %s on %s: %s - %s",
+                          e.code, d.code, e.reason, body_text)
+                print(f"[dosage-push] ❌ HTTP {e.code} for {d.code}: {body_text}")
+                result["errors"] += 1
             continue
         except Exception as e:
             log.error("[dosage-push] ❌ Network error pushing %s: %s",

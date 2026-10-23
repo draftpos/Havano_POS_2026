@@ -34,14 +34,21 @@ class MainMenuDialog(QDialog):
         lay.addWidget(QLabel("System Mode Override (Requires Restart):", styleSheet="font-weight:bold;"))
         self._mode_combo = QComboBox()
         self._mode_combo.setFixedHeight(34)
-        self._mode_combo.addItems(["(Auto / From DB)", "Frappe", "Odoo", "Offline"])
+        self._mode_combo.addItems(["SaaS (Cloud)", "Frappe", "Odoo", "Offline"])
         self._mode_combo.setStyleSheet(f"""
             QComboBox {{
                 border: 1px solid {BORDER}; border-radius: 4px; padding: 4px 10px; background: {WHITE};
             }}
         """)
         
-        current_mode = self._settings.systemModeOverride.lower()
+        current_mode = (self._settings.systemModeOverride or "").lower()
+        if not current_mode:
+            try:
+                from services.credentials import get_system_mode
+                current_mode = (get_system_mode() or "").lower()
+            except Exception:
+                current_mode = "saas"
+
         if current_mode == "frappe":
             self._mode_combo.setCurrentIndex(1)
         elif current_mode == "odoo":
@@ -100,7 +107,7 @@ class MainMenuDialog(QDialog):
 
     def _save(self):
         idx = self._mode_combo.currentIndex()
-        target_mode = ""
+        target_mode = "saas"
         if idx == 1:
             target_mode = "frappe"
         elif idx == 2:
@@ -109,16 +116,17 @@ class MainMenuDialog(QDialog):
             target_mode = "offline"
 
         mode_changed = False
-        if target_mode:
-            try:
-                from services.credentials import set_system_mode, get_system_mode
-                if target_mode.lower() != get_system_mode().lower():
-                    mode_ok = set_system_mode(target_mode, parent=self)
-                    if not mode_ok:
-                        return
-                    mode_changed = True
-            except Exception as _ex_m:
-                print(f"[main_menu_dialog] mode change error: {_ex_m}")
+        try:
+            from services.credentials import set_system_mode, get_system_mode
+            if target_mode.lower() != (get_system_mode() or "").lower():
+                self.hide()
+                mode_ok = set_system_mode(target_mode, parent=self.parent())
+                if not mode_ok:
+                    self.show()
+                    return
+                mode_changed = True
+        except Exception as _ex_m:
+            print(f"[main_menu_dialog] mode change error: {_ex_m}")
 
         self._settings.systemModeOverride = target_mode
 
@@ -131,14 +139,5 @@ class MainMenuDialog(QDialog):
         self.accept()
 
         if mode_changed:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(
-                self,
-                "Mode Changed",
-                f"System mode changed to '{target_mode.upper()}'.\nDatabase was wiped and re-migrated.\n\nReturning to Login Screen..."
-            )
-            p = getattr(self, "parent_window", None) or self.parent()
-            if p and hasattr(p, "_logout"):
-                p._logout()
-            elif p and hasattr(p, "_do_logout"):
-                p._do_logout()
+            from utils.app_restart import restart_application
+            restart_application()

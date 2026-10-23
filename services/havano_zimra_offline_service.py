@@ -49,10 +49,16 @@ class HavanoZimraOfflineService:
         if self._config_path and os.path.exists(self._config_path):
             return self._config_path
 
-        candidates = [
+        try:
+            from database.db import get_app_data_dir
+            candidates = [str(get_app_data_dir() / "havanoconfig.ini")]
+        except Exception:
+            candidates = []
+        
+        candidates.extend([
             os.path.join(os.getcwd(), "havanoconfig.ini"),
             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "havanoconfig.ini"),
-        ]
+        ])
 
         if settings:
             base_url = str(getattr(settings, "base_url", "") or "").strip()

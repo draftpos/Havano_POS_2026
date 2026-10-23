@@ -151,6 +151,68 @@ def _icon_svg(name: str, size: float = 8, color: str = "#ffffff") -> str:
     return icons.get(name, "")
 
 
+def _is_print_customer_details_enabled() -> bool:
+    """Checks pos_settings table for print_customer_details rule."""
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT setting_value FROM pos_settings WITH (NOLOCK) WHERE setting_key='print_customer_details'")
+        row = cur.fetchone()
+        conn.close()
+        if row and str(row[0]).strip() in ("1", "true", "True", "yes", "YES"):
+            return True
+        return False
+    except Exception as exc:
+        log.debug("Error checking print_customer_details setting: %s", exc)
+        return False
+
+
+def _enrich_customer_details(customer_name: str, cust_id: str | int = None) -> dict:
+    """Queries customers table to retrieve full contact and fiscal details."""
+    details = {
+        "email": "",
+        "address": "",
+        "tin": "",
+        "vat": "",
+        "phone": "",
+        "trade_name": "",
+    }
+    if not customer_name and not cust_id:
+        return details
+    try:
+        from database.db import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+        row = None
+        if cust_id:
+            cur.execute(
+                "SELECT custom_email_address, custom_house_no, custom_street, custom_city, custom_province, "
+                "custom_customer_tin, custom_customer_vat, custom_telephone_number, custom_trade_name "
+                "FROM customers WITH (NOLOCK) WHERE id = ?", (cust_id,)
+            )
+            row = cur.fetchone()
+        if not row and customer_name:
+            cur.execute(
+                "SELECT custom_email_address, custom_house_no, custom_street, custom_city, custom_province, "
+                "custom_customer_tin, custom_customer_vat, custom_telephone_number, custom_trade_name "
+                "FROM customers WITH (NOLOCK) WHERE customer_name = ?", (str(customer_name).strip(),)
+            )
+            row = cur.fetchone()
+        conn.close()
+        if row:
+            details["email"] = (row[0] or "").strip()
+            addr_parts = [str(p).strip() for p in (row[1], row[2], row[3], row[4]) if p and str(p).strip()]
+            details["address"] = ", ".join(addr_parts)
+            details["tin"] = (row[5] or "").strip()
+            details["vat"] = (row[6] or "").strip()
+            details["phone"] = (row[7] or "").strip()
+            details["trade_name"] = (row[8] or "").strip()
+    except Exception as exc:
+        log.debug("Customer details lookup failed: %s", exc)
+    return details
+
+
 def render_a4_invoice_html(sale_data: dict | object) -> str:
     """
     Generate clean, high-precision HTML using point-based (pt) sizing for perfect A4 vector rendering.
@@ -184,8 +246,113 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
 
     currency = _get("currency", "USD") or "USD"
     customer_name = _get("customerName") or _get("customer_name") or "Cash Customer"
-    customer_address = _get("customerAddress") or _get("customer_address") or ""
-    customer_phone = _get("customerContact") or _get("customer_phone") or ""
+    customer_address = _get("customerAddress") or _get("customer_address") or _get("customeraddress") or ""
+    customer_phone = _get("customerContact") or _get("customer_phone") or _get("customer_contact") or _get("customercontact") or ""
+    customer_email = _get("customerEmail") or _get("customer_email") or _get("customeremail") or _get("custom_email_address") or ""
+    customer_tin = _get("customerTin") or _get("customer_tin") or _get("customertin") or _get("custom_customer_tin") or ""
+    customer_vat = _get("customerVat") or _get("customer_vat") or _get("customervat") or _get("custom_customer_vat") or ""
+    customer_trade_name = _get("customerTradeName") or _get("customer_trade_name") or _get("custom_trade_name") or ""
+    customer_id = _get("customer_id") or _get("customerId") or _get("custom_id")
+
+    is_walkin = (
+        not customer_name
+        or str(customer_name).strip().lower() in (
+            "walk-in", "walk in", "walk in customer", "walk-in customer",
+            "cash customer", "cash", "default", "default customer"
+        )
+    )
+
+    show_cust_setting = _get("print_customer_details")
+    if show_cust_setting is None or show_cust_setting == "":
+        show_cust_setting = _get("show_customer_details")
+    if show_cust_setting is not None and show_cust_setting != "":
+        show_customer_details = str(show_cust_setting).strip().lower() in ("1", "true", "yes")
+    else:
+        show_customer_details = _is_print_customer_details_enabled()
+
+    if show_customer_details and not is_walkin:
+        # If any key details are missing, enrich from DB
+        if not customer_email or not customer_tin or not customer_vat or not customer_address or not customer_phone:
+            db_info = _enrich_customer_details(customer_name, customer_id)
+            if not customer_email and db_info["email"]:
+                customer_email = db_info["email"]
+            if not customer_address and db_info["address"]:
+                customer_address = db_info["address"]
+            if not customer_tin and db_info["tin"]:
+                customer_tin = db_info["tin"]
+            if not customer_vat and db_info["vat"]:
+                customer_vat = db_info["vat"]
+            if not customer_phone and db_info["phone"]:
+                customer_phone = db_info["phone"]
+            if not customer_trade_name and db_info["trade_name"]:
+                customer_trade_name = db_info["trade_name"]
+
+    _skip_customer_tin = False
+    _skip_customer_vat = False
+    if customer_tin and tin_no and str(customer_tin).strip().lower() == str(tin_no).strip().lower():
+        _skip_customer_tin = True
+    if str(customer_tin).strip() in ("00000000", "0"):
+        _skip_customer_tin = True
+    if customer_vat and vat_no and str(customer_vat).strip().lower() == str(vat_no).strip().lower():
+        _skip_customer_vat = True
+
+    cust_rows = []
+    cust_display_name = customer_name
+    if customer_trade_name and customer_trade_name.lower() != customer_name.lower():
+        cust_display_name = f"{customer_name} ({customer_trade_name})"
+
+    cust_rows.append(
+        f'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Customer Name</td>'
+        f'<td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>'
+        f'<td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top; font-weight: bold; color: #0a2342;">{cust_display_name}</td></tr>'
+    )
+
+    if show_customer_details and not is_walkin:
+        if customer_phone:
+            cust_rows.append(
+                f'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Phone</td>'
+                f'<td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>'
+                f'<td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{customer_phone}</td></tr>'
+            )
+        if customer_email:
+            cust_rows.append(
+                f'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Email</td>'
+                f'<td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>'
+                f'<td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{customer_email}</td></tr>'
+            )
+        if customer_address:
+            cust_rows.append(
+                f'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Address</td>'
+                f'<td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>'
+                f'<td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{customer_address}</td></tr>'
+            )
+        if customer_tin and not _skip_customer_tin:
+            cust_rows.append(
+                f'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">TIN</td>'
+                f'<td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>'
+                f'<td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top; font-weight: bold;">{customer_tin}</td></tr>'
+            )
+        if customer_vat and not _skip_customer_vat:
+            cust_rows.append(
+                f'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">VAT No.</td>'
+                f'<td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>'
+                f'<td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{customer_vat}</td></tr>'
+            )
+    else:
+        if customer_address:
+            cust_rows.append(
+                f'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Address</td>'
+                f'<td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>'
+                f'<td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{customer_address}</td></tr>'
+            )
+        if customer_phone:
+            cust_rows.append(
+                f'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Phone</td>'
+                f'<td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>'
+                f'<td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{customer_phone}</td></tr>'
+            )
+
+    customer_table_rows_html = "".join(cust_rows)
 
     doc_type = str(_get("doc_type") or _get("docType") or "").lower()
     receipt_type = str(_get("receiptType") or _get("receipt_type") or "").upper()
@@ -559,13 +726,7 @@ def render_a4_invoice_html(sale_data: dict | object) -> str:
                             <span class="text-primary-dark font-bold" style="font-size: {f_head};">CUSTOMER DETAILS</span>
                         </div>
                         <table width="100%" cellpadding="1" cellspacing="0" class="prop-table" style="width: 100%; border-collapse: collapse; font-size: {f_base};">
-                            <tr>
-                                <td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Customer Name</td>
-                                <td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td>
-                                <td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">{customer_name}</td>
-                            </tr>
-                            {'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Address</td><td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td><td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">' + customer_address + '</td></tr>' if customer_address else ''}
-                            {'<tr><td width="35%" class="prop-label" style="width: 35%; font-weight: bold; padding: 2.5pt 0; vertical-align: top;">Phone</td><td width="5%" class="prop-colon" style="width: 5%; text-align: center; padding: 2.5pt 0; vertical-align: top;">:</td><td width="60%" style="width: 60%; padding: 2.5pt 0; vertical-align: top;">' + customer_phone + '</td></tr>' if customer_phone else ''}
+                            {customer_table_rows_html}
                         </table>
                     </td>
 

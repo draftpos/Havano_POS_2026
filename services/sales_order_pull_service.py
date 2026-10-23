@@ -64,7 +64,10 @@ def _list_order_names(host: str, headers: dict) -> list[str]:
     try:
         data = _http_get_json(url, headers)
     except urllib.error.HTTPError as e:
-        log.error("[SO pull] list HTTP %s: %s", e.code, e.reason)
+        if e.code == 404:
+            log.debug("[SO pull] Sales Orders endpoint not found (HTTP 404)")
+        else:
+            log.error("[SO pull] list HTTP %s: %s", e.code, e.reason)
         return []
     except Exception as e:
         log.error("[SO pull] list failed: %s", e)

@@ -537,9 +537,63 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
     }
 
     # Kitchen-printer routing flags (kitchen_order_1..6 for SaaS / custom_is_order_item_1..6 for Frappe)
-    for i in range(1, 7):
-        val = p.get(f"kitchen_order_{i}") if p.get(f"kitchen_order_{i}") is not None else p.get(f"custom_is_order_item_{i}")
-        result[f"order_{i}"] = 1 if (str(val).strip().lower() in ("1", "true", "yes", "t", "y") or val is True or val == 1) else 0
+    has_explicit_order = any(
+        p.get(f"kitchen_order_{i}") is not None or
+        p.get(f"kitchen_order{i}") is not None or
+        p.get(f"custom_is_order_item_{i}") is not None or
+        p.get(f"custom_is_order_item{i}") is not None or
+        p.get(f"is_order_item_{i}") is not None or
+        p.get(f"is_order_item{i}") is not None or
+        p.get(f"custom_kitchen_order_{i}") is not None or
+        p.get(f"order_{i}") is not None or
+        p.get(f"order{i}") is not None
+        for i in range(1, 7)
+    ) or any(
+        p.get(k) is not None
+        for k in ("kitchen_order", "is_kitchen_order", "custom_kitchen_order", "custom_is_order_item")
+    )
+
+    if has_explicit_order:
+        for i in range(1, 7):
+            val = (
+                p.get(f"kitchen_order_{i}")
+                if p.get(f"kitchen_order_{i}") is not None
+                else p.get(f"kitchen_order{i}")
+                if p.get(f"kitchen_order{i}") is not None
+                else p.get(f"custom_is_order_item_{i}")
+                if p.get(f"custom_is_order_item_{i}") is not None
+                else p.get(f"custom_is_order_item{i}")
+                if p.get(f"custom_is_order_item{i}") is not None
+                else p.get(f"is_order_item_{i}")
+                if p.get(f"is_order_item_{i}") is not None
+                else p.get(f"is_order_item{i}")
+                if p.get(f"is_order_item{i}") is not None
+                else p.get(f"custom_kitchen_order_{i}")
+                if p.get(f"custom_kitchen_order_{i}") is not None
+                else p.get(f"order_{i}")
+                if p.get(f"order_{i}") is not None
+                else p.get(f"order{i}")
+                if p.get(f"order{i}") is not None
+                else (p.get("kitchen_order") or p.get("is_kitchen_order") or p.get("custom_kitchen_order") or p.get("custom_is_order_item"))
+                if i == 1
+                else None
+            )
+            result[f"order_{i}"] = 1 if (str(val).strip().lower() in ("1", "true", "yes", "t", "y") or val is True or val == 1) else 0
+    else:
+        # Fallback 1: check cached order flags from login response
+        try:
+            from services.auth_service import get_cached_login_order_flags
+            cached_flags = get_cached_login_order_flags(part_no)
+        except Exception:
+            cached_flags = None
+
+        if cached_flags is not None:
+            for i in range(1, 7):
+                result[f"order_{i}"] = cached_flags[i - 1]
+        else:
+            # Fallback 2: None indicates to leave existing DB column value untouched on UPDATE
+            for i in range(1, 7):
+                result[f"order_{i}"] = None
 
     if tax_info:
         result["tax_rate"]          = tax_info["tax_rate"]
@@ -967,7 +1021,8 @@ def _upsert_parsed_product(cur, conn, p: dict, local_part_nos: set) -> bool:
     track_stock       = p.get("track_stock", 1)
     active            = p.get("active", 1)
     print_after_order = int(p.get("print_after_order", 0) or 0)
-    order_flags       = tuple(int(p.get(f"order_{i}", 0) or 0) for i in range(1, 7))
+    order_flags_update = tuple(p.get(f"order_{i}") for i in range(1, 7))
+    order_flags_insert = tuple(int(p.get(f"order_{i}") or 0) for i in range(1, 7))
     cost_price        = p.get("cost_price", 0.0)
 
     is_new = part_no not in local_part_nos
@@ -975,7 +1030,41 @@ def _upsert_parsed_product(cur, conn, p: dict, local_part_nos: set) -> bool:
     # ── INSERT or UPDATE products row ──────────────────────────────────
     try:
         hs_code = p.get("hs_code", "")
-        if is_new:
+        clean_part_no = str(part_no).strip()
+        norm_part_no = clean_part_no.upper()
+
+        cur.execute(
+            """
+            UPDATE products
+            SET name = ?, price = ?, cost_price = ?, stock = ?, category = ?,
+                uom = ?, conversion_factor = 1.0,
+                tax_rate = ?, tax_type = ?, item_tax_template = ?, hs_code = ?,
+                is_pharmacy_product = ?, track_stock = ?, active = ?, print_after_order = ?,
+                order_1 = COALESCE(?, order_1),
+                order_2 = COALESCE(?, order_2),
+                order_3 = COALESCE(?, order_3),
+                order_4 = COALESCE(?, order_4),
+                order_5 = COALESCE(?, order_5),
+                order_6 = COALESCE(?, order_6)
+            WHERE UPPER(LTRIM(RTRIM(part_no))) = ?
+            """,
+            (
+                p["name"], p["price"], cost_price, p["stock"], p["category"],
+                p.get("uom", "Nos"),
+                tax_rate, tax_type, item_tax_template, hs_code,
+                is_pharm, track_stock, active, print_after_order,
+                *order_flags_update,
+                norm_part_no,
+            ),
+        )
+
+        if cur.rowcount > 0:
+            local_part_nos.add(norm_part_no)
+            log.debug(
+                "[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  orders=%s",
+                clean_part_no, tax_rate, tax_type, order_flags_update,
+            )
+        else:
             cur.execute(
                 """
                 INSERT INTO products
@@ -987,41 +1076,17 @@ def _upsert_parsed_product(cur, conn, p: dict, local_part_nos: set) -> bool:
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    part_no, p["name"], p["price"], cost_price, p["stock"], p["category"],
+                    clean_part_no, p["name"], p["price"], cost_price, p["stock"], p["category"],
                     p.get("uom", "Nos"),
                     tax_rate, tax_type, item_tax_template, hs_code,
                     is_pharm, track_stock, active, print_after_order,
-                    *order_flags,
+                    *order_flags_insert,
                 ),
             )
-            local_part_nos.add(part_no)
+            local_part_nos.add(norm_part_no)
             log.debug(
                 "[sync] Inserted: %s  tax_rate=%.4f  tax_type=%s  orders=%s",
-                part_no, tax_rate, tax_type, order_flags,
-            )
-        else:
-            cur.execute(
-                """
-                UPDATE products
-                SET name = ?, price = ?, cost_price = ?, stock = ?, category = ?,
-                    uom = ?, conversion_factor = 1.0,
-                    tax_rate = ?, tax_type = ?, item_tax_template = ?, hs_code = ?,
-                    is_pharmacy_product = ?, track_stock = ?, active = ?, print_after_order = ?,
-                    order_1 = ?, order_2 = ?, order_3 = ?, order_4 = ?, order_5 = ?, order_6 = ?
-                WHERE part_no = ?
-                """,
-                (
-                    p["name"], p["price"], cost_price, p["stock"], p["category"],
-                    p.get("uom", "Nos"),
-                    tax_rate, tax_type, item_tax_template, hs_code,
-                    is_pharm, track_stock, active, print_after_order,
-                    *order_flags,
-                    part_no,
-                ),
-            )
-            log.debug(
-                "[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  orders=%s",
-                part_no, tax_rate, tax_type, order_flags,
+                clean_part_no, tax_rate, tax_type, order_flags_insert,
             )
         conn.commit()
     except Exception as e:

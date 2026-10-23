@@ -22,6 +22,7 @@ _sync_thread = None
 def get_unsynced_payment_entries() -> list[dict]:
     conn = get_connection()
     cur = conn.cursor()
+    cur.timeout = 60
     cur.execute("""
         SELECT pe.*, s.frappe_ref AS sale_frappe_ref, s.odoo_invoice_id, s.customer_name
         FROM payment_entries pe

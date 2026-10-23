@@ -8,18 +8,22 @@ from PySide6.QtGui import QColor
 import json
 from pathlib import Path
 
-_SETTINGS_FILE = Path("app_data/sql_settings.json")
+def _settings_file() -> Path:
+    from database.db import get_app_data_dir
+    return get_app_data_dir() / "sql_settings.json"
+
 _HIDE_DINING_PROMPT = False
 
 def set_dining_prompt_hidden(hidden: bool):
     global _HIDE_DINING_PROMPT
     _HIDE_DINING_PROMPT = hidden
     try:
+        _f = _settings_file()
         data = {}
-        if _SETTINGS_FILE.exists():
-            data = json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
+        if _f.exists():
+            data = json.loads(_f.read_text(encoding="utf-8"))
         data["hide_dining_prompt"] = bool(hidden)
-        _SETTINGS_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        _f.write_text(json.dumps(data, indent=4), encoding="utf-8")
     except Exception as e:
         print(f"[DiningOptionDialog] Error writing to sql_settings.json: {e}")
 
@@ -28,8 +32,9 @@ def is_dining_prompt_hidden() -> bool:
     if _HIDE_DINING_PROMPT:
         return True
     try:
-        if _SETTINGS_FILE.exists():
-            data = json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
+        _f = _settings_file()
+        if _f.exists():
+            data = json.loads(_f.read_text(encoding="utf-8"))
             val = data.get("hide_dining_prompt")
             if val is True or str(val).lower() in ("true", "1", "yes"):
                 _HIDE_DINING_PROMPT = True

@@ -126,7 +126,14 @@ def _get_default_store_name() -> str:
     except Exception:
         pass
 
-    return "Main Store"
+    try:
+        from services.credentials import get_system_mode
+        if (get_system_mode() or "").strip().lower() != "saas":
+            return "Main Store"
+    except Exception:
+        pass
+
+    return ""
 
 
 def _field_row(label_text, content, lw=LBL_W):

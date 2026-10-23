@@ -22,7 +22,7 @@
     "enableLaybyes": false,
     "enableQuotes": true,
     "enablePayments": false,
-    "enableExpenses": true,
+    "enableExpenses": false,
     "enableERPModules": true,
     "showMenuPOS": true,
     "showMenuSales": true,
@@ -37,6 +37,6 @@
     "showSalesList": false,
     "showBadgeQ": true,
     "showBadgeZ": true,
-    "systemModeOverride": "saas",
+    "systemModeOverride": "offline",
     "capitalizeItemNames": true
 }

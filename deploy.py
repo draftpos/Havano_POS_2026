@@ -24,42 +24,76 @@ import json
 import os
 from pathlib import Path
 
+# Ensure UTF-8 output encoding for Windows command line / PowerShell
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  CONFIGURE ONCE — your Nextcloud WebDAV credentials
-#  Use an App Password from Nextcloud Settings → Security → App Passwords
+#  Nextcloud WebDAV credentials (can be overridden by environment variables)
 # ─────────────────────────────────────────────────────────────────────────────
-NC_BASE_URL  = "https://vmi3020185.contaboserver.net"
-NC_USERNAME  = "admin"           # ← change if your Nextcloud username is different
-NC_APP_PASS  = "Farai@#$1234"
-NC_FOLDER    = "Pos-Updates"
+NC_BASE_URL     = (os.environ.get("NEXTCLOUD_BASE_URL") or os.environ.get("NEXTCLOUD_URL") or "https://vmi3020185.contaboserver.net").rstrip("/")
+NC_SHARE_TOKEN  = os.environ.get("NEXTCLOUD_SHARE_TOKEN") or "3kiXJJQC4LiwPrd"
+NC_USERNAME     = os.environ.get("NEXTCLOUD_USERNAME") or "admin"
+NC_APP_PASS     = os.environ.get("NEXTCLOUD_APP_PASS") or "Farai@#$1234"
+NC_FOLDER       = (os.environ.get("NEXTCLOUD_FOLDER") or "Pos-Updates").strip("/")
 # ─────────────────────────────────────────────────────────────────────────────
 
 MAIN_PY       = Path(__file__).parent / "main.py"
 INSTALLER_DIR = Path(__file__).parent / "combined" / "Output"  # ← where Inno Setup drops the .exe
-RELEASE_NOTES = "Bug fixes and performance improvements."  # ← edit before deploying
-
-
-def _webdav_url(filename: str) -> str:
-    return f"{NC_BASE_URL}/remote.php/dav/files/{NC_USERNAME}/{NC_FOLDER}/{filename}"
+RELEASE_NOTES = os.environ.get("RELEASE_NOTES", "Bug fixes and performance improvements.")
 
 
 def _upload(local_path: Path, remote_filename: str):
     """Upload a file to Nextcloud via WebDAV (PUT)."""
     import urllib.request
     import base64
-    creds = base64.b64encode(f"{NC_USERNAME}:{NC_APP_PASS}".encode()).decode()
-    url   = _webdav_url(remote_filename)
-    data  = local_path.read_bytes()
-    req   = urllib.request.Request(url, data=data, method="PUT")
-    req.add_header("Authorization", f"Basic {creds}")
-    req.add_header("Content-Type", "application/octet-stream")
-    print(f"  ↑  Uploading {remote_filename} ({len(data)/1024/1024:.1f} MB) ...")
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        code = resp.getcode()
-        if code in (200, 201, 204):
-            print(f"  ✅ {remote_filename} uploaded (HTTP {code})")
-        else:
-            raise RuntimeError(f"Upload failed: HTTP {code}")
+    import time
+
+    data = local_path.read_bytes()
+    size_mb = len(data) / (1024 * 1024)
+    print(f"  Uploading {remote_filename} ({size_mb:.1f} MB) to Nextcloud ...")
+
+    # Strategy 1: Public share WebDAV (matches updater.py share 3kiXJJQC4LiwPrd)
+    # Strategy 2: User WebDAV (admin / app_pass)
+    endpoints = []
+    if NC_SHARE_TOKEN:
+        endpoints.append((
+            f"{NC_BASE_URL}/public.php/webdav/{remote_filename}",
+            base64.b64encode(f"{NC_SHARE_TOKEN}:".encode()).decode()
+        ))
+    if NC_USERNAME and NC_APP_PASS:
+        endpoints.append((
+            f"{NC_BASE_URL}/remote.php/dav/files/{NC_USERNAME}/{NC_FOLDER}/{remote_filename}",
+            base64.b64encode(f"{NC_USERNAME}:{NC_APP_PASS}".encode()).decode()
+        ))
+
+    last_error = None
+    for url, creds in endpoints:
+        for attempt in range(1, 4):
+            req = urllib.request.Request(url, data=data, method="PUT")
+            req.add_header("Authorization", f"Basic {creds}")
+            req.add_header("Content-Type", "application/octet-stream")
+            try:
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    code = resp.getcode()
+                    if code in (200, 201, 204):
+                        print(f"  [OK] {remote_filename} uploaded successfully (HTTP {code})")
+                        return
+                    else:
+                        raise RuntimeError(f"Upload failed: HTTP {code}")
+            except Exception as e:
+                last_error = e
+                if attempt < 3:
+                    time.sleep(2)
+                else:
+                    break
+
+    if last_error:
+        raise last_error
 
 
 def _read_current_version() -> str:
@@ -98,6 +132,7 @@ def _bump(current: str, bump_type: str) -> str:
 def _find_installer(version: str) -> Path:
     """Look for the built installer in combined/Output."""
     candidates = [
+        INSTALLER_DIR / f"HavanoPOS_Update_Installer_v{version}.exe",
         INSTALLER_DIR / f"HavanoPOS_Installer_v{version}.exe",
         INSTALLER_DIR / f"HavanoPOS_v{version}.exe",
     ]
@@ -105,7 +140,12 @@ def _find_installer(version: str) -> Path:
         if c.exists():
             return c
 
-    # Fallback: pick the NEWEST .exe in the folder (most recently modified)
+    # Fallback: pick the NEWEST .exe matching version or most recently modified
+    matching = sorted(INSTALLER_DIR.glob(f"*{version}*.exe"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if matching:
+        print(f"  ℹ️  Found version-matching installer: {matching[0].name}")
+        return matching[0]
+
     exes = sorted(INSTALLER_DIR.glob("*.exe"), key=lambda p: p.stat().st_mtime, reverse=True)
     if exes:
         print(f"  ⚠️  Exact match not found — using newest installer: {exes[0].name}")
@@ -117,42 +157,45 @@ def _find_installer(version: str) -> Path:
 
 
 def main():
-    bump_arg = sys.argv[1].strip() if len(sys.argv) > 1 else "patch"
+    args = [a.strip() for a in sys.argv[1:]]
+    auto_yes = ("-y" in args) or ("--yes" in args) or (os.environ.get("CI") == "true") or (not sys.stdin.isatty())
+    bump_args = [a for a in args if a not in ("-y", "--yes", "--current", "current")]
+    bump_arg = bump_args[0] if bump_args else ("current" if ("--current" in args or "current" in args) else "patch")
 
-    print("\n══════════════════════════════════════════════")
-    print("  Havano POS — Deploy to Nextcloud")
-    print("══════════════════════════════════════════════\n")
+    print("\n==============================================")
+    print("  Havano POS -- Deploy to Nextcloud")
+    print("==============================================\n")
 
     # 1. Version
     current = _read_current_version()
     print(f"  Current version : {current}")
 
-    if bump_arg in ("major", "minor", "patch"):
+    if bump_arg in ("current", "--current"):
+        new_version = current
+    elif bump_arg in ("major", "minor", "patch"):
         new_version = _bump(current, bump_arg)
     else:
         new_version = bump_arg  # explicit e.g. "2.3.1"
 
-    print(f"  New version     : {new_version}\n")
+    print(f"  Target version  : {new_version}\n")
 
-    # 2. Confirm
-    ans = input(f"  Bump {current} → {new_version} and upload to Nextcloud? [y/N] ").strip().lower()
-    if ans != "y":
-        print("  Aborted.")
-        return
+    # 2. Confirm (if interactive)
+    if not auto_yes:
+        ans = input(f"  Deploy v{new_version} and upload to Nextcloud? [y/N] ").strip().lower()
+        if ans != "y":
+            print("  Aborted.")
+            return
+    else:
+        print(f"  Deploying v{new_version} (auto-confirmed)...")
 
-    # 3. Update main.py
-    _write_version(new_version)
+    # 3. Update main.py if version changed
+    if new_version != current:
+        _write_version(new_version)
 
     # 4. Find installer
     installer_path = _find_installer(new_version)
-    installer_filename = f"HavanoPOS_Installer_v{new_version}.exe"
-
-    # Rename if needed so Nextcloud filename matches version.json
-    if installer_path.name != installer_filename:
-        new_path = installer_path.parent / installer_filename
-        installer_path.rename(new_path)
-        installer_path = new_path
-        print(f"  📝 Renamed installer → {installer_filename}")
+    installer_filename = installer_path.name
+    print(f"  📦 Found installer : {installer_filename} ({installer_path.stat().st_size / (1024*1024):.1f} MB)")
 
     # 5. Generate version.json
     version_info = {
@@ -161,17 +204,19 @@ def main():
         "release_notes": RELEASE_NOTES,
         "mandatory": False,
     }
+    INSTALLER_DIR.mkdir(parents=True, exist_ok=True)
     version_json_path = INSTALLER_DIR / "version.json"
     version_json_path.write_text(json.dumps(version_info, indent=2), encoding="utf-8")
-    print(f"  📄 version.json written:\n     {json.dumps(version_info, indent=5)}\n")
+    print(f"  📄 version.json written:\n{json.dumps(version_info, indent=4)}\n")
 
     # 6. Upload both to Nextcloud
-    print("  Uploading to Nextcloud...")
+    print(f"  Connecting to Nextcloud endpoint: {NC_BASE_URL} ...")
     _upload(version_json_path, "version.json")
     _upload(installer_path,    installer_filename)
 
-    print(f"\n  🎉 Done! v{new_version} is live on Nextcloud.")
-    print("     Existing installs will see the update prompt on next startup.\n")
+    print(f"\n  🎉 SUCCESS: Havano POS v{new_version} is deployed and live on Nextcloud!")
+    print(f"     File: {installer_filename}")
+    print("     Existing client POS installations will see the update on next launch.\n")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ from services.bugsink_service import (
 _logger = logging.getLogger("hang_watchdog")
 
 # Escalating thresholds in seconds to alert on
-FREEZE_ALERT_THRESHOLDS = [5.0, 15.0, 30.0, 60.0]
+FREEZE_ALERT_THRESHOLDS = [2.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0]
 
 
 class _HeartbeatHelper(QObject):
@@ -75,28 +75,6 @@ class HangWatchdog:
             freeze_duration = now - self._freeze_start_time
             current_page = get_current_page()
             _logger.info(f"[Watchdog] UI recovered after {freeze_duration:.1f}s at [{current_page}]")
-            add_breadcrumb(
-                category="ui_hang",
-                message=f"UI Recovered from freeze after {freeze_duration:.1f}s at [{current_page}]",
-                level="info",
-                data={"hang_duration_seconds": round(freeze_duration, 2), "page": current_page},
-            )
-            # Send recovery event if it was a severe freeze (>= 5s)
-            if freeze_duration >= 5.0:
-                capture_message(
-                    f"UI Recovered from {freeze_duration:.1f}s Freeze at [{current_page}]",
-                    level="info",
-                    extra={
-                        "hang_duration_seconds": round(freeze_duration, 2),
-                        "page": current_page,
-                        "recovered_at": datetime.now().isoformat(),
-                    },
-                    tags={
-                        "ui_hang": "recovered",
-                        "hang_duration": f"{int(freeze_duration)}s",
-                        "page": current_page,
-                    },
-                )
 
         self._is_frozen = False
         self._freeze_start_time = None
@@ -125,6 +103,22 @@ class HangWatchdog:
     def stop(self):
         self._stop_event.set()
 
+    def pause(self):
+        """Temporarily pause freeze alerting (e.g. during heavy initial startup module loading)."""
+        self._paused = True
+        self._last_heartbeat_time = time.time()
+        self._is_frozen = False
+        self._freeze_start_time = None
+        self._reported_thresholds.clear()
+
+    def resume(self):
+        """Resume monitoring after deliberate startup / loading sequence completes."""
+        self._paused = False
+        self._last_heartbeat_time = time.time()
+        self._is_frozen = False
+        self._freeze_start_time = None
+        self._reported_thresholds.clear()
+
     def _get_process_memory_mb(self) -> float:
         try:
             import psutil
@@ -134,8 +128,20 @@ class HangWatchdog:
         return 0.0
 
     def _run_watchdog(self):
+        last_loop_time = time.time()
         while not self._stop_event.is_set():
             time.sleep(self._check_interval)
+            
+            now = time.time()
+            # If the background thread itself slept for vastly longer than the interval,
+            # the OS went to sleep/hibernation. Reset the ping timer to avoid a false alert!
+            if now - last_loop_time > (self._check_interval + 5.0):
+                self._last_heartbeat_time = now
+            last_loop_time = now
+
+            if getattr(self, "_paused", False):
+                self._last_heartbeat_time = now
+                continue
 
             # Post a ping request to the Qt event loop
             try:
@@ -143,7 +149,6 @@ class HangWatchdog:
             except Exception:
                 pass
 
-            now = time.time()
             elapsed_since_pong = now - self._last_heartbeat_time
 
             # Check each threshold (5s, 15s, 30s, 60s)
@@ -218,6 +223,30 @@ class HangWatchdog:
 
         leaf_file_short = Path(blocked_file).name if blocked_file != "Unknown" else "Unknown"
         app_file_short = Path(app_file).name if app_file else ""
+
+        # Suppress freeze reporting for expected startup migrations, schema DDLs, and font checks
+        ignored_startup_files = (
+            "setup_database.py",
+            "migrate.py",
+            "tenant_reset.py",
+            "apply_performance_indexes.py",
+            "verify_and_heal_fonts",
+            "updater.py",
+            "sp_msforeachtable",
+            "nocheck constraint",
+            "_add_column_if_missing",
+            "information_schema",
+            "col_exists",
+            "db.py",
+            "pyodbc",
+        )
+        combined_path = f"{blocked_file} {app_file} {exact_code_line} {app_code_line} {stack_text}".lower()
+        if any(ig in combined_path for ig in ignored_startup_files) or current_page.lower() in ("startup", "loading"):
+            _logger.debug(
+                f"[Watchdog] Suppressed startup migration freeze event at "
+                f"{app_file_short or leaf_file_short}:{app_lineno or blocked_lineno} ({elapsed:.1f}s)"
+            )
+            return
 
         # Construct high-visibility title with the exact code line
         if app_file and app_file_short != leaf_file_short:
@@ -298,3 +327,17 @@ def start_hang_watchdog(check_interval_seconds: float = 1.0) -> HangWatchdog:
         _watchdog_instance = HangWatchdog(check_interval_seconds=check_interval_seconds)
         _watchdog_instance.start()
     return _watchdog_instance
+
+
+def pause_hang_watchdog():
+    """Pause the watchdog temporarily during intentional startup loading."""
+    global _watchdog_instance
+    if _watchdog_instance is not None:
+        _watchdog_instance.pause()
+
+
+def resume_hang_watchdog():
+    """Resume the watchdog after startup loading finishes."""
+    global _watchdog_instance
+    if _watchdog_instance is not None:
+        _watchdog_instance.resume()

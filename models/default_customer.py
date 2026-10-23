@@ -92,13 +92,27 @@ def create_default_customer():
             try:
                 defs = get_defaults() or {}
                 target_pl_id = defs.get("default_price_list_id")
-                if not target_pl_id:
+                valid_pl_id = None
+                if target_pl_id:
+                    cursor.execute("SELECT id FROM [dbo].[price_lists] WHERE id = ?", (target_pl_id,))
+                    r_pl = cursor.fetchone()
+                    if r_pl:
+                        valid_pl_id = r_pl[0]
+
+                if not valid_pl_id:
                     cursor.execute("SELECT id FROM [dbo].[price_lists] WHERE LOWER(name) = 'retail'")
                     r_pl = cursor.fetchone()
                     if r_pl:
-                        target_pl_id = r_pl[0]
-                if target_pl_id:
-                    tid = int(target_pl_id)
+                        valid_pl_id = r_pl[0]
+
+                if not valid_pl_id:
+                    cursor.execute("SELECT TOP 1 id FROM [dbo].[price_lists] ORDER BY id ASC")
+                    r_pl = cursor.fetchone()
+                    if r_pl:
+                        valid_pl_id = r_pl[0]
+
+                if valid_pl_id:
+                    tid = int(valid_pl_id)
                     cursor.execute("UPDATE [dbo].[customers] SET default_price_list_id = ? WHERE id = ? AND (default_price_list_id IS NULL OR default_price_list_id != ?)", (tid, customer_id, tid))
                     conn.commit()
             except Exception as pl_up_err:

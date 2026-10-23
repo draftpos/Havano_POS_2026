@@ -53,10 +53,9 @@ _poller_thread: _threading.Thread | None = None
 # ── Path helpers ──────────────────────────────────────────────────────────────
 
 def _app_data_dir() -> Path:
-    """Returns the app_data directory, same logic as credentials.py."""
-    if hasattr(sys, "_MEIPASS"):
-        return Path(sys.executable).parent / "app_data"
-    return Path(os.path.abspath(".")) / "app_data"
+    """Returns the app_data directory via the canonical helper."""
+    from database.db import get_app_data_dir
+    return get_app_data_dir()
 
 
 def _cache_path() -> Path:
@@ -190,19 +189,35 @@ def fetch_and_cache(timeout: int = 15) -> list[dict]:
     _mem_cache = mops
 
     # ── Sync to local modes_of_payment DB table (no schema changes) ──────────
-    if mops:
-        _sync_to_db(mops)
+    raw_currencies = []
+    if isinstance(raw, dict):
+        raw_user = raw.get("user")
+        if isinstance(raw_user, dict) and raw_user.get("currencies"):
+            raw_currencies = raw_user.get("currencies") or []
+        elif raw.get("currencies"):
+            raw_currencies = raw.get("currencies") or []
+        elif isinstance(message, dict) and message.get("currencies"):
+            raw_currencies = message.get("currencies") or []
+
+    if mops or raw_currencies:
+        _sync_to_db(mops, currencies=raw_currencies)
 
     return mops
 
 
-def _sync_to_db(mops: list[dict]) -> None:
+def sync_db_with_mops(mops: list[dict], currencies: list[dict] | None = None) -> None:
+    """Public wrapper to trigger MOP + FX rate sync to DB."""
+    _sync_to_db(mops, currencies=currencies)
+
+
+def _sync_to_db(mops: list[dict], currencies: list[dict] | None = None) -> None:
     """
     Upserts every MOP from the API into modes_of_payment (synced_from_api=1),
     then DELETEs any row that was previously API-synced but is no longer
     present in the latest payload.
 
-    Uses only EXISTING columns — zero DB schema changes.
+    Writes exchange rates prioritizing official rates from the 'currencies' list
+    over payment-method-specific rate markups.
     """
     try:
         from database.db import get_connection
@@ -217,9 +232,9 @@ def _sync_to_db(mops: list[dict]) -> None:
 
     # ── 1. UPSERT each MOP from the API ──────────────────────────────────────
     for m in mops:
-        name     = m["name"]
-        currency = m["currency"]
-        mop_type = m["type"]
+        name     = m.get("name")
+        currency = m.get("currency")
+        mop_type = m.get("type", "Cash")
         if not name:
             continue
         try:
@@ -261,9 +276,8 @@ def _sync_to_db(mops: list[dict]) -> None:
             log.warning("[saas_mop_rates] Upsert failed for '%s': %s", name, e)
 
     # ── 2. Write exchange rates into exchange_rates table ─────────────────────
-    # The payment dialog calls models.exchange_rate.get_rate(currency, base_ccy).
-    # exchange_rates was empty — populate it from the API payload so the dialog
-    # gets the correct rate (e.g. ZIG→USD = 1/35 = 0.02857).
+    # Prioritizes master currency rates (from 'currencies' array in login payload)
+    # over payment-method specific exchange rates.
     base_ccy = "USD"
     try:
         from models.company_defaults import get_defaults
@@ -273,29 +287,45 @@ def _sync_to_db(mops: list[dict]) -> None:
         pass
 
     rates_written: list[str] = []
+    currencies_written_set: set[str] = set()
     try:
         from models.exchange_rate import upsert_rate
         from datetime import date
         today = date.today().isoformat()
 
+        # A) Process official rates from 'currencies' list first
+        if currencies:
+            for c in currencies:
+                if not isinstance(c, dict):
+                    continue
+                currency = str(c.get("name") or c.get("currency") or c.get("symbol") or "").strip().upper()
+                exchange_rate = float(c.get("exchange_rate") or c.get("rate") or 0.0)
+                if not currency or currency == base_ccy or exchange_rate <= 0:
+                    continue
+
+                rate_foreign_to_base = round(1.0 / exchange_rate, 10)
+                upsert_rate(currency, base_ccy, rate_foreign_to_base, today)
+                upsert_rate(base_ccy, currency, exchange_rate, today)
+                currencies_written_set.add(currency)
+                rates_written.append(f"{currency}->{base_ccy}={rate_foreign_to_base:.6f} (from currency master: {exchange_rate})")
+
+        # B) Process MOP rates for any currencies not already set by currency master
         for m in mops:
-            currency     = (m.get("currency") or "").strip().upper()
-            exchange_rate = float(m.get("exchange_rate") or 1.0)
+            currency = (m.get("currency") or "").strip().upper()
+            if currency in currencies_written_set:
+                # Official currency rate was already set from master currencies list!
+                continue
+            exchange_rate = float(m.get("exchange_rate") or m.get("rate") or 1.0)
             if not currency or currency == base_ccy or exchange_rate <= 0:
                 continue
 
-            # SaaS rate is "how many base units per 1 foreign unit" (e.g. ZIG→USD = 1/35)
-            # exchange_rate from API = 35 means "1 USD = 35 ZIG"
-            # So: ZIG→USD = 1/35, USD→ZIG = 35
             rate_foreign_to_base = round(1.0 / exchange_rate, 10)
-
-            # foreign → base  (what payment_dialog uses)
             upsert_rate(currency, base_ccy, rate_foreign_to_base, today)
-            # base → foreign  (useful for display / inverse lookups)
             upsert_rate(base_ccy, currency, exchange_rate, today)
+            currencies_written_set.add(currency)
 
             rates_written.append(f"{currency}->{base_ccy}={rate_foreign_to_base:.6f}")
-            log.debug("[saas_mop_rates] Exchange rate: %s→%s=%.6f (inv=%.2f)",
+            log.debug("[saas_mop_rates] Exchange rate from MOP: %s→%s=%.6f (inv=%.2f)",
                       currency, base_ccy, rate_foreign_to_base, exchange_rate)
     except Exception as e:
         log.warning("[saas_mop_rates] Exchange rate upsert error: %s", e)
