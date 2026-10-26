@@ -1,5 +1,28 @@
 # Change History
 
+## [2026-10-26 10:15:00] - Fix: Resolve Startup NameError '_load_settings' and Premature DB Queries on Unconfigured Terminals
+
+### Problem
+When the application started up without an existing or valid database connection (e.g. unconfigured terminal, fresh installation, or unreachable database server), two cascading errors occurred:
+1. `main.py` attempted to synchronize system mode via `get_system_mode()` at line 591 before the connection check or setup loop had even run, causing premature DB connection attempts against an unconfigured database and logging `ERROR [credentials] DB read FAILED - returning empty credentials (no RAM fallback): Database configuration is missing. Cannot fall back to a default database.`
+2. In the setup loop at line 636 of `main.py`, the code attempted to call `_load_settings()` to inspect the configured database name, but `_load_settings` had not been imported from `database.db`. This threw an uncaught `NameError: name '_load_settings' is not defined`, crashing the application immediately before the user could open `SqlSettingsDialog` to configure or retry database settings. Furthermore, if `configured_db` was blank/unconfigured, the user would have been prompted with a confusing sleep-retry dialog for an empty database name.
+
+### Fix
+1. **Import `_load_settings` in `main.py`**:
+   - Added `_load_settings` to the imports from `database.db` (line 35).
+2. **Robust Connection Setup Flow (`main.py`)**:
+   - In the connection check loop, checked `if not configured_db:` and immediately launched `SqlSettingsDialog()` instead of popping up an unreachable retry dialog with an empty database name.
+   - Moved `get_system_mode()` execution to after the database connection setup loop and schema migrations have completed, guaranteeing that database synchronization only occurs once the database connection is verified and valid.
+3. **Graceful Handling of Unconfigured DB in `services/credentials.py`**:
+   - In `get_all_credentials()`, demoted missing database configuration from an `ERROR` to a `warning` ("DB read skipped - database not yet configured").
+   - In `get_system_mode()`, replaced redundant call to `get_all_credentials().get("system_mode", "saas")` with `"saas"`, preventing a second duplicate failing DB query when the database is unreachable or unconfigured.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `main.py` | 35, 630–675 | Imported `_load_settings`, added empty db check in setup loop, and deferred system mode sync until after DB setup |
+| `services/credentials.py` | 204–207, 290–294 | Log warning instead of error when DB unconfigured, and default system mode to "saas" without redundant failing query |
+
 ## [2026-10-23 11:35:00] - CI/CD Automation: GitHub Actions Automated Build & Nextcloud Deployment Pipeline
 
 ### Problem

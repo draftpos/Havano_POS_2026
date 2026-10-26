@@ -32,14 +32,14 @@ from PySide6.QtCore import Qt, QThread, Signal, QTimer
 # from views.main_window import MainWindow # Lazy loaded
 # from views.login_dialog import LoginDialog # Lazy loaded
 from views.dialogs.sql_settings_dialog import SqlSettingsDialog
-from database.db import is_connection_valid, get_connection
+from database.db import is_connection_valid, get_connection, _load_settings
 
 # ─────────────────────────────────────────────────────────────
 #  APP VERSION — update this each release to match version.json
 #  on Nextcloud. Example: "2.0.0" → "2.1.0" for next release.
 # ────────────────────────────────────────────────────────s────
 
-APP_VERSION = "2.0.8.77"
+APP_VERSION = "2.0.8.78"
 Debug = False
 
 _lock_file = None
@@ -587,11 +587,6 @@ if __name__ == "__main__":
     settings_file = app_data_dir / "sql_settings.json"
     import json
 
-    # ── System Mode Initialization & Database-First Synchronization ────────
-    from services.credentials import get_system_mode
-    _saved_mode = get_system_mode()
-    print(f"[startup] System mode confirmed: {_saved_mode}")
-
     initialization_done = False
     needs_setup = False
 
@@ -634,7 +629,12 @@ if __name__ == "__main__":
             if not is_connection_valid():
                 from PySide6.QtWidgets import QMessageBox
                 cfg = _load_settings()
-                configured_db = cfg.get("database", "Unknown")
+                configured_db = str(cfg.get("database") or "").strip()
+                if not configured_db:
+                    dlg = SqlSettingsDialog()
+                    if dlg.exec() != QDialog.Accepted:
+                        sys.exit(0)
+                    continue
                 resp = QMessageBox.question(
                     None,
                     "Database Server Unreachable",
@@ -664,6 +664,11 @@ if __name__ == "__main__":
             _restaurant_migrate()
         except Exception as e:
             print(f"[startup] Failed to migrate models after setup: {e}")
+
+    # ── System Mode Initialization & Database-First Synchronization ────────
+    from services.credentials import get_system_mode
+    _saved_mode = get_system_mode()
+    print(f"[startup] System mode confirmed: {_saved_mode}")
 
     # 5. Site Config UI Check (Main Thread)
     try:

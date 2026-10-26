@@ -202,7 +202,10 @@ def get_all_credentials() -> dict:
         log.warning("[credentials] company_defaults row has no api_key - credentials not yet configured.")
         return {}
     except Exception as e:
-        log.error("[credentials] DB read FAILED - returning empty credentials (no RAM fallback): %s", e)
+        if "Database configuration is missing" in str(e):
+            log.warning("[credentials] DB read skipped - database not yet configured: %s", e)
+        else:
+            log.error("[credentials] DB read FAILED - returning empty credentials (no RAM fallback): %s", e)
         return {}
 
 
@@ -289,7 +292,7 @@ def get_system_mode() -> str:
     except Exception:
         pass
 
-    return get_all_credentials().get("system_mode", "saas")
+    return "saas"
 
 
 def get_odoo_token() -> str:
