@@ -282,6 +282,106 @@ class ZimraApiService:
 
 # ---------------------------------------------------------------------------
 # Module-level helper - keeps callers working unchanged
+
+    def open_fiscal_day(self, settings) -> ApiResult:
+        """
+        Explicitly open the fiscal day on Havano Cloud / FDMS.
+        """
+        session = requests.Session()
+        ok, csrf_token = self._fetch_token(settings, session)
+        if not ok:
+            return ApiResult.error(csrf_token)
+
+        url = f"{settings.base_url}/api/method/havanozimracloud.api.openday"
+        headers = {
+            "X-Frappe-CSRF-Token": csrf_token,
+            "Authorization": f"token {settings.api_key}:{settings.api_secret}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        data = {
+            "device_sn": str(settings.device_sn),
+        }
+        try:
+            resp = session.post(url, data=data, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                resp_data = resp.json()
+                msg = resp_data.get("message")
+                if isinstance(msg, dict):
+                    if msg.get("status") == "error" or str(resp_data.get("Code", "")) == "0":
+                        return ApiResult.error(msg.get("message") or msg.get("error") or "Failed to open fiscal day")
+                    return ApiResult.success(msg)
+                elif isinstance(msg, str) and "error" in msg.lower():
+                    return ApiResult.error(msg)
+                return ApiResult.success(resp_data)
+            return ApiResult.error(f"HTTP {resp.status_code}: {resp.text}")
+        except Exception as e:
+            return ApiResult.error(f"Open Fiscal Day error: {e}")
+
+    def close_fiscal_day(self, settings) -> ApiResult:
+        """
+        Explicitly close the fiscal day and generate Z-Report.
+        """
+        session = requests.Session()
+        ok, csrf_token = self._fetch_token(settings, session)
+        if not ok:
+            return ApiResult.error(csrf_token)
+
+        url = f"{settings.base_url}/api/method/havanozimracloud.api.closeday"
+        headers = {
+            "X-Frappe-CSRF-Token": csrf_token,
+            "Authorization": f"token {settings.api_key}:{settings.api_secret}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        data = {
+            "device_sn": str(settings.device_sn),
+        }
+        try:
+            resp = session.post(url, data=data, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                resp_data = resp.json()
+                msg = resp_data.get("message")
+                if isinstance(msg, dict):
+                    if msg.get("status") == "error" or str(resp_data.get("Code", "")) == "0":
+                        return ApiResult.error(msg.get("message") or msg.get("error") or "Failed to close fiscal day")
+                    return ApiResult.success(msg)
+                elif isinstance(msg, str) and "error" in msg.lower():
+                    return ApiResult.error(msg)
+                return ApiResult.success(resp_data)
+            return ApiResult.error(f"HTTP {resp.status_code}: {resp.text}")
+        except Exception as e:
+            return ApiResult.error(f"Close Fiscal Day error: {e}")
+
+    def get_device_status(self, settings) -> ApiResult:
+        """
+        Query current device and fiscal day status.
+        """
+        session = requests.Session()
+        ok, csrf_token = self._fetch_token(settings, session)
+        if not ok:
+            return ApiResult.error(csrf_token)
+
+        url = f"{settings.base_url}/api/method/havanozimracloud.api.getdaystatus"
+        headers = {
+            "X-Frappe-CSRF-Token": csrf_token,
+            "Authorization": f"token {settings.api_key}:{settings.api_secret}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        data = {
+            "device_sn": str(settings.device_sn),
+        }
+        try:
+            resp = session.post(url, data=data, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                resp_data = resp.json()
+                msg = resp_data.get("message")
+                if isinstance(msg, dict):
+                    return ApiResult.success(msg)
+                return ApiResult.success(resp_data)
+            return ApiResult.error(f"HTTP {resp.status_code}: {resp.text}")
+        except Exception as e:
+            return ApiResult.error(f"Get Status error: {e}")
+
+
 # ---------------------------------------------------------------------------
 _zimra_service: Optional["ZimraApiService"] = None
 

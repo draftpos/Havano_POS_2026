@@ -37,6 +37,6 @@
     "showSalesList": false,
     "showBadgeQ": true,
     "showBadgeZ": true,
-    "systemModeOverride": "offline",
+    "systemModeOverride": "saas",
     "capitalizeItemNames": true
 }

@@ -15,14 +15,18 @@ class AxisOperationThread(QThread):
 
     def run(self):
         try:
-            from services.axis_api_service import get_axis_api_service
             repo = FiscalSettingsRepository()
             settings = repo.get_settings()
-            if not settings or not settings.enabled or settings.provider != "axis":
-                self.finished_signal.emit(False, "Axis API is not configured or enabled.")
+            if not settings or not settings.enabled or settings.provider not in ("axis", "frappe", "havano_zimra"):
+                self.finished_signal.emit(False, "Fiscal API is not configured or enabled.")
                 return
 
-            service = get_axis_api_service()
+            if settings.provider in ("frappe", "havano_zimra"):
+                from services.zimra_api_service import get_zimra_service
+                service = get_zimra_service()
+            else:
+                from services.axis_api_service import get_axis_api_service
+                service = get_axis_api_service()
             
             if self.action == "open":
                 result = service.open_fiscal_day(settings)
@@ -40,32 +44,51 @@ class AxisOperationThread(QThread):
                 status_res = service.get_device_status(settings)
                 if status_res.is_success:
                     data = status_res.data
-                    # Axis API can return the payload inside a "Data" or "data" object
                     if "Data" in data and isinstance(data["Data"], dict):
                         data = data["Data"]
                     elif "data" in data and isinstance(data["data"], dict):
                         data = data["data"]
+                    elif "message" in data and isinstance(data["message"], dict):
+                        data = data["message"]
                     
-                    # Safely extract the values, accounting for both PascalCase and camelCase
-                    fiscal_day = data.get("FiscalDayNo") or data.get("fiscalDayNo") or data.get("fiscalDay") or "Unknown"
-                    day_status = data.get("FiscalDayStatus") or data.get("fiscalDayStatus") or data.get("status") or "Unknown"
+                    fiscal_day = (
+                        data.get("FiscalDayNo") or data.get("fiscalDayNo")
+                        or data.get("FiscalDay") or data.get("fiscalDay") or "Unknown"
+                    )
+                    day_status = (
+                        data.get("FiscalDayStatus") or data.get("fiscalDayStatus")
+                        or data.get("status") or "Unknown"
+                    )
                     
                     self.finished_signal.emit(True, f"Device Online. Fiscal Day: {fiscal_day} ({day_status})")
                 else:
                     self.finished_signal.emit(False, f"Device Offline: {status_res.error}")
         except Exception as e:
-            self.finished_signal.emit(False, f"Exception during Axis operation: {str(e)}")
+            self.finished_signal.emit(False, f"Exception during fiscal operation: {str(e)}")
 
 class AxisFiscalDialog(QDialog):
     """
-    A smart dialog to handle Axis fiscal day operations (Open/Close shift).
+    A smart dialog to handle fiscal day operations (Open/Close shift) for Havano and Axis devices.
     """
     def __init__(self, parent=None, initial_action=None):
         """
         initial_action can be "open", "close", or None (for options menu view).
         """
         super().__init__(parent)
-        self.setWindowTitle("Axis Fiscalization")
+        
+        provider_name = "Fiscal"
+        try:
+            repo = FiscalSettingsRepository()
+            s = repo.get_settings()
+            if s and s.provider in ("frappe", "havano_zimra"):
+                provider_name = "Havano"
+            elif s and s.provider == "axis":
+                provider_name = "Axis"
+        except Exception:
+            pass
+
+        self._provider_name = provider_name
+        self.setWindowTitle(f"{provider_name} Fiscalization")
         self.setMinimumWidth(600)
         self.setMinimumHeight(250)
         self.setModal(True)
@@ -84,12 +107,13 @@ class AxisFiscalDialog(QDialog):
         # Title / Info
         self.info_label = QLabel()
         self.info_label.setWordWrap(True)
+        pname = self._provider_name
         if self.initial_action == "open":
-            self.info_label.setText("Shift has started.\n\nPlease open the fiscal day on the Axis device to begin recording fiscal sales.")
+            self.info_label.setText(f"Shift has started.\n\nPlease open the fiscal day on the {pname} device to begin recording fiscal sales.")
         elif self.initial_action == "close":
-            self.info_label.setText("Shift has closed.\n\nPlease close the fiscal day on the Axis device to finalize the Z-Report.")
+            self.info_label.setText(f"Shift has closed.\n\nPlease close the fiscal day on the {pname} device to finalize the Z-Report.")
         else:
-            self.info_label.setText("Axis Fiscal Operations\n\nManage the virtual device's fiscal day.")
+            self.info_label.setText(f"{pname} Fiscal Operations\n\nManage the device's fiscal day.")
         
         self.info_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1a5fb4;")
         self.info_label.setAlignment(Qt.AlignCenter)
@@ -111,7 +135,7 @@ class AxisFiscalDialog(QDialog):
         self.btn_open.setStyleSheet("background-color: #10b981; color: white; font-weight: bold; border-radius: 5px;")
         self.btn_open.clicked.connect(lambda: self._perform_action("open"))
 
-        self.btn_close = QPushButton("Close Fiscal Day")
+        self.btn_close = QPushButton("Close Fiscal Day (Z-Report)")
         self.btn_close.setFixedHeight(40)
         self.btn_close.setStyleSheet("background-color: #b02020; color: white; font-weight: bold; border-radius: 5px;")
         self.btn_close.clicked.connect(lambda: self._perform_action("close"))

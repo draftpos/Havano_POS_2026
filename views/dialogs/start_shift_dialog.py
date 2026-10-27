@@ -192,7 +192,7 @@ class StartShiftDialog(QDialog):
                     from models.fiscal_settings import FiscalSettingsRepository
                     f_repo = FiscalSettingsRepository().get_settings()
                     if f_repo and f_repo.enabled:
-                        if f_repo.provider == "axis":
+                        if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                             from views.dialogs.axis_fiscal_dialog import AxisFiscalDialog
                             from PySide6.QtCore import QTimer
                             QTimer.singleShot(300, lambda: AxisFiscalDialog(self.parent_win, initial_action="open").exec())

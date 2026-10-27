@@ -50,19 +50,36 @@ def _apply_prices(products_list: list[dict], price_list_name: str = None) -> lis
         from database.db import get_connection
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT part_no, uom, price FROM item_prices WITH (NOLOCK) WHERE price_list = ? AND price_type = 'selling'", (target_pl,))
-        price_map = {(r[0], r[1]): float(r[2]) for r in cur.fetchall()}
-        if target_pl != "Standard Selling":
-            cur.execute("SELECT part_no, uom, price FROM item_prices WITH (NOLOCK) WHERE price_list = 'Standard Selling' AND price_type = 'selling'")
-            fallback_map = {(r[0], r[1]): float(r[2]) for r in cur.fetchall()}
-            for k, v in fallback_map.items():
-                if k not in price_map:
-                    price_map[k] = v
+        cur.execute("SELECT part_no, uom, price FROM item_prices WITH (NOLOCK) WHERE LOWER(price_list) = LOWER(?) AND price_type = 'selling'", (target_pl,))
+        price_map = {}
+        part_only_map = {}
+        for r in cur.fetchall():
+            p_no = str(r[0] or "").strip().upper()
+            u_name = str(r[1] or "").strip().upper()
+            pr = float(r[2] or 0)
+            price_map[(p_no, u_name)] = pr
+            if p_no not in part_only_map and pr > 0:
+                part_only_map[p_no] = pr
+
+        if target_pl.lower() != "standard selling":
+            cur.execute("SELECT part_no, uom, price FROM item_prices WITH (NOLOCK) WHERE LOWER(price_list) = 'standard selling' AND price_type = 'selling'")
+            for r in cur.fetchall():
+                p_no = str(r[0] or "").strip().upper()
+                u_name = str(r[1] or "").strip().upper()
+                pr = float(r[2] or 0)
+                if (p_no, u_name) not in price_map:
+                    price_map[(p_no, u_name)] = pr
+                if p_no not in part_only_map and pr > 0:
+                    part_only_map[p_no] = pr
         conn.close()
+
         for p in products_list:
-            key = (p.get("part_no"), p.get("uom"))
-            if key in price_map and price_map[key] > 0:
-                p["price"] = price_map[key]
+            p_no = str(p.get("part_no") or "").strip().upper()
+            u_name = str(p.get("uom") or "").strip().upper()
+            if (p_no, u_name) in price_map and price_map[(p_no, u_name)] > 0:
+                p["price"] = price_map[(p_no, u_name)]
+            elif p_no in part_only_map and part_only_map[p_no] > 0:
+                p["price"] = part_only_map[p_no]
     except Exception as e:
         print(f"[models.product] Error applying price list {target_pl}: {e}")
     return products_list

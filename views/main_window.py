@@ -2611,7 +2611,7 @@ class OptionsDialog(QDialog):
             repo = FiscalSettingsRepository()
             settings = repo.get_settings()
             if settings and settings.enabled:
-                if settings.provider == "axis":
+                if settings.provider in ("axis", "frappe", "havano_zimra"):
                     self._axis_btn = _row("Axis Fiscal Operations", self._do_axis_fiscal, color="#10b981", hov="#059669")
                     bl.addWidget(self._axis_btn)
                 elif settings.provider == "revmax":
@@ -2705,6 +2705,7 @@ class OptionsDialog(QDialog):
                             "total_api": res.get("products_synced", 0),
                             "errors":   0,
                         })
+                    else:
                         # Frappe/SaaS mode - original path
                         from services.credentials import get_credentials, has_credentials
                         if not has_credentials():
@@ -6466,7 +6467,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     options_menu_btn.addItem("Axis Fiscal Operations", self._do_nav_axis_fiscal)
                 elif f_repo.provider == "revmax":
                     options_menu_btn.addItem("Revmax Fiscal Operations", self._do_nav_revmax_fiscal)
@@ -8309,7 +8310,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     options_menu_btn.addItem("Axis Fiscal Operations", self._do_nav_axis_fiscal)
                 elif f_repo.provider == "revmax":
                     options_menu_btn.addItem("Revmax Fiscal Operations", self._do_nav_revmax_fiscal)
@@ -10153,10 +10154,27 @@ class POSView(QWidget):
             cur  = conn.cursor()
             cur.execute("""
                 SELECT uom, price FROM item_prices
-                WHERE  part_no = ? AND price_list = ? AND price_type = 'selling'
+                WHERE  part_no = ? AND LOWER(price_list) = LOWER(?) AND price_type = 'selling'
                 ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
             """, (part_no, price_list))
             rows = cur.fetchall()
+
+            if not rows and str(price_list).strip().lower() != "standard selling":
+                cur.execute("""
+                    SELECT uom, price FROM item_prices
+                    WHERE  part_no = ? AND LOWER(price_list) = 'standard selling' AND price_type = 'selling'
+                    ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
+                """, (part_no,))
+                rows = cur.fetchall()
+
+            if not rows:
+                cur.execute("""
+                    SELECT uom, price FROM products WITH (NOLOCK)
+                    WHERE  part_no = ?
+                """, (part_no,))
+                p_row = cur.fetchone()
+                if p_row and p_row[1] is not None:
+                    rows = [(p_row[0] or "Nos", p_row[1])]
 
             result = [{"uom": r[0], "price": float(r[1] or 0)} for r in rows]
             seen_uoms = {r["uom"].strip().upper() for r in result}
@@ -10239,12 +10257,16 @@ class POSView(QWidget):
                 print(f"[BundlePrice] Error resolving bundle price: {e}")
 
         if not rows:
-            self._warn_popup(
-                "Item not priced",
-                f"<b>{name}</b> has no price in the <b>{price_list}</b> "
-                f"price list. Add a rate on the server and re-sync.",
-            )
-            return None
+            prod_price = float(product.get("price") or 0.0)
+            if prod_price > 0:
+                rows = [{"uom": base_uom, "price": prod_price}]
+            else:
+                self._warn_popup(
+                    "Item not priced",
+                    f"<b>{name}</b> has no price in the <b>{price_list}</b> "
+                    f"price list. Add a rate on the server and re-sync.",
+                )
+                return None
 
         # Pre-selected barcode_uom (from scanned barcode) bypasses UOM picker
         if barcode_uom:
@@ -11747,7 +11769,7 @@ class POSView(QWidget):
                 from models.fiscal_settings import FiscalSettingsRepository
                 f_repo = FiscalSettingsRepository().get_settings()
                 if f_repo and f_repo.enabled:
-                    if f_repo.provider == "axis":
+                    if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                         from views.dialogs.axis_fiscal_dialog import AxisFiscalDialog
                         AxisFiscalDialog(self, initial_action="close").exec()
                     elif f_repo.provider == "revmax":
@@ -16566,7 +16588,7 @@ class OptionsDialog(QDialog):
             repo = FiscalSettingsRepository()
             settings = repo.get_settings()
             if settings and settings.enabled:
-                if settings.provider == "axis":
+                if settings.provider in ("axis", "frappe", "havano_zimra"):
                     self._axis_btn = _row("Axis Fiscal Operations", self._do_axis_fiscal, color="#10b981", hov="#059669")
                     bl.addWidget(self._axis_btn)
                 elif settings.provider == "revmax":
@@ -16667,8 +16689,8 @@ class OptionsDialog(QDialog):
                             self.failed.emit("No credentials - log in once so the sync can authenticate.")
                             return
                         key, secret = get_credentials()
-                        from services.product_sync_windows_service import sync_products_smart
-                        res = sync_products_smart(key, secret) or {}
+                        from services.sync_all import sync_everything
+                        res = sync_everything() or {}
                         self.done.emit(res)
                 except Exception as e:
                     self.failed.emit(str(e))
@@ -20528,7 +20550,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     options_menu_btn.addItem("Axis Fiscal Operations", self._do_nav_axis_fiscal)
                 elif f_repo.provider == "revmax":
                     options_menu_btn.addItem("Revmax Fiscal Operations", self._do_nav_revmax_fiscal)
@@ -22297,7 +22319,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     options_menu_btn.addItem("Axis Fiscal Operations", self._do_nav_axis_fiscal)
                 elif f_repo.provider == "revmax":
                     options_menu_btn.addItem("Revmax Fiscal Operations", self._do_nav_revmax_fiscal)
@@ -24118,10 +24140,27 @@ class POSView(QWidget):
             cur  = conn.cursor()
             cur.execute("""
                 SELECT uom, price FROM item_prices
-                WHERE  part_no = ? AND price_list = ? AND price_type = 'selling'
+                WHERE  part_no = ? AND LOWER(price_list) = LOWER(?) AND price_type = 'selling'
                 ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
             """, (part_no, price_list))
             rows = cur.fetchall()
+
+            if not rows and str(price_list).strip().lower() != "standard selling":
+                cur.execute("""
+                    SELECT uom, price FROM item_prices
+                    WHERE  part_no = ? AND LOWER(price_list) = 'standard selling' AND price_type = 'selling'
+                    ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
+                """, (part_no,))
+                rows = cur.fetchall()
+
+            if not rows:
+                cur.execute("""
+                    SELECT uom, price FROM products WITH (NOLOCK)
+                    WHERE  part_no = ?
+                """, (part_no,))
+                p_row = cur.fetchone()
+                if p_row and p_row[1] is not None:
+                    rows = [(p_row[0] or "Nos", p_row[1])]
 
             result = [{"uom": r[0], "price": float(r[1] or 0)} for r in rows]
             seen_uoms = {r["uom"].strip().upper() for r in result}
@@ -24203,8 +24242,8 @@ class POSView(QWidget):
                 print(f"[BundlePrice] Error resolving bundle price: {e}")
 
         if not rows:
-            # Fallback for unpriced items: allow them at 0 price
-            rows = [{"uom": base_uom, "price": 0.0}]
+            prod_price = float(product.get("price") or 0.0)
+            rows = [{"uom": base_uom, "price": prod_price}]
 
         # Pre-selected barcode_uom (from scanned barcode) bypasses UOM picker
         if barcode_uom:
@@ -25734,7 +25773,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     from views.dialogs.axis_fiscal_dialog import AxisFiscalDialog
                     AxisFiscalDialog(self, initial_action="close").exec()
                 elif f_repo.provider == "revmax":

@@ -416,7 +416,7 @@ class DayShiftDialog(BlurredDialog):
             from models.fiscal_settings import FiscalSettingsRepository
             repo = FiscalSettingsRepository()
             settings = repo.get_settings()
-            if settings and settings.enabled and settings.provider == "axis":
+            if settings and settings.enabled and settings.provider in ("axis", "frappe", "havano_zimra"):
                 from views.dialogs.axis_fiscal_dialog import AxisFiscalDialog
                 # Run this after a tiny delay to ensure dialog rendering finishes nicely
                 QTimer.singleShot(500, lambda: AxisFiscalDialog(self, initial_action="open").exec())

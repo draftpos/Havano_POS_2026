@@ -273,24 +273,69 @@ def _extract_cost_price(prices: list, stock_uom: str = "Nos") -> float:
     except (TypeError, ValueError):
         return 0.0
 
-def _extract_selling_price(prices: list, stock_uom: str = "Nos") -> float:
+def _extract_selling_price(prices: list, stock_uom: str = "Nos", active_price_list: str = "") -> float:
     """
     Find the best selling price from the prices array.
     Priority:
-      1. Standard Selling for the stock UOM (e.g. Nos, Kg)
-      2. Any Standard Selling price
-      3. Any selling type price
+      1. Active price list matching stock UOM
+      2. Active price list (any UOM)
+      3. Standard Selling matching stock UOM
+      4. Any Standard Selling price
+      5. Any selling price matching stock UOM
+      6. Any selling type price
     """
     selling = [p for p in (prices or []) if str(p.get("type", "selling")).lower() == "selling"]
     if not selling:
         return 0.0
+
+    target_pl = active_price_list.strip().lower() if active_price_list else ""
+    target_uom = stock_uom.strip().lower()
+
+    if target_pl:
+        for p in selling:
+            pl_name = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip().lower()
+            u_name = str(p.get("uom") or "").strip().lower()
+            if pl_name == target_pl and u_name == target_uom:
+                try:
+                    return float(p.get("price") or 0)
+                except (TypeError, ValueError):
+                    pass
+        for p in selling:
+            pl_name = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip().lower()
+            if pl_name == target_pl:
+                try:
+                    return float(p.get("price") or 0)
+                except (TypeError, ValueError):
+                    pass
+
     for p in selling:
-        if str(p.get("uom") or "").strip().lower() == stock_uom.strip().lower():
-            return float(p.get("price") or 0)
+        pl_name = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip().lower()
+        u_name = str(p.get("uom") or "").strip().lower()
+        if "standard selling" in pl_name and u_name == target_uom:
+            try:
+                return float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                pass
+
     for p in selling:
-        if "standard selling" in str(p.get("priceName") or "").lower():
-            return float(p.get("price") or 0)
-    return float(selling[0].get("price") or 0)
+        pl_name = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip().lower()
+        if "standard selling" in pl_name:
+            try:
+                return float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                pass
+
+    for p in selling:
+        if str(p.get("uom") or "").strip().lower() == target_uom:
+            try:
+                return float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                pass
+
+    try:
+        return float(selling[0].get("price") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 def _get_company_warehouse() -> str:
     """
@@ -420,7 +465,7 @@ def _extract_price_list_rows(prices: list) -> list[dict]:
     seen: set[tuple[str, str, str]] = set()
 
     for p in prices or []:
-        price_list = str(p.get("priceName") or "").strip()
+        price_list = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip()
         if not price_list:
             continue
         uom        = str(p.get("uom")  or "nos").strip() or "nos"
@@ -471,7 +516,7 @@ def _extract_variant_info(p: dict) -> dict:
     }
 
 
-def _parse_product(p: dict, active_store: str = "") -> dict | None:
+def _parse_product(p: dict, active_store: str = "", active_price_list: str = "") -> dict | None:
     """
     Maps the real API product object to a clean local dict including tax info.
     Returns None if the product should be skipped or does not belong to active store.
@@ -485,7 +530,7 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
     # Synchronize all catalogue items; do not skip products if warehouse is not matched
     # (Stock extraction already resolves the specific warehouse stock appropriately)
     stock_uom = str((p.get("uom") or {}).get("stock_uom") or "Nos").strip()
-    price     = _extract_selling_price(p.get("prices", []), stock_uom)
+    price     = _extract_selling_price(p.get("prices", []), stock_uom, active_price_list=active_price_list)
 
     _ROOT_GROUPS = {"all item groups", "all"}
     raw_group = str(p.get("groupname") or "").strip()
@@ -567,6 +612,7 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
         "track_stock":         1 if str(p.get("maintainstock") if p.get("maintainstock") is not None else p.get("is_stock_item") if p.get("is_stock_item") is not None else p.get("track_stock") or "1").strip().lower() in ("1", "true", "yes", "t", "y") else 0,
         "uom_prices":          uom_prices,
         "price_list_rows":     price_list_rows,
+        "item_prices":         price_list_rows,
         "is_pharmacy_product": bool(p.get("is_pharmacy_product") or 0),
         "is_butchery_product": bool(p.get("is_butchery_product") or 0),
         "is_product_bundle":   bool(p.get("is_product_bundle") or p.get("is_combo") or 0),
@@ -861,12 +907,21 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
         from models.company_defaults import get_defaults
         co_defs = get_defaults() or {}
         active_store_name = (co_defs.get("server_store_name") or co_defs.get("server_warehouse") or co_defs.get("store_name") or "").strip()
+        active_pl_name = (co_defs.get("default_price_list_name") or "").strip()
+        if not active_pl_name:
+            import json
+            from database.db import get_app_data_dir
+            settings_path = get_app_data_dir() / "sql_settings.json"
+            if settings_path.exists():
+                cfg = json.loads(settings_path.read_text(encoding="utf-8"))
+                active_pl_name = (cfg.get("default_pricelist_name") or "").strip()
     except Exception:
         active_store_name = ""
+        active_pl_name = ""
 
     remote = []
     for p in remote_raw:
-        parsed = _parse_product(p, active_store=active_store_name)
+        parsed = _parse_product(p, active_store=active_store_name, active_price_list=active_pl_name)
         if parsed is None:
             part_no = str(p.get("itemcode") or "").strip()
             if not part_no:
@@ -1029,7 +1084,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
 
             # ── Upsert full price-list cache for this item ───────────────────
             # Templates have no prices of their own - variants carry them.
-            price_rows = p.get("item_prices") or []
+            price_rows = p.get("price_list_rows") or p.get("item_prices") or []
             if price_rows:
                 n = _upsert_item_prices(cur, p["part_no"], price_rows)
                 if n:
