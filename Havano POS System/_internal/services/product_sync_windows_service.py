@@ -166,7 +166,6 @@ def _get(url: str, api_key: str, api_secret: str) -> dict:
 def _fetch_all_pages(api_key: str, api_secret: str, host: str) -> list[dict]:
     """Pages through the API using the real pagination structure."""
     products: list[dict] = []
-    page = 1
     
     # Select base_endpoint according to system mode
     try:
@@ -175,52 +174,76 @@ def _fetch_all_pages(api_key: str, api_secret: str, host: str) -> list[dict]:
     except Exception:
         sys_mode = "saas"
 
-    if sys_mode == "saas" or sys_mode != "frappe":
-        base_endpoint = f"{host}/api/method/saas_api.www.api.get_my_products"
-        fallback_endpoint = f"{host}/api/method/havano_pos_integration.api.get_products"
-    else:
-        base_endpoint = f"{host}/api/method/havano_pos_integration.api.get_products"
-        fallback_endpoint = f"{host}/api/method/saas_api.www.api.get_my_products"
-    use_fallback = False
-
-    while True:
-        endpoint = fallback_endpoint if use_fallback else base_endpoint
-        url = f"{endpoint}?page={page}&limit={PAGE_SIZE}"
-        log.info("[sync] Fetching page %d (limit=%d)...", page, PAGE_SIZE)
-
+    if sys_mode == "odoo":
         try:
-            data        = _get(url, api_key, api_secret)
-            msg         = data.get("message", {})
-            page_items  = msg.get("products", []) if isinstance(msg, dict) else []
-            pagination  = msg.get("pagination", {}) if isinstance(msg, dict) else {}
-            total_pages = pagination.get("total_pages", 1)
-            has_next    = pagination.get("has_next_page", False)
-        except urllib.error.HTTPError as e:
-            if not use_fallback:
-                log.info(f"[sync] Endpoint {endpoint} failed with {e.code}, trying fallback.")
-                use_fallback = True
-                continue
-            raise e
+            from services.odoo.sync_service import sync_products_odoo
+            sync_products_odoo()
+            return []
         except Exception as e:
-            log.error("[sync] Page %d fetch failed: %s", page, e)
+            log.warning("[sync] Odoo product sync encountered an error: %s", e)
+            return []
+
+    candidate_endpoints = [
+        f"{host}/api/method/saas_api.www.api.get_my_products",
+        f"{host}/api/method/havano_pos_integration.api.get_products",
+        f"{host}/api/method/saas_api.www.api.get_products",
+        f"{host}/api/method/saas_api.api.get_products",
+    ]
+
+    working_endpoint = None
+
+    for endpoint in candidate_endpoints:
+        page = 1
+        page_products: list[dict] = []
+        endpoint_failed = False
+
+        while True:
+            url = f"{endpoint}?page={page}&limit={PAGE_SIZE}"
+            log.info("[sync] Fetching page %d (limit=%d) from %s...", page, PAGE_SIZE, endpoint)
+
+            try:
+                data        = _get(url, api_key, api_secret)
+                msg         = data.get("message", {})
+                page_items  = msg.get("products", []) if isinstance(msg, dict) else []
+                pagination  = msg.get("pagination", {}) if isinstance(msg, dict) else {}
+                total_pages = pagination.get("total_pages", 1)
+                has_next    = pagination.get("has_next_page", False)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    log.info("[sync] Endpoint %s returned 404, trying next candidate...", endpoint)
+                else:
+                    log.warning("[sync] Endpoint %s returned HTTP %d: %s", endpoint, e.code, e)
+                endpoint_failed = True
+                break
+            except Exception as e:
+                log.warning("[sync] Page %d fetch failed on %s: %s", page, endpoint, e)
+                endpoint_failed = True
+                break
+
+            # TAX DEBUG: log a sample raw product on first page
+            if page == 1 and page_items:
+                sample       = page_items[0]
+                sample_taxes = sample.get("taxes", [])
+                log.info(
+                    "[TAX FIELD DEBUG] Sample product '%s' taxes raw: %s",
+                    sample.get("itemcode", "?"),
+                    json.dumps(sample_taxes, default=str),
+                )
+
+            page_products.extend(page_items)
+            log.info("[sync]   %d products on page %d/%d", len(page_items), page, total_pages)
+
+            if not has_next:
+                break
+            page += 1
+
+        if not endpoint_failed:
+            working_endpoint = endpoint
+            products = page_products
             break
 
-        # TAX DEBUG: log a sample raw product on first page
-        if page == 1 and page_items:
-            sample       = page_items[0]
-            sample_taxes = sample.get("taxes", [])
-            log.info(
-                "[TAX FIELD DEBUG] Sample product '%s' taxes raw: %s",
-                sample.get("itemcode", "?"),
-                json.dumps(sample_taxes, default=str),
-            )
-
-        products.extend(page_items)
-        log.info("[sync]   %d products on page %d/%d", len(page_items), page, total_pages)
-
-        if not has_next:
-            break
-        page += 1
+    if working_endpoint is None and not products:
+        log.warning("[sync] All product sync candidate endpoints returned 404 or failed on host %s. Skipping this cycle.", host)
 
     return products
 
@@ -250,24 +273,80 @@ def _extract_cost_price(prices: list, stock_uom: str = "Nos") -> float:
     except (TypeError, ValueError):
         return 0.0
 
-def _extract_selling_price(prices: list, stock_uom: str = "Nos") -> float:
+def _extract_selling_price(prices: list, stock_uom: str = "Nos", active_price_list: str = "", active_store: str = "") -> float:
     """
     Find the best selling price from the prices array.
-    Priority:
-      1. Standard Selling for the stock UOM (e.g. Nos, Kg)
-      2. Any Standard Selling price
-      3. Any selling type price
+    When `active_store` is provided, store-specific price entries for other stores
+    are excluded and entries explicitly matching `active_store` are prioritised.
     """
-    selling = [p for p in (prices or []) if str(p.get("type", "selling")).lower() == "selling"]
-    if not selling:
+    all_selling = [p for p in (prices or []) if str(p.get("type", "selling")).lower() == "selling"]
+    if not all_selling:
         return 0.0
+
+    target_store = active_store.strip().lower() if active_store else ""
+    if target_store:
+        store_exact = [
+            p for p in all_selling
+            if str(p.get("store") or p.get("warehouse") or "").strip().lower() == target_store
+        ]
+        store_generic = [
+            p for p in all_selling
+            if not str(p.get("store") or p.get("warehouse") or "").strip()
+        ]
+        selling = store_exact + store_generic
+        if not selling:
+            selling = all_selling
+    else:
+        selling = all_selling
+
+    target_pl = active_price_list.strip().lower() if active_price_list else ""
+    target_uom = stock_uom.strip().lower()
+
+    if target_pl:
+        for p in selling:
+            pl_name = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip().lower()
+            u_name = str(p.get("uom") or "").strip().lower()
+            if pl_name == target_pl and u_name == target_uom:
+                try:
+                    return float(p.get("price") or 0)
+                except (TypeError, ValueError):
+                    pass
+        for p in selling:
+            pl_name = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip().lower()
+            if pl_name == target_pl:
+                try:
+                    return float(p.get("price") or 0)
+                except (TypeError, ValueError):
+                    pass
+
     for p in selling:
-        if str(p.get("uom") or "").strip().lower() == stock_uom.strip().lower():
-            return float(p.get("price") or 0)
+        pl_name = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip().lower()
+        u_name = str(p.get("uom") or "").strip().lower()
+        if "standard selling" in pl_name and u_name == target_uom:
+            try:
+                return float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                pass
+
     for p in selling:
-        if "standard selling" in str(p.get("priceName") or "").lower():
-            return float(p.get("price") or 0)
-    return float(selling[0].get("price") or 0)
+        pl_name = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip().lower()
+        if "standard selling" in pl_name:
+            try:
+                return float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                pass
+
+    for p in selling:
+        if str(p.get("uom") or "").strip().lower() == target_uom:
+            try:
+                return float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                pass
+
+    try:
+        return float(selling[0].get("price") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 def _get_company_warehouse() -> str:
     """
@@ -383,31 +462,29 @@ def _extract_tax_info(taxes: list, part_no: str = "") -> dict | None:
     }
 
 
-def _extract_price_list_rows(prices: list) -> list[dict]:
+def _extract_price_list_rows(prices: list, active_store: str = "") -> list[dict]:
     """
     Normalise the `prices` array from get_products into rows suitable for the
-    local `item_prices` table. One row per (price_list, uom, price_type).
-
-    Mirrors the Android client's bulk-cache approach (see
-    lib/core/services/products_service.dart) - the server ships every price
-    list a product belongs to, and the POS filters by the *active* price
-    list at cart time.
+    local `item_prices` table. One row per (price_list, uom, price_type, store)
+    so that admin sync preserves every store's price in the local DB and the POS
+    can resolve the active store's price at display time.
     """
     rows: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
 
-    for p in prices or []:
-        price_list = str(p.get("priceName") or "").strip()
+    for p in (prices or []):
+        price_list = str(p.get("priceName") or p.get("price_list_name") or p.get("price_list") or "").strip()
         if not price_list:
             continue
         uom        = str(p.get("uom")  or "nos").strip() or "nos"
         price_type = str(p.get("type") or "selling").strip().lower() or "selling"
+        store_name = str(p.get("store") or p.get("warehouse") or "").strip()
         try:
             price = float(p.get("price") or 0)
         except (TypeError, ValueError):
             price = 0.0
 
-        key = (price_list, uom, price_type)
+        key = (price_list.lower(), uom.lower(), price_type, store_name.lower())
         if key in seen:
             continue
         seen.add(key)
@@ -416,8 +493,52 @@ def _extract_price_list_rows(prices: list) -> list[dict]:
             "uom":        uom,
             "price":      price,
             "price_type": price_type,
+            "store":      store_name,
         })
     return rows
+
+
+def _filter_warehouses_for_product(p: dict, catalog_has_store_prices: bool = False) -> list[dict]:
+    """
+    Determine which stores/warehouses a product is actually assigned to.
+
+    In SaaS mode (`havano_pos_integration.api.get_products`), `p["warehouses"]`
+    lists every organization warehouse for every product (with `qtyOnHand: 0.0`
+    for stores that don't carry it), while `p["prices"]` contains store-specific
+    selling entries (`store` / `warehouse` field) ONLY for stores where the
+    product is assigned and sold.
+    """
+    raw_whs = list(p.get("warehouses") or [])
+    raw_prices = list(p.get("prices") or [])
+
+    price_store_map: dict[str, str] = {}
+    for rp in raw_prices:
+        if str(rp.get("type") or "selling").strip().lower() != "selling":
+            continue
+        s_orig = str(rp.get("store") or rp.get("warehouse") or "").strip()
+        if s_orig:
+            price_store_map[s_orig.lower()] = s_orig
+
+    if price_store_map:
+        filtered_whs: list[dict] = []
+        matched_stores: set[str] = set()
+        for w in raw_whs:
+            w_name = str(w.get("warehouse") or w.get("warehouse_name") or w.get("store") or "").strip()
+            w_low = w_name.lower()
+            if w_low in price_store_map:
+                filtered_whs.append(w)
+                matched_stores.add(w_low)
+        for s_low, s_orig in price_store_map.items():
+            if s_low not in matched_stores:
+                filtered_whs.append({"warehouse": s_orig, "qtyOnHand": 0.0})
+        return filtered_whs
+
+    # If the organization catalog uses store-tagged prices, a non-template product
+    # with zero store-tagged selling prices is not assigned to any store.
+    if catalog_has_store_prices and not bool(p.get("has_variants") or 0):
+        return []
+
+    return raw_whs
 
 
 def _extract_variant_info(p: dict) -> dict:
@@ -448,10 +569,15 @@ def _extract_variant_info(p: dict) -> dict:
     }
 
 
-def _parse_product(p: dict, active_store: str = "") -> dict | None:
+def _parse_product(
+    p: dict,
+    active_store: str = "",
+    active_price_list: str = "",
+    catalog_has_store_prices: bool = False,
+) -> dict | None:
     """
     Maps the real API product object to a clean local dict including tax info.
-    Returns None if the product should be skipped or does not belong to active store.
+    Returns None if the product has no item code.
     """
     part_no   = str(p.get("itemcode") or "").strip().upper()
     name      = str(p.get("itemname") or "").strip()
@@ -459,10 +585,13 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
     if not part_no:
         return None
 
-    # Synchronize all catalogue items; do not skip products if warehouse is not matched
-    # (Stock extraction already resolves the specific warehouse stock appropriately)
     stock_uom = str((p.get("uom") or {}).get("stock_uom") or "Nos").strip()
-    price     = _extract_selling_price(p.get("prices", []), stock_uom)
+    price     = _extract_selling_price(
+        p.get("prices", []),
+        stock_uom,
+        active_price_list=active_price_list,
+        active_store=active_store,
+    )
 
     _ROOT_GROUPS = {"all item groups", "all"}
     raw_group = str(p.get("groupname") or "").strip()
@@ -472,7 +601,10 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
         log.debug("[sync] %s - groupname '%s' is a root group, stored as uncategorised.",
                   part_no, raw_group)
 
-    stock = _extract_stock(p.get("warehouses", []))
+    filtered_warehouses = _filter_warehouses_for_product(
+        p, catalog_has_store_prices=catalog_has_store_prices
+    )
+    stock = _extract_stock(filtered_warehouses)
 
     taxes    = p.get("taxes", [])
     tax_info = _extract_tax_info(taxes, part_no=part_no)
@@ -505,11 +637,22 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
     if not part_no:
         return None
 
-    # Build UOM prices list
+    # Build UOM prices list (filtered by active_store if set)
     raw_prices = p.get("prices", [])
+    store_clean = (active_store or "").strip().lower()
+    ordered_for_uom = list(raw_prices)
+    if store_clean:
+        ordered_for_uom = [
+            rp for rp in ordered_for_uom
+            if not str(rp.get("store") or rp.get("warehouse") or "").strip()
+            or str(rp.get("store") or rp.get("warehouse") or "").strip().lower() == store_clean
+        ]
+        ordered_for_uom.sort(
+            key=lambda rp: 0 if str(rp.get("store") or rp.get("warehouse") or "").strip().lower() == store_clean else 1
+        )
     uom_prices = []
     seen_uoms  = set()
-    for rp in raw_prices:
+    for rp in ordered_for_uom:
         if str(rp.get("type", "selling")).lower() != "selling":
             continue
         uom_name = str(rp.get("uom") or "Nos").strip()
@@ -525,7 +668,7 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
     # Every price-list row for this item (multi-currency / multi-list aware).
     # Used below to populate the `item_prices` cache so the POS can look up
     # the right price for the active customer's price list.
-    price_list_rows = _extract_price_list_rows(raw_prices)
+    price_list_rows = _extract_price_list_rows(raw_prices, active_store=active_store)
 
     # Variant metadata - template flag, parent pointer, attribute blob.
     variant_info = _extract_variant_info(p)
@@ -544,11 +687,12 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
         "track_stock":         1 if str(p.get("maintainstock") if p.get("maintainstock") is not None else p.get("is_stock_item") if p.get("is_stock_item") is not None else p.get("track_stock") or "1").strip().lower() in ("1", "true", "yes", "t", "y") else 0,
         "uom_prices":          uom_prices,
         "price_list_rows":     price_list_rows,
+        "item_prices":         price_list_rows,
         "is_pharmacy_product": bool(p.get("is_pharmacy_product") or 0),
         "is_butchery_product": bool(p.get("is_butchery_product") or 0),
         "is_product_bundle":   bool(p.get("is_product_bundle") or p.get("is_combo") or 0),
         "batches":             raw_batches,
-        "raw_warehouses":      p.get("warehouses", []),
+        "raw_warehouses":      filtered_warehouses,
         "raw_batches":         p.get("batches", []),
         "hs_code":             str(p.get("hscode") or p.get("hs_code") or "").strip(),
         "print_after_order":   1 if (p.get("print_after_order") or p.get("print_after_order_item") or p.get("custom_print_after_order")) else 0,
@@ -561,9 +705,63 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
     }
 
     # Kitchen-printer routing flags (kitchen_order_1..6 for SaaS / custom_is_order_item_1..6 for Frappe)
-    for i in range(1, 7):
-        val = p.get(f"kitchen_order_{i}") if p.get(f"kitchen_order_{i}") is not None else p.get(f"custom_is_order_item_{i}")
-        result[f"order_{i}"] = 1 if (str(val).strip().lower() in ("1", "true", "yes", "t", "y") or val is True or val == 1) else 0
+    has_explicit_order = any(
+        p.get(f"kitchen_order_{i}") is not None or
+        p.get(f"kitchen_order{i}") is not None or
+        p.get(f"custom_is_order_item_{i}") is not None or
+        p.get(f"custom_is_order_item{i}") is not None or
+        p.get(f"is_order_item_{i}") is not None or
+        p.get(f"is_order_item{i}") is not None or
+        p.get(f"custom_kitchen_order_{i}") is not None or
+        p.get(f"order_{i}") is not None or
+        p.get(f"order{i}") is not None
+        for i in range(1, 7)
+    ) or any(
+        p.get(k) is not None
+        for k in ("kitchen_order", "is_kitchen_order", "custom_kitchen_order", "custom_is_order_item")
+    )
+
+    if has_explicit_order:
+        for i in range(1, 7):
+            val = (
+                p.get(f"kitchen_order_{i}")
+                if p.get(f"kitchen_order_{i}") is not None
+                else p.get(f"kitchen_order{i}")
+                if p.get(f"kitchen_order{i}") is not None
+                else p.get(f"custom_is_order_item_{i}")
+                if p.get(f"custom_is_order_item_{i}") is not None
+                else p.get(f"custom_is_order_item{i}")
+                if p.get(f"custom_is_order_item{i}") is not None
+                else p.get(f"is_order_item_{i}")
+                if p.get(f"is_order_item_{i}") is not None
+                else p.get(f"is_order_item{i}")
+                if p.get(f"is_order_item{i}") is not None
+                else p.get(f"custom_kitchen_order_{i}")
+                if p.get(f"custom_kitchen_order_{i}") is not None
+                else p.get(f"order_{i}")
+                if p.get(f"order_{i}") is not None
+                else p.get(f"order{i}")
+                if p.get(f"order{i}") is not None
+                else (p.get("kitchen_order") or p.get("is_kitchen_order") or p.get("custom_kitchen_order") or p.get("custom_is_order_item"))
+                if i == 1
+                else None
+            )
+            result[f"order_{i}"] = 1 if (str(val).strip().lower() in ("1", "true", "yes", "t", "y") or val is True or val == 1) else 0
+    else:
+        # Fallback 1: check cached order flags from login response
+        try:
+            from services.auth_service import get_cached_login_order_flags
+            cached_flags = get_cached_login_order_flags(part_no)
+        except Exception:
+            cached_flags = None
+
+        if cached_flags is not None:
+            for i in range(1, 7):
+                result[f"order_{i}"] = cached_flags[i - 1]
+        else:
+            # Fallback 2: None indicates to leave existing DB column value untouched on UPDATE
+            for i in range(1, 7):
+                result[f"order_{i}"] = None
 
     if tax_info:
         result["tax_rate"]          = tax_info["tax_rate"]
@@ -584,12 +782,18 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
 
 def _upsert_item_prices(cur, part_no: str, rows: list[dict]) -> int:
     """
-    MERGE the full price-list cache for a single item. One MERGE per row -
-    the row count is small (usually 1–3 per item) so batching via a table
-    variable isn't worth the complexity. Returns the number of rows upserted.
+    Replace the price-list cache for a single item, storing all stores' price
+    rows (with their `store` column) so display-time queries can resolve the
+    active store's price dynamically.
     """
+    try:
+        cur.execute("DELETE FROM item_prices WHERE part_no = ?", (part_no,))
+    except Exception as e:
+        log.warning("[sync] item_prices cleanup failed for %s: %s", part_no, e)
+
     count = 0
     for r in rows:
+        store_val = str(r.get("store") or "").strip()
         try:
             cur.execute("""
                 IF NOT EXISTS (SELECT 1 FROM price_lists WITH (NOLOCK) WHERE name = ?)
@@ -599,28 +803,15 @@ def _upsert_item_prices(cur, part_no: str, rows: list[dict]) -> int:
             """, (r["price_list"], r["price_list"]))
             
             cur.execute("""
-                MERGE item_prices AS target
-                USING (SELECT ? AS part_no, ? AS price_list,
-                              ? AS uom,     ? AS price_type) AS src
-                    ON target.part_no    = src.part_no
-                   AND target.price_list = src.price_list
-                   AND target.uom        = src.uom
-                   AND target.price_type = src.price_type
-                WHEN MATCHED THEN
-                    UPDATE SET price      = ?,
-                               updated_at = GETDATE()
-                WHEN NOT MATCHED THEN
-                    INSERT (part_no, price_list, uom, price, price_type)
-                    VALUES (?, ?, ?, ?, ?);
+                INSERT INTO item_prices (part_no, price_list, uom, price, price_type, store, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, GETDATE());
             """, (
-                part_no, r["price_list"], r["uom"], r["price_type"],
-                r["price"],
-                part_no, r["price_list"], r["uom"], r["price"], r["price_type"],
+                part_no, r["price_list"], r["uom"], r["price"], r["price_type"], store_val,
             ))
             count += 1
         except Exception as e:
-            log.warning("[sync] item_prices upsert failed %s/%s/%s: %s",
-                        part_no, r.get("price_list"), r.get("uom"), e)
+            log.warning("[sync] item_prices upsert failed %s/%s/%s (%s): %s",
+                        part_no, r.get("price_list"), r.get("uom"), store_val, e)
     return count
 
 
@@ -752,9 +943,30 @@ def _ensure_schema(cur) -> None:
             price       DECIMAL(24,6) NOT NULL DEFAULT 0,
             currency    NVARCHAR(10)  NULL,
             price_type  NVARCHAR(20)  NOT NULL DEFAULT 'selling',
-            updated_at  DATETIME      NOT NULL DEFAULT GETDATE(),
-            CONSTRAINT UQ_item_prices UNIQUE (part_no, price_list, uom, price_type)
+            store       NVARCHAR(120) NOT NULL DEFAULT '',
+            updated_at  DATETIME      NOT NULL DEFAULT GETDATE()
         )
+    """)
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'item_prices' AND COLUMN_NAME = 'store'
+        )
+        ALTER TABLE item_prices ADD store NVARCHAR(120) NOT NULL DEFAULT ''
+    """)
+    cur.execute("""
+        IF EXISTS (
+            SELECT 1 FROM sys.key_constraints
+            WHERE name = 'UQ_item_prices' AND parent_object_id = OBJECT_ID('item_prices')
+        )
+        ALTER TABLE item_prices DROP CONSTRAINT UQ_item_prices
+    """)
+    cur.execute("""
+        IF EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = 'ux_item_prices_key' AND object_id = OBJECT_ID('item_prices')
+        )
+        DROP INDEX ux_item_prices_key ON item_prices
     """)
 
 
@@ -784,12 +996,33 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
         from models.company_defaults import get_defaults
         co_defs = get_defaults() or {}
         active_store_name = (co_defs.get("server_store_name") or co_defs.get("server_warehouse") or co_defs.get("store_name") or "").strip()
+        active_pl_name = (co_defs.get("default_price_list_name") or "").strip()
+        if not active_pl_name:
+            import json
+            from database.db import get_app_data_dir
+            settings_path = get_app_data_dir() / "sql_settings.json"
+            if settings_path.exists():
+                cfg = json.loads(settings_path.read_text(encoding="utf-8"))
+                active_pl_name = (cfg.get("default_pricelist_name") or "").strip()
     except Exception:
         active_store_name = ""
+        active_pl_name = ""
+
+    catalog_has_store_prices = any(
+        str(rp.get("store") or rp.get("warehouse") or "").strip()
+        for raw_p in remote_raw
+        for rp in (raw_p.get("prices") or [])
+        if str(rp.get("type") or "selling").strip().lower() == "selling"
+    )
 
     remote = []
     for p in remote_raw:
-        parsed = _parse_product(p, active_store=active_store_name)
+        parsed = _parse_product(
+            p,
+            active_store=active_store_name,
+            active_price_list=active_pl_name,
+            catalog_has_store_prices=catalog_has_store_prices,
+        )
         if parsed is None:
             part_no = str(p.get("itemcode") or "").strip()
             if not part_no:
@@ -818,6 +1051,7 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
         from database.db import get_connection
         conn = get_connection()
         cur  = conn.cursor()
+        cur.timeout = 120
     except Exception as e:
         log.error("DB connection failed: %s", e)
         return result
@@ -860,7 +1094,8 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
 
             is_pharm = 1 if p.get("is_pharmacy_product") else 0
 
-            order_flags = tuple(int(p.get(f"order_{i}", 0) or 0) for i in range(1, 7))
+            order_flags_update = tuple(p.get(f"order_{i}") for i in range(1, 7))
+            order_flags_insert = tuple(int(p.get(f"order_{i}") or 0) for i in range(1, 7))
             print_after_order = int(p.get("print_after_order", 0) or 0)
 
             # Variant fields (default-safe so existing products get flags=0)
@@ -869,53 +1104,59 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
             variant_of   = p.get("variant_of")  # may be None
             attributes   = p.get("attributes") or "[]"
 
-            if p["part_no"] in local_part_nos:
-                cur.execute("""
-                    UPDATE products
-                    SET    name                = ?,
-                           description         = ?,
-                           price               = ?,
-                           cost_price          = ?,
-                           reorder_level       = ?,
-                           stock               = ?,
-                           track_stock         = ?,
-                           category            = ?,
-                           tax_rate            = ?,
-                           tax_type            = ?,
-                           item_tax_template   = ?,
-                           hs_code             = ?,
-                           is_pharmacy_product = ?,
-                           is_butchery_product = ?,
-                           is_product_bundle   = ?,
-                           conversion_factor   = ?,
-                           uom                 = ?,
-                           print_after_order   = ?,
-                           order_1             = ?,
-                           order_2             = ?,
-                           order_3             = ?,
-                           order_4             = ?,
-                           order_5             = ?,
-                           order_6             = ?,
-                           is_template         = ?,
-                           has_variants        = ?,
-                           variant_of          = ?,
-                           attributes          = ?,
-                           active              = 1
-                    WHERE  part_no = ?
-                """, (
-                    p["name"], p["description"], p["price"], p["cost_price"], p["reorder_level"],
-                    p["stock"], p["track_stock"], p["category"],
-                    tax_rate, tax_type, item_tax_template, hs_code_val, is_pharm,
-                    int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
-                    p.get("uom") or None,
-                    print_after_order,
-                    *order_flags,
-                    is_template, has_variants, variant_of, attributes,
-                    p["part_no"],
-                ))
+            clean_part_no = str(p["part_no"]).strip()
+            p["part_no"] = clean_part_no
+            norm_part_no = clean_part_no.upper()
+
+            cur.execute("""
+                UPDATE products
+                SET    name                = ?,
+                       description         = ?,
+                       price               = ?,
+                       cost_price          = ?,
+                       reorder_level       = ?,
+                       stock               = ?,
+                       track_stock         = ?,
+                       category            = ?,
+                       tax_rate            = ?,
+                       tax_type            = ?,
+                       item_tax_template   = ?,
+                       hs_code             = ?,
+                       is_pharmacy_product = ?,
+                       is_butchery_product = ?,
+                       is_product_bundle   = ?,
+                       conversion_factor   = ?,
+                       uom                 = ?,
+                       print_after_order   = ?,
+                       order_1             = COALESCE(?, order_1),
+                       order_2             = COALESCE(?, order_2),
+                       order_3             = COALESCE(?, order_3),
+                       order_4             = COALESCE(?, order_4),
+                       order_5             = COALESCE(?, order_5),
+                       order_6             = COALESCE(?, order_6),
+                       is_template         = ?,
+                       has_variants        = ?,
+                       variant_of          = ?,
+                       attributes          = ?,
+                       active              = 1
+                WHERE  UPPER(LTRIM(RTRIM(part_no))) = ?
+            """, (
+                p["name"], p["description"], p["price"], p["cost_price"], p["reorder_level"],
+                p["stock"], p["track_stock"], p["category"],
+                tax_rate, tax_type, item_tax_template, hs_code_val, is_pharm,
+                int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
+                p.get("uom") or None,
+                print_after_order,
+                *order_flags_update,
+                is_template, has_variants, variant_of, attributes,
+                norm_part_no,
+            ))
+            
+            if cur.rowcount > 0:
                 result["updated"] += 1
+                local_part_nos.add(norm_part_no)
                 log.debug("[sync] Updated: %s  tax_rate=%.4f  tax_type=%s  pharmacy=%d  orders=%s  tmpl=%d var_of=%s",
-                          p["part_no"], tax_rate, tax_type, is_pharm, order_flags,
+                          p["part_no"], tax_rate, tax_type, is_pharm, order_flags_update,
                           is_template, variant_of)
             else:
                 cur.execute("""
@@ -933,22 +1174,21 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                     int(p["is_butchery_product"]), int(p["is_product_bundle"]), p["conversion_factor"],
                     p.get("uom") or None,
                     print_after_order,
-                    *order_flags,
+                    *order_flags_insert,
                     is_template, has_variants, variant_of, attributes,
                 ))
-                local_part_nos.add(p["part_no"])
+                local_part_nos.add(norm_part_no)
                 result["inserted"] += 1
                 log.debug("[sync] Inserted: %s  tax_rate=%.4f  tax_type=%s  orders=%s  tmpl=%d var_of=%s",
-                          p["part_no"], tax_rate, tax_type, order_flags,
+                          p["part_no"], tax_rate, tax_type, order_flags_insert,
                           is_template, variant_of)
 
             # ── Upsert full price-list cache for this item ───────────────────
             # Templates have no prices of their own - variants carry them.
-            price_rows = p.get("item_prices") or []
-            if price_rows:
-                n = _upsert_item_prices(cur, p["part_no"], price_rows)
-                if n:
-                    log.debug("[sync] %s - %d price-list row(s) cached", p["part_no"], n)
+            price_rows = p.get("price_list_rows") or p.get("item_prices") or []
+            n = _upsert_item_prices(cur, p["part_no"], price_rows)
+            if n:
+                log.debug("[sync] %s - %d price-list row(s) cached", p["part_no"], n)
 
             # ── Upsert product_warehouse_stock ───────────────────────────────
             try:
@@ -1033,6 +1273,10 @@ def sync_products_smart(api_key: str, api_secret: str) -> dict:
                             p.get("part_no"), _be)
 
             # ── Upsert UOM prices ────────────────────────────────────────────
+            try:
+                cur.execute("DELETE FROM product_uom_prices WHERE part_no = ?", (p["part_no"],))
+            except Exception as e:
+                log.warning("Error clearing UOM prices for %s: %s", p["part_no"], e)
             for up in (p.get("uom_prices") or []):
                 try:
                     cur.execute("""

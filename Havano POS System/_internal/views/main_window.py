@@ -2611,7 +2611,7 @@ class OptionsDialog(QDialog):
             repo = FiscalSettingsRepository()
             settings = repo.get_settings()
             if settings and settings.enabled:
-                if settings.provider == "axis":
+                if settings.provider in ("axis", "frappe", "havano_zimra"):
                     self._axis_btn = _row("Axis Fiscal Operations", self._do_axis_fiscal, color="#10b981", hov="#059669")
                     bl.addWidget(self._axis_btn)
                 elif settings.provider == "revmax":
@@ -2705,6 +2705,7 @@ class OptionsDialog(QDialog):
                             "total_api": res.get("products_synced", 0),
                             "errors":   0,
                         })
+                    else:
                         # Frappe/SaaS mode - original path
                         from services.credentials import get_credentials, has_credentials
                         if not has_credentials():
@@ -2735,11 +2736,19 @@ class OptionsDialog(QDialog):
         self._sync_thread.start()
 
     def _on_sync_products_done(self, res: dict):
-        # Refresh the POS product grid so newly-synced items appear without a
-        # restart. _reload_current_category preserves the active category/page.
         try:
-            if self._pos and hasattr(self._pos, "_reload_current_category"):
-                self._pos._reload_current_category()
+            if self._pos:
+                if hasattr(self._pos, "_price_map_cache"):
+                    self._pos._price_map_cache.clear()
+                if hasattr(self._pos, "_price_rows_cache"):
+                    self._pos._price_rows_cache.clear()
+                if hasattr(self._pos, "_cached_active_price_list_name"):
+                    self._pos._cached_active_price_list_name = None
+                self._pos._category_names = []
+                if hasattr(self._pos, "_reload_current_category"):
+                    self._pos._reload_current_category()
+                if hasattr(self._pos, "refresh_pos_grid"):
+                    self._pos.refresh_pos_grid()
         except Exception as e:
             print(f"[OptionsDialog] product grid refresh failed: {e}")
 
@@ -3459,7 +3468,9 @@ def _clean_frappe_error(raw: str) -> str:
 # Tabbed SI / CN / SO view.  Raw API errors shown verbatim and are copyable.
 # Header shows count per tab.  Smart open: opens the right tab automatically.
 # =============================================================================
-class UnsyncedPopup(QDialog):
+from views.components.blur_overlay import BlurredDialog
+
+class UnsyncedPopup(BlurredDialog):
     """
     kind = "SI"  -> opens on the Sales Invoices tab
     kind = "CN"  -> opens on the Credit Notes tab
@@ -4479,7 +4490,16 @@ class POSView(QWidget):
                 self.dlg = dialog
             def on_done(self, res):
                 try:
+                    if hasattr(self.pos, "_price_map_cache"):
+                        self.pos._price_map_cache.clear()
+                    if hasattr(self.pos, "_price_rows_cache"):
+                        self.pos._price_rows_cache.clear()
+                    if hasattr(self.pos, "_cached_active_price_list_name"):
+                        self.pos._cached_active_price_list_name = None
+                    self.pos._category_names = []
                     self.pos._reload_current_category()
+                    if hasattr(self.pos, "refresh_pos_grid"):
+                        self.pos.refresh_pos_grid()
                 except Exception: pass
                 self.dlg.close()
                 pw = getattr(self.pos, "parent_window", None)
@@ -5230,6 +5250,20 @@ class POSView(QWidget):
         discount_amt = getattr(self, "current_discount_amount", 0.0)
         
         # ── 4. OPEN PAYMENT DIALOG WITH ITEMS ──────────────────────────────────
+        dining_option = ""
+        if hasattr(self, "_get_pos_rule") and self._get_pos_rule("takeaway_or_sitin", default=False):
+            from views.dialogs.dining_option_dialog import is_dining_prompt_hidden, DiningOptionDialog
+            if is_dining_prompt_hidden():
+                dining_option = "TAKE AWAY"
+            else:
+                try:
+                    dlg_dining = DiningOptionDialog(self)
+                    if dlg_dining.exec() != QDialog.Accepted or not dlg_dining.selected_option:
+                        return
+                    dining_option = dlg_dining.selected_option
+                except Exception as e:
+                    print(f"[POSView] DiningOptionDialog error: {e}")
+
         is_restaurant = getattr(self, "_restaurant_mode", False)
         _prefill = getattr(self, "_prefill_amounts", None)
         self._prefill_amounts = None  # consume it so next open is clean
@@ -5252,6 +5286,7 @@ class POSView(QWidget):
                 table_id=getattr(self, "_current_table_id", None),
                 warehouse_id=self.warehouse_id,
                 cost_center_id=self.cost_center_id,
+                dining_option=dining_option,
             )
         else:
             dlg = PaymentDialog(
@@ -5272,6 +5307,7 @@ class POSView(QWidget):
                 table_id=getattr(self, "_current_table_id", None),
                 warehouse_id=self.warehouse_id,
                 cost_center_id=self.cost_center_id,
+                dining_option=dining_option,
             )
         
         print(f"[DEBUG] _open_payment: Opening dialog with waiter_name='{getattr(self, '_current_waiter_name', '')}'")
@@ -5545,7 +5581,7 @@ class POSView(QWidget):
     # =========================================================================
     
     def _get_active_warehouse_id(self):
-        """Dynamically retrieve active warehouse_id: POS session -> user shop -> company defaults shop."""
+        """Dynamically retrieve active warehouse_id: POS session -> company defaults shop -> user shop."""
         if getattr(self, "warehouse_id", None):
             return self.warehouse_id
         try:
@@ -5559,7 +5595,25 @@ class POSView(QWidget):
 
         from models.product import get_warehouse_id_by_name
 
-        # Check logged in user assigned warehouse
+        # Prefer Company Defaults active store (especially in SaaS mode where admin users
+        # have a comma-separated list of all stores on self.user["warehouse"]).
+        try:
+            from models.company_defaults import get_defaults
+            defs = get_defaults() or {}
+            def_wh = str(
+                defs.get("server_warehouse")
+                or defs.get("server_store_name")
+                or defs.get("warehouse")
+                or ""
+            ).strip()
+            if def_wh:
+                wh_id = get_warehouse_id_by_name(def_wh)
+                if wh_id:
+                    return wh_id
+        except Exception:
+            pass
+
+        # Fallback to logged-in user assigned warehouse
         if hasattr(self, 'user') and self.user:
             wh_id = self.user.get("warehouse_id")
             if wh_id:
@@ -5569,18 +5623,14 @@ class POSView(QWidget):
                 wh_id = get_warehouse_id_by_name(wh_name)
                 if wh_id:
                     return wh_id
-
-        # Fallback to Company Defaults shop
-        try:
-            from models.company_defaults import get_defaults
-            defs = get_defaults() or {}
-            def_wh = str(defs.get("server_warehouse") or "").strip()
-            if def_wh:
-                wh_id = get_warehouse_id_by_name(def_wh)
-                if wh_id:
-                    return wh_id
-        except Exception:
-            pass
+                # Handle comma-separated store lists on multi-store users
+                if "," in wh_name:
+                    for part in wh_name.split(","):
+                        part_clean = part.strip()
+                        if part_clean:
+                            wh_id = get_warehouse_id_by_name(part_clean)
+                            if wh_id:
+                                return wh_id
 
         return None
 
@@ -6382,6 +6432,65 @@ class POSView(QWidget):
             quote_btn.setVisible(False)
         
         # ── Options dropdown (replaces right-panel Options button) ───────────────
+        # ── Expenses button ───────────────────────────────────────────────────
+        self.expenses_btn = _nb("Expenses", self._on_expenses_clicked, color=ORANGE, hov=AMBER)
+        self.expenses_btn.setToolTip("Record Till Expenses")
+        layout.addWidget(self.expenses_btn)
+        layout.addSpacing(4)
+        try:
+            if not getattr(adv_settings, "enableExpenses", False):
+                self.expenses_btn.setVisible(False)
+        except Exception:
+            self.expenses_btn.setVisible(False)
+
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
         options_menu_btn = HoverMenuButton("Options", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
         options_menu_btn.addItem("Sync from Server",    self._do_nav_sync_products)
@@ -6389,7 +6498,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     options_menu_btn.addItem("Axis Fiscal Operations", self._do_nav_axis_fiscal)
                 elif f_repo.provider == "revmax":
                     options_menu_btn.addItem("Revmax Fiscal Operations", self._do_nav_revmax_fiscal)
@@ -8166,6 +8275,65 @@ class POSView(QWidget):
         
         
 # ── Options dropdown ──────────────────────────────────────────────────────
+        # ── Expenses button ───────────────────────────────────────────────────
+        self.expenses_btn = _nb("Expenses", self._on_expenses_clicked, color=ORANGE, hov=AMBER)
+        self.expenses_btn.setToolTip("Record Till Expenses")
+        layout.addWidget(self.expenses_btn)
+        layout.addSpacing(4)
+        try:
+            if not getattr(adv_settings, "enableExpenses", False):
+                self.expenses_btn.setVisible(False)
+        except Exception:
+            self.expenses_btn.setVisible(False)
+
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
         options_menu_btn = HoverMenuButton("Options", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
         options_menu_btn.addItem("Sync from Server",    self._do_nav_sync_products)
@@ -8173,7 +8341,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     options_menu_btn.addItem("Axis Fiscal Operations", self._do_nav_axis_fiscal)
                 elif f_repo.provider == "revmax":
                     options_menu_btn.addItem("Revmax Fiscal Operations", self._do_nav_revmax_fiscal)
@@ -8823,7 +8991,8 @@ class POSView(QWidget):
             from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton
             from PySide6.QtCore import Qt
             
-            dlg = QDialog(self)
+            from views.components.blur_overlay import BlurredDialog
+            dlg = BlurredDialog(self)
             dlg.setWindowTitle("Update Quantity")
             dlg.setModal(True)
             dlg.setFixedSize(400, 450)
@@ -8902,7 +9071,9 @@ class POSView(QWidget):
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, _setup_cursor)
             
-            if dlg.exec() == QDialog.Accepted:
+            res = dlg.exec()
+            
+            if res == QDialog.Accepted:
                 new_qty = spin.value()
                 
                 block_rule = not getattr(self, "_get_pos_rule", lambda k, default: default)("allow_negative_stock", default=True)
@@ -10014,10 +10185,27 @@ class POSView(QWidget):
             cur  = conn.cursor()
             cur.execute("""
                 SELECT uom, price FROM item_prices
-                WHERE  part_no = ? AND price_list = ? AND price_type = 'selling'
+                WHERE  part_no = ? AND LOWER(price_list) = LOWER(?) AND price_type = 'selling'
                 ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
             """, (part_no, price_list))
             rows = cur.fetchall()
+
+            if not rows and str(price_list).strip().lower() != "standard selling":
+                cur.execute("""
+                    SELECT uom, price FROM item_prices
+                    WHERE  part_no = ? AND LOWER(price_list) = 'standard selling' AND price_type = 'selling'
+                    ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
+                """, (part_no,))
+                rows = cur.fetchall()
+
+            if not rows:
+                cur.execute("""
+                    SELECT uom, price FROM products WITH (NOLOCK)
+                    WHERE  part_no = ?
+                """, (part_no,))
+                p_row = cur.fetchone()
+                if p_row and p_row[1] is not None:
+                    rows = [(p_row[0] or "Nos", p_row[1])]
 
             result = [{"uom": r[0], "price": float(r[1] or 0)} for r in rows]
             seen_uoms = {r["uom"].strip().upper() for r in result}
@@ -10100,12 +10288,16 @@ class POSView(QWidget):
                 print(f"[BundlePrice] Error resolving bundle price: {e}")
 
         if not rows:
-            self._warn_popup(
-                "Item not priced",
-                f"<b>{name}</b> has no price in the <b>{price_list}</b> "
-                f"price list. Add a rate on the server and re-sync.",
-            )
-            return None
+            prod_price = float(product.get("price") or 0.0)
+            if prod_price > 0:
+                rows = [{"uom": base_uom, "price": prod_price}]
+            else:
+                self._warn_popup(
+                    "Item not priced",
+                    f"<b>{name}</b> has no price in the <b>{price_list}</b> "
+                    f"price list. Add a rate on the server and re-sync.",
+                )
+                return None
 
         # Pre-selected barcode_uom (from scanned barcode) bypasses UOM picker
         if barcode_uom:
@@ -11349,11 +11541,25 @@ class POSView(QWidget):
             if hidden_no_price:
                 print(f"[grid] {hidden_no_price} item(s) show 0 - no rate in "
                       f"price list '{active_list}'")
+            if len(tuples) == 0 and name == "All":
+                try:
+                    from services.bugsink_service import check_and_report_saas_empty_catalog
+                    check_and_report_saas_empty_catalog(
+                        context="secondary_grid_all",
+                        extra_info={"warehouse_id": wh_id, "price_list": active_list}
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[grid] Error loading products: {e}")
             self._current_products   = []
             self._product_meta_by_pn = {}
             self._has_any_product_image = False
+            try:
+                from services.bugsink_service import capture_exception
+                capture_exception(e, extra={"action": "secondary_load_products_grid", "category": name})
+            except Exception:
+                pass
 
         self._product_page = 0
         self._render_product_page()
@@ -11573,8 +11779,13 @@ class POSView(QWidget):
         self._reload_current_category()
 
     def _reload_current_category(self):
+        if hasattr(self, "_price_map_cache"):
+            self._price_map_cache.clear()
+        if hasattr(self, "_price_rows_cache"):
+            self._price_rows_cache.clear()
+        self._cached_active_price_list_name = None
         idx  = getattr(self, "_active_cat_idx", 0)
-        name = self._category_names[idx] if idx < len(self._category_names) else "All"
+        name = self._category_names[idx] if (getattr(self, "_category_names", None) and idx < len(self._category_names)) else "All"
         self._load_category_products(idx, name)
 
     # =========================================================================
@@ -11594,7 +11805,7 @@ class POSView(QWidget):
                 from models.fiscal_settings import FiscalSettingsRepository
                 f_repo = FiscalSettingsRepository().get_settings()
                 if f_repo and f_repo.enabled:
-                    if f_repo.provider == "axis":
+                    if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                         from views.dialogs.axis_fiscal_dialog import AxisFiscalDialog
                         AxisFiscalDialog(self, initial_action="close").exec()
                     elif f_repo.provider == "revmax":
@@ -12653,31 +12864,36 @@ class POSView(QWidget):
                                    fiscal_qr: str = "", fiscal_vc: str = ""):
         """Build a proper ReceiptData credit note and send it to printing_service."""
         import json
-        from pathlib import Path
         from models.receipt import ReceiptData, Item
         from models.company_defaults import get_defaults
-        from services.printing_service import printing_service
+        from services.printing_service import printing_service, get_configured_paper_size
+        from database.db import get_app_data_dir
 
         co = get_defaults() or {}
 
-        # ── Resolve printer ──────────────────────────────────────────────────
-        hw_file  = Path("app_data/hardware_settings.json")
-        printers = []
-        try:
-            with open(hw_file, "r", encoding="utf-8") as f:
-                hw = json.load(f)
-            if hw.get("main_printer") and hw["main_printer"] != "(None)":
-                printers.append(hw["main_printer"])
-        except Exception:
-            pass
+        # ── Resolve printer & paper size ─────────────────────────────────────
+        paper_size = get_configured_paper_size()
+        is_a4 = str(paper_size).upper() == "A4"
 
-        if not printers:
-            QMessageBox.warning(
-                self, "No Printer",
-                "No active printer configured in hardware settings.\n"
-                "Go to Settings -> Hardware to configure a printer."
-            )
-            return
+        printers = []
+        if not is_a4:
+            hw_file = get_app_data_dir() / "hardware_settings.json"
+            try:
+                if hw_file.exists():
+                    with open(hw_file, "r", encoding="utf-8") as f:
+                        hw = json.load(f)
+                    if hw.get("main_printer") and hw["main_printer"] != "(None)":
+                        printers.append(hw["main_printer"])
+            except Exception:
+                pass
+
+            if not printers:
+                QMessageBox.warning(
+                    self, "No Printer",
+                    "No active printer configured in hardware settings.\n"
+                    "Go to Settings -> Hardware to configure a printer."
+                )
+                return
 
         # ── Build ReceiptData ────────────────────────────────────────────────
         subtotal = sum(float(it.get("total", 0)) for it in items)
@@ -12704,6 +12920,31 @@ class POSView(QWidget):
             currency            = cn.get("currency", "USD"),
             footer              = co.get("footer_text", "Credit note issued. Thank you."),
         )
+
+        # Enrich customer details (email, address, TIN, VAT)
+        cust_name = str(cn.get("customer_name", "") or "").strip()
+        if cust_name and cust_name.lower() not in ("walk-in", "walk in", "walk in customer", "walk-in customer", "cash customer", "cash", "default", "default customer"):
+            try:
+                from database.db import get_connection
+                _c_conn = get_connection()
+                _c_cur = _c_conn.cursor()
+                _c_cur.execute(
+                    "SELECT custom_email_address, custom_house_no, custom_street, custom_city, custom_province, custom_customer_tin, custom_customer_vat, custom_telephone_number "
+                    "FROM customers WITH (NOLOCK) WHERE customer_name = ?", (cust_name,)
+                )
+                _c_row = _c_cur.fetchone()
+                _c_conn.close()
+                if _c_row:
+                    receipt.customerEmail = _c_row[0] or ""
+                    addr_parts = [str(p).strip() for p in (_c_row[1], _c_row[2], _c_row[3], _c_row[4]) if p and str(p).strip()]
+                    receipt.customeraddress = ", ".join(addr_parts)
+                    receipt.customerTin = _c_row[5] or ""
+                    receipt.customerVat = _c_row[6] or ""
+                    if not receipt.customerContact and _c_row[7]:
+                        receipt.customerContact = _c_row[7]
+            except Exception:
+                pass
+
         # Extra attributes read via getattr() in printing_service - set after construction
         receipt.originalInvoiceNo = cn.get("invoice_no", "")
         receipt.creditNoteReason  = cn.get("reason", "")
@@ -12725,6 +12966,12 @@ class POSView(QWidget):
         receipt.itemlist = receipt.items
 
         # ── Print ────────────────────────────────────────────────────────────
+        if is_a4:
+            if printing_service.print_credit_note(receipt):
+                QMessageBox.information(self, "Credit Note Preview",
+                                        "Credit note A4 document opened in preview.")
+            return
+
         ok = False
         for p in printers:
             if printing_service.print_credit_note(receipt, printer_name=p):
@@ -13148,6 +13395,18 @@ class POSView(QWidget):
     # =========================================================================
     # QUOTATION FLOW
     # =========================================================================
+    def _on_expenses_clicked(self):
+        try:
+            from views.dialogs.expense_dialog import ProcessExpenseDialog
+            parent_window = getattr(self, "parent_window", None) or getattr(self, "parent", lambda: self)() 
+            if not isinstance(parent_window, type(self)):
+                parent_window = self
+            dlg = ProcessExpenseDialog(parent=parent_window)
+            dlg.exec()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to open Expenses dialog: {e}")
+
     def _on_quotation(self):
         """
         Quotation flow:
@@ -16365,7 +16624,7 @@ class OptionsDialog(QDialog):
             repo = FiscalSettingsRepository()
             settings = repo.get_settings()
             if settings and settings.enabled:
-                if settings.provider == "axis":
+                if settings.provider in ("axis", "frappe", "havano_zimra"):
                     self._axis_btn = _row("Axis Fiscal Operations", self._do_axis_fiscal, color="#10b981", hov="#059669")
                     bl.addWidget(self._axis_btn)
                 elif settings.provider == "revmax":
@@ -16466,8 +16725,8 @@ class OptionsDialog(QDialog):
                             self.failed.emit("No credentials - log in once so the sync can authenticate.")
                             return
                         key, secret = get_credentials()
-                        from services.product_sync_windows_service import sync_products_smart
-                        res = sync_products_smart(key, secret) or {}
+                        from services.sync_all import sync_everything
+                        res = sync_everything() or {}
                         self.done.emit(res)
                 except Exception as e:
                     self.failed.emit(str(e))
@@ -16490,11 +16749,19 @@ class OptionsDialog(QDialog):
         self._sync_thread.start()
 
     def _on_sync_products_done(self, res: dict):
-        # Refresh the POS product grid so newly-synced items appear without a
-        # restart. _reload_current_category preserves the active category/page.
         try:
-            if self._pos and hasattr(self._pos, "_reload_current_category"):
-                self._pos._reload_current_category()
+            if self._pos:
+                if hasattr(self._pos, "_price_map_cache"):
+                    self._pos._price_map_cache.clear()
+                if hasattr(self._pos, "_price_rows_cache"):
+                    self._pos._price_rows_cache.clear()
+                if hasattr(self._pos, "_cached_active_price_list_name"):
+                    self._pos._cached_active_price_list_name = None
+                self._pos._category_names = []
+                if hasattr(self._pos, "_reload_current_category"):
+                    self._pos._reload_current_category()
+                if hasattr(self._pos, "refresh_pos_grid"):
+                    self._pos.refresh_pos_grid()
         except Exception as e:
             print(f"[OptionsDialog] product grid refresh failed: {e}")
 
@@ -17340,7 +17607,7 @@ def _clean_frappe_error(raw: str) -> str:
 # Tabbed SI / CN / SO view.  Raw API errors shown verbatim and are copyable.
 # Header shows count per tab.  Smart open: opens the right tab automatically.
 # =============================================================================
-class UnsyncedPopup(QDialog):
+class UnsyncedPopup(BlurredDialog):
     """
     kind = "SI"  -> opens on the Sales Invoices tab
     kind = "CN"  -> opens on the Credit Notes tab
@@ -18372,7 +18639,16 @@ class POSView(QWidget):
                 self.dlg = dialog
             def on_done(self, res):
                 try:
+                    if hasattr(self.pos, "_price_map_cache"):
+                        self.pos._price_map_cache.clear()
+                    if hasattr(self.pos, "_price_rows_cache"):
+                        self.pos._price_rows_cache.clear()
+                    if hasattr(self.pos, "_cached_active_price_list_name"):
+                        self.pos._cached_active_price_list_name = None
+                    self.pos._category_names = []
                     self.pos._reload_current_category()
+                    if hasattr(self.pos, "refresh_pos_grid"):
+                        self.pos.refresh_pos_grid()
                 except Exception: pass
                 try:
                     self.dlg.close()
@@ -19115,6 +19391,20 @@ class POSView(QWidget):
         discount_amt = getattr(self, "current_discount_amount", 0.0)
         
         # ΓöÇΓöÇ 4. OPEN PAYMENT DIALOG WITH ITEMS ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        dining_option = ""
+        if hasattr(self, "_get_pos_rule") and self._get_pos_rule("takeaway_or_sitin", default=False):
+            from views.dialogs.dining_option_dialog import is_dining_prompt_hidden, DiningOptionDialog
+            if is_dining_prompt_hidden():
+                dining_option = "TAKE AWAY"
+            else:
+                try:
+                    dlg_dining = DiningOptionDialog(self)
+                    if dlg_dining.exec() != QDialog.Accepted or not dlg_dining.selected_option:
+                        return
+                    dining_option = dlg_dining.selected_option
+                except Exception as e:
+                    print(f"[POSView] DiningOptionDialog error: {e}")
+
         is_restaurant = getattr(self, "_restaurant_mode", False)
         _prefill = getattr(self, "_prefill_amounts", None)
         self._prefill_amounts = None  # consume it so next open is clean
@@ -19137,6 +19427,7 @@ class POSView(QWidget):
                 table_id=getattr(self, "_current_table_id", None),
                 warehouse_id=self.warehouse_id,
                 cost_center_id=self.cost_center_id,
+                dining_option=dining_option,
             )
         else:
             dlg = PaymentDialog(
@@ -19157,6 +19448,7 @@ class POSView(QWidget):
                 table_id=getattr(self, "_current_table_id", None),
                 warehouse_id=self.warehouse_id,
                 cost_center_id=self.cost_center_id,
+                dining_option=dining_option,
             )
         
         print(f"[DEBUG] _open_payment: Opening dialog with waiter_name='{getattr(self, '_current_waiter_name', '')}'")
@@ -19409,7 +19701,7 @@ class POSView(QWidget):
     # =========================================================================
     
     def _get_active_warehouse_id(self):
-        """Dynamically retrieve active warehouse_id: POS session -> user shop -> company defaults shop."""
+        """Dynamically retrieve active warehouse_id: POS session -> company defaults shop -> user shop."""
         if getattr(self, "warehouse_id", None):
             return self.warehouse_id
         try:
@@ -19423,7 +19715,25 @@ class POSView(QWidget):
 
         from models.product import get_warehouse_id_by_name
 
-        # Check logged in user assigned warehouse
+        # Prefer Company Defaults active store (especially in SaaS mode where admin users
+        # have a comma-separated list of all stores on self.user["warehouse"]).
+        try:
+            from models.company_defaults import get_defaults
+            defs = get_defaults() or {}
+            def_wh = str(
+                defs.get("server_warehouse")
+                or defs.get("server_store_name")
+                or defs.get("warehouse")
+                or ""
+            ).strip()
+            if def_wh:
+                wh_id = get_warehouse_id_by_name(def_wh)
+                if wh_id:
+                    return wh_id
+        except Exception:
+            pass
+
+        # Fallback to logged-in user assigned warehouse
         if hasattr(self, 'user') and self.user:
             wh_id = self.user.get("warehouse_id")
             if wh_id:
@@ -19433,18 +19743,14 @@ class POSView(QWidget):
                 wh_id = get_warehouse_id_by_name(wh_name)
                 if wh_id:
                     return wh_id
-
-        # Fallback to Company Defaults shop
-        try:
-            from models.company_defaults import get_defaults
-            defs = get_defaults() or {}
-            def_wh = str(defs.get("server_warehouse") or "").strip()
-            if def_wh:
-                wh_id = get_warehouse_id_by_name(def_wh)
-                if wh_id:
-                    return wh_id
-        except Exception:
-            pass
+                # Handle comma-separated store lists on multi-store users
+                if "," in wh_name:
+                    for part in wh_name.split(","):
+                        part_clean = part.strip()
+                        if part_clean:
+                            wh_id = get_warehouse_id_by_name(part_clean)
+                            if wh_id:
+                                return wh_id
 
         return None
 
@@ -20245,6 +20551,65 @@ class POSView(QWidget):
             quote_btn.setVisible(False)
         
         # ΓöÇΓöÇ Options dropdown (replaces right-panel Options button) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Expenses button ───────────────────────────────────────────────────
+        self.expenses_btn = _nb("Expenses", self._on_expenses_clicked, color=ORANGE, hov=AMBER)
+        self.expenses_btn.setToolTip("Record Till Expenses")
+        layout.addWidget(self.expenses_btn)
+        layout.addSpacing(4)
+        try:
+            if not getattr(adv_settings, "enableExpenses", False):
+                self.expenses_btn.setVisible(False)
+        except Exception:
+            self.expenses_btn.setVisible(False)
+
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
         options_menu_btn = HoverMenuButton("Options ", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
         options_menu_btn.addItem("Sync from Server",    self._do_nav_sync_products)
@@ -20252,7 +20617,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     options_menu_btn.addItem("Axis Fiscal Operations", self._do_nav_axis_fiscal)
                 elif f_repo.provider == "revmax":
                     options_menu_btn.addItem("Revmax Fiscal Operations", self._do_nav_revmax_fiscal)
@@ -21955,6 +22320,65 @@ class POSView(QWidget):
         
         
 # ΓöÇΓöÇ Options dropdown ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Expenses button ───────────────────────────────────────────────────
+        self.expenses_btn = _nb("Expenses", self._on_expenses_clicked, color=ORANGE, hov=AMBER)
+        self.expenses_btn.setToolTip("Record Till Expenses")
+        layout.addWidget(self.expenses_btn)
+        layout.addSpacing(4)
+        try:
+            if not getattr(adv_settings, "enableExpenses", False):
+                self.expenses_btn.setVisible(False)
+        except Exception:
+            self.expenses_btn.setVisible(False)
+
+        # ── Monitors dropdown ────────────────────────────────────────────────────
+        self.monitors_menu_btn = HoverMenuButton("Monitors", color=NAVY_2, hov=NAVY_3, height=NAV_H)
+        
+        def _launch_kds(m):
+            from views.restaurant_kds import KitchenWindow, ReadyBoardWindow, UnifiedMonitorWindow
+            if m == "k":
+                if not hasattr(self, "_kw") or self._kw is None:
+                    self._kw = KitchenWindow()
+                self._kw.show()
+                self._kw.raise_()
+                self._kw.activateWindow()
+            elif m == "d":
+                if not hasattr(self, "_db") or self._db is None:
+                    self._db = ReadyBoardWindow()
+                self._db.show()
+                self._db.raise_()
+                self._db.activateWindow()
+            elif m == "u":
+                if not hasattr(self, "_um") or self._um is None:
+                    self._um = UnifiedMonitorWindow()
+                self._um.show()
+                self._um.raise_()
+                self._um.activateWindow()
+
+        self.monitors_menu_btn.addItem("Kitchen Display (KDS)", lambda: _launch_kds("k"))
+        self.monitors_menu_btn.addItem("Ready Board (Dispatch)", lambda: _launch_kds("d"))
+        self.monitors_menu_btn.addItem("Unified Monitor", lambda: _launch_kds("u"))
+        
+        layout.addWidget(self.monitors_menu_btn)
+        layout.addSpacing(4)
+        
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key IN ('enable_kds_websocket', 'takeaway_monitors')")
+            rows = cur.fetchall()
+            conn.close()
+            
+            kds_enabled = False
+            for row in rows:
+                if str(row[0]) == "1":
+                    kds_enabled = True
+                    break
+            if not kds_enabled:
+                self.monitors_menu_btn.setVisible(False)
+        except Exception:
+            self.monitors_menu_btn.setVisible(False)
         options_menu_btn = HoverMenuButton("Options ", color=NAVY_2, hov=NAVY_3, height=NAV_H)
         options_menu_btn.clicked.connect(self._show_options_menu)
         options_menu_btn.addItem("Sync from Server",    self._do_nav_sync_products)
@@ -21962,7 +22386,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     options_menu_btn.addItem("Axis Fiscal Operations", self._do_nav_axis_fiscal)
                 elif f_repo.provider == "revmax":
                     options_menu_btn.addItem("Revmax Fiscal Operations", self._do_nav_revmax_fiscal)
@@ -22598,7 +23022,8 @@ class POSView(QWidget):
             from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton
             from PySide6.QtCore import Qt
             
-            dlg = QDialog(self)
+            from views.components.blur_overlay import BlurredDialog
+            dlg = BlurredDialog(self)
             dlg.setWindowTitle("Update Quantity")
             dlg.setModal(True)
             dlg.setFixedSize(400, 450)
@@ -22678,7 +23103,9 @@ class POSView(QWidget):
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, _setup_cursor)
             
-            if dlg.exec() == QDialog.Accepted:
+            res = dlg.exec()
+            
+            if res == QDialog.Accepted:
                 new_qty = spin.value()
                 
                 if not getattr(self, "_get_pos_rule", lambda k, default: default)("allow_negative_stock", default=True):
@@ -23780,10 +24207,27 @@ class POSView(QWidget):
             cur  = conn.cursor()
             cur.execute("""
                 SELECT uom, price FROM item_prices
-                WHERE  part_no = ? AND price_list = ? AND price_type = 'selling'
+                WHERE  part_no = ? AND LOWER(price_list) = LOWER(?) AND price_type = 'selling'
                 ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
             """, (part_no, price_list))
             rows = cur.fetchall()
+
+            if not rows and str(price_list).strip().lower() != "standard selling":
+                cur.execute("""
+                    SELECT uom, price FROM item_prices
+                    WHERE  part_no = ? AND LOWER(price_list) = 'standard selling' AND price_type = 'selling'
+                    ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
+                """, (part_no,))
+                rows = cur.fetchall()
+
+            if not rows:
+                cur.execute("""
+                    SELECT uom, price FROM products WITH (NOLOCK)
+                    WHERE  part_no = ?
+                """, (part_no,))
+                p_row = cur.fetchone()
+                if p_row and p_row[1] is not None:
+                    rows = [(p_row[0] or "Nos", p_row[1])]
 
             result = [{"uom": r[0], "price": float(r[1] or 0)} for r in rows]
             seen_uoms = {r["uom"].strip().upper() for r in result}
@@ -23865,8 +24309,8 @@ class POSView(QWidget):
                 print(f"[BundlePrice] Error resolving bundle price: {e}")
 
         if not rows:
-            # Fallback for unpriced items: allow them at 0 price
-            rows = [{"uom": base_uom, "price": 0.0}]
+            prod_price = float(product.get("price") or 0.0)
+            rows = [{"uom": base_uom, "price": prod_price}]
 
         # Pre-selected barcode_uom (from scanned barcode) bypasses UOM picker
         if barcode_uom:
@@ -25098,11 +25542,25 @@ class POSView(QWidget):
             if hidden_no_price:
                 print(f"[grid] {hidden_no_price} item(s) show 0 - no rate in "
                       f"price list '{active_list}'")
+            if len(tuples) == 0 and name == "All":
+                try:
+                    from services.bugsink_service import check_and_report_saas_empty_catalog
+                    check_and_report_saas_empty_catalog(
+                        context="product_grid_all",
+                        extra_info={"warehouse_id": wh_id, "price_list": active_list}
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[grid] Error loading products: {e}")
             self._current_products   = []
             self._product_meta_by_pn = {}
             self._has_any_product_image = False
+            try:
+                from services.bugsink_service import capture_exception
+                capture_exception(e, extra={"action": "load_products_grid", "category": name})
+            except Exception:
+                pass
         finally:
             self._product_page = 0
             self._render_product_page()
@@ -25141,6 +25599,38 @@ class POSView(QWidget):
         per_page    = ROWS * COLS
         total       = len(self._current_products)
         total_pages = max(1, (total + per_page - 1) // per_page)
+
+        if total == 0:
+            try:
+                from database.db import _load_settings
+                from services.bugsink_service import check_and_report_database_change, check_and_report_saas_empty_catalog
+                cfg = _load_settings()
+                db_name = cfg.get("database") or "Unknown"
+                changed, chg_msg = check_and_report_database_change(db_name, context="product_grid_render")
+                check_and_report_saas_empty_catalog(context="product_grid_empty")
+
+                empty_card = QFrame()
+                border_color = "#ef4444" if changed else "#cbd5e1"
+                bg_color = "#fef2f2" if changed else "#ffffff"
+                empty_card.setStyleSheet(f"QFrame {{ background-color: {bg_color}; border: 1.5px dashed {border_color}; border-radius: 8px; padding: 20px; }}")
+                e_layout = QVBoxLayout(empty_card)
+                e_layout.setAlignment(Qt.AlignCenter)
+                e_layout.setSpacing(6)
+
+                msg_txt = f"⚠️ DATABASE CHANGED: Switched to '{db_name}'\nNo products found in this database. Error reported to Bugsink." if changed else f"No products found in active database: '{db_name}'"
+                e_lbl = QLabel(msg_txt)
+                e_lbl.setAlignment(Qt.AlignCenter)
+                text_color = "#b91c1c" if changed else "#64748b"
+                e_lbl.setStyleSheet(f"color: {text_color}; font-size: 13px; font-weight: bold; background: transparent;")
+                e_layout.addWidget(e_lbl)
+
+                self._product_grid.addWidget(empty_card, 0, 0, ROWS, COLS)
+            except Exception:
+                pass
+            self._grid_page_lbl.setText("0 / 0")
+            self._grid_prev_btn.setEnabled(False)
+            self._grid_next_btn.setEnabled(False)
+            return
 
         start         = self._product_page * per_page
         page_products = self._current_products[start: start + per_page]
@@ -25326,6 +25816,11 @@ class POSView(QWidget):
         self._reload_current_category()
 
     def _reload_current_category(self):
+        if hasattr(self, "_price_map_cache"):
+            self._price_map_cache.clear()
+        if hasattr(self, "_price_rows_cache"):
+            self._price_rows_cache.clear()
+        self._cached_active_price_list_name = None
         if not getattr(self, "_category_names", None):
             try:
                 from models.product import get_categories
@@ -25350,7 +25845,7 @@ class POSView(QWidget):
             from models.fiscal_settings import FiscalSettingsRepository
             f_repo = FiscalSettingsRepository().get_settings()
             if f_repo and f_repo.enabled:
-                if f_repo.provider == "axis":
+                if f_repo.provider in ("axis", "frappe", "havano_zimra"):
                     from views.dialogs.axis_fiscal_dialog import AxisFiscalDialog
                     AxisFiscalDialog(self, initial_action="close").exec()
                 elif f_repo.provider == "revmax":
@@ -26397,33 +26892,38 @@ class POSView(QWidget):
                                    fiscal_qr: str = "", fiscal_vc: str = ""):
         """Build a proper ReceiptData credit note and send it to printing_service."""
         import json
-        from pathlib import Path
         from models.receipt import ReceiptData, Item
         from models.company_defaults import get_defaults
-        from services.printing_service import printing_service
+        from services.printing_service import printing_service, get_configured_paper_size
+        from database.db import get_app_data_dir
 
         co = get_defaults() or {}
 
-        # ΓöÇΓöÇ Resolve printer ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-        hw_file  = Path("app_data/hardware_settings.json")
+        # ── Resolve printer & paper size ─────────────────────────────────────
+        paper_size = get_configured_paper_size()
+        is_a4 = str(paper_size).upper() == "A4"
+
         printers = []
-        try:
-            with open(hw_file, "r", encoding="utf-8") as f:
-                hw = json.load(f)
-            if hw.get("main_printer") and hw["main_printer"] != "(None)":
-                printers.append(hw["main_printer"])
-        except Exception:
-            pass
+        if not is_a4:
+            hw_file = get_app_data_dir() / "hardware_settings.json"
+            try:
+                if hw_file.exists():
+                    with open(hw_file, "r", encoding="utf-8") as f:
+                        hw = json.load(f)
+                    if hw.get("main_printer") and hw["main_printer"] != "(None)":
+                        printers.append(hw["main_printer"])
+            except Exception:
+                pass
 
-        if not printers:
-            QMessageBox.warning(
-                self, "No Printer",
-                "No active printer configured in hardware settings.\n"
-                "Go to Settings -> Hardware to configure a printer."
-            )
-            return
+            if not printers:
+                QMessageBox.warning(
+                    self, "No Printer",
+                    "No active printer configured in hardware settings.\n"
+                    "Go to Settings -> Hardware to configure a printer."
+                )
+                return
 
-        # ΓöÇΓöÇ Build ReceiptData ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Build ReceiptData ────────────────────────────────────────────────
         subtotal = sum(float(it.get("total", 0)) for it in items)
 
         receipt = ReceiptData(
@@ -26448,6 +26948,31 @@ class POSView(QWidget):
             currency            = cn.get("currency", "USD"),
             footer              = co.get("footer_text", "Credit note issued. Thank you."),
         )
+
+        # Enrich customer details (email, address, TIN, VAT)
+        cust_name = str(cn.get("customer_name", "") or "").strip()
+        if cust_name and cust_name.lower() not in ("walk-in", "walk in", "walk in customer", "walk-in customer", "cash customer", "cash", "default", "default customer"):
+            try:
+                from database.db import get_connection
+                _c_conn = get_connection()
+                _c_cur = _c_conn.cursor()
+                _c_cur.execute(
+                    "SELECT custom_email_address, custom_house_no, custom_street, custom_city, custom_province, custom_customer_tin, custom_customer_vat, custom_telephone_number "
+                    "FROM customers WITH (NOLOCK) WHERE customer_name = ?", (cust_name,)
+                )
+                _c_row = _c_cur.fetchone()
+                _c_conn.close()
+                if _c_row:
+                    receipt.customerEmail = _c_row[0] or ""
+                    addr_parts = [str(p).strip() for p in (_c_row[1], _c_row[2], _c_row[3], _c_row[4]) if p and str(p).strip()]
+                    receipt.customeraddress = ", ".join(addr_parts)
+                    receipt.customerTin = _c_row[5] or ""
+                    receipt.customerVat = _c_row[6] or ""
+                    if not receipt.customerContact and _c_row[7]:
+                        receipt.customerContact = _c_row[7]
+            except Exception:
+                pass
+
         # Extra attributes read via getattr() in printing_service - set after construction
         receipt.originalInvoiceNo = cn.get("invoice_no", "")
         receipt.creditNoteReason  = cn.get("reason", "")
@@ -26468,7 +26993,13 @@ class POSView(QWidget):
             ))
         receipt.itemlist = receipt.items
 
-        # ΓöÇΓöÇ Print ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Print ────────────────────────────────────────────────────────────
+        if is_a4:
+            if printing_service.print_credit_note(receipt):
+                QMessageBox.information(self, "Credit Note Preview",
+                                        "Credit note A4 document opened in preview.")
+            return
+
         ok = False
         for p in printers:
             if printing_service.print_credit_note(receipt, printer_name=p):
@@ -26891,6 +27422,18 @@ class POSView(QWidget):
     # =========================================================================
     # QUOTATION FLOW
     # =========================================================================
+    def _on_expenses_clicked(self):
+        try:
+            from views.dialogs.expense_dialog import ProcessExpenseDialog
+            parent_window = getattr(self, "parent_window", None) or getattr(self, "parent", lambda: self)() 
+            if not isinstance(parent_window, type(self)):
+                parent_window = self
+            dlg = ProcessExpenseDialog(parent=parent_window)
+            dlg.exec()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to open Expenses dialog: {e}")
+
     def _on_quotation(self):
         """
         Quotation flow:
@@ -27574,7 +28117,6 @@ class MainWindow(QMainWindow):
 
         # Close any open child modal dialogs so they do not block eviction
         try:
-            from PySide6.QtWidgets import QDialog
             for child in self.findChildren(QDialog):
                 if child.isVisible():
                     child.reject()
@@ -29302,6 +29844,23 @@ class MainWindow(QMainWindow):
             app_inst = QApplication.instance()
             if app_inst:
                 app_inst.quit()
+            
+            # Aggressive background thread termination: force exit to ensure ports are cleared
+            import os
+            import threading
+            def _force_exit():
+                import time
+                time.sleep(0.5)
+                # Ensure the lock file is released so the user doesn't get 'Already Running'
+                try:
+                    from PySide6.QtCore import QDir
+                    lock_path = QDir.tempPath() + "/havano_pos_2026.lock"
+                    if os.path.exists(lock_path):
+                        os.remove(lock_path)
+                except Exception:
+                    pass
+                os._exit(0)
+            threading.Thread(target=_force_exit, daemon=True).start()
 
     def _logout(self):
         msg = QMessageBox(self)
@@ -29339,6 +29898,18 @@ class MainWindow(QMainWindow):
             return
         self._is_logging_out = True
 
+        # ── Smart Loader: show while logging out ──
+        _logout_loader = None
+        try:
+            from views.components.sleek_loader import SleekLoaderOverlay
+            _logout_loader = SleekLoaderOverlay()
+            _logout_loader.set_status("Logging out...")
+            _logout_loader.show_loading()
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+        except Exception:
+            pass
+
         self.hide()
         
         # Trigger an automated database backup on logout
@@ -29354,6 +29925,13 @@ class MainWindow(QMainWindow):
         try:
             from views.login_dialog import LoginDialog
             dlg = LoginDialog()
+            
+            if _logout_loader:
+                try:
+                    _logout_loader.hide_loading()
+                except Exception:
+                    pass
+
             if dlg.exec() == QDialog.Accepted:
                 # ── Smart Loader: show while MainWindow initializes ──
                 try:
@@ -30289,10 +30867,12 @@ class FiscalWaitDialog(QDialog):
             self.thread.wait()
         super().closeEvent(event)
 
-# # =============================================================================
-# REPRINT DIALOG  -  two tabs: Sales Invoice  |  Sales Order
-# =============================================================================
-class ReprintDialog(QDialog):
+try:
+    from views.components.blur_overlay import BlurredDialog
+except ImportError:
+    BlurredDialog = QDialog
+
+class ReprintDialog(BlurredDialog):
     """
     Two-tab reprint dialog.
       Tab 1 - Sales Invoice : search by invoice number or customer name

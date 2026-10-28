@@ -2736,11 +2736,19 @@ class OptionsDialog(QDialog):
         self._sync_thread.start()
 
     def _on_sync_products_done(self, res: dict):
-        # Refresh the POS product grid so newly-synced items appear without a
-        # restart. _reload_current_category preserves the active category/page.
         try:
-            if self._pos and hasattr(self._pos, "_reload_current_category"):
-                self._pos._reload_current_category()
+            if self._pos:
+                if hasattr(self._pos, "_price_map_cache"):
+                    self._pos._price_map_cache.clear()
+                if hasattr(self._pos, "_price_rows_cache"):
+                    self._pos._price_rows_cache.clear()
+                if hasattr(self._pos, "_cached_active_price_list_name"):
+                    self._pos._cached_active_price_list_name = None
+                self._pos._category_names = []
+                if hasattr(self._pos, "_reload_current_category"):
+                    self._pos._reload_current_category()
+                if hasattr(self._pos, "refresh_pos_grid"):
+                    self._pos.refresh_pos_grid()
         except Exception as e:
             print(f"[OptionsDialog] product grid refresh failed: {e}")
 
@@ -4482,7 +4490,16 @@ class POSView(QWidget):
                 self.dlg = dialog
             def on_done(self, res):
                 try:
+                    if hasattr(self.pos, "_price_map_cache"):
+                        self.pos._price_map_cache.clear()
+                    if hasattr(self.pos, "_price_rows_cache"):
+                        self.pos._price_rows_cache.clear()
+                    if hasattr(self.pos, "_cached_active_price_list_name"):
+                        self.pos._cached_active_price_list_name = None
+                    self.pos._category_names = []
                     self.pos._reload_current_category()
+                    if hasattr(self.pos, "refresh_pos_grid"):
+                        self.pos.refresh_pos_grid()
                 except Exception: pass
                 self.dlg.close()
                 pw = getattr(self.pos, "parent_window", None)
@@ -5564,7 +5581,7 @@ class POSView(QWidget):
     # =========================================================================
     
     def _get_active_warehouse_id(self):
-        """Dynamically retrieve active warehouse_id: POS session -> user shop -> company defaults shop."""
+        """Dynamically retrieve active warehouse_id: POS session -> company defaults shop -> user shop."""
         if getattr(self, "warehouse_id", None):
             return self.warehouse_id
         try:
@@ -5578,7 +5595,25 @@ class POSView(QWidget):
 
         from models.product import get_warehouse_id_by_name
 
-        # Check logged in user assigned warehouse
+        # Prefer Company Defaults active store (especially in SaaS mode where admin users
+        # have a comma-separated list of all stores on self.user["warehouse"]).
+        try:
+            from models.company_defaults import get_defaults
+            defs = get_defaults() or {}
+            def_wh = str(
+                defs.get("server_warehouse")
+                or defs.get("server_store_name")
+                or defs.get("warehouse")
+                or ""
+            ).strip()
+            if def_wh:
+                wh_id = get_warehouse_id_by_name(def_wh)
+                if wh_id:
+                    return wh_id
+        except Exception:
+            pass
+
+        # Fallback to logged-in user assigned warehouse
         if hasattr(self, 'user') and self.user:
             wh_id = self.user.get("warehouse_id")
             if wh_id:
@@ -5588,18 +5623,14 @@ class POSView(QWidget):
                 wh_id = get_warehouse_id_by_name(wh_name)
                 if wh_id:
                     return wh_id
-
-        # Fallback to Company Defaults shop
-        try:
-            from models.company_defaults import get_defaults
-            defs = get_defaults() or {}
-            def_wh = str(defs.get("server_warehouse") or "").strip()
-            if def_wh:
-                wh_id = get_warehouse_id_by_name(def_wh)
-                if wh_id:
-                    return wh_id
-        except Exception:
-            pass
+                # Handle comma-separated store lists on multi-store users
+                if "," in wh_name:
+                    for part in wh_name.split(","):
+                        part_clean = part.strip()
+                        if part_clean:
+                            wh_id = get_warehouse_id_by_name(part_clean)
+                            if wh_id:
+                                return wh_id
 
         return None
 
@@ -11748,8 +11779,13 @@ class POSView(QWidget):
         self._reload_current_category()
 
     def _reload_current_category(self):
+        if hasattr(self, "_price_map_cache"):
+            self._price_map_cache.clear()
+        if hasattr(self, "_price_rows_cache"):
+            self._price_rows_cache.clear()
+        self._cached_active_price_list_name = None
         idx  = getattr(self, "_active_cat_idx", 0)
-        name = self._category_names[idx] if idx < len(self._category_names) else "All"
+        name = self._category_names[idx] if (getattr(self, "_category_names", None) and idx < len(self._category_names)) else "All"
         self._load_category_products(idx, name)
 
     # =========================================================================
@@ -16713,11 +16749,19 @@ class OptionsDialog(QDialog):
         self._sync_thread.start()
 
     def _on_sync_products_done(self, res: dict):
-        # Refresh the POS product grid so newly-synced items appear without a
-        # restart. _reload_current_category preserves the active category/page.
         try:
-            if self._pos and hasattr(self._pos, "_reload_current_category"):
-                self._pos._reload_current_category()
+            if self._pos:
+                if hasattr(self._pos, "_price_map_cache"):
+                    self._pos._price_map_cache.clear()
+                if hasattr(self._pos, "_price_rows_cache"):
+                    self._pos._price_rows_cache.clear()
+                if hasattr(self._pos, "_cached_active_price_list_name"):
+                    self._pos._cached_active_price_list_name = None
+                self._pos._category_names = []
+                if hasattr(self._pos, "_reload_current_category"):
+                    self._pos._reload_current_category()
+                if hasattr(self._pos, "refresh_pos_grid"):
+                    self._pos.refresh_pos_grid()
         except Exception as e:
             print(f"[OptionsDialog] product grid refresh failed: {e}")
 
@@ -18595,7 +18639,16 @@ class POSView(QWidget):
                 self.dlg = dialog
             def on_done(self, res):
                 try:
+                    if hasattr(self.pos, "_price_map_cache"):
+                        self.pos._price_map_cache.clear()
+                    if hasattr(self.pos, "_price_rows_cache"):
+                        self.pos._price_rows_cache.clear()
+                    if hasattr(self.pos, "_cached_active_price_list_name"):
+                        self.pos._cached_active_price_list_name = None
+                    self.pos._category_names = []
                     self.pos._reload_current_category()
+                    if hasattr(self.pos, "refresh_pos_grid"):
+                        self.pos.refresh_pos_grid()
                 except Exception: pass
                 try:
                     self.dlg.close()
@@ -19648,7 +19701,7 @@ class POSView(QWidget):
     # =========================================================================
     
     def _get_active_warehouse_id(self):
-        """Dynamically retrieve active warehouse_id: POS session -> user shop -> company defaults shop."""
+        """Dynamically retrieve active warehouse_id: POS session -> company defaults shop -> user shop."""
         if getattr(self, "warehouse_id", None):
             return self.warehouse_id
         try:
@@ -19662,7 +19715,25 @@ class POSView(QWidget):
 
         from models.product import get_warehouse_id_by_name
 
-        # Check logged in user assigned warehouse
+        # Prefer Company Defaults active store (especially in SaaS mode where admin users
+        # have a comma-separated list of all stores on self.user["warehouse"]).
+        try:
+            from models.company_defaults import get_defaults
+            defs = get_defaults() or {}
+            def_wh = str(
+                defs.get("server_warehouse")
+                or defs.get("server_store_name")
+                or defs.get("warehouse")
+                or ""
+            ).strip()
+            if def_wh:
+                wh_id = get_warehouse_id_by_name(def_wh)
+                if wh_id:
+                    return wh_id
+        except Exception:
+            pass
+
+        # Fallback to logged-in user assigned warehouse
         if hasattr(self, 'user') and self.user:
             wh_id = self.user.get("warehouse_id")
             if wh_id:
@@ -19672,18 +19743,14 @@ class POSView(QWidget):
                 wh_id = get_warehouse_id_by_name(wh_name)
                 if wh_id:
                     return wh_id
-
-        # Fallback to Company Defaults shop
-        try:
-            from models.company_defaults import get_defaults
-            defs = get_defaults() or {}
-            def_wh = str(defs.get("server_warehouse") or "").strip()
-            if def_wh:
-                wh_id = get_warehouse_id_by_name(def_wh)
-                if wh_id:
-                    return wh_id
-        except Exception:
-            pass
+                # Handle comma-separated store lists on multi-store users
+                if "," in wh_name:
+                    for part in wh_name.split(","):
+                        part_clean = part.strip()
+                        if part_clean:
+                            wh_id = get_warehouse_id_by_name(part_clean)
+                            if wh_id:
+                                return wh_id
 
         return None
 
@@ -25749,6 +25816,11 @@ class POSView(QWidget):
         self._reload_current_category()
 
     def _reload_current_category(self):
+        if hasattr(self, "_price_map_cache"):
+            self._price_map_cache.clear()
+        if hasattr(self, "_price_rows_cache"):
+            self._price_rows_cache.clear()
+        self._cached_active_price_list_name = None
         if not getattr(self, "_category_names", None):
             try:
                 from models.product import get_categories

@@ -357,19 +357,58 @@ def _extract_tax_info(taxes: list, part_no: str = "") -> dict | None:
     }
 
 
-def _extract_selling_price(prices: list, stock_uom: str = "Nos") -> float:
+def _extract_selling_price(
+    prices: list,
+    stock_uom: str = "Nos",
+    active_price_list: str = "",
+    active_store: str = "",
+) -> float:
     """
-    Best selling price from the prices array.
-    Priority:
-      1. Selling price that matches the stock UOM
-      2. Any 'Standard Selling' price list entry
-      3. First selling-type entry
+    Best selling price from the prices array, prioritizing active_store and active_price_list.
     """
     selling = [p for p in (prices or []) if str(p.get("type", "")).lower() == "selling"]
     if not selling:
         return 0.0
+
+    store_clean = (active_store or "").strip().lower()
+    if store_clean:
+        store_exact = [
+            p for p in selling
+            if str(p.get("store") or p.get("warehouse") or "").strip().lower() == store_clean
+        ]
+        store_generic = [
+            p for p in selling
+            if not str(p.get("store") or p.get("warehouse") or "").strip()
+        ]
+        if store_exact or store_generic:
+            selling = store_exact + store_generic
+
+    pl_clean = (active_price_list or "").strip().lower()
+    uom_clean = (stock_uom or "Nos").strip().lower()
+
+    if pl_clean:
+        for p in selling:
+            p_pl = str(p.get("priceName") or p.get("price_list") or "").strip().lower()
+            p_uom = str(p.get("uom") or "").strip().lower()
+            if p_pl == pl_clean and p_uom == uom_clean:
+                try:
+                    val = float(p.get("price") or 0)
+                    if val > 0:
+                        return val
+                except (TypeError, ValueError):
+                    pass
+        for p in selling:
+            p_pl = str(p.get("priceName") or p.get("price_list") or "").strip().lower()
+            if p_pl == pl_clean:
+                try:
+                    val = float(p.get("price") or 0)
+                    if val > 0:
+                        return val
+                except (TypeError, ValueError):
+                    pass
+
     for p in selling:
-        if str(p.get("uom") or "").strip().lower() == stock_uom.strip().lower():
+        if str(p.get("uom") or "").strip().lower() == uom_clean:
             try:
                 return float(p.get("price") or 0)
             except (TypeError, ValueError):
@@ -384,6 +423,44 @@ def _extract_selling_price(prices: list, stock_uom: str = "Nos") -> float:
         return float(selling[0].get("price") or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _filter_warehouses_for_product(p: dict, catalog_has_store_prices: bool = False) -> list[dict]:
+    """
+    Determine which stores/warehouses a product is actually assigned to.
+    In SaaS mode, `p["warehouses"]` lists all organization stores for every
+    product, whereas `p["prices"]` only includes store-specific selling entries
+    (`store` / `warehouse`) for the stores where the product is assigned.
+    """
+    raw_whs = list(p.get("warehouses") or [])
+    raw_prices = list(p.get("prices") or [])
+
+    price_store_map: dict[str, str] = {}
+    for rp in raw_prices:
+        if str(rp.get("type") or "selling").strip().lower() != "selling":
+            continue
+        s_orig = str(rp.get("store") or rp.get("warehouse") or "").strip()
+        if s_orig:
+            price_store_map[s_orig.lower()] = s_orig
+
+    if price_store_map:
+        filtered_whs: list[dict] = []
+        matched_stores: set[str] = set()
+        for w in raw_whs:
+            w_name = str(w.get("warehouse") or w.get("warehouse_name") or w.get("store") or "").strip()
+            w_low = w_name.lower()
+            if w_low in price_store_map:
+                filtered_whs.append(w)
+                matched_stores.add(w_low)
+        for s_low, s_orig in price_store_map.items():
+            if s_low not in matched_stores:
+                filtered_whs.append({"warehouse": s_orig, "qtyOnHand": 0.0})
+        return filtered_whs
+
+    if catalog_has_store_prices and not bool(p.get("has_variants") or 0):
+        return []
+
+    return raw_whs
 
 
 def _extract_cost_price(prices: list, stock_uom: str = "Nos") -> float:
@@ -474,11 +551,16 @@ def _extract_stock(warehouses: list) -> float:
     return 0.0
 
 
-def _parse_product(p: dict, active_store: str = "") -> dict | None:
+def _parse_product(
+    p: dict,
+    active_store: str = "",
+    active_price_list: str = "",
+    catalog_has_store_prices: bool = False,
+) -> dict | None:
     """
     Maps a raw API product dict -> clean local dict with full tax fields.
-    Stock is filtered by the company's default warehouse.
-    Returns None if the product must be skipped.
+    Stock and warehouse assignments are filtered by store assignment.
+    Returns None if the product has no item code.
     """
     part_no   = str(p.get("itemcode") or "").strip().upper()
     name      = _clean_text(str(p.get("itemname") or "")).strip()[:255]
@@ -487,36 +569,47 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
     if not part_no:
         return None
 
-    # Filter out products that do not belong to active store if specified
-    if active_store:
-        raw_whs = p.get("warehouses") or []
-        if raw_whs:
-            matching_wh = [w for w in raw_whs if str(w.get("warehouse") or w.get("warehouse_name") or "").strip().lower() == active_store.strip().lower()]
-            if not matching_wh:
-                log.debug("[sync] Skipping %s - not assigned to active store '%s'", part_no, active_store)
-                return None
-
     raw_group = str(p.get("groupname") or "").strip()
     category  = "" if raw_group.lower() in _ROOT_GROUPS else raw_group[:100]
 
-    price = _extract_selling_price(p.get("prices") or [], stock_uom)
+    filtered_warehouses = _filter_warehouses_for_product(
+        p, catalog_has_store_prices=catalog_has_store_prices
+    )
+    price = _extract_selling_price(
+        p.get("prices") or [],
+        stock_uom,
+        active_price_list=active_price_list,
+        active_store=active_store,
+    )
     cost_price = _extract_cost_price(p.get("prices") or [], stock_uom)
-    stock = _extract_stock(p.get("warehouses") or [])
+    stock = _extract_stock(filtered_warehouses)
 
     # Tax - full extraction using maximum_net_rate
     tax_info = _extract_tax_info(p.get("taxes") or [], part_no=part_no)
 
-    # Item prices (both selling and buying, per price list and uom)
+    # Item prices (keep all stores' price rows with `store` column for display-time resolution)
+    raw_prices = list(p.get("prices") or [])
     item_prices = []
-    for rp in (p.get("prices") or []):
-        pl = str(rp.get("priceName") or "").strip()
+    seen_ip_keys = set()
+    for rp in raw_prices:
+        pl = str(rp.get("priceName") or rp.get("price_list") or "").strip()
         uom_name = str(rp.get("uom") or "Nos").strip()
+        p_type = str(rp.get("type") or "selling").strip().lower() or "selling"
+        store_name = str(rp.get("store") or rp.get("warehouse") or "").strip()
         try:
             rp_price = float(rp.get("price") or 0)
         except (TypeError, ValueError):
             rp_price = 0.0
-        if pl and uom_name and rp_price > 0:
-            item_prices.append({"price_list": pl, "uom": uom_name, "price": rp_price})
+        key = (pl.lower(), uom_name.lower(), p_type, store_name.lower())
+        if pl and uom_name and rp_price > 0 and key not in seen_ip_keys:
+            seen_ip_keys.add(key)
+            item_prices.append({
+                "price_list": pl,
+                "uom": uom_name,
+                "price": rp_price,
+                "price_type": p_type,
+                "store": store_name,
+            })
 
     result = {
         "part_no":             part_no,
@@ -527,7 +620,7 @@ def _parse_product(p: dict, active_store: str = "") -> dict | None:
         "stock":               stock,
         "uom":                 stock_uom,
         "item_prices":         item_prices,
-        "raw_warehouses":      p.get("warehouses") or [],
+        "raw_warehouses":      filtered_warehouses,
         "is_pharmacy_product": 1 if p.get("is_pharmacy_product") else 0,
         "track_stock":         1 if str(p.get("maintainstock") if p.get("maintainstock") is not None else p.get("is_stock_item") if p.get("is_stock_item") is not None else p.get("track_stock") or "1").strip().lower() in ("1", "true", "yes", "t", "y") else 0,
         "hs_code":              str(p.get("hscode") or p.get("hs_code") or "").strip(),
@@ -921,8 +1014,24 @@ def sync_products(api_key: str = "", api_secret: str = "",
         from models.company_defaults import get_defaults
         co_defs = get_defaults() or {}
         active_store_name = (co_defs.get("server_store_name") or co_defs.get("server_warehouse") or co_defs.get("store_name") or "").strip()
+        active_pl_name = (co_defs.get("default_price_list_name") or "").strip()
+        if not active_pl_name:
+            import json
+            from database.db import get_app_data_dir
+            settings_path = get_app_data_dir() / "sql_settings.json"
+            if settings_path.exists():
+                cfg = json.loads(settings_path.read_text(encoding="utf-8"))
+                active_pl_name = (cfg.get("default_pricelist_name") or "").strip()
     except Exception:
         active_store_name = ""
+        active_pl_name = ""
+
+    catalog_has_store_prices = any(
+        str(rp.get("store") or rp.get("warehouse") or "").strip()
+        for raw_p in all_raw
+        for rp in (raw_p.get("prices") or [])
+        if str(rp.get("type") or "selling").strip().lower() == "selling"
+    )
 
     synced_part_nos = set()
     for idx, raw in enumerate(all_raw, start=1):
@@ -947,7 +1056,12 @@ def sync_products(api_key: str = "", api_secret: str = "",
             )
  
         try:
-            parsed = _parse_product(raw, active_store=active_store_name)
+            parsed = _parse_product(
+                raw,
+                active_store=active_store_name,
+                active_price_list=active_pl_name,
+                catalog_has_store_prices=catalog_has_store_prices,
+            )
             if parsed is None:
                 result["skipped"] += 1
                 continue
@@ -1094,27 +1208,50 @@ def _upsert_parsed_product(cur, conn, p: dict, local_part_nos: set) -> bool:
         raise  # Let caller count this as an error
 
     # ── Item prices ─────────────────────────────────────────────────────
+    try:
+        cur.execute("""
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = 'item_prices' AND COLUMN_NAME = 'store'
+            )
+            ALTER TABLE item_prices ADD store NVARCHAR(120) NOT NULL DEFAULT ''
+        """)
+        cur.execute("""
+            IF EXISTS (
+                SELECT 1 FROM sys.key_constraints
+                WHERE name = 'UQ_item_prices' AND parent_object_id = OBJECT_ID('item_prices')
+            )
+            ALTER TABLE item_prices DROP CONSTRAINT UQ_item_prices
+        """)
+        cur.execute("""
+            IF EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'ux_item_prices_key' AND object_id = OBJECT_ID('item_prices')
+            )
+            DROP INDEX ux_item_prices_key ON item_prices
+        """)
+        cur.execute("DELETE FROM item_prices WHERE part_no = ?", (part_no,))
+    except Exception as e:
+        log.warning("[sync] item_prices schema/cleanup failed for %s: %s", part_no, e)
+
     for ip in (p.get("item_prices") or []):
         try:
             cur.execute(
                 """
-                MERGE item_prices AS target
-                USING (SELECT ? AS part_no, ? AS price_list, ? AS uom) AS src
-                    ON target.part_no = src.part_no
-                   AND target.price_list = src.price_list
-                   AND target.uom     = src.uom
-                WHEN MATCHED THEN
-                    UPDATE SET price = ?
-                WHEN NOT MATCHED THEN
-                    INSERT (part_no, price_list, uom, price) VALUES (?, ?, ?, ?);
+                INSERT INTO item_prices (part_no, price_list, uom, price, price_type, store, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, GETDATE());
                 """,
                 (
-                    part_no, ip["price_list"], ip["uom"], ip["price"],
-                    part_no, ip["price_list"], ip["uom"], ip["price"],
+                    part_no,
+                    ip["price_list"],
+                    ip["uom"],
+                    ip["price"],
+                    ip.get("price_type", "selling"),
+                    ip.get("store", ""),
                 ),
             )
         except Exception as e:
-            log.warning("[sync] Item price MERGE failed for %s/%s/%s: %s", part_no, ip.get("price_list"), ip.get("uom"), e)
+            log.warning("[sync] Item price INSERT failed for %s/%s/%s: %s", part_no, ip.get("price_list"), ip.get("uom"), e)
     try:
         conn.commit()
     except Exception as e:
@@ -1183,44 +1320,43 @@ def _upsert_parsed_product(cur, conn, p: dict, local_part_nos: set) -> bool:
 
     # ── product_warehouse_stock & warehouses auto-registration ──────
     raw_warehouses = p.get("raw_warehouses") or []
-    if raw_warehouses:
-        try:
-            cur.execute(
-                "DELETE FROM product_warehouse_stock "
-                "WHERE product_id = (SELECT id FROM products WHERE part_no = ?)",
-                (part_no,)
-            )
-            for w in raw_warehouses:
-                w_name = str(w.get("warehouse") or "").strip()
-                if not w_name:
-                    continue
-                try:
-                    qty = float(w.get("qtyOnHand") or 0)
-                except (TypeError, ValueError):
-                    qty = 0.0
+    try:
+        cur.execute(
+            "DELETE FROM product_warehouse_stock "
+            "WHERE product_id = (SELECT id FROM products WHERE part_no = ?)",
+            (part_no,)
+        )
+        for w in raw_warehouses:
+            w_name = str(w.get("warehouse") or "").strip()
+            if not w_name:
+                continue
+            try:
+                qty = float(w.get("qtyOnHand") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
 
-                cur.execute("SELECT id FROM warehouses WHERE LTRIM(RTRIM(UPPER(name))) = ?", (w_name.upper(),))
-                r = cur.fetchone()
-                if r:
-                    wh_id = r[0]
-                else:
-                    cur.execute("SELECT TOP 1 id FROM companies ORDER BY id ASC")
-                    c_row = cur.fetchone()
-                    comp_id = c_row[0] if c_row else 1
-                    cur.execute("INSERT INTO warehouses (name, company_id) VALUES (?, ?)", (w_name, comp_id))
-                    cur.execute("SELECT @@IDENTITY")
-                    r_new = cur.fetchone()
-                    wh_id = r_new[0] if r_new else None
+            cur.execute("SELECT id FROM warehouses WHERE LTRIM(RTRIM(UPPER(name))) = ?", (w_name.upper(),))
+            r = cur.fetchone()
+            if r:
+                wh_id = r[0]
+            else:
+                cur.execute("SELECT TOP 1 id FROM companies ORDER BY id ASC")
+                c_row = cur.fetchone()
+                comp_id = c_row[0] if c_row else 1
+                cur.execute("INSERT INTO warehouses (name, company_id) VALUES (?, ?)", (w_name, comp_id))
+                cur.execute("SELECT @@IDENTITY")
+                r_new = cur.fetchone()
+                wh_id = r_new[0] if r_new else None
 
-                if wh_id:
-                    cur.execute("""
-                        INSERT INTO product_warehouse_stock (product_id, warehouse_id, stock)
-                        VALUES ((SELECT id FROM products WHERE part_no = ?), ?, ?)
-                    """, (part_no, wh_id, qty))
-            conn.commit()
-            log.debug("[sync] %s - warehouse stock synced for %d warehouse(s)", part_no, len(raw_warehouses))
-        except Exception as e:
-            log.warning("[sync] product_warehouse_stock upsert failed for %s: %s", part_no, e)
+            if wh_id:
+                cur.execute("""
+                    INSERT INTO product_warehouse_stock (product_id, warehouse_id, stock)
+                    VALUES ((SELECT id FROM products WHERE part_no = ?), ?, ?)
+                """, (part_no, wh_id, qty))
+        conn.commit()
+        log.debug("[sync] %s - warehouse stock synced for %d warehouse(s)", part_no, len(raw_warehouses))
+    except Exception as e:
+        log.warning("[sync] product_warehouse_stock upsert failed for %s: %s", part_no, e)
 
     return is_new
 

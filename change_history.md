@@ -1,5 +1,34 @@
 # Change History
 
+## [2026-10-28 10:52:00] - Fix: SaaS Store/Warehouse Product & Category Filtering and Per-Store Pricing at Display Time
+
+### Problem
+In SaaS mode (`get_system_mode() == "saas"`), the POS product grid, category filters, and search displays were showing all organization products across all stores instead of filtering to the active store (`Legends Chisipiti`, `Legends Machipisa`, `Legends Xuls`):
+1. The SaaS product catalog API (`havano_pos_integration.api.get_products`) returns every organization warehouse in `product["warehouses"]` for every product (with `qtyOnHand: 0.0` for stores where it is not stocked), while actual store assignments and per-store prices live in `product["prices"]` via the `store` / `warehouse` field on selling price entries. Because sync inserted `product_warehouse_stock` rows for every entry in `product["warehouses"]`, `_get_warehouse_filter()` matched every product for every store.
+2. Different stores can have different selling prices under the same price list (e.g., `Retail`), and `item_prices` previously lacked a `store` column and deduplicated by `(part_no, price_list, uom, price_type)`, overwriting other stores' prices.
+3. In `views/main_window.py`, `_get_active_warehouse_id()` checked `self.user.get("warehouse")` (which is a comma-separated list of all stores for admin users) before `company_defaults["server_warehouse"]`, and several display calls omitted `warehouse_id`.
+
+### Fix
+1. **Preserve Complete Organization Catalog & Per-Store Assignments/Prices During Admin Sync ([`services/product_sync_windows_service.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/product_sync_windows_service.py), [`services/sync_service.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/sync_service.py))**:
+   - Added `_filter_warehouses_for_product()` to derive each product's true store assignments from store-tagged selling entries in `product["prices"]` when the catalog uses store-tagged pricing, while keeping all organization products in `products`.
+   - Added a `store` column (`NVARCHAR(120) NOT NULL DEFAULT ''`) to `item_prices` (and dropped the old 4-column unique constraint/index `UQ_item_prices` / `ux_item_prices_key`) so admin sync preserves all stores' price rows in `item_prices`.
+   - Updated `_extract_selling_price()` to prioritize prices matching the active store and active price list.
+2. **Dynamic Display-Time Store Filtering & Per-Store Price Resolution ([`models/product.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/models/product.py))**:
+   - Added `_resolve_default_warehouse_id()` and `_resolve_warehouse_name()` so display queries (`get_all_products`, `get_products_by_category`, `get_all_products_including_inactive`, `search_products`, `get_categories`, `get_all_categories`, `get_product_by_id`) automatically resolve the active SaaS store when `warehouse_id` is omitted.
+   - Updated `get_categories()` and `get_all_categories()` to filter categories by the active `warehouse_id` so categories belonging exclusively to other stores do not appear on the POS grid.
+   - Updated `get_product_by_part_no()` to apply `_get_warehouse_filter(warehouse_id)` when `warehouse_id` is provided.
+   - Updated `_apply_prices()` to resolve prices matching the displayed store's `store` tag in `item_prices` before falling back to generic (`store = ''`) prices.
+3. **Active Store Priority in Main Window ([`views/main_window.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/views/main_window.py))**:
+   - Updated both `_get_active_warehouse_id()` methods to prioritize `company_defaults` (`server_warehouse` / `server_store_name`) over `self.user.get("warehouse")` and support comma-separated user warehouse strings as a fallback.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `services/product_sync_windows_service.py` | 276–349, 465–660, 783–825, 928–975, 1000–1030, 1185–1295 | Added store-aware `_filter_warehouses_for_product`, preserved `store` column in `item_prices`, and updated `_extract_selling_price` |
+| `services/sync_service.py` | 360–465, 554–635, 1016–1060, 1210–1340 | Ported `_filter_warehouses_for_product`, `item_prices.store` persistence, and unconditional `product_warehouse_stock` refresh |
+| `models/product.py` | 45–295 | Added display-time store resolution (`_resolve_default_warehouse_id`), store-aware `_apply_prices()`, and store-filtered categories/queries |
+| `views/main_window.py` | 5583–5635, 19703–19755 | Prioritized `company_defaults["server_warehouse"]` in `_get_active_warehouse_id()` |
+
 ## [2026-10-26 10:15:00] - Fix: Resolve Startup NameError '_load_settings' and Premature DB Queries on Unconfigured Terminals
 
 ### Problem
