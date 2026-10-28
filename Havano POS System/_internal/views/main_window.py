@@ -2657,10 +2657,13 @@ class OptionsDialog(QDialog):
     def _do_pos_rules(self):
         self.accept()
         try:
-            from views.dialogs.pos_rules_dialog import POSRulesDialog
-            POSRulesDialog(self.parent()).exec()
-        except Exception as e:
-            pass
+            from views.dialogs.settings_dialog import POSRulesDialog as _SettingsPOSRulesDialog
+            _SettingsPOSRulesDialog(self.parent()).exec()
+        except Exception:
+            try:
+                POSRulesDialog(self.parent()).exec()
+            except Exception:
+                pass
         
     def _do_axis_fiscal(self):
         self.accept()
@@ -3292,6 +3295,8 @@ class POSRulesDialog(QDialog):
              "Enable live background synchronization for Kitchen Display System (KDS) screens.", False),
             ("show_tax_on_invoice", "Show Tax Breakdown on A4 Invoice",
              "Include tax column and subtotal/tax summary on printed A4 invoices and quotations.", True),
+            ("limit_fiscalization_by_amount", "Limit Fiscalization by Invoice Amount",
+             "Only fiscalize receipts up to the maximum invoice total set here; higher totals won't fiscalize.", False),
         ]
         for key, label, desc, default in rules:
             self._add_rule_row(bl, key, label, desc, default)
@@ -3396,7 +3401,28 @@ class POSRulesDialog(QDialog):
             chk.setChecked(bool(int(row[0])) if row else default)
         except Exception:
             chk.setChecked(default)
-        rl.addLayout(txt, 1); rl.addWidget(chk)
+        rl.addLayout(txt, 1)
+        if key == "limit_fiscalization_by_amount":
+            from PySide6.QtGui import QDoubleValidator
+            self.fiscal_max_amount_input = QLineEdit()
+            _dv = QDoubleValidator(0.0, 999999999.99, 2, self.fiscal_max_amount_input)
+            _dv.setNotation(QDoubleValidator.StandardNotation)
+            self.fiscal_max_amount_input.setValidator(_dv)
+            self.fiscal_max_amount_input.setText("40")
+            self.fiscal_max_amount_input.setPlaceholderText("Max $")
+            self.fiscal_max_amount_input.setFixedSize(76, 30)
+            self.fiscal_max_amount_input.setAlignment(Qt.AlignCenter)
+            try:
+                from database.db import get_connection
+                _c = get_connection(); _cur = _c.cursor()
+                _cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key='fiscalization_max_invoice_amount'")
+                _r = _cur.fetchone(); _c.close()
+                if _r and str(_r[0]).strip():
+                    self.fiscal_max_amount_input.setText(str(_r[0]).strip())
+            except Exception:
+                pass
+            rl.addWidget(self.fiscal_max_amount_input)
+        rl.addWidget(chk)
         self._checks[key] = chk
         layout.addWidget(rw)
 
@@ -3423,6 +3449,15 @@ class POSRulesDialog(QDialog):
                     WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
                                           VALUES (s.k, s.v);
                 """, (key, val))
+            if hasattr(self, "fiscal_max_amount_input"):
+                fiscal_max_val = self.fiscal_max_amount_input.text().strip() or "0"
+                cur.execute("""
+                    MERGE pos_settings AS t
+                    USING (SELECT 'fiscalization_max_invoice_amount' AS k, ? AS v) AS s ON t.setting_key = s.k
+                    WHEN MATCHED     THEN UPDATE SET setting_value = s.v
+                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
+                                          VALUES (s.k, s.v);
+                """, (fiscal_max_val,))
                 
             local_cust = self.cbo_default_cust.currentText().strip()
             cur.execute("""
@@ -5372,7 +5407,7 @@ class POSView(QWidget):
                     try:
                         from services.fiscalization_service import get_fiscalization_service
                         fs = get_fiscalization_service()
-                        if fs and fs.is_fiscalization_enabled() and not sale.get("fiscal_qr_code"):
+                        if fs and fs.should_fiscalize_sale(sale) and not sale.get("fiscal_qr_code"):
                             wait_dlg = FiscalWaitDialog(self, sale_id=sale.get("id"))
                             wait_dlg.exec()
                             if wait_dlg.success and wait_dlg.refreshed_sale:
@@ -5470,7 +5505,7 @@ class POSView(QWidget):
                 try:
                     from services.fiscalization_service import get_fiscalization_service
                     fs = get_fiscalization_service()
-                    if fs and fs.is_fiscalization_enabled() and not sale.get("fiscal_qr_code"):
+                    if fs and fs.should_fiscalize_sale(sale) and not sale.get("fiscal_qr_code"):
                         wait_dlg = FiscalWaitDialog(self, sale_id=sale.get("id"))
                         wait_dlg.exec()
                         if wait_dlg.success and wait_dlg.refreshed_sale:
@@ -16670,10 +16705,13 @@ class OptionsDialog(QDialog):
     def _do_pos_rules(self):
         self.accept()
         try:
-            from views.dialogs.pos_rules_dialog import POSRulesDialog
-            POSRulesDialog(self.parent()).exec()
-        except Exception as e:
-            pass
+            from views.dialogs.settings_dialog import POSRulesDialog as _SettingsPOSRulesDialog
+            _SettingsPOSRulesDialog(self.parent()).exec()
+        except Exception:
+            try:
+                POSRulesDialog(self.parent()).exec()
+            except Exception:
+                pass
         
     def _do_axis_fiscal(self):
         self.accept()
@@ -17432,6 +17470,8 @@ class POSRulesDialog(QDialog):
              "Prompt for supervisor PIN when a cashier attempts to remove an item from the cart.", False),
             ("enable_kds_websocket", "ENABLE KITCHEN DISPLAY SYSTEM",
              "Enable live background synchronization for Kitchen Display System (KDS) screens.", False),
+            ("limit_fiscalization_by_amount", "Limit Fiscalization by Invoice Amount",
+             "Only fiscalize receipts up to the maximum invoice total set here; higher totals won't fiscalize.", False),
         ]
         for key, label, desc, default in rules:
             self._add_rule_row(bl, key, label, desc, default)
@@ -17536,7 +17576,28 @@ class POSRulesDialog(QDialog):
             chk.setChecked(bool(int(row[0])) if row else default)
         except Exception:
             chk.setChecked(default)
-        rl.addLayout(txt, 1); rl.addWidget(chk)
+        rl.addLayout(txt, 1)
+        if key == "limit_fiscalization_by_amount":
+            from PySide6.QtGui import QDoubleValidator
+            self.fiscal_max_amount_input = QLineEdit()
+            _dv = QDoubleValidator(0.0, 999999999.99, 2, self.fiscal_max_amount_input)
+            _dv.setNotation(QDoubleValidator.StandardNotation)
+            self.fiscal_max_amount_input.setValidator(_dv)
+            self.fiscal_max_amount_input.setText("40")
+            self.fiscal_max_amount_input.setPlaceholderText("Max $")
+            self.fiscal_max_amount_input.setFixedSize(76, 30)
+            self.fiscal_max_amount_input.setAlignment(Qt.AlignCenter)
+            try:
+                from database.db import get_connection
+                _c = get_connection(); _cur = _c.cursor()
+                _cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key='fiscalization_max_invoice_amount'")
+                _r = _cur.fetchone(); _c.close()
+                if _r and str(_r[0]).strip():
+                    self.fiscal_max_amount_input.setText(str(_r[0]).strip())
+            except Exception:
+                pass
+            rl.addWidget(self.fiscal_max_amount_input)
+        rl.addWidget(chk)
         self._checks[key] = chk
         layout.addWidget(rw)
 
@@ -17563,6 +17624,15 @@ class POSRulesDialog(QDialog):
                     WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
                                           VALUES (s.k, s.v);
                 """, (key, val))
+            if hasattr(self, "fiscal_max_amount_input"):
+                fiscal_max_val = self.fiscal_max_amount_input.text().strip() or "0"
+                cur.execute("""
+                    MERGE pos_settings AS t
+                    USING (SELECT 'fiscalization_max_invoice_amount' AS k, ? AS v) AS s ON t.setting_key = s.k
+                    WHEN MATCHED     THEN UPDATE SET setting_value = s.v
+                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
+                                          VALUES (s.k, s.v);
+                """, (fiscal_max_val,))
                 
             local_cust = self.cbo_default_cust.currentText().strip()
             cur.execute("""
@@ -19513,7 +19583,7 @@ class POSView(QWidget):
                     try:
                         from services.fiscalization_service import get_fiscalization_service
                         fs = get_fiscalization_service()
-                        if fs and fs.is_fiscalization_enabled() and not sale.get("fiscal_qr_code"):
+                        if fs and fs.should_fiscalize_sale(sale) and not sale.get("fiscal_qr_code"):
                             wait_dlg = FiscalWaitDialog(self, sale_id=sale.get("id"))
                             wait_dlg.exec()
                             if wait_dlg.success and wait_dlg.refreshed_sale:
@@ -19611,7 +19681,7 @@ class POSView(QWidget):
                 try:
                     from services.fiscalization_service import get_fiscalization_service
                     fs = get_fiscalization_service()
-                    if fs and fs.is_fiscalization_enabled() and not sale.get("fiscal_qr_code"):
+                    if fs and fs.should_fiscalize_sale(sale) and not sale.get("fiscal_qr_code"):
                         wait_dlg = FiscalWaitDialog(self, sale_id=sale.get("id"))
                         wait_dlg.exec()
                         if wait_dlg.success and wait_dlg.refreshed_sale:
@@ -30804,6 +30874,9 @@ class FiscalPollThread(QObject):
                 sale = fetchone_dict(cur)
                 conn.close()
                 
+                if sale and str(sale.get("fiscal_status") or "").lower() == "not_required":
+                    self.finished.emit(False, sale)
+                    return
                 if sale and sale.get("fiscal_qr_code") and str(sale.get("fiscal_qr_code")).strip():
                     self.finished.emit(True, sale)
                     return

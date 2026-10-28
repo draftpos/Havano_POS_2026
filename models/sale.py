@@ -734,6 +734,15 @@ def create_sale(
 
     try:
         if has_fiscal:
+            initial_fiscal_status = "pending"
+            try:
+                from services.fiscalization_service import get_fiscalization_service, is_sale_within_fiscal_limit
+                _fs_init = get_fiscalization_service()
+                if not (_fs_init and _fs_init.is_fiscalization_enabled()) or not is_sale_within_fiscal_limit(total_amount):
+                    initial_fiscal_status = "not_required"
+            except Exception as _f_init_err:
+                print(f"[create_sale] fiscal_status pre-check warning: {_f_init_err}")
+
             cur.execute("""
                 INSERT INTO sales (
                     invoice_number, invoice_no, invoice_date,
@@ -759,7 +768,7 @@ def create_sale(
                 float(effective_sub), float(total_vat), float(discount_amount), float(discount_percent),
                 receipt_type, footer, 0,
                 float(total_items_val), float(change_val), 1 if is_on_account else 0,
-                shift_id, "pending",
+                shift_id, initial_fiscal_status,
                 _total_usd, _total_zwd, _tendered_usd, _tendered_zwd, _exch,
                 order_number, waiter_name, warehouse_id, cost_center_id, cashier_cloud_user_id,
                 eff_pos_profile, eff_terminal_id, eff_store, eff_payment_method,
@@ -1083,8 +1092,12 @@ def _trigger_fiscalization_background(sale_id: int):
                     return
 
                 sale = get_sale_by_id(sale_id)
-                if sale and sale.get("fiscal_status") == "fiscalized":
-                    print(f"[Fiscalization] Sale {sale_id} already fiscalized")
+                if sale and sale.get("fiscal_status") in ("fiscalized", "not_required"):
+                    print(f"[Fiscalization] Sale {sale_id} status is {sale.get('fiscal_status')}, skipping")
+                    return
+                if sale and hasattr(fiscal_service, "should_fiscalize_sale") and not fiscal_service.should_fiscalize_sale(sale):
+                    print(f"[Fiscalization] Sale {sale_id} total ({sale.get('total')}) exceeds fiscal limit, marking not_required")
+                    _mark_sale_fiscal_status(sale_id, "not_required")
                     return
 
                 print(f"[Fiscalization] Attempt {attempt} for sale {sale_id}")
@@ -1150,11 +1163,16 @@ def _print_receipt(sale: dict, items: list, tendered: float, change: float,
     elif 0 < paid < total:
         footer = f"PARTIAL PAYMENT - Paid: {paid:.2f} | Balance: {outstanding:.2f}\n{footer}"
 
-    # Check if fiscalization is enabled
+    # Check if fiscalization is enabled and required for this sale
     try:
         from services.fiscalization_service import get_fiscalization_service
         fiscal_service = get_fiscalization_service()
-        fiscal_enabled = fiscal_service.is_fiscalization_enabled() if fiscal_service else False
+        if fiscal_service and hasattr(fiscal_service, "should_fiscalize_sale"):
+            fiscal_enabled = fiscal_service.should_fiscalize_sale(sale)
+        else:
+            fiscal_enabled = fiscal_service.is_fiscalization_enabled() if fiscal_service else False
+        if str(sale.get("fiscal_status") or "").lower() == "not_required":
+            fiscal_enabled = False
     except Exception as e:
         print(f"[Fiscalization] Error checking fiscal status: {e}")
         fiscal_enabled = False

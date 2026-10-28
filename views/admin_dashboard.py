@@ -1137,7 +1137,11 @@ class OptionsDialog(QDialog):
 
     def _do_pos_rules(self):
         self.accept()
-        POSRulesDialog(self.parent()).exec()
+        try:
+            from views.dialogs.settings_dialog import POSRulesDialog as _SettingsPOSRulesDialog
+            _SettingsPOSRulesDialog(self.parent()).exec()
+        except Exception:
+            POSRulesDialog(self.parent()).exec()
 
     # =========================================================================
     # PRODUCT SYNC - one-shot pull from Frappe
@@ -1278,6 +1282,8 @@ class POSRulesDialog(QDialog):
              "Show 'Insufficient Stock' popup when item has no stock.", False),
             ("use_pricing_rules", "Apply Pricing Rules",
              "Auto-apply discount rules when adding items.", False),
+            ("limit_fiscalization_by_amount", "Limit Fiscalization by Invoice Amount",
+             "Only fiscalize receipts up to the maximum invoice total set here; higher totals won't fiscalize.", False),
         ]
         for key, label, desc, default in rules:
             self._add_rule_row(bl, key, label, desc, default)
@@ -1335,7 +1341,28 @@ class POSRulesDialog(QDialog):
             chk.setChecked((str(row[0]).strip().lower() in ("1", "true", "yes")) if row else default)
         except Exception:
             chk.setChecked(default)
-        rl.addLayout(txt, 1); rl.addWidget(chk)
+        rl.addLayout(txt, 1)
+        if key == "limit_fiscalization_by_amount":
+            from PySide6.QtGui import QDoubleValidator
+            self.fiscal_max_amount_input = QLineEdit()
+            _dv = QDoubleValidator(0.0, 999999999.99, 2, self.fiscal_max_amount_input)
+            _dv.setNotation(QDoubleValidator.StandardNotation)
+            self.fiscal_max_amount_input.setValidator(_dv)
+            self.fiscal_max_amount_input.setText("40")
+            self.fiscal_max_amount_input.setPlaceholderText("Max $")
+            self.fiscal_max_amount_input.setFixedSize(76, 30)
+            self.fiscal_max_amount_input.setAlignment(Qt.AlignCenter)
+            try:
+                from database.db import get_connection
+                _c = get_connection(); _cur = _c.cursor()
+                _cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key='fiscalization_max_invoice_amount'")
+                _r = _cur.fetchone(); _c.close()
+                if _r and str(_r[0]).strip():
+                    self.fiscal_max_amount_input.setText(str(_r[0]).strip())
+            except Exception:
+                pass
+            rl.addWidget(self.fiscal_max_amount_input)
+        rl.addWidget(chk)
         self._checks[key] = chk
         layout.addWidget(rw)
 
@@ -1362,6 +1389,15 @@ class POSRulesDialog(QDialog):
                     WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
                                           VALUES (s.k, s.v);
                 """, (key, val))
+            if hasattr(self, "fiscal_max_amount_input"):
+                fiscal_max_val = self.fiscal_max_amount_input.text().strip() or "0"
+                cur.execute("""
+                    MERGE pos_settings AS t
+                    USING (SELECT 'fiscalization_max_invoice_amount' AS k, ? AS v) AS s ON t.setting_key = s.k
+                    WHEN MATCHED     THEN UPDATE SET setting_value = s.v
+                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
+                                          VALUES (s.k, s.v);
+                """, (fiscal_max_val,))
             conn.commit(); conn.close()
             QMessageBox.information(self, "Saved", "POS rules saved successfully.")
             self.accept()

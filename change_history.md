@@ -1,5 +1,30 @@
 # Change History
 
+## [2026-10-28 12:18:00] - Feature: POS Rules Setting to Limit Fiscalization by Maximum Invoice Amount
+
+### Summary
+Added a **Limit Fiscalization by Amount** (`limit_fiscalization_by_amount`) toggle and **Max Fiscal Invoice Amount** (`fiscalization_max_invoice_amount`) threshold input under **POS Rules** (`POSRulesDialog`). When enabled, only receipts with an invoice total less than or equal to the configured threshold (e.g., `40`) are fiscalized; any receipt whose total exceeds the threshold (e.g., `41` or `540`) is marked `fiscal_status = 'not_required'`, skips ZIMRA/Axis fiscalization, bypasses the 6-second `FiscalWaitDialog` popup, and prints immediately.
+
+### Changes
+1. **Fiscalization Threshold Helpers & Service Gate ([`services/fiscalization_service.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/fiscalization_service.py))**:
+   - Added `get_fiscalization_amount_limit()` and `is_sale_within_fiscal_limit(invoice_total)` to read `limit_fiscalization_by_amount` and `fiscalization_max_invoice_amount` from `pos_settings`.
+   - Added `FiscalizationService.should_fiscalize_sale(sale_or_total)` and updated `process_sale_fiscalization()` so sales exceeding the configured maximum amount are immediately marked `not_required` and skipped.
+2. **Sale Creation, Background Trigger & Receipt Printing ([`models/sale.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/models/sale.py))**:
+   - Updated `create_sale()` to set initial `fiscal_status = "not_required"` when fiscalization is disabled or `total_amount` exceeds `is_sale_within_fiscal_limit(total_amount)`.
+   - Updated `_trigger_fiscalization_background()` and `_print_receipt()` to skip background fiscalization and the 6-second print wait when a sale is `not_required` or exceeds the configured fiscal amount limit.
+3. **POS Rules UI & Checkout Wait Dialog ([`views/dialogs/settings_dialog.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/views/dialogs/settings_dialog.py), [`views/main_window.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/views/main_window.py), [`views/admin_dashboard.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/views/admin_dashboard.py))**:
+   - Added the **LIMIT FISCALIZATION BY AMOUNT** rule toggle and maximum invoice amount input field (`fiscal_max_amount_input`, default `40`) to `POSRulesDialog` in [`views/dialogs/settings_dialog.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/views/dialogs/settings_dialog.py), [`views/main_window.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/views/main_window.py), and [`views/admin_dashboard.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/views/admin_dashboard.py).
+   - Updated `MainWindow` checkout flows and `FiscalPollThread` to check `fs.should_fiscalize_sale(sale)` so invoices above the limit print immediately without opening `FiscalWaitDialog`.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `services/fiscalization_service.py` | 62–162 | Added `get_fiscalization_amount_limit()`, `is_sale_within_fiscal_limit()`, `should_fiscalize_sale()`, and threshold check in `process_sale_fiscalization()` |
+| `models/sale.py` | 735–777, 1094–1105, 1166–1180 | Pre-set `fiscal_status = 'not_required'` in `create_sale()` and skip background fiscalization/print wait when above threshold |
+| `views/dialogs/settings_dialog.py` | 1786–1800, 2023–2045, 2077–2095, 2124–2150 | Added `limit_fiscalization_by_amount` toggle and `fiscal_max_amount_input` field to `POSRulesDialog` |
+| `views/main_window.py` | 2657–2668, 3294–3475, 5378, 5476, 16670–16681, 17439–17640, 19519, 19617, 30813–30820 | Added POS rule UI and gated `FiscalWaitDialog` on `fs.should_fiscalize_sale(sale)` |
+| `views/admin_dashboard.py` | 1138–1145, 1278–1385 | Added `limit_fiscalization_by_amount` toggle and max amount input to `POSRulesDialog` |
+
 ## [2026-10-28 10:52:00] - Fix: SaaS Store/Warehouse Product & Category Filtering and Per-Store Pricing at Display Time
 
 ### Problem
