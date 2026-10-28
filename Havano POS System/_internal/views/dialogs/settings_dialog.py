@@ -1,15 +1,22 @@
 # =============================================================================
 # views/dialogs/settings_dialog.py
 # =============================================================================
+# pyrefly: ignore [missing-import]
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QFrame, QLineEdit, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QMessageBox, QCheckBox, QScrollArea,
 )
+# pyrefly: ignore [missing-import]
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter
+from models.receipt import ReceiptData, Item, MultiCurrencyDetail
+# pyrefly: ignore [missing-import]
+from PySide6.QtGui import QColor, QFont, QPainter, QIcon
+# pyrefly: ignore [missing-import]
 from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
+# pyrefly: ignore [missing-import]
+import qtawesome as qta
 from datetime import datetime
 from models.advance_settings import AdvanceSettings
 import json
@@ -18,30 +25,14 @@ from pathlib import Path
 # from views.dialogs.customer_dialog import CustomerDialog
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-NAVY      = "#0d1f3c"
-NAVY_2    = "#162d52"
-NAVY_3    = "#1e3d6e"
-ACCENT    = "#1a5fb4"
-ACCENT_H  = "#1c6dd0"
-WHITE     = "#ffffff"
-OFF_WHITE = "#f5f8fc"
-LIGHT     = "#e4eaf4"
-MID       = "#8fa8c8"
-DARK_TEXT = "#0d1f3c"
-MUTED     = "#5a7a9a"
-BORDER    = "#c8d8ec"
-ROW_ALT   = "#edf3fb"
-SUCCESS   = "#1a7a3c"
-SUCCESS_H = "#1f9447"
-DANGER    = "#b02020"
-DANGER_H  = "#cc2828"
+from theme import *
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _friendly_error(e):
     msg = str(e)
     if "REFERENCE constraint" in msg or "FK_" in msg or "foreign key" in msg.lower():
-        return "Cannot delete — record is still linked to other data. Remove those links first."
+        return "Cannot delete - record is still linked to other data. Remove those links first."
     if "UNIQUE" in msg or "duplicate key" in msg.lower():
         return "A record with that name already exists."
     if "Cannot insert the value NULL" in msg:
@@ -119,48 +110,144 @@ def _tbl():
     return t
 
 # ── Hardware Config Logic ─────────────────────────────────────────────────────
-# _HW_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "hardware_settings.json")
-# _HW_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "hardware_settings.json")
-# _ORDER_STATIONS = [f"Order {i}" for i in range(1, 7)]
-# ── Hardware Config Logic ─────────────────────────────────────────────────────
-_HW_FILE = Path("app_data/hardware_settings.json")   # ← now matches sql_settings.json
+# Path is anchored to the executable / script location so it resolves
+# correctly regardless of how or from where the app is launched.
+import sys as _sys
+import logging as _logging
+_hw_log = _logging.getLogger(__name__)
+
+def _hw_file() -> Path:
+    """
+    Always returns the same absolute path to hardware_settings.json,
+    no matter what the current working directory is.
+
+    • Frozen (PyInstaller exe) -> sits next to the .exe
+    • Normal Python            -> sits next to this .py file's project root
+    """
+    if getattr(_sys, "frozen", False):
+        # Running as compiled exe - use the folder that contains the exe
+        base = Path(_sys.executable).parent
+    else:
+        # Running as plain Python - go up from this file to project root
+        base = Path(__file__).resolve().parent.parent
+    return base / "app_data" / "hardware_settings.json"
+
 _ORDER_STATIONS = [f"Order {i}" for i in range(1, 7)]
+
+_HW_DEFAULTS: dict = {
+    "main_printer": "(None)",
+    "paper_size": "80mm",
+    "kitchen_printing_enabled": False,
+    "pharmacy_label_printer": "(None)",
+    "orders": {}
+}
+
 def _load_hw() -> dict:
+    """
+    Load hardware settings from JSON.
+    Logs exactly what went wrong instead of silently swallowing errors.
+    Falls back to DB if the file is missing or corrupt, then to defaults.
+    """
+    hw_path = _hw_file()
+
+    # ── Ensure the folder exists ──────────────────────────────────────────
     try:
-        _HW_FILE.parent.mkdir(parents=True, exist_ok=True)   # ensure app_data/ exists
-        if _HW_FILE.exists():
-            with open(_HW_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {"main_printer": "(None)", "orders": {}}
+        hw_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        _hw_log.error("Cannot create app_data folder at %s: %s", hw_path.parent, e)
+
+    # ── Try JSON (primary) ────────────────────────────────────────────────
+    if hw_path.exists():
+        try:
+            with open(hw_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data:
+                return data
+            _hw_log.warning("hardware_settings.json exists but is empty/invalid at %s", hw_path)
+        except json.JSONDecodeError as e:
+            _hw_log.error("hardware_settings.json is corrupt at %s: %s", hw_path, e)
+        except PermissionError as e:
+            _hw_log.error("No read permission for %s: %s", hw_path, e)
+        except Exception as e:
+            _hw_log.error("Unexpected error reading %s: %s", hw_path, e)
+    else:
+        _hw_log.info("hardware_settings.json not found at %s - will try DB", hw_path)
+
+    # ── Try DB fallback ───────────────────────────────────────────────────
+    try:
+        from database.hardware_settings_db import load_hw as _db_load
+        data = _db_load()
+        if data:
+            # Restore JSON so all other modules find it next time
+            _save_hw(data)
+            _hw_log.info("Restored hardware_settings.json from DB fallback")
+            return data
+    except Exception as e:
+        _hw_log.warning("DB fallback also failed: %s", e)
+
+    # ── Hard defaults ─────────────────────────────────────────────────────
+    _hw_log.warning("Using hard-coded defaults for hardware settings")
+    return dict(_HW_DEFAULTS)
+
 
 def _save_hw(data: dict):
+    """
+    Save hardware settings to JSON.
+    Logs the exact error if the write fails instead of silently dropping it.
+    Also syncs to DB as a background safety copy.
+    """
+    hw_path = _hw_file()
+
+    # ── Write JSON (primary - must succeed) ───────────────────────────────
     try:
-        _HW_FILE.parent.mkdir(parents=True, exist_ok=True)   # ensure app_data/ exists
-        with open(_HW_FILE, "w", encoding="utf-8") as f:
+        hw_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(hw_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-    except Exception:
-        pass
+        _hw_log.debug("hardware_settings.json saved to %s", hw_path)
+    except PermissionError as e:
+        _hw_log.error("Cannot write hardware_settings.json - permission denied at %s: %s", hw_path, e)
+    except Exception as e:
+        _hw_log.error("Failed to write hardware_settings.json at %s: %s", hw_path, e)
+
+    try:
+        from database.db import get_app_data_dir
+        app_data_hw = Path(get_app_data_dir()) / "hardware_settings.json"
+        if app_data_hw != hw_path:
+            app_data_hw.parent.mkdir(parents=True, exist_ok=True)
+            with open(app_data_hw, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+    except Exception as e:
+        _hw_log.debug("Secondary hardware_settings.json sync warning: %s", e)
+
+    # ── Sync to DB (best-effort safety copy) ─────────────────────────────
+    try:
+        from database.hardware_settings_db import save_hw as _db_save
+        _db_save(data)
+    except Exception as e:
+        _hw_log.warning("DB sync failed (non-fatal): %s", e)
     
 def _get_system_printers() -> list[str]:
     printers = ["(None)"]
     try:
-        import win32print
-        for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS):
-            printers.append(p[2])
+        # pyrefly: ignore [missing-import]
+        from PySide6.QtPrintSupport import QPrinterInfo
+        for p in QPrinterInfo.availablePrinters():
+            name = p.printerName()
+            if name and name not in printers:
+                printers.append(name)
     except Exception:
+        pass
+    if len(printers) <= 1:
         try:
-            from PySide6.QtPrintSupport import QPrinterInfo
-            for p in QPrinterInfo.availablePrinters():
-                name = p.printerName()
-                if name and name not in printers:
-                    printers.append(name)
+            import win32print
+            for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL):
+                if p[2] not in printers:
+                    printers.append(p[2])
         except Exception: pass
     return printers
 
 # =============================================================================
-# BASE — all section dialogs inherit from this
+# BASE - all section dialogs inherit from this
 # =============================================================================
 class _Base(QDialog):
     TITLE  = "Settings"
@@ -186,10 +273,12 @@ class _Base(QDialog):
         hl.addWidget(title); hl.addStretch()
 
         if hasattr(self, "_save"):
-            cb = _btn("💾 Save Settings", color=SUCCESS, hover=SUCCESS_H, height=30, width=150)
+            cb = _btn("Save Settings", color=SUCCESS, hover=SUCCESS_H, height=30, width=150)
+            cb.setIcon(qta.icon("fa5s.save", color="white"))
             cb.clicked.connect(self._save)
         else:
-            cb = _btn("✕ Close", color=DANGER, hover=DANGER_H, height=30, width=90)
+            cb = _btn("Close", color=DANGER, hover=DANGER_H, height=30, width=90)
+            cb.setIcon(qta.icon("fa5s.times", color="white"))
             cb.clicked.connect(self.accept)
 
         hl.addWidget(cb); root.addWidget(hdr)
@@ -211,7 +300,7 @@ class _Base(QDialog):
         QTimer.singleShot(5000, lambda: self._sl.setText("") if self._sl else None)
 
 # =============================================================================
-# Section Dialogs (Companies, Customer Groups, etc.) — unchanged
+# Section Dialogs (Companies, Customer Groups, etc.) - unchanged
 # =============================================================================
 
 class CompanyDialog(_Base):
@@ -259,11 +348,12 @@ class CompanyDialog(_Base):
             from models.company import delete_company; delete_company(c["id"]); self._load(); self._msg("Deleted.")
         except Exception as e: self._msg(_friendly_error(e),True)
 
-# ── Users dialog — separate file, no circular dependency ─────────────────────
+# ── Users dialog - separate file, no circular dependency ─────────────────────
 try:
     from views.dialogs.users_dialog import ManageUsersDialog, UsersDialog
 except Exception:
     # Fallback: define minimal stub so SettingsDialog still opens
+    # pyrefly: ignore [missing-import]
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
     class ManageUsersDialog(QDialog):
         def __init__(self, parent=None, current_user=None):
@@ -273,11 +363,11 @@ except Exception:
             lay.addWidget(QLabel("Users dialog unavailable."))
     UsersDialog = ManageUsersDialog
 
-# ── Helpers — defined locally to avoid importing from main_window ─────────────
+# ── Helpers - defined locally to avoid importing from main_window ─────────────
 def _friendly_db_error(e):
     msg = str(e)
     if "REFERENCE constraint" in msg or "FK_" in msg or "foreign key" in msg.lower():
-        return "Cannot delete — record is still linked to other data."
+        return "Cannot delete - record is still linked to other data."
     if "UNIQUE" in msg or "duplicate key" in msg.lower():
         return "A record with that name already exists."
     if "Cannot insert the value NULL" in msg:
@@ -299,7 +389,9 @@ def _settings_table_style():
     """
 
 def navy_btn(text, height=36, font_size=12, width=None, color=None, hover=None):
+    # pyrefly: ignore [missing-import]
     from PySide6.QtWidgets import QPushButton
+    # pyrefly: ignore [missing-import]
     from PySide6.QtCore import Qt
     bg  = color or NAVY
     hov = hover or NAVY_2
@@ -318,6 +410,7 @@ def navy_btn(text, height=36, font_size=12, width=None, color=None, hover=None):
     return btn
 
 def hr(horizontal=True):
+    # pyrefly: ignore [missing-import]
     from PySide6.QtWidgets import QFrame
     line = QFrame()
     line.setFrameShape(QFrame.HLine if horizontal else QFrame.VLine)
@@ -364,7 +457,7 @@ class CustomerGroupDialog(QDialog):
         except Exception: groups=[]
         for g in groups:
             r=self._tbl.rowCount(); self._tbl.insertRow(r)
-            parent_name = next((x["name"] for x in groups if x["id"]==g.get("parent_group_id")),"—")
+            parent_name = next((x["name"] for x in groups if x["id"]==g.get("parent_group_id")),"-")
             for col,val in enumerate([g["name"],parent_name]):
                 it=QTableWidgetItem(val); it.setData(Qt.UserRole,g); self._tbl.setItem(r,col,it)
             self._tbl.setRowHeight(r,32)
@@ -530,27 +623,50 @@ class PriceListDialog(QDialog):
         self._build(); self._reload()
 
     def _build(self):
-        lay=QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(20,16,20,16)
-        hdr=QWidget(); hdr.setFixedHeight(44); hdr.setStyleSheet(f"background-color:{NAVY}; border-radius:5px;")
-        hl=QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0)
-        hl.addWidget(QLabel("Price Lists",styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
+        lay = QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(0,0,0,16)
+        
+        # Premium Header with Buttons on Top
+        hdr = QWidget(); hdr.setFixedHeight(65); hdr.setStyleSheet(f"background-color:{NAVY};")
+        hl = QHBoxLayout(hdr); hl.setContentsMargins(20,0,20,0)
+        
+        v_title = QVBoxLayout(); v_title.setSpacing(2); v_title.setAlignment(Qt.AlignVCenter)
+        title_lbl = QLabel("PRICE LISTS")
+        title_lbl.setStyleSheet(f"color:{WHITE}; font-size:16px; font-weight:bold; background:transparent;")
+        sub_lbl = QLabel("Manage selling rates for your products")
+        sub_lbl.setStyleSheet(f"color:{MUTED}; font-size:10px; background:transparent;")
+        v_title.addWidget(title_lbl); v_title.addWidget(sub_lbl)
+        hl.addLayout(v_title)
+        
+        hl.addStretch()
+
+        self._status = QLabel(""); self._status.setStyleSheet(f"font-size:11px; color:{WHITE}; background:transparent;")
+        hl.addWidget(self._status)
+        hl.addSpacing(10)
+
+        add_btn = navy_btn("Add", height=38, color=SUCCESS, hover=SUCCESS_H); add_btn.setFixedWidth(80)
+        del_btn = navy_btn("Delete", height=38, color=DANGER, hover=DANGER_H); del_btn.setFixedWidth(80)
+        cls_btn = navy_btn("Close", height=38); cls_btn.setFixedWidth(80)
+        
+        add_btn.clicked.connect(self._add); del_btn.clicked.connect(self._delete); cls_btn.clicked.connect(self.accept)
+        
+        hl.addWidget(add_btn); hl.addWidget(del_btn); hl.addWidget(cls_btn)
         lay.addWidget(hdr)
-        self._tbl=QTableWidget(0,2); self._tbl.setHorizontalHeaderLabels(["Name","Selling"])
+
+        body = QWidget(); bl = QVBoxLayout(body); bl.setContentsMargins(20,0,20,0)
+        
+        self._tbl = QTableWidget(0,2); self._tbl.setHorizontalHeaderLabels(["Name","Selling"])
         self._tbl.horizontalHeader().setStretchLastSection(True); self._tbl.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
         self._tbl.verticalHeader().setVisible(False); self._tbl.setAlternatingRowColors(True)
         self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers); self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._tbl.setStyleSheet(_settings_table_style()); lay.addWidget(self._tbl,1); lay.addWidget(hr())
-        fr=QHBoxLayout(); fr.setSpacing(8)
-        self._f_name=QLineEdit(); self._f_name.setPlaceholderText("Price list name *"); self._f_name.setFixedHeight(34)
-        self._f_selling=QComboBox(); self._f_selling.addItems(["Selling","Not Selling"]); self._f_selling.setFixedHeight(34)
+        self._tbl.setStyleSheet(_settings_table_style()); bl.addWidget(self._tbl,1); bl.addWidget(hr())
+        
+        fr = QHBoxLayout(); fr.setSpacing(8)
+        self._f_name = QLineEdit(); self._f_name.setPlaceholderText("Price list name *"); self._f_name.setFixedHeight(40)
+        self._f_selling = QComboBox(); self._f_selling.addItems(["Selling","Not Selling"]); self._f_selling.setFixedHeight(40)
         fr.addWidget(self._f_name,2); fr.addWidget(self._f_selling,1)
-        lay.addLayout(fr)
-        br=QHBoxLayout(); br.setSpacing(8)
-        self._status=QLabel(""); self._status.setStyleSheet(f"font-size:12px;color:{SUCCESS};background:transparent;")
-        add_btn=navy_btn("Add",height=34,color=SUCCESS,hover=SUCCESS_H); del_btn=navy_btn("Delete",height=34,color=DANGER,hover=DANGER_H); cls_btn=navy_btn("Close",height=34)
-        add_btn.clicked.connect(self._add); del_btn.clicked.connect(self._delete); cls_btn.clicked.connect(self.accept)
-        br.addWidget(self._status,1); br.addWidget(add_btn); br.addWidget(del_btn); br.addWidget(cls_btn)
-        lay.addLayout(br)
+        bl.addLayout(fr)
+        
+        lay.addWidget(body)
 
     def _reload(self):
         self._tbl.setRowCount(0)
@@ -585,96 +701,57 @@ class PriceListDialog(QDialog):
         except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
 
 
-class CustomerDialog(QDialog):
+class CustomerFormPopup(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Customers"); self.setMinimumSize(860,560)
-        self.setStyleSheet(f"QDialog {{ background-color:{WHITE}; }}")
-        self._build(); self._reload()
+        self.setWindowTitle("Add Customer")
+        self.setFixedSize(800, 320)
+        self.setStyleSheet(f"QDialog {{ background-color:#ffffff; }}")
+        self._build()
 
     def _build(self):
-        lay=QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(20,16,20,16)
-        hdr=QWidget(); hdr.setFixedHeight(44); hdr.setStyleSheet(f"background-color:{NAVY}; border-radius:5px;")
-        hl=QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0)
-        hl.addWidget(QLabel("Customers",styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
-        lay.addWidget(hdr)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(10)
+        
+        self._status = QLabel()
+        self._status.setStyleSheet("color:#1a7a3c; font-size:12px; font-weight:bold;")
+        lay.addWidget(self._status)
 
-        sr=QHBoxLayout(); sr.setSpacing(8)
-        self._search=QLineEdit(); self._search.setPlaceholderText("Search by name, trade name or phone…"); self._search.setFixedHeight(34)
-        self._search.textChanged.connect(self._do_search)
-        sr.addWidget(self._search)
-        lay.addLayout(sr)
-
-        self._tbl=QTableWidget(0,6)
-        self._tbl.setHorizontalHeaderLabels(["Name","Type","Group","Phone","City","Price List"])
-        hh=self._tbl.horizontalHeader(); hh.setSectionResizeMode(0,QHeaderView.Stretch)
-        for ci in [1,2,3,4,5]: hh.setSectionResizeMode(ci,QHeaderView.Fixed); self._tbl.setColumnWidth(ci,110)
-        self._tbl.verticalHeader().setVisible(False); self._tbl.setAlternatingRowColors(True)
-        self._tbl.setEditTriggers(QAbstractItemView.NoEditTriggers); self._tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._tbl.setStyleSheet(_settings_table_style()); lay.addWidget(self._tbl,1); lay.addWidget(hr())
-
-        form=QGridLayout(); form.setSpacing(8)
-        self._f_name  =QLineEdit(); self._f_name.setPlaceholderText("Customer name *"); self._f_name.setFixedHeight(32)
-        self._f_type  =QComboBox(); self._f_type.addItems(["","Individual","Company"]); self._f_type.setFixedHeight(32)
-        self._f_trade =QLineEdit(); self._f_trade.setPlaceholderText("Trade name"); self._f_trade.setFixedHeight(32)
-        self._f_phone =QLineEdit(); self._f_phone.setPlaceholderText("Phone"); self._f_phone.setFixedHeight(32)
-        self._f_email =QLineEdit(); self._f_email.setPlaceholderText("Email"); self._f_email.setFixedHeight(32)
-        self._f_city  =QLineEdit(); self._f_city.setPlaceholderText("City"); self._f_city.setFixedHeight(32)
-        self._f_house =QLineEdit(); self._f_house.setPlaceholderText("House No."); self._f_house.setFixedHeight(32)
-        self._f_group =QComboBox(); self._f_group.setFixedHeight(32)
-        self._f_wh    =QComboBox(); self._f_wh.setFixedHeight(32)
-        self._f_cc    =QComboBox(); self._f_cc.setFixedHeight(32)
-        self._f_pl    =QComboBox(); self._f_pl.setFixedHeight(32)
-
-        for lbl_txt, widget, r, c in [
-            ("Name *",       self._f_name,  0,0), ("Type",         self._f_type,  0,2),
-            ("Trade Name",   self._f_trade, 1,0), ("Phone",        self._f_phone, 1,2),
-            ("Email",        self._f_email, 2,0), ("City",         self._f_city,  2,2),
-            ("House No.",    self._f_house, 3,0), ("Group *",      self._f_group, 3,2),
-            ("Warehouse *",  self._f_wh,    4,0), ("Cost Center *",self._f_cc,    4,2),
-            ("Price List *", self._f_pl,    5,0),
-        ]:
-            form.addWidget(QLabel(lbl_txt,styleSheet="background:transparent;font-size:12px;"),r,c)
-            form.addWidget(widget,r,c+1)
-        lay.addLayout(form)
-
-        br=QHBoxLayout(); br.setSpacing(8)
-        self._status=QLabel(""); self._status.setStyleSheet(f"font-size:12px;color:{SUCCESS};background:transparent;")
-        add_btn=navy_btn("Add Customer",height=34,color=SUCCESS,hover=SUCCESS_H)
-        del_btn=navy_btn("Delete",height=34,color=DANGER,hover=DANGER_H)
-        cls_btn=navy_btn("Close",height=34)
-        add_btn.clicked.connect(self._add); del_btn.clicked.connect(self._delete); cls_btn.clicked.connect(self.accept)
-        br.addWidget(self._status,1); br.addWidget(add_btn); br.addWidget(del_btn); br.addWidget(cls_btn)
+        br = QHBoxLayout()
+        add_btn = navy_btn("Save Customer", height=38, color="#1a7a3c", hover="#1f9447")
+        add_btn.clicked.connect(self._add)
+        cls_btn = navy_btn("Close", height=38)
+        cls_btn.clicked.connect(self.accept)
+        br.addWidget(add_btn)
+        br.addWidget(cls_btn)
         lay.addLayout(br)
 
-    def _reload(self):
-        self._tbl.setRowCount(0)
-        try:
-            from models.customer import get_all_customers
-            custs=get_all_customers()
-        except Exception: custs=[]
+        form = QGridLayout()
+        form.setSpacing(10)
+        self._f_name  = QLineEdit(); self._f_name.setPlaceholderText("Customer name *"); self._f_name.setFixedHeight(34)
+        self._f_type  = QComboBox(); self._f_type.addItems(["", "Individual", "Company"]); self._f_type.setFixedHeight(34)
+        self._f_trade = QLineEdit(); self._f_trade.setPlaceholderText("Trade name"); self._f_trade.setFixedHeight(34)
+        self._f_phone = QLineEdit(); self._f_phone.setPlaceholderText("Phone"); self._f_phone.setFixedHeight(34)
+        self._f_email = QLineEdit(); self._f_email.setPlaceholderText("Email"); self._f_email.setFixedHeight(34)
+        self._f_city  = QLineEdit(); self._f_city.setPlaceholderText("City"); self._f_city.setFixedHeight(34)
+        self._f_house = QLineEdit(); self._f_house.setPlaceholderText("Address"); self._f_house.setFixedHeight(34)
+        self._f_group = QComboBox(); self._f_group.setFixedHeight(34)
+        self._f_wh    = QComboBox(); self._f_wh.setFixedHeight(34)
+        self._f_cc    = QComboBox(); self._f_cc.setFixedHeight(34)
+        self._f_pl    = QComboBox(); self._f_pl.setFixedHeight(34)
+
+        for lbl_txt, widget, r, c in [
+            ("Name *",       self._f_name,  0, 0), ("Type",         self._f_type,  0, 2), ("Trade Name",   self._f_trade, 0, 4),
+            ("Phone",        self._f_phone, 1, 0), ("Email",        self._f_email, 1, 2), ("City",         self._f_city,  1, 4),
+            ("Address",      self._f_house, 2, 0), ("Group *",      self._f_group, 2, 2), ("Warehouse *",  self._f_wh,    2, 4),
+            ("Cost Ctr *",   self._f_cc,    3, 0), ("Price List *", self._f_pl,    3, 2),
+        ]:
+            form.addWidget(QLabel(lbl_txt, styleSheet="font-size:12px;font-weight:bold;color:#1e293b;"), r, c)
+            form.addWidget(widget, r, c + 1)
+        lay.addLayout(form)
+        lay.addStretch()
         self._populate_combos()
-        self._populate_table(custs)
-
-    def _do_search(self, query):
-        if not query.strip(): self._reload(); return
-        try:
-            from models.customer import search_customers
-            custs=search_customers(query)
-        except Exception: custs=[]
-        self._populate_table(custs)
-
-    def _populate_table(self, custs):
-        self._tbl.setRowCount(0)
-        for c in custs:
-            r=self._tbl.rowCount(); self._tbl.insertRow(r)
-            for col,val in enumerate([
-                c["customer_name"], c.get("customer_type",""),
-                c.get("customer_group_name",""), c.get("custom_telephone_number",""),
-                c.get("custom_city",""), c.get("price_list_name",""),
-            ]):
-                it=QTableWidgetItem(str(val)); it.setData(Qt.UserRole,c); self._tbl.setItem(r,col,it)
-            self._tbl.setRowHeight(r,32)
 
     def _populate_combos(self):
         try:
@@ -682,20 +759,19 @@ class CustomerDialog(QDialog):
             from models.warehouse import get_all_warehouses
             from models.cost_center import get_all_cost_centers
             from models.price_list import get_all_price_lists
-            groups=get_all_customer_groups(); whs=get_all_warehouses()
-            ccs=get_all_cost_centers(); pls=get_all_price_lists()
-        except Exception: groups=[];whs=[];ccs=[];pls=[]
-        for cb in [self._f_group,self._f_wh,self._f_cc,self._f_pl]: cb.clear()
-        for g in groups: self._f_group.addItem(g["name"],g["id"])
-        for w in whs: self._f_wh.addItem(f"{w['name']} ({w.get('company_name','')})",w["id"])
-        for cc in ccs: self._f_cc.addItem(f"{cc['name']} ({cc.get('company_name','')})",cc["id"])
-        for pl in pls: self._f_pl.addItem(pl["name"],pl["id"])
+            groups = get_all_customer_groups(); whs = get_all_warehouses()
+            ccs = get_all_cost_centers(); pls = get_all_price_lists()
+        except Exception: groups=[]; whs=[]; ccs=[]; pls=[]
+        for g in groups: self._f_group.addItem(g["name"], g["id"])
+        for w in whs: self._f_wh.addItem(f"{w['name']}", w["id"])
+        for cc in ccs: self._f_cc.addItem(f"{cc['name']}", cc["id"])
+        for pl in pls: self._f_pl.addItem(pl["name"], pl["id"])
 
     def _add(self):
-        name=self._f_name.text().strip()
-        if not name: self._status.setText("Customer name required."); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;"); return
-        gid=self._f_group.currentData(); wid=self._f_wh.currentData(); ccid=self._f_cc.currentData(); plid=self._f_pl.currentData()
-        if not all([gid,wid,ccid,plid]): self._status.setText("Group, Warehouse, Cost Center and Price List are required."); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;"); return
+        name = self._f_name.text().strip()
+        if not name: self._status.setText("Customer name required."); self._status.setStyleSheet(f"color:#b02020;") ; return
+        gid = self._f_group.currentData(); wid = self._f_wh.currentData(); ccid = self._f_cc.currentData(); plid = self._f_pl.currentData()
+        if not all([gid, wid, ccid, plid]): self._status.setText("Group, WH, CC and Price List required."); self._status.setStyleSheet(f"color:#b02020;"); return
         try:
             from models.customer import create_customer
             create_customer(
@@ -709,28 +785,94 @@ class CustomerDialog(QDialog):
                 custom_city=self._f_city.text().strip(),
                 custom_house_no=self._f_house.text().strip(),
             )
-            for f in [self._f_name,self._f_trade,self._f_phone,self._f_email,self._f_city,self._f_house]: f.clear()
+            self._status.setText("Customer added successfully!")
+            self._status.setStyleSheet("color:#1a7a3c;")
+            QTimer.singleShot(1000, self.accept)
+        except Exception as e: self._status.setText(f"Error: {e}"); self._status.setStyleSheet(f"color:#b02020;")
+
+class CustomerDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Customers")
+        self.setMinimumSize(960, 680)
+        self.setStyleSheet(f"QDialog {{ background-color:#ffffff; }}")
+        self._build()
+        self._reload()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setSpacing(0)
+        lay.setContentsMargins(0, 0, 0, 0)
+        
+        from views.reports.report_template import ReportTemplate
+        self.report = ReportTemplate("Customers", is_report=False, show_date_filter=True, parent=self)
+        self.report.set_headers(["Name", "Type", "Group", "Phone", "City", "Price List"])
+        
+        self.report.btn_add.clicked.connect(self._open_add_customer)
+        
+        del_btn = navy_btn("Delete", height=30, color="#b02020", hover="#cc2828")
+        del_btn.clicked.connect(self._delete)
+        self.report.filters_layout.addWidget(del_btn)
+        
+        self._tbl = self.report.table
+        hh = self._tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        for ci in [1, 2, 3, 4, 5]: 
+            hh.setSectionResizeMode(ci, QHeaderView.Fixed)
+            self._tbl.setColumnWidth(ci, 110)
+        
+        lay.addWidget(self.report, 1)
+
+    def _open_add_customer(self):
+        dlg = CustomerFormPopup(self)
+        if dlg.exec() == QDialog.Accepted:
             self._reload()
-            self._status.setText(f"Customer '{name}' added."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
-        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+
+    def _reload(self):
+        while self._tbl.rowCount() > 1:
+            self._tbl.removeRow(1)
+        try:
+            from models.customer import get_all_customers
+            custs = get_all_customers()
+        except Exception: custs = []
+        self._populate_table(custs)
+
+    def _do_search(self, query):
+        if not query.strip(): self._reload(); return
+        try:
+            from models.customer import search_customers
+            custs = search_customers(query)
+        except Exception: custs = []
+        self._populate_table(custs)
+
+    def _populate_table(self, custs):
+        while self._tbl.rowCount() > 1:
+            self._tbl.removeRow(1)
+        for c in custs:
+            r = self._tbl.rowCount(); self._tbl.insertRow(r)
+            for col, val in enumerate([
+                c["customer_name"], c.get("customer_type", ""),
+                c.get("customer_group_name", ""), c.get("custom_telephone_number", ""),
+                c.get("custom_city", ""), c.get("price_list_name", ""),
+            ]):
+                it = QTableWidgetItem(str(val)); it.setData(Qt.UserRole, c); self._tbl.setItem(r, col, it)
+                it.setFlags(it.flags() & ~Qt.ItemIsEditable)
 
     def _delete(self):
-        row=self._tbl.currentRow()
-        if row<0: self._status.setText("Select a customer first."); return
-        c=self._tbl.item(row,0).data(Qt.UserRole)
-        if QMessageBox.question(self,"Delete",f"Delete '{c['customer_name']}'?",QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes: return
+        row = self._tbl.currentRow()
+        if row < 0: return
+        c = self._tbl.item(row, 0).data(Qt.UserRole)
+        if QMessageBox.question(self, "Delete", f"Delete '{c['customer_name']}'?", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes: return
         try:
             from models.customer import delete_customer
             delete_customer(c["id"]); self._reload()
-            self._status.setText("Deleted."); self._status.setStyleSheet(f"color:{SUCCESS};font-size:12px;background:transparent;")
-        except Exception as e: self._status.setText(_friendly_db_error(e)); self._status.setStyleSheet(f"color:{DANGER};font-size:12px;background:transparent;")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
 
-
-# =============================================================================
-# HardwareDialog — Hardware Settings (Enhanced)
+# HardwareDialog - Hardware Settings (Enhanced)
 # =============================================================================
 # =============================================================================
-# HardwareDialog — Hardware Settings (Fixed & Working)
+# HardwareDialog - Hardware Settings (Fixed & Working)
 # =============================================================================
 class HardwareDialog(_Base):
     TITLE = "Hardware Settings"
@@ -739,15 +881,10 @@ class HardwareDialog(_Base):
     def _build(self, lay):
         hw = _load_hw()
         self._system_printers = _get_system_printers()
-        
-        # Status label at top
-        self._status_lbl = QLabel("Loaded printers: " + ", ".join(self._system_printers[:3]) + (" ..." if len(self._system_printers) > 3 else ""))
-        self._status_lbl.setStyleSheet(f"font-size:12px; color:{MUTED}; background:transparent;")
-        lay.addWidget(self._status_lbl)
-        lay.addSpacing(8)
 
         # Refresh printers button
-        refresh_btn = _btn("🔄 Refresh Printer List", color=ACCENT, hover=ACCENT_H, height=28)
+        refresh_btn = _btn("Refresh Printer List", color=ACCENT, hover=ACCENT_H, height=28)
+        refresh_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
         refresh_btn.clicked.connect(self._refresh_printers)
         lay.addWidget(refresh_btn, alignment=Qt.AlignRight)
         lay.addSpacing(10); lay.addWidget(_hr()); lay.addSpacing(10)
@@ -768,7 +905,44 @@ class HardwareDialog(_Base):
         test_main.clicked.connect(lambda: self._test_printer(self._main_printer.currentText()))
         
         pr_row.addWidget(pr_lbl); pr_row.addStretch(); pr_row.addWidget(self._main_printer); pr_row.addWidget(test_main)
-        lay.addLayout(pr_row); lay.addSpacing(10); lay.addWidget(_hr()); lay.addSpacing(10)
+        lay.addLayout(pr_row); lay.addSpacing(10)
+
+        # --- Receipt Paper Size ---
+        ps_row = QHBoxLayout(); ps_row.setSpacing(12)
+        ps_lbl = QLabel("Printer Paper Size / Format")
+        ps_lbl.setStyleSheet(f"color:{DARK_TEXT};font-size:13px;font-weight:bold;background:transparent;")
+        
+        self._paper_size_combo = _combo(); self._paper_size_combo.setFixedWidth(260)
+        for ps_opt in ["80mm", "58mm", "A4"]:
+            self._paper_size_combo.addItem(ps_opt)
+        
+        saved_ps = hw.get("paper_size", "80mm") or "80mm"
+        ps_idx = self._paper_size_combo.findText(saved_ps)
+        self._paper_size_combo.setCurrentIndex(ps_idx if ps_idx >= 0 else 0)
+        
+        ps_row.addWidget(ps_lbl); ps_row.addStretch(); ps_row.addWidget(self._paper_size_combo); ps_row.addSpacing(72)
+        lay.addLayout(ps_row); lay.addSpacing(10); lay.addWidget(_hr()); lay.addSpacing(10)
+
+        # --- Kitchen printing master switch -----------------------------------
+        # pyrefly: ignore [missing-import]
+        from PySide6.QtWidgets import QCheckBox
+        self._kitchen_enabled_chk = QCheckBox("Enable Kitchen Printing")
+        self._kitchen_enabled_chk.setChecked(bool(hw.get("kitchen_printing_enabled", False)))
+        self._kitchen_enabled_chk.setStyleSheet(f"""
+            QCheckBox {{
+                color:{DARK_TEXT}; font-size:13px; font-weight:bold;
+                background:transparent; padding:4px 0;
+            }}
+            QCheckBox::indicator {{
+                width:18px; height:18px;
+            }}
+        """)
+        self._kitchen_enabled_chk.setToolTip(
+            "When on, every sale fans out grouped items to the Order 1–6 printers below.\n"
+            "Kitchen slips print item + qty only (no prices, no totals)."
+        )
+        lay.addWidget(self._kitchen_enabled_chk)
+        lay.addSpacing(10)
 
         # --- Order Stations ---
         ord_lbl = QLabel("Assign Kitchen / Order Station Printers")
@@ -799,14 +973,29 @@ class HardwareDialog(_Base):
             row.addWidget(lbl); row.addStretch(); row.addWidget(st_printer); row.addWidget(test_btn)
             lay.addLayout(row)
             self._station_widgets.append((st_printer, name))
-        
+
+        lay.addSpacing(10); lay.addWidget(_hr()); lay.addSpacing(10)
+
+        # --- ZPL Pharmacy Label Printer ---
+        zpl_row = QHBoxLayout(); zpl_row.setSpacing(12)
+        zpl_lbl = QLabel("Pharmacy Label Printer")
+        zpl_lbl.setStyleSheet(f"font-size:13px; color:{DARK_TEXT}; font-weight:bold; background:transparent; min-width:90px;")
+        self._zpl_printer = _combo(); self._zpl_printer.setFixedWidth(260)
+        self._zpl_printer.addItem("(None)")
+        for p in self._system_printers: self._zpl_printer.addItem(p)
+        saved_zpl = hw.get("pharmacy_label_printer", "(None)")
+        zpl_idx = self._zpl_printer.findText(saved_zpl)
+        self._zpl_printer.setCurrentIndex(zpl_idx if zpl_idx >= 0 else 0)
+        test_zpl_btn = _btn("Test", color=ACCENT, hover=ACCENT_H, height=28, width=60)
+        test_zpl_btn.clicked.connect(lambda: self._test_printer(self._zpl_printer.currentText()))
+        zpl_row.addWidget(zpl_lbl); zpl_row.addStretch(); zpl_row.addWidget(self._zpl_printer); zpl_row.addWidget(test_zpl_btn)
+        lay.addLayout(zpl_row)
+
         lay.addStretch(); self._status(lay)
 
     def _refresh_printers(self):
         self._system_printers = _get_system_printers()
-        self._status_lbl.setText("Refreshed: " + ", ".join(self._system_printers[:3]) + (" ..." if len(self._system_printers) > 3 else ""))
-        
-        for combo_widget, _ in [(self._main_printer, None)] + self._station_widgets:
+        for combo_widget, _ in [(self._main_printer, None)] + self._station_widgets + [(self._zpl_printer, None)]:
             current = combo_widget.currentText()
             combo_widget.clear()
             combo_widget.addItem("(None)")
@@ -837,7 +1026,7 @@ class HardwareDialog(_Base):
             painter.setFont(normal_font)
             painter.drawText(10, 160, f"Printer : {printer_name}")
             painter.drawText(10, 190, f"Date    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            painter.drawText(10, 220, "Status  : OK ✓")
+            painter.drawText(10, 220, "Status  : OK")
             painter.drawText(10, 260, "This is a test page from Havano POS System.")
             painter.drawText(10, 300, "Developed by Havano Team.")
 
@@ -863,16 +1052,19 @@ class HardwareDialog(_Base):
         try:
             data = {
                 "main_printer": self._main_printer.currentText(),
+                "paper_size": self._paper_size_combo.currentText(),
+                "kitchen_printing_enabled": bool(self._kitchen_enabled_chk.isChecked()),
+                "pharmacy_label_printer": self._zpl_printer.currentText(),
                 "orders": {}
             }
-            
+
             for combo, name in self._station_widgets:
                 p_name = combo.currentText()
                 data["orders"][name] = {
                     "active": p_name != "(None)",
                     "printer": p_name
                 }
-            
+
             _save_hw(data)
             
             QMessageBox.information(
@@ -888,7 +1080,285 @@ class HardwareDialog(_Base):
      
 
 # =============================================================================
-# SettingsDialog — Main Menu
+# MaintenanceDialog - Operational / Print behaviour toggles
+# Lives under Settings -> HARDWARE & PRINTING, replaces the old printer-setup
+# placeholder the user referenced.
+# =============================================================================
+class MaintenanceDialog(QDialog):
+    """
+    Maintenance settings dialog.
+
+    Current toggles
+    ───────────────
+    • allow_loaded_quotation_qty_change
+        When ON  -> cashier can freely edit the Qty of pharmacy items that were
+                   loaded from a quotation (same behaviour as non-pharmacy rows).
+        When OFF -> Qty on loaded pharmacy quotation rows stays locked (default).
+
+    • print_batch_on_receipt
+        When ON  -> batch number + expiry date are printed under each line item
+                   on the customer receipt (current behaviour).
+        When OFF -> batch / expiry lines are suppressed on the receipt.
+    """
+
+    _RULES = [
+        (
+            "allow_loaded_quotation_qty_change",
+            "ALLOW QTY CHANGE ON LOADED QUOTATION",
+            "Let cashiers edit the quantity of pharmacy items\n"
+            "after a quotation has been loaded into the POS cart.",
+        ),
+        (
+            "print_batch_on_receipt",
+            "PRINT BATCH NUMBERS ON RECEIPT",
+            "Include batch number and expiry date lines beneath\n"
+            "each pharmacy item on the printed customer receipt.",
+        ),
+        (
+            "show_expected_in_reconciliation",
+            "SHOW EXPECTED AMOUNT IN RECONCILIATION",
+            "Display the mathematically expected cash drawer amount\n"
+            "and variance in the shift closing dialog.",
+        ),
+        (
+            "enable_quotation_printing",
+            "ENABLE QUOTATION THERMAL PRINTING",
+            "Allow printing quotes to standard receipt printer.",
+        ),
+        (
+            "auto_print_quotations",
+            "AUTO-PRINT QUOTATIONS (SKIP PREVIEW)",
+            "Skip preview popup when saving quotations.",
+        ),
+        (
+            "allow_others_to_view_orders",
+            "ALLOW CASHIERS TO VIEW OTHER ORDERS",
+            "Let non-admin cashiers open orders started by others.",
+        ),
+        (
+            "allow_others_to_close_orders",
+            "ALLOW CASHIERS TO CLOSE OTHER ORDERS",
+            "Let non-admin cashiers finalize payments for orders\n"
+            "started by another user/cashier.",
+        ),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._toggles: dict = {}
+        self.setFixedSize(520, 560)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setStyleSheet("QDialog { background:#ffffff; border:1px solid #1a5fb4; }")
+        self._build()
+        self._load()
+
+    # ── UI ───────────────────────────────────────────────────────────────────
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Header
+        header = QWidget()
+        header.setFixedHeight(55)
+        header.setStyleSheet("background:#f8fafc; border-bottom:1px solid #d1d9e6;")
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(20, 0, 15, 0)
+
+        title = QLabel("MAINTENANCE SETTINGS")
+        title.setStyleSheet(
+            "font-size:11px; font-weight:bold; color:#1a5fb4; letter-spacing:1.5px;"
+        )
+
+        self._save_btn = QPushButton("SAVE")
+        self._save_btn.setFixedSize(90, 32)
+        self._save_btn.setStyleSheet(
+            "QPushButton { background:#1a5fb4; color:white; border-radius:4px;"
+            "  font-weight:bold; font-size:10px; border:none; }"
+            "QPushButton:hover { background:#1a5fb4; }"
+            "QPushButton:disabled { background:#ffffff; color:#10b981;"
+            "  border:1px solid #10b981; }"
+        )
+        self._save_btn.clicked.connect(self._save)
+
+        close_btn = QPushButton("CLOSE")
+        close_btn.setFixedSize(70, 32)
+        close_btn.setStyleSheet(
+            "QPushButton { background:transparent; color:#1a5fb4; border:1px solid #1a5fb4;"
+            "  border-radius:4px; font-weight:bold; font-size:10px; }"
+            "QPushButton:hover { background:#eef2f7; }"
+        )
+        close_btn.clicked.connect(self.reject)
+
+        hl.addWidget(title)
+        hl.addStretch()
+        hl.addWidget(self._save_btn)
+        hl.addSpacing(6)
+        hl.addWidget(close_btn)
+        root.addWidget(header)
+
+        # Body
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(30, 10, 30, 16)
+        bl.setSpacing(0)
+
+        for key, lbl, desc in self._RULES:
+            bl.addWidget(self._rule_row(key, lbl, desc))
+
+        bl.addStretch()
+
+        upd_btn = QPushButton(" Check for Updates")
+        upd_btn.setFixedSize(150, 36)
+        upd_btn.setStyleSheet(
+            "QPushButton { background:#1a5fb4; color:white; border-radius:6px;"
+            "  font-weight:bold; font-size:11px; border:none; }"
+            "QPushButton:hover { background:#1a5fb4; }"
+        )
+        try:
+            import qtawesome as qta
+            upd_btn.setIcon(qta.icon("fa5s.sync-alt", color="white"))
+        except Exception:
+            pass
+        upd_btn.clicked.connect(self._check_for_updates)
+        bl.addWidget(upd_btn, alignment=Qt.AlignCenter)
+        bl.addSpacing(16)
+
+        self._status_lbl = QLabel("● SYSTEM CONFIGURATION")
+        self._status_lbl.setStyleSheet(
+            "color:#1a5fb4; font-size:9px; font-weight:bold; opacity:0.6;"
+        )
+        bl.addWidget(self._status_lbl)
+        root.addWidget(body)
+
+    def _check_for_updates(self):
+        try:
+            import main
+            from updater import check_for_updates
+            check_for_updates(main.APP_VERSION, parent=self, silent=False)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not launch updater:\n{e}")
+
+    def _rule_row(self, key: str, label: str, desc: str) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 12, 0, 12)
+
+        row = QHBoxLayout()
+        txt = QVBoxLayout(); txt.setSpacing(2)
+
+        title_lbl = QLabel(label)
+        title_lbl.setStyleSheet("color:#1a5fb4; font-size:11px; font-weight:bold;")
+        sub_lbl = QLabel(desc)
+        sub_lbl.setStyleSheet("color:#64748b; font-size:10px;")
+        sub_lbl.setWordWrap(True)
+
+        txt.addWidget(title_lbl)
+        txt.addWidget(sub_lbl)
+
+        tog = SlidingToggle()
+        self._toggles[key] = tog
+
+        row.addLayout(txt, 1)
+        row.addSpacing(16)
+        row.addWidget(tog, 0, Qt.AlignVCenter)
+        layout.addLayout(row)
+
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background:#eef2f7; border:none;")
+        layout.addWidget(line)
+        return container
+
+    # ── Persistence ──────────────────────────────────────────────────────────
+    def _load(self):
+        # Default: allow_loaded_quotation_qty_change = OFF (0)
+        #          print_batch_on_receipt             = ON  (1)
+        defaults = {
+            "allow_loaded_quotation_qty_change": False,
+            "print_batch_on_receipt": True,
+            "show_expected_in_reconciliation": True,
+            "enable_quotation_printing": True,
+            "auto_print_quotations": False,
+            "allow_others_to_view_orders": True,
+            "allow_others_to_close_orders": True,
+        }
+        for key, tog in self._toggles.items():
+            tog.setChecked(defaults.get(key, False))
+            tog.position = 1.0 if defaults.get(key, False) else 0.0
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_key, setting_value FROM pos_settings")
+            for k, v in cur.fetchall():
+                if k in self._toggles:
+                    checked = (str(v) == "1")
+                    self._toggles[k].setChecked(checked)
+                    self._toggles[k].position = 1.0 if checked else 0.0
+            conn.close()
+        except Exception:
+            pass
+
+    def _save(self):
+        try:
+            self._save_btn.setEnabled(False)
+            self._save_btn.setText("SAVING…")
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("""
+                IF NOT EXISTS (
+                    SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_NAME='pos_settings'
+                )
+                CREATE TABLE pos_settings (
+                    setting_key   NVARCHAR(80)  NOT NULL PRIMARY KEY,
+                    setting_value NVARCHAR(255) NOT NULL DEFAULT '0'
+                )
+            """)
+            for key, tog in self._toggles.items():
+                val = "1" if tog.isChecked() else "0"
+                cur.execute(
+                    """
+                    IF EXISTS (SELECT 1 FROM pos_settings WHERE setting_key = ?)
+                        UPDATE pos_settings SET setting_value = ? WHERE setting_key = ?
+                    ELSE
+                        INSERT INTO pos_settings (setting_key, setting_value) VALUES (?, ?)
+                    """,
+                    (key, val, key, key, val)
+                )
+            conn.commit(); conn.close()
+            self._save_btn.setText("SAVED")
+            try:
+                # pyrefly: ignore [missing-import]
+                import qtawesome as qta
+                self._save_btn.setIcon(qta.icon("fa5s.check", color="white"))
+            except Exception:
+                pass
+            # pyrefly: ignore [missing-import]
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1500, self._reset_btn)
+        except Exception as e:
+            self._save_btn.setEnabled(True)
+            self._save_btn.setText("SAVE")
+            QMessageBox.warning(self, "Error", f"Failed to save settings:\n{e}")
+
+    def _reset_btn(self):
+        self._save_btn.setEnabled(True)
+        self._save_btn.setText("SAVE")
+        try:
+            self._save_btn.setIcon(QIcon())
+        except Exception:
+            pass
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.reject()
+        else:
+            super().keyPressEvent(event)
+
+
+# =============================================================================
+# SettingsDialog - Main Menu
 # =============================================================================
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, user=None):
@@ -907,9 +1377,11 @@ class SettingsDialog(QDialog):
         hl = QHBoxLayout(hdr); hl.setContentsMargins(20, 0, 20, 0)
         hl.addWidget(QLabel("Settings", styleSheet=f"font-size:15px;font-weight:bold;color:{WHITE};background:transparent;"))
         hl.addStretch()
-        cb = _btn("✕", color=NAVY_2, hover=DANGER, height=28, width=32)
+        cb = _btn("", color=NAVY_2, hover=DANGER, height=28, width=32)
+        cb.setIcon(qta.icon("fa5s.times", color="white"))
         cb.clicked.connect(self.accept); hl.addWidget(cb); root.addWidget(hdr)
 
+        # pyrefly: ignore [missing-import]
         from PySide6.QtWidgets import QScrollArea, QFrame as _QFrame
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -930,14 +1402,20 @@ class SettingsDialog(QDialog):
 
         def _open_company_defaults():
             try:
+                # pyrefly: ignore [missing-import]
                 from PySide6.QtWidgets import QVBoxLayout as _VL, QDialog as _D
                 from views.pages.company_defaults_page import CompanyDefaultsPage
-                dlg = _D(self); dlg.setWindowTitle("Company Defaults")
+                dlg = _D(self)
+                dlg.setWindowTitle("Company Defaults")
                 dlg.setMinimumSize(1000, 700)
                 dlg.setStyleSheet(f"QDialog {{ background: {WHITE}; }}")
-                lay = _VL(dlg); lay.setContentsMargins(0,0,0,0); lay.addWidget(CompanyDefaultsPage())
+                # Override closeEvent so the OS window X just closes this dialog,
+                # not the entire application.
+                dlg.closeEvent = lambda event: (dlg.accept(), event.accept())
+                lay = _VL(dlg); lay.setContentsMargins(0,0,0,0); lay.addWidget(CompanyDefaultsPage(dlg))
                 dlg.exec()
             except Exception as e:
+                # pyrefly: ignore [missing-import]
                 from PySide6.QtWidgets import QMessageBox as _MB
                 _MB.warning(self, "Error", f"Could not open Company Defaults:\n{e}")
 
@@ -946,12 +1424,23 @@ class SettingsDialog(QDialog):
                 from views.dialogs.advance_settings_dialog import AdvanceSettingsDialog
                 AdvanceSettingsDialog(self).exec()
             except Exception as e:
+                # pyrefly: ignore [missing-import]
                 from PySide6.QtWidgets import QMessageBox as _MB
                 _MB.warning(self, "Error", f"Could not open Advanced Printing:\n{e}")
 
+        def _open_category_visibility():
+            try:
+                from views.dialogs.category_visibility_dialog import CategoryVisibilityDialog
+                CategoryVisibilityDialog(self).exec()
+            except Exception as e:
+                # pyrefly: ignore [missing-import]
+                from PySide6.QtWidgets import QMessageBox as _MB
+                _MB.warning(self, "Error", f"Could not open Category Visibility:\n{e}")
+
         def _add_items(item_list):
-            for icon, label, handler in item_list:
-                row = QPushButton(f"   {icon}   {label}")
+            for icon_name, label, handler in item_list:
+                row = QPushButton(f"    {label}")
+                row.setIcon(qta.icon(icon_name))
                 row.setFixedHeight(44); row.setCursor(Qt.PointingHandCursor); row.setFocusPolicy(Qt.NoFocus)
                 row.setStyleSheet(f"""
                     QPushButton {{
@@ -966,27 +1455,65 @@ class SettingsDialog(QDialog):
         # ── MASTER DATA ───────────────────────────────────────────────────────
         ml.addWidget(_section_divider("MASTER DATA"))
         _add_items([
-            ("🏢", "Companies",         lambda: CompanyDialog(self).exec()),
-            ("👥", "Customer Groups",   lambda: CustomerGroupDialog(self).exec()),
-            ("🏭", "Warehouses",        lambda: WarehouseDialog(self).exec()),
-            ("💰", "Cost Centers",      lambda: CostCenterDialog(self).exec()),
-            ("🏷", "Price Lists",       lambda: PriceListDialog(self).exec()),
-            ("👤", "Customers",         lambda: CustomerDialog(self).exec()),
+            ("fa5s.building",   "Companies",       lambda: CompanyDialog(self).exec()),
+            ("fa5s.users",      "Customer Groups", lambda: CustomerGroupDialog(self).exec()),
+            ("fa5s.industry",   "Warehouses",      lambda: WarehouseDialog(self).exec()),
+            ("fa5s.money-bill", "Cost Centers",    lambda: CostCenterDialog(self).exec()),
+            ("fa5s.tag",        "Price Lists",     lambda: PriceListDialog(self).exec()),
+            ("fa5s.user",       "Customers",       lambda: CustomerDialog(self).exec()),
         ])
+
+        def _open_main_menu_dialog():
+            try:
+                from views.dialogs.main_menu_dialog import MainMenuDialog
+                MainMenuDialog(self).exec()
+            except Exception as e:
+                # pyrefly: ignore [missing-import]
+                from PySide6.QtWidgets import QMessageBox as _MB
+                _MB.warning(self, "Error", f"Could not open Main Menu Settings:\n{e}")
 
         # ── ADMIN ─────────────────────────────────────────────────────────────
         ml.addWidget(_section_divider("ADMIN"))
         _add_items([
-            ("🔑", "Users",              lambda: UsersDialog(self, current_user=self.user).exec()),
-            ("🏛", "Company Defaults",   _open_company_defaults),
-            ("🛡", "POS Rules",          lambda: POSRulesDialog(self).exec()),
+            ("fa5s.key",        "Users",             lambda: UsersDialog(self, current_user=self.user).exec()),
+            ("fa5s.landmark",   "Company Defaults",  _open_company_defaults),
+            ("fa5s.shield-alt", "POS Rules",         lambda: POSRulesDialog(self).exec()),
+            ("fa5s.eye-slash",  "Category Visibility", _open_category_visibility),
+            ("fa5s.concierge-bell", "Order Settings",   lambda: MaintenanceDialog(self).exec()),
         ])
 
         # ── HARDWARE & PRINTING ────────────────────────────────────────────────
         ml.addWidget(_section_divider("HARDWARE & PRINTING"))
         _add_items([
-            ("🖨", "Hardware Settings",  lambda: HardwareDialog(self).exec()),
-            ("🖨", "Advanced Printing",  _open_adv_printing),
+            ("fa5s.print",   "Hardware Settings",     lambda: HardwareDialog(self).exec()),
+            ("fa5s.tools",   "Maintenance",            lambda: MaintenanceDialog(self).exec()),
+            ("fa5s.sliders-h", "Advanced Settings",  _open_adv_printing),
+            ("fa5s.toggle-on", "Main Menu / Mode",   _open_main_menu_dialog),
+        ])
+
+        # Pharmacy Mode toggle moved to Company Defaults -> Payment Settings card.
+
+        # ── CONFIGURATIONS ─────────────────────────────────────────────────────
+        def _open_backup_restore():
+            try:
+                from views.dialogs.backup_settings_dialog import BackupSettingsView
+                from PySide6.QtWidgets import QDialog as _D, QVBoxLayout as _VL
+                dlg = _D(self)
+                dlg.setWindowTitle("Backup & Restore")
+                dlg.setMinimumSize(900, 620)
+                dlg.setStyleSheet(f"QDialog {{ background: {WHITE}; }}")
+                dlg.closeEvent = lambda event: (dlg.accept(), event.accept())
+                lay = _VL(dlg)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.addWidget(BackupSettingsView(dlg))
+                dlg.exec()
+            except Exception as e:
+                from PySide6.QtWidgets import QMessageBox as _MB
+                _MB.warning(self, "Error", f"Could not open Backup & Restore:\n{e}")
+
+        ml.addWidget(_section_divider("CONFIGURATIONS"))
+        _add_items([
+            ("fa5s.database",   "Backup & Restore",  _open_backup_restore),
         ])
 
         scroll_area.setWidget(menu)
@@ -1010,15 +1537,17 @@ class SettingsDialog(QDialog):
 
 
 # =============================================================================
-# ToggleSwitch — Proper iOS-style animated toggle widget
+# ToggleSwitch - Proper iOS-style animated toggle widget
 # =============================================================================
+# pyrefly: ignore [missing-import]
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve, Property as QtProperty
+# pyrefly: ignore [missing-import]
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush
 
 class ToggleSwitch(QCheckBox):
     """
     A smooth animated iOS-style toggle switch.
-    Draws its own track + thumb via paintEvent — no stylesheet tricks.
+    Draws its own track + thumb via paintEvent - no stylesheet tricks.
     """
     _TRACK_ON   = QColor("#1a7a3c")   # SUCCESS green
     _TRACK_OFF  = QColor("#c8d8ec")   # BORDER grey
@@ -1064,7 +1593,7 @@ class ToggleSwitch(QCheckBox):
         tw = self._TRACK_W; th = self._TRACK_H
         ox = 1; oy = 1   # offset so thumb shadow isn't clipped
 
-        # Interpolate track color OFF → ON
+        # Interpolate track color OFF -> ON
         t = self._anim_pos
         r = int(self._TRACK_OFF.red()   + t * (self._TRACK_ON.red()   - self._TRACK_OFF.red()))
         g = int(self._TRACK_OFF.green() + t * (self._TRACK_ON.green() - self._TRACK_OFF.green()))
@@ -1095,262 +1624,548 @@ class ToggleSwitch(QCheckBox):
         p.end()
 
     def sizeHint(self):
+        # pyrefly: ignore [missing-import]
         from PySide6.QtCore import QSize
         return QSize(self._TRACK_W + 2, self._TRACK_H + 2)
 
-
 # =============================================================================
-# POSRulesDialog — POS Business Rules (accessible from Settings menu)
+# POS BUSINESS RULES - NAVY BLUE ERP (FIXED CLICK & SLIDE)
 # =============================================================================
-class POSRulesDialog(QDialog):
-    """
-    Toggle-based POS business rules:
-      #3  Block zero-price sales
-      #4  Block zero-stock sales
-      #7  Apply Frappe pricing rules
-    """
+# pyrefly: ignore [missing-import]
+from PySide6.QtWidgets import (
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
+    QLabel, QFrame, QCheckBox, QMessageBox
+)
+# pyrefly: ignore [missing-import]
+from PySide6.QtCore import Qt, QTimer, Property, QEasingCurve, QPropertyAnimation
+# pyrefly: ignore [missing-import]
+from PySide6.QtGui import QPainter, QColor
 
+# ── Sliding Toggle (Fixed Click Logic) ──────────────────────────────────────
+class SlidingToggle(QCheckBox):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("POS Rules")
-        self.setFixedSize(560, 520)
-        self.setModal(True)
-        self.setStyleSheet(f"QDialog {{ background:{OFF_WHITE}; }}")
+        self.setFixedSize(44, 22)
+        self.setCursor(Qt.PointingHandCursor)
+        
+        self._position = 0.0 
+        self.animation = QPropertyAnimation(self, b"position")
+        self.animation.setDuration(160)
+        self.animation.setEasingCurve(QEasingCurve.InOutQuad)
+
+    @Property(float)
+    def position(self): return self._position
+
+    @position.setter
+    def position(self, pos):
+        self._position = pos
+        self.update() 
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.setChecked(not self.isChecked())
+            self.toggled.emit(self.isChecked())
+
+    def checkStateSet(self):
+        super().checkStateSet()
+        self.animation.stop()
+        self.animation.setEndValue(1.0 if self.isChecked() else 0.0)
+        self.animation.start()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        
+        # Track Background (MUTED to Navy Blue: #1a5fb4)
+        bg_color = QColor(209, 217, 230) 
+        if self._position > 0:
+            # Smoothly transition color based on position
+            r = int(209 + (self._position * (13 - 209)))
+            g = int(217 + (self._position * (31 - 217)))
+            b = int(230 + (self._position * (60 - 230)))
+            bg_color = QColor(r, g, b)
+            
+        p.setBrush(bg_color)
+        p.drawRoundedRect(0, 0, self.width(), self.height(), 11, 11)
+        
+        # Handle (White Circle)
+        p.setBrush(QColor("#ffffff"))
+        handle_size = 16
+        margin = 3
+        range_x = self.width() - handle_size - (margin * 2)
+        handle_x = margin + (self._position * range_x)
+        
+        p.drawEllipse(handle_x, margin, handle_size, handle_size)
+        p.end()
+
+# ── Main Dialog ──────────────────────────────────────────────────────────────
+class POSRulesDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self._toggles = {}
+        self._spinboxes = {}
+        
+        self.setMinimumSize(1000, 700)
+        self.setWindowState(Qt.WindowMaximized)
+        self.setWindowFlags(Qt.Dialog | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
+        self.setStyleSheet("QDialog { background:#ffffff; }")
+        
         self._build()
+        self._load_existing_rules()
 
     def _build(self):
+        from PySide6.QtWidgets import QGridLayout, QLineEdit, QComboBox, QScrollArea as _SA
+        from PySide6.QtGui import QIntValidator
+
         root = QVBoxLayout(self)
-        root.setSpacing(0); root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # ── Header bar ────────────────────────────────────────────────────────
-        hdr = QWidget(); hdr.setFixedHeight(60)
-        hdr.setStyleSheet(f"background:{NAVY}; border-bottom: 2px solid {ACCENT};")
-        hl = QHBoxLayout(hdr); hl.setContentsMargins(24, 0, 20, 0)
+        # ── Header ───────────────────────────────────────────────────────────
+        header = QWidget()
+        header.setFixedHeight(60)
+        header.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #0d2b5e, stop:1 #1a5fb4);"
+        )
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(28, 0, 20, 0)
 
-        icon_lbl = QLabel("🛡")
-        icon_lbl.setStyleSheet("font-size:22px; background:transparent;")
-        title_lbl = QLabel("POS Business Rules")
-        title_lbl.setStyleSheet(
-            f"font-size:17px; font-weight:bold; color:{WHITE}; background:transparent; margin-left:8px;")
-        sub_lbl = QLabel("Configure sale restrictions and pricing behaviour")
-        sub_lbl.setStyleSheet(
-            f"font-size:11px; color:{MID}; background:transparent; margin-left:8px;")
+        title_w = QVBoxLayout()
+        title_w.setSpacing(1)
+        t1 = QLabel("POS BUSINESS RULES")
+        t1.setStyleSheet("font-size:13px; font-weight:bold; color:#ffffff; letter-spacing:1.5px; background:transparent;")
+        t2 = QLabel("Configure system-wide behaviour for the Point of Sale")
+        t2.setStyleSheet("font-size:10px; color:rgba(255,255,255,0.55); background:transparent;")
+        title_w.addWidget(t1)
+        title_w.addWidget(t2)
 
-        text_col = QVBoxLayout(); text_col.setSpacing(1)
-        text_col.addWidget(title_lbl); text_col.addWidget(sub_lbl)
-
-        hl.addWidget(icon_lbl)
-        hl.addLayout(text_col)
-        hl.addStretch()
-
-        close_x = QPushButton("✕")
-        close_x.setFixedSize(32, 32); close_x.setCursor(Qt.PointingHandCursor)
-        close_x.setFocusPolicy(Qt.NoFocus)
-        close_x.setStyleSheet(f"""
-            QPushButton {{ background:transparent; color:{MID}; border:none;
-                           font-size:16px; font-weight:bold; border-radius:6px; }}
-            QPushButton:hover {{ background:{DANGER}; color:{WHITE}; }}
+        self.save_btn = QPushButton("SAVE RULES")
+        self.save_btn.setFixedSize(120, 34)
+        self.save_btn.setStyleSheet("""
+            QPushButton {
+                background:#10b981; color:white; border-radius:6px;
+                font-weight:bold; font-size:10px; border:none;
+            }
+            QPushButton:hover { background:#059669; }
+            QPushButton:disabled { background:#ffffff; color:#10b981; border:1px solid #10b981; }
         """)
-        close_x.clicked.connect(self.reject)
-        hl.addWidget(close_x)
-        root.addWidget(hdr)
+        self.save_btn.clicked.connect(self._save)
 
-        # ── Scrollable body ───────────────────────────────────────────────────
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        self.exit_btn = QPushButton("CLOSE")
+        self.exit_btn.setFixedSize(80, 34)
+        self.exit_btn.setStyleSheet("""
+            QPushButton {
+                background:rgba(255,255,255,0.12); color:white;
+                border:1px solid rgba(255,255,255,0.30);
+                border-radius:6px; font-weight:bold; font-size:10px;
+            }
+            QPushButton:hover { background:rgba(255,255,255,0.22); }
+        """)
+        self.exit_btn.clicked.connect(self.reject)
+
+        hl.addLayout(title_w, 1)
+        hl.addWidget(self.save_btn)
+        hl.addSpacing(8)
+        hl.addWidget(self.exit_btn)
+        root.addWidget(header)
+
+        # ── Scrollable Grid Body ─────────────────────────────────────────────
+        scroll = _SA()
+        scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background:transparent; border:none; }")
+        scroll.setStyleSheet("QScrollArea { background:#f0f4f9; }")
 
-        body = QWidget(); body.setStyleSheet(f"background:{OFF_WHITE};")
-        bl = QVBoxLayout(body); bl.setSpacing(8); bl.setContentsMargins(24, 20, 24, 20)
+        body = QWidget()
+        body.setStyleSheet("background:#f0f4f9;")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(28, 24, 28, 24)
+        body_layout.setSpacing(20)
 
-        # ── Section: Sale Restrictions ────────────────────────────────────────
-        self._section_label(bl, "SALE RESTRICTIONS")
+        # ── Section: Sales Controls ──────────────────────────────────────────
+        body_layout.addWidget(self._section_header("SALES CONTROLS"))
+        sales_rules = [
+            ("block_zero_price",    "BLOCK ZERO-PRICE SALES",        "Prevent $0.00 items on invoices."),
+            ("allow_negative_stock",    "ALLOW NEGATIVE STOCK",         "Allow sales even when stock is empty."),
+            ("use_pricing_rules",   "APPLY PRICING RULES",            "Auto-apply ERP discount rules."),
+            ("require_pin_to_remove", "PIN FOR ITEM REMOVAL",         "Require supervisor PIN to remove a cart item."),
+            ("allow_others_to_view_orders",  "VIEW OTHERS' ORDERS",   "Cashiers can open orders started by others."),
+            ("allow_others_to_close_orders", "CLOSE OTHERS' ORDERS",  "Cashiers can finalize/pay others' orders."),
+            ("limit_fiscalization_by_amount", "LIMIT FISCALIZATION BY AMOUNT", "Only fiscalize receipts up to the max invoice value set here; higher won't fiscalize."),
+        ]
+        body_layout.addLayout(self._grid_of_cards(sales_rules))
 
-        self._rule_card(bl,
-            key="block_zero_price",
-            icon="🚫",
-            title="Block Zero-Price Sales",
-            desc="Prevents adding any item priced at $0.00 to the invoice. Cashiers will see a warning and the item will not be added.",
-            default=True,
-            accent="#b02020",
+        # ── Section: Dining & Workflow ───────────────────────────────────────
+        body_layout.addWidget(self._section_header("DINING & WORKFLOW"))
+        dining_rules = [
+            ("takeaway_or_sitin",         "TAKE AWAY / SIT IN PROMPT",         "Ask cashier to pick dining option before payment."),
+            ("takeaway_monitors",          "TAKEAWAY MONITORS",                 "Automatically push Take Away sales invoices as orders to Kitchen & Dispatch Monitors."),
+            ("enable_kds_websocket",       "KITCHEN DISPLAY SYSTEM",            "Live sync to KDS screens."),
+            ("enable_double_printing",     "DOUBLE PRINTING",                   "Print two copies of every sales receipt."),
+        ]
+        body_layout.addLayout(self._grid_of_cards(dining_rules))
+
+        # ── Section: Quotations & Printing ──────────────────────────────────
+        body_layout.addWidget(self._section_header("QUOTATIONS & PRINTING"))
+        print_rules = [
+            ("show_tax_on_invoice",      "SHOW TAX ON INVOICE / A4",      "Include tax breakdown column and subtotal tax summary on A4 invoices & quotes."),
+            ("enable_quotation_printing", "QUOTATION THERMAL PRINTING",   "Allow printing quotes to receipt printer."),
+            ("auto_print_quotations",      "AUTO-PRINT QUOTATIONS",         "Skip preview popup when saving quotations."),
+            ("print_customer_details",     "CUSTOMER DETAILS ON RECEIPT",   "Print email, TIN, VAT & address on receipt."),
+        ]
+        body_layout.addLayout(self._grid_of_cards(print_rules))
+
+        # ── Section: Pharmacy ───────────────────────────────────────────────
+        try:
+            from settings.pharmacy_settings import get_pharmacy_mode
+            if get_pharmacy_mode():
+                body_layout.addWidget(self._section_header("PHARMACY CONTROLS"))
+                pharm_rules = [
+                    ("allow_cashier_pharmacy_sales", "CASHIER PHARMACY SALES", "When enabled, cashiers can sell pharmacy items like normal products without dosage prompts, auto-creating a quote."),
+                    ("fetch_invoices_as_quotations", "FETCH INVOICES AS QUOTATIONS", "Enable pulling sales invoices from Odoo and putting them directly into quotations."),
+                ]
+                body_layout.addLayout(self._grid_of_cards(pharm_rules))
+        except Exception as _e:
+            print(f"[POSRulesDialog] Could not load pharmacy rules: {_e}")
+
+        # ── Section: Numeric Settings ────────────────────────────────────────
+        body_layout.addWidget(self._section_header("NUMERIC SETTINGS"))
+        
+        dp_grid = QGridLayout()
+        dp_grid.setSpacing(12)
+        
+        dp_card = QFrame()
+        dp_card.setObjectName("ruleCard")
+        dp_card.setStyleSheet(
+            "QFrame#ruleCard { background:#ffffff; border-radius:8px;"
+            " border:1px solid #d1d9e6; }"
+            "QFrame#ruleCard:hover { border:1px solid #1a5fb4; }"
         )
-        self._rule_card(bl,
-            key="block_zero_stock",
-            icon="📦",
-            title="Block Zero-Stock Sales",
-            desc="Stops a sale when the item has no available stock. An 'Insufficient Stock' alert is shown to the cashier.",
-            default=True,
-            accent="#c05a00",
+        dp_card.setFixedHeight(64)
+        dp_cl = QHBoxLayout(dp_card)
+        dp_cl.setContentsMargins(12, 8, 12, 8)
+        dp_cl.setSpacing(12)
+
+        text_ly = QVBoxLayout()
+        text_ly.setSpacing(2)
+        
+        dp_t = QLabel("QUANTITY DECIMAL PLACES")
+        dp_t.setStyleSheet("color:#1a5fb4; font-size:11px; font-weight:800; letter-spacing:0.5px; background:transparent; border:none;")
+        dp_t.setWordWrap(True)
+        
+        dp_s = QLabel("Decimal places for quantities (e.g. 2 → 0.00)")
+        dp_s.setStyleSheet("color:#64748b; font-size:9px; background:transparent; border:none;")
+        dp_s.setWordWrap(True)
+        
+        text_ly.addWidget(dp_t)
+        text_ly.addWidget(dp_s)
+        text_ly.addStretch()
+        
+        self.qty_dp_input = QLineEdit()
+        self.qty_dp_input.setValidator(QIntValidator(0, 4, self.qty_dp_input))
+        self.qty_dp_input.setText("2")
+        self.qty_dp_input.setFixedSize(64, 30)
+        self.qty_dp_input.setAlignment(Qt.AlignCenter)
+        self.qty_dp_input.setStyleSheet(
+            "QLineEdit { border:1px solid #d1d9e6; border-radius:6px;"
+            " font-size:14px; font-weight:bold; color:#1a5fb4;"
+            " background:#f8fafc; }"
         )
+        
+        dp_cl.addLayout(text_ly, 1)
+        dp_cl.addWidget(self.qty_dp_input, 0, Qt.AlignVCenter)
+        
+        dp_grid.addWidget(dp_card, 0, 0)
+        
+        spacer1 = QWidget()
+        spacer1.setStyleSheet("background:transparent;")
+        spacer2 = QWidget()
+        spacer2.setStyleSheet("background:transparent;")
+        dp_grid.addWidget(spacer1, 0, 1)
+        dp_grid.addWidget(spacer2, 0, 2)
+        
+        body_layout.addLayout(dp_grid)
 
-        bl.addSpacing(6)
-        self._section_label(bl, "PRICING")
-
-        self._rule_card(bl,
-            key="use_pricing_rules",
-            icon="💸",
-            title="Apply Frappe Pricing Rules",
-            desc="Automatically fetches and applies discount rules from Frappe ERPNext when an item is added to the cart.",
-            default=True,
-            accent="#1a5fb4",
+        # ── Section: System Defaults ─────────────────────────────────────────
+        body_layout.addWidget(self._section_header("SYSTEM DEFAULTS"))
+        
+        def_grid = QGridLayout()
+        def_grid.setSpacing(12)
+        
+        def_card = QFrame()
+        def_card.setObjectName("ruleCard")
+        def_card.setStyleSheet(
+            "QFrame#ruleCard { background:#ffffff; border-radius:8px;"
+            " border:1px solid #d1d9e6; }"
+            "QFrame#ruleCard:hover { border:1px solid #1a5fb4; }"
         )
+        def_card.setFixedHeight(64)
+        def_cl = QHBoxLayout(def_card)
+        def_cl.setContentsMargins(12, 8, 12, 8)
+        def_cl.setSpacing(12)
 
-        # ── Info note ─────────────────────────────────────────────────────────
-        bl.addSpacing(6)
-        note_card = QWidget()
-        note_card.setStyleSheet(f"""
-            QWidget {{
-                background: #eef4ff;
-                border: 1px solid #b8d0f0;
-                border-left: 4px solid {ACCENT};
-                border-radius: 8px;
-            }}
-        """)
-        nl = QHBoxLayout(note_card); nl.setContentsMargins(16, 12, 16, 12); nl.setSpacing(12)
-        note_icon = QLabel("💡"); note_icon.setStyleSheet("background:transparent; font-size:18px;")
-        note_icon.setFixedWidth(24)
-        note_text = QLabel(
-            "<b>Per-user permissions</b> such as Allow Discounts, Reprint, "
-            "Credit Notes and Receipt are managed in "
-            "<b>Settings → Users</b> — edit any user to adjust their access.")
-        note_text.setWordWrap(True)
-        note_text.setStyleSheet(f"color:{NAVY}; font-size:12px; background:transparent; line-height:1.5;")
-        nl.addWidget(note_icon, alignment=Qt.AlignTop)
-        nl.addWidget(note_text, 1)
-        bl.addWidget(note_card)
+        def_text_ly = QVBoxLayout()
+        def_text_ly.setSpacing(2)
+        
+        def_t = QLabel("DEFAULT WALK-IN CUSTOMER")
+        def_t.setStyleSheet("color:#1a5fb4; font-size:11px; font-weight:800; letter-spacing:0.5px; background:transparent; border:none;")
+        def_t.setWordWrap(True)
+        
+        def_s = QLabel("Fallback customer instead of Cash Customer.")
+        def_s.setStyleSheet("color:#64748b; font-size:9px; background:transparent; border:none;")
+        def_s.setWordWrap(True)
+        
+        def_text_ly.addWidget(def_t)
+        def_text_ly.addWidget(def_s)
+        def_text_ly.addStretch()
+        
+        self.cbo_default_cust = QComboBox()
+        self.cbo_default_cust.setFixedSize(140, 30)
+        self.cbo_default_cust.setStyleSheet(
+            "QComboBox { border:1px solid #d1d9e6; border-radius:6px;"
+            " font-size:11px; font-weight:bold; color:#1a5fb4; background:#f8fafc; padding: 0 8px; }"
+            "QComboBox::drop-down { border:none; }"
+            "QComboBox QAbstractItemView { background: #ffffff; color: #1a5fb4; selection-background-color: #1a5fb4; selection-color: #ffffff; }"
+        )
+        self.cbo_default_cust.addItem("Cash Customer")
+        
+        # Load customers from database
+        try:
+            from database.db import get_connection
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT customer_name FROM customers ORDER BY customer_name")
+            for c_row in cur.fetchall():
+                cname = str(c_row[0]).strip()
+                if cname and cname.lower() != "cash customer":
+                    self.cbo_default_cust.addItem(cname)
+            conn.close()
+        except Exception as e:
+            print(f"[POSRulesDialog] Failed to load customers for dropdown: {e}")
+        
+        def_cl.addLayout(def_text_ly, 1)
+        def_cl.addWidget(self.cbo_default_cust, 0, Qt.AlignVCenter)
+        
+        def_grid.addWidget(def_card, 0, 0)
+        
+        def_spacer1 = QWidget()
+        def_spacer1.setStyleSheet("background:transparent;")
+        def_spacer2 = QWidget()
+        def_spacer2.setStyleSheet("background:transparent;")
+        def_grid.addWidget(def_spacer1, 0, 1)
+        def_grid.addWidget(def_spacer2, 0, 2)
+        
+        body_layout.addLayout(def_grid)
 
-        bl.addStretch()
+        body_layout.addStretch()
+        self.status_lbl = QLabel("● SYSTEM CONFIGURATION")
+        self.status_lbl.setStyleSheet("color:#94a3b8; font-size:9px; font-weight:bold;")
+        body_layout.addWidget(self.status_lbl)
+
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
 
-        # ── Footer / Save bar ─────────────────────────────────────────────────
-        footer = QWidget()
-        footer.setFixedHeight(64)
-        footer.setStyleSheet(f"""
-            QWidget {{
-                background: {WHITE};
-                border-top: 1px solid {BORDER};
-            }}
-        """)
-        fl = QHBoxLayout(footer); fl.setContentsMargins(24, 0, 24, 0); fl.setSpacing(10)
-
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setFixedSize(100, 38); cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.setFocusPolicy(Qt.NoFocus)
-        cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{WHITE}; color:{MUTED}; border:1px solid {BORDER};
-                border-radius:6px; font-size:13px; font-weight:600;
-            }}
-            QPushButton:hover {{ background:{LIGHT}; color:{NAVY}; border-color:{MID}; }}
-        """)
-        cancel_btn.clicked.connect(self.reject)
-
-        save_btn = QPushButton("  💾  Save Rules")
-        save_btn.setFixedSize(160, 38); save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.setFocusPolicy(Qt.NoFocus)
-        save_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{SUCCESS}; color:{WHITE}; border:none;
-                border-radius:6px; font-size:13px; font-weight:bold;
-            }}
-            QPushButton:hover {{ background:{SUCCESS_H}; }}
-            QPushButton:pressed {{ background:#155e30; }}
-        """)
-        save_btn.clicked.connect(self._save)
-
-        fl.addStretch()
-        fl.addWidget(cancel_btn)
-        fl.addWidget(save_btn)
-        root.addWidget(footer)
-
-    def _section_label(self, layout, text):
+    def _section_header(self, text):
         lbl = QLabel(text)
-        lbl.setStyleSheet(f"""
-            color:{MUTED}; font-size:10px; font-weight:bold;
-            background:transparent; letter-spacing:1.5px;
-            padding-bottom:2px;
-        """)
-        layout.addWidget(lbl)
+        lbl.setStyleSheet(
+            "color:#64748b; font-size:9px; font-weight:800;"
+            " letter-spacing:1.8px; background:transparent;"
+        )
+        return lbl
 
-    def _rule_card(self, layout, key, icon, title, desc, default, accent=None):
-        accent = accent or ACCENT
-        card = QWidget()
-        card.setStyleSheet(f"""
-            QWidget#ruleCard {{
-                background:{WHITE};
-                border:1px solid {BORDER};
-                border-left: 4px solid {accent};
-                border-radius: 10px;
-            }}
-        """)
+    def _grid_of_cards(self, rules):
+        from PySide6.QtWidgets import QGridLayout
+        grid = QGridLayout()
+        grid.setSpacing(12)
+        col_count = 3
+        for idx, (key, lbl, desc) in enumerate(rules):
+            card = self._rule_card(key, lbl, desc)
+            grid.addWidget(card, idx // col_count, idx % col_count)
+        # fill last row with spacers if not a multiple of 3
+        remaining = len(rules) % col_count
+        if remaining:
+            for c in range(remaining, col_count):
+                spacer = QWidget()
+                spacer.setStyleSheet("background:transparent;")
+                grid.addWidget(spacer, len(rules) // col_count, c)
+        return grid
+
+    def _rule_card(self, key, label, desc):
+        card = QFrame()
         card.setObjectName("ruleCard")
+        card.setFixedHeight(64)
+        card.setStyleSheet(
+            "QFrame#ruleCard { background:#ffffff; border-radius:8px;"
+            " border:1px solid #d1d9e6; }"
+            "QFrame#ruleCard:hover { border:1px solid #1a5fb4; }"
+        )
+        cl = QHBoxLayout(card)
+        cl.setContentsMargins(12, 8, 12, 8)
+        cl.setSpacing(12)
 
-        cl = QHBoxLayout(card); cl.setContentsMargins(16, 14, 18, 14); cl.setSpacing(14)
+        # Left: Label and Description
+        text_ly = QVBoxLayout()
+        text_ly.setSpacing(2)
+        
+        t = QLabel(label)
+        t.setStyleSheet("color:#1a5fb4; font-size:11px; font-weight:800; letter-spacing:0.5px; background:transparent; border:none;")
+        t.setWordWrap(True)
+        
+        d = QLabel(desc)
+        d.setStyleSheet("color:#64748b; font-size:9px; background:transparent; border:none;")
+        d.setWordWrap(True)
+        
+        text_ly.addWidget(t)
+        text_ly.addWidget(d)
+        text_ly.addStretch()
 
-        # Icon badge
-        ic = QLabel(icon)
-        ic.setFixedSize(38, 38)
-        ic.setAlignment(Qt.AlignCenter)
-        ic.setStyleSheet(f"""
-            font-size:18px;
-            background:{LIGHT};
-            border-radius:8px;
-        """)
-
-        # Text
-        txt_col = QVBoxLayout(); txt_col.setSpacing(3)
-        t_lbl = QLabel(title)
-        t_lbl.setStyleSheet(f"font-size:13px; font-weight:bold; color:{NAVY}; background:transparent;")
-        d_lbl = QLabel(desc)
-        d_lbl.setWordWrap(True)
-        d_lbl.setStyleSheet(f"font-size:11px; color:{MUTED}; background:transparent; line-height:1.4;")
-        txt_col.addWidget(t_lbl); txt_col.addWidget(d_lbl)
-
-        # Toggle
-        tog = ToggleSwitch()
-        try:
-            from database.db import get_connection
-            conn = get_connection(); cur = conn.cursor()
-            cur.execute("SELECT setting_value FROM pos_settings WHERE setting_key=?", (key,))
-            row = cur.fetchone(); conn.close()
-            tog.setChecked((str(row[0]).strip().lower() in ("1", "true", "yes")) if row else default)
-        except Exception:
-            tog.setChecked(default)
-
-        cl.addWidget(ic, alignment=Qt.AlignTop | Qt.AlignLeft)
-        cl.addLayout(txt_col, 1)
-        cl.addWidget(tog, alignment=Qt.AlignVCenter)
-
+        tog = SlidingToggle()
         self._toggles[key] = tog
-        layout.addWidget(card)
+        
+        cl.addLayout(text_ly, 1)
+        if key == "limit_fiscalization_by_amount":
+            from PySide6.QtGui import QDoubleValidator
+            self.fiscal_max_amount_input = QLineEdit()
+            _dv = QDoubleValidator(0.0, 999999999.99, 2, self.fiscal_max_amount_input)
+            _dv.setNotation(QDoubleValidator.StandardNotation)
+            self.fiscal_max_amount_input.setValidator(_dv)
+            self.fiscal_max_amount_input.setText("40")
+            self.fiscal_max_amount_input.setPlaceholderText("Max $")
+            self.fiscal_max_amount_input.setToolTip("Maximum invoice total to fiscalize (e.g. 40 means invoices > 40 will NOT fiscalize)")
+            self.fiscal_max_amount_input.setFixedSize(72, 30)
+            self.fiscal_max_amount_input.setAlignment(Qt.AlignCenter)
+            self.fiscal_max_amount_input.setStyleSheet(
+                "QLineEdit { border:1px solid #d1d9e6; border-radius:6px;"
+                " font-size:13px; font-weight:bold; color:#1a5fb4;"
+                " background:#f8fafc; padding: 0 4px; }"
+            )
+            cl.addWidget(self.fiscal_max_amount_input, 0, Qt.AlignVCenter)
+        cl.addWidget(tog, 0, Qt.AlignVCenter)
+        
+        return card
+
+    def _rule_row(self, key, label, desc):
+        """Legacy single-row method (kept for compatibility)."""
+        return self._rule_card(key, label, desc)
 
     def _save(self):
         try:
+            self.save_btn.setEnabled(False)
+            self.save_btn.setText("SAVING...")
+
             from database.db import get_connection
             conn = get_connection(); cur = conn.cursor()
-            cur.execute("""
-                IF NOT EXISTS (
-                    SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-                    WHERE TABLE_NAME='pos_settings'
-                )
-                CREATE TABLE pos_settings (
-                    setting_key   NVARCHAR(80)  NOT NULL PRIMARY KEY,
-                    setting_value NVARCHAR(255) NOT NULL DEFAULT '0'
-                )
-            """)
+            
             for key, tog in self._toggles.items():
                 val = "1" if tog.isChecked() else "0"
+                if key == "allow_cashier_pharmacy_sales":
+                    # This rule goes to company_defaults instead of pos_settings
+                    cur.execute("""
+                        IF EXISTS (SELECT 1 FROM company_defaults)
+                            UPDATE company_defaults SET allow_cashier_pharmacy_sales = ?
+                    """, (val,))
+                    continue
+
                 cur.execute("""
                     MERGE pos_settings AS t
                     USING (SELECT ? AS k, ? AS v) AS s ON t.setting_key = s.k
-                    WHEN MATCHED     THEN UPDATE SET setting_value = s.v
-                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value)
-                                          VALUES (s.k, s.v);
+                    WHEN MATCHED THEN UPDATE SET setting_value = s.v
+                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value) VALUES (s.k, s.v);
                 """, (key, val))
+            
+            # Save qty_decimal_places
+            qty_dp_val = self.qty_dp_input.text().strip() or "2"
+            cur.execute("""
+                MERGE pos_settings AS t
+                USING (SELECT ? AS k, ? AS v) AS s ON t.setting_key = s.k
+                WHEN MATCHED THEN UPDATE SET setting_value = s.v
+                WHEN NOT MATCHED THEN INSERT (setting_key, setting_value) VALUES (s.k, s.v);
+            """, ("qty_decimal_places", qty_dp_val))
+
+            # Save fiscalization_max_invoice_amount
+            if hasattr(self, "fiscal_max_amount_input"):
+                fiscal_max_val = self.fiscal_max_amount_input.text().strip() or "0"
+                cur.execute("""
+                    MERGE pos_settings AS t
+                    USING (SELECT ? AS k, ? AS v) AS s ON t.setting_key = s.k
+                    WHEN MATCHED THEN UPDATE SET setting_value = s.v
+                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value) VALUES (s.k, s.v);
+                """, ("fiscalization_max_invoice_amount", fiscal_max_val))
+            
+            local_cust = self.cbo_default_cust.currentText().strip()
+            cur.execute("""
+                MERGE pos_settings AS t
+                USING (SELECT 'local_default_customer' AS k, ? AS v) AS s ON t.setting_key = s.k
+                WHEN MATCHED THEN UPDATE SET setting_value = s.v
+                WHEN NOT MATCHED THEN INSERT (setting_key, setting_value) VALUES (s.k, s.v);
+            """, (local_cust,))
+            
             conn.commit(); conn.close()
-            QMessageBox.information(self, "Saved", "POS rules saved successfully.")
-            self.accept()
+            
+            try:
+                from views.dialogs.dining_option_dialog import set_dining_prompt_hidden
+                set_dining_prompt_hidden(False)
+            except Exception:
+                pass
+
+            self.save_btn.setText("SAVED")
+            self.save_btn.setIcon(qta.icon("fa5s.check", color="white"))
+            QTimer.singleShot(1500, self._reset_btn)
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Could not save rules:\n{e}")
+            self.save_btn.setEnabled(True)
+            self.save_btn.setText("SAVE RULES")
+            QMessageBox.warning(self, "Error", f"Failed: {e}")
+
+    def _reset_btn(self):
+        self.save_btn.setEnabled(True)
+        self.save_btn.setText("SAVE RULES")
+
+    def _load_existing_rules(self):
+        # Default ALL to True first (Consistency with _get_pos_rule)
+        for k, t in self._toggles.items():
+            # auto_print_quotations, require_pin_to_remove, takeaway_or_sitin, auto_kds_takeaway_orders, show_tax_on_invoice, limit_fiscalization_by_amount should be OFF by default
+            default = (k not in ("show_tax_on_invoice", "auto_print_quotations", "require_pin_to_remove", "takeaway_or_sitin", "auto_kds_takeaway_orders", "takeaway_monitors", "enable_kds_websocket", "limit_fiscalization_by_amount"))
+            t.setChecked(default)
+            t.position = 1.0 if default else 0.0
+
+        try:
+            from database.db import get_connection
+            conn = get_connection(); cur = conn.cursor()
+            cur.execute("SELECT setting_key, setting_value FROM pos_settings")
+            for k, v in cur.fetchall():
+                if k in self._toggles and k != "allow_cashier_pharmacy_sales":
+                    checked = (str(v) == "1")
+                    self._toggles[k].setChecked(checked)
+                    self._toggles[k].position = 1.0 if checked else 0.0
+                elif k == "qty_decimal_places":
+                    try: self.qty_dp_input.setText(str(int(v)))
+                    except: pass
+                elif k == "fiscalization_max_invoice_amount":
+                    try:
+                        if hasattr(self, "fiscal_max_amount_input") and str(v).strip():
+                            self.fiscal_max_amount_input.setText(str(v).strip())
+                    except: pass
+                elif k == "local_default_customer":
+                    try:
+                        idx = self.cbo_default_cust.findText(str(v).strip())
+                        if idx >= 0: self.cbo_default_cust.setCurrentIndex(idx)
+                    except: pass
+            
+            if "allow_cashier_pharmacy_sales" in self._toggles:
+                try:
+                    cur.execute("SELECT allow_cashier_pharmacy_sales FROM company_defaults")
+                    row = cur.fetchone()
+                    if row:
+                        checked = (str(row[0]).strip() == "1")
+                        self._toggles["allow_cashier_pharmacy_sales"].setChecked(checked)
+                        self._toggles["allow_cashier_pharmacy_sales"].position = 1.0 if checked else 0.0
+                except Exception:
+                    pass
+
+            conn.close()
+        except: pass
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape: self.reject()
+        else: super().keyPressEvent(event)

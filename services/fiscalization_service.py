@@ -59,6 +59,56 @@ class FiscalizationBatchResult:
             self.errors = []
 
 
+def get_fiscalization_amount_limit() -> tuple[bool, float]:
+    """
+    Read POS Rules settings for maximum invoice amount to fiscalize:
+      - limit_fiscalization_by_amount ('1' / '0')
+      - fiscalization_max_invoice_amount (float string, e.g. '40.00')
+    Returns (is_limit_enabled, max_invoice_amount).
+    """
+    enabled = False
+    max_amount = 0.0
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT setting_key, setting_value
+            FROM pos_settings
+            WHERE setting_key IN ('limit_fiscalization_by_amount', 'fiscalization_max_invoice_amount')
+        """)
+        for k, v in cur.fetchall():
+            k_str = str(k or "").strip()
+            v_str = str(v or "").strip()
+            if k_str == "limit_fiscalization_by_amount":
+                enabled = v_str.lower() in ("1", "true", "yes", "on")
+            elif k_str == "fiscalization_max_invoice_amount":
+                try:
+                    max_amount = float(v_str)
+                except (ValueError, TypeError):
+                    max_amount = 0.0
+        conn.close()
+    except Exception as e:
+        log.debug(f"Could not read fiscalization amount limit from pos_settings: {e}")
+    return enabled, max_amount
+
+
+def is_sale_within_fiscal_limit(invoice_total: float) -> bool:
+    """
+    Returns True if the invoice total is allowed to be fiscalized.
+    When 'limit_fiscalization_by_amount' is enabled and 'fiscalization_max_invoice_amount' > 0,
+    any invoice with total > max_amount will NOT be fiscalized (returns False).
+    """
+    limit_enabled, max_amount = get_fiscalization_amount_limit()
+    if limit_enabled and max_amount > 0:
+        try:
+            total_val = abs(float(invoice_total or 0.0))
+        except (ValueError, TypeError):
+            total_val = 0.0
+        if total_val > max_amount + 1e-6:
+            return False
+    return True
+
+
 class FiscalizationService:
 
     def __init__(self):
@@ -68,6 +118,24 @@ class FiscalizationService:
     def is_fiscalization_enabled(self) -> bool:
         settings = self._settings_repo.get_settings()
         return settings is not None and settings.enabled
+
+    def get_fiscal_amount_limit(self) -> tuple[bool, float]:
+        return get_fiscalization_amount_limit()
+
+    def should_fiscalize_sale(self, sale_or_total) -> bool:
+        """
+        Returns True only if fiscalization is enabled AND the sale total is within
+        the configured POS Rules max invoice fiscalization limit (if enabled).
+        """
+        if not self.is_fiscalization_enabled():
+            return False
+        if isinstance(sale_or_total, dict):
+            if str(sale_or_total.get("fiscal_status") or "").lower() == "not_required":
+                return False
+            total_val = sale_or_total.get("total", 0.0)
+        else:
+            total_val = sale_or_total
+        return is_sale_within_fiscal_limit(total_val)
 
     # =========================================================================
     # SALE FISCALIZATION - NO CONVERSION EVER
@@ -88,6 +156,13 @@ class FiscalizationService:
 
             if sale.get("fiscal_status") == "fiscalized":
                 print(f"✓ Sale {sale_id} is already fiscalized")
+                return True
+
+            sale_total = abs(float(sale.get("total") or 0.0))
+            if not is_sale_within_fiscal_limit(sale_total):
+                _, max_amt = get_fiscalization_amount_limit()
+                print(f"[Fiscalization] Sale {sale_id} total ({sale_total:.2f}) exceeds max fiscalization limit ({max_amt:.2f}), skipping fiscalization")
+                self._update_sale_fiscal_status(sale_id, "not_required")
                 return True
 
             current_status = (sale.get("fiscal_status") or "").upper()

@@ -1792,6 +1792,7 @@ class POSRulesDialog(QDialog):
             ("require_pin_to_remove", "PIN FOR ITEM REMOVAL",         "Require supervisor PIN to remove a cart item."),
             ("allow_others_to_view_orders",  "VIEW OTHERS' ORDERS",   "Cashiers can open orders started by others."),
             ("allow_others_to_close_orders", "CLOSE OTHERS' ORDERS",  "Cashiers can finalize/pay others' orders."),
+            ("limit_fiscalization_by_amount", "LIMIT FISCALIZATION BY AMOUNT", "Only fiscalize receipts up to the max invoice value set here; higher won't fiscalize."),
         ]
         body_layout.addLayout(self._grid_of_cards(sales_rules))
 
@@ -2023,6 +2024,23 @@ class POSRulesDialog(QDialog):
         self._toggles[key] = tog
         
         cl.addLayout(text_ly, 1)
+        if key == "limit_fiscalization_by_amount":
+            from PySide6.QtGui import QDoubleValidator
+            self.fiscal_max_amount_input = QLineEdit()
+            _dv = QDoubleValidator(0.0, 999999999.99, 2, self.fiscal_max_amount_input)
+            _dv.setNotation(QDoubleValidator.StandardNotation)
+            self.fiscal_max_amount_input.setValidator(_dv)
+            self.fiscal_max_amount_input.setText("40")
+            self.fiscal_max_amount_input.setPlaceholderText("Max $")
+            self.fiscal_max_amount_input.setToolTip("Maximum invoice total to fiscalize (e.g. 40 means invoices > 40 will NOT fiscalize)")
+            self.fiscal_max_amount_input.setFixedSize(72, 30)
+            self.fiscal_max_amount_input.setAlignment(Qt.AlignCenter)
+            self.fiscal_max_amount_input.setStyleSheet(
+                "QLineEdit { border:1px solid #d1d9e6; border-radius:6px;"
+                " font-size:13px; font-weight:bold; color:#1a5fb4;"
+                " background:#f8fafc; padding: 0 4px; }"
+            )
+            cl.addWidget(self.fiscal_max_amount_input, 0, Qt.AlignVCenter)
         cl.addWidget(tog, 0, Qt.AlignVCenter)
         
         return card
@@ -2064,6 +2082,16 @@ class POSRulesDialog(QDialog):
                 WHEN MATCHED THEN UPDATE SET setting_value = s.v
                 WHEN NOT MATCHED THEN INSERT (setting_key, setting_value) VALUES (s.k, s.v);
             """, ("qty_decimal_places", qty_dp_val))
+
+            # Save fiscalization_max_invoice_amount
+            if hasattr(self, "fiscal_max_amount_input"):
+                fiscal_max_val = self.fiscal_max_amount_input.text().strip() or "0"
+                cur.execute("""
+                    MERGE pos_settings AS t
+                    USING (SELECT ? AS k, ? AS v) AS s ON t.setting_key = s.k
+                    WHEN MATCHED THEN UPDATE SET setting_value = s.v
+                    WHEN NOT MATCHED THEN INSERT (setting_key, setting_value) VALUES (s.k, s.v);
+                """, ("fiscalization_max_invoice_amount", fiscal_max_val))
             
             local_cust = self.cbo_default_cust.currentText().strip()
             cur.execute("""
@@ -2096,8 +2124,8 @@ class POSRulesDialog(QDialog):
     def _load_existing_rules(self):
         # Default ALL to True first (Consistency with _get_pos_rule)
         for k, t in self._toggles.items():
-            # auto_print_quotations, require_pin_to_remove, takeaway_or_sitin, auto_kds_takeaway_orders, show_tax_on_invoice should be OFF by default
-            default = (k not in ("show_tax_on_invoice", "auto_print_quotations", "require_pin_to_remove", "takeaway_or_sitin", "auto_kds_takeaway_orders", "takeaway_monitors", "enable_kds_websocket"))
+            # auto_print_quotations, require_pin_to_remove, takeaway_or_sitin, auto_kds_takeaway_orders, show_tax_on_invoice, limit_fiscalization_by_amount should be OFF by default
+            default = (k not in ("show_tax_on_invoice", "auto_print_quotations", "require_pin_to_remove", "takeaway_or_sitin", "auto_kds_takeaway_orders", "takeaway_monitors", "enable_kds_websocket", "limit_fiscalization_by_amount"))
             t.setChecked(default)
             t.position = 1.0 if default else 0.0
 
@@ -2112,6 +2140,11 @@ class POSRulesDialog(QDialog):
                     self._toggles[k].position = 1.0 if checked else 0.0
                 elif k == "qty_decimal_places":
                     try: self.qty_dp_input.setText(str(int(v)))
+                    except: pass
+                elif k == "fiscalization_max_invoice_amount":
+                    try:
+                        if hasattr(self, "fiscal_max_amount_input") and str(v).strip():
+                            self.fiscal_max_amount_input.setText(str(v).strip())
                     except: pass
                 elif k == "local_default_customer":
                     try:
