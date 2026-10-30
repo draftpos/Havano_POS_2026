@@ -1,5 +1,29 @@
 # Change History
 
+## [2026-10-30 11:45:00] - Fix: Merge Conflicts and Latency Optimization in ZIMRA Fiscalization API
+
+### Problem
+1. A git pull caused merge conflicts in `main.py`, `change_history.md`, `stock_cache.json`, and `Havano POS System/_internal/services/fiscalization_service.py`.
+2. Online fiscalization was experiencing significant delays (4.5s to 6.6s+ per checkout), reaching the 6-second `FiscalWaitDialog` timeout because `ZimraApiService` created a brand new `requests.Session()` and executed a cold TLS handshake (1.7s?2.5s) plus a separate `POST /token` request (1.5s?3.0s) on every single invoice before finally calling `sendinvoice`.
+
+### Fix
+1. **Resolved Merge Conflicts**:
+   - Merged `main.py` keeping `APP_VERSION = "2.0.8.82"`.
+   - Merged `change_history.md`, keeping all recent entries.
+   - Cleaned `stock_cache.json` and synced `Havano POS System/_internal/services/fiscalization_service.py`.
+2. **Connection Pooling & Token Caching ([`services/zimra_api_service.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/zimra_api_service.py))**:
+   - Implemented persistent session with `HTTPAdapter` connection pooling to reuse keep-alive TCP/TLS connections to `https://erpfiscal.havano.online`, dropping request latency from ~2.5s down to ~0.3s.
+   - Added CSRF token caching with a 10-minute TTL, eliminating the redundant token fetch roundtrip on every sale.
+   - Added automatic token invalidation and refresh if the server ever returns HTTP 401/403 or CSRF invalid.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `main.py` | 42?46 | Resolved conflict preserving `APP_VERSION = "2.0.8.82"` |
+| `stock_cache.json` | 1?5 | Resolved conflict to latest stock cache |
+| `services/zimra_api_service.py` | 71?175, 240?255 | Added session connection pooling, token caching, and automatic re-authentication |
+| `Havano POS System/_internal/services/fiscalization_service.py` | All | Synced clean fiscalization service |
+
 ## [2026-10-30 10:45:00] - Fix: Bundle Offline Fiscalization in Executable and Prevent Offline Failures from Halting ZIMRA Fiscalization
 
 ### Problem
