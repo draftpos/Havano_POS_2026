@@ -70,44 +70,63 @@ class FiscalInvoiceResponse:
 
 # Module-level lock - shared across ALL instances and ALL threads
 _send_lock = threading.Lock()
+_shared_session = None
+_cached_token = None
+_cached_token_time = 0.0
+_token_lock = threading.Lock()
+TOKEN_CACHE_TTL = 600  # 10 minutes cache avoids 2.5s overhead per sale
 
 
 class ZimraApiService:
     """
-    Stateless ZIMRA API wrapper.
-    Every send_invoice call gets its own fresh session + token,
-    exactly like the working test_simple_invoice.py script.
+    High-performance ZIMRA API wrapper with connection pooling and token caching.
+    Uses HTTP keep-alive connection pooling to eliminate cold TLS handshake delays (~2s).
     Module-level lock ensures concurrent sales never interleave.
     """
 
-    def _fetch_token(self, settings, session: requests.Session) -> tuple:
+    def _get_session(self) -> requests.Session:
+        global _shared_session
+        if _shared_session is None:
+            _shared_session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(pool_connections=5, pool_maxsize=10, max_retries=1)
+            _shared_session.mount("https://", adapter)
+            _shared_session.mount("http://", adapter)
+        return _shared_session
+
+    def _fetch_token(self, settings, session: requests.Session, force_refresh: bool = False) -> tuple:
         """
-        Internal helper - fetches a fresh CSRF token.
+        Internal helper - fetches or reuses cached CSRF token.
         Returns (True, csrf_token) on success, (False, error_message) on failure.
-        Shared by both get_token() and send_invoice() to avoid duplication.
         """
-        token_url = f"{settings.base_url}/api/method/havanozimracloud.api.token"
-        try:
-            print(f"[ZIMRA] Getting token...")
-            token_resp = session.post(token_url, timeout=30)
-            if token_resp.status_code != 200:
-                return False, f"Token request failed HTTP {token_resp.status_code}: {token_resp.text}"
-            token_data = token_resp.json()
-            csrf_token = token_data.get("token") or token_data.get("message")
-            if not csrf_token:
-                return False, f"No token in response: {token_data}"
-            print(f"[ZIMRA] Token obtained")
-            return True, csrf_token
-        except Exception as e:
-            return False, f"Token error: {e}"
+        global _cached_token, _cached_token_time
+        with _token_lock:
+            now = time.time()
+            if not force_refresh and _cached_token and (now - _cached_token_time < TOKEN_CACHE_TTL):
+                return True, _cached_token
+
+            token_url = f"{settings.base_url}/api/method/havanozimracloud.api.token"
+            try:
+                print(f"[ZIMRA] Refreshing token...")
+                token_resp = session.post(token_url, timeout=15)
+                if token_resp.status_code != 200:
+                    return False, f"Token request failed HTTP {token_resp.status_code}: {token_resp.text}"
+                token_data = token_resp.json()
+                csrf_token = token_data.get("token") or token_data.get("message")
+                if not csrf_token:
+                    return False, f"No token in response: {token_data}"
+                _cached_token = csrf_token
+                _cached_token_time = now
+                print(f"[ZIMRA] Token obtained and cached")
+                return True, csrf_token
+            except Exception as e:
+                return False, f"Token error: {e}"
 
     def get_token(self, settings) -> ApiResult:
         """
         Public method used by Device Monitor for ping / health checks.
-        Fetches a fresh token and returns it wrapped in ApiResult.
         """
-        session = requests.Session()
-        ok, result = self._fetch_token(settings, session)
+        session = self._get_session()
+        ok, result = self._fetch_token(settings, session, force_refresh=True)
         if ok:
             return ApiResult.success(result)
         return ApiResult.error(result)
@@ -116,7 +135,7 @@ class ZimraApiService:
         """
         Pings ZIMRA using the token endpoint to check connectivity.
         """
-        session = requests.Session()
+        session = self._get_session()
         ok, result = self._fetch_token(settings, session)
         if not ok:
             return ApiResult.error(result)
@@ -137,27 +156,20 @@ class ZimraApiService:
                      customer_name: str, trade_name: str, items_xml: str,
                      **kwargs) -> ApiResult:
         """
-        Send a single invoice to ZIMRA.
-        Always fetches a fresh token and uses a brand-new session.
+        Send a single invoice to ZIMRA using connection pooling and token caching.
         Serialised via module-level lock so two threads cannot interleave.
-
-        kwargs accepted:
-          invoice_flag        (int)   - 0=normal sale, 3=credit note  (default: 0)
-          original_invoice_no (str)   - original invoice number for credit notes (default: "")
-          global_invoice_no   (str)   - original fiscal global number for credit notes (default: "")
-          tendered            (float) - payment amount; negative for credit notes (default: 0)
         """
         with _send_lock:
-            # ── Read optional kwargs ──────────────────────────────────────────
+            # ?? Read optional kwargs ??????????????????????????????????????????
             invoice_flag        = kwargs.get("invoice_flag", 0)
             original_invoice_no = kwargs.get("original_invoice_no", "")
             global_invoice_no   = kwargs.get("global_invoice_no", "")
             tendered            = float(kwargs.get("tendered", 0))
 
-            # ── 1. Fresh session per call ──
-            session = requests.Session()
+            # ?? 1. Warm connection pool ??
+            session = self._get_session()
 
-            # ── 2. Fresh token via shared helper ──
+            # ?? 2. Cached token ??
             ok, result = self._fetch_token(settings, session)
             if not ok:
                 return ApiResult.error(result)
@@ -221,6 +233,13 @@ class ZimraApiService:
                 print(f"[ZIMRA] Response status: {response.status_code}")
                 raw = response.text[:500] if response.text else "empty"
                 print(f"[ZIMRA] Raw response text: {raw}")
+
+                if response.status_code in (401, 403) or (response.text and "csrf" in response.text.lower()):
+                    print(f"[ZIMRA] Token expired/invalid, forcing refresh and retrying...")
+                    ok, csrf_token = self._fetch_token(settings, session, force_refresh=True)
+                    if ok:
+                        headers["X-Frappe-CSRF-Token"] = csrf_token
+                        response = session.post(invoice_url, data=data, headers=headers, timeout=60)
 
                 if response.status_code != 200:
                     return ApiResult.error(f"HTTP {response.status_code}: {response.text}")
