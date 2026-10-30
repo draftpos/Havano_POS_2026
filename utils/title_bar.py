@@ -60,11 +60,11 @@ class _TitleBarEventFilter(QObject):
                         self._processing.add(obj_id)
                         try:
                             hwnd = int(obj.winId())
-                        _set_window_title_bar_color(hwnd, "#1a5fb4", "#ffffff")
-                    except Exception:
-                        pass
-                    finally:
-                        self._processing.discard(obj_id)
+                            _set_window_title_bar_color(hwnd, "#1a5fb4", "#ffffff")
+                        except Exception:
+                            pass
+                        finally:
+                            self._processing.discard(obj_id)
         finally:
             self._in_filter = False
         ret = super().eventFilter(obj, event)

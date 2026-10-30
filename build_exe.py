@@ -53,6 +53,27 @@ def build():
     res = subprocess.run(cmd)
 
     if res.returncode == 0:
+        dist_dir = os.path.join(os.path.dirname(__file__), "dist", "HavanoPOS")
+        if os.path.exists(dist_dir):
+            app_data_dir = os.path.join(dist_dir, "app_data")
+            os.makedirs(app_data_dir, exist_ok=True)
+            
+            # Copy havanoconfig.ini to dist and app_data
+            src_cfg = os.path.join(os.path.dirname(__file__), "havanoconfig.ini")
+            if os.path.exists(src_cfg):
+                shutil.copy2(src_cfg, os.path.join(dist_dir, "havanoconfig.ini"))
+                shutil.copy2(src_cfg, os.path.join(app_data_dir, "havanoconfig.ini"))
+                print("[deploy] Included havanoconfig.ini in dist and dist/app_data")
+
+            # Copy havano_cert to dist and app_data
+            src_cert = os.path.join(os.path.dirname(__file__), "havano_cert")
+            if os.path.exists(src_cert):
+                for target_cert in [os.path.join(dist_dir, "havano_cert"), os.path.join(app_data_dir, "havano_cert")]:
+                    if os.path.exists(target_cert):
+                        shutil.rmtree(target_cert)
+                    shutil.copytree(src_cert, target_cert)
+                print("[deploy] Included havano_cert in dist and dist/app_data")
+
         print("\n" + "=" * 60)
         print(" [OK] SUCCESS: Havano POS executable built in dist/HavanoPOS/")
         print("=" * 60)

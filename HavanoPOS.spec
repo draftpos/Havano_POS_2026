@@ -1,7 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('assets', 'assets')]
+if os.path.exists('havanoconfig.ini'):
+    datas.append(('havanoconfig.ini', '.'))
+if os.path.exists('havano_cert'):
+    datas.append(('havano_cert', 'havano_cert'))
+if os.path.exists('havanozimrapackage'):
+    datas.append(('havanozimrapackage', 'havanozimrapackage'))
+
 binaries = []
 hiddenimports = [
     'PySide6.QtPdf',
@@ -16,6 +24,9 @@ hiddenimports = [
     'cryptography.hazmat.primitives.hashes',
     'cryptography.hazmat.primitives.kdf.pbkdf2',
     'cryptography.hazmat.backends',
+    'havanozimrapackage',
+    'havanozimrapackage.device',
+    'havanozimrapackage.signature',
 ]
 tmp_ret = collect_all('openpyxl')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]

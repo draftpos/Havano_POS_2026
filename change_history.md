@@ -1,5 +1,43 @@
 # Change History
 
+## [2026-10-30 10:45:00] - Fix: Bundle Offline Fiscalization in Executable and Prevent Offline Failures from Halting ZIMRA Fiscalization
+
+### Problem
+1. When compiling via `build_exe.py` and `HavanoPOS.spec`, `havanoconfig.ini`, `havano_cert/`, and `havanozimrapackage` were not bundled into `datas` or copied to `dist/HavanoPOS/`, causing offline signing to fail with `havanoconfig.ini not found at C:\Program Files\Havano POS\app_data\havanoconfig.ini`.
+2. When online fiscalization failed (e.g. `Zimra User Account not found for Device SN: FIRSTSUPPLYN03 or Account disabled`), `FiscalizationService` unconditionally fell back to offline mode. When offline signing failed, it overwrote the sale's `fiscal_error` with `Offline signing failed: havanoconfig.ini not found`, masking the true ZIMRA error and halting online fiscalization retries.
+
+### Fix
+1. **Bundle Offline Fiscalization Components ([`HavanoPOS.spec`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/HavanoPOS.spec), [`build_exe.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/build_exe.py))**:
+   - Added `havanoconfig.ini`, `havano_cert/`, and `havanozimrapackage` to `datas` and `hiddenimports` in `HavanoPOS.spec`.
+   - Updated `build_exe.py` to deploy `havanoconfig.ini` and `havano_cert/` into both `dist/HavanoPOS/` and `dist/HavanoPOS/app_data/`.
+2. **Robust Path Resolution and Availability Check ([`services/havano_zimra_offline_service.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/havano_zimra_offline_service.py))**:
+   - Updated `get_config_file_path()` to search `app_data`, executable directory, `_internal`, and application root, automatically copying config and certificates to `get_app_data_dir()` for writable counters.
+   - Added `is_available()` to verify `havanoconfig.ini` and `havano_cert/key.key` before attempting offline operations.
+3. **Preserve Real Online Errors and Retries ([`services/fiscalization_service.py`](file:///c:/Users/user/Desktop/Havano_POS_2026-main/services/fiscalization_service.py))**:
+   - Gated offline fallback on `offline_service.is_available()`.
+   - If offline fallback is not available or fails, the true online error (e.g. `Zimra User Account not found for Device SN: FIRSTSUPPLYN03 or Account disabled`) is preserved on the sale so background retry continues attempting to send to ZIMRA.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `HavanoPOS.spec` | 6–36 | Added `havanoconfig.ini`, `havano_cert`, and `havanozimrapackage` to bundle datas and hidden imports |
+| `build_exe.py` | 55–80 | Added deployment step copying `havanoconfig.ini` and `havano_cert` to `dist/HavanoPOS/` and `app_data/` |
+| `services/havano_zimra_offline_service.py` | 40–115 | Enhanced config path resolution across frozen/app_data paths and added `is_available()` check |
+| `services/fiscalization_service.py` | 362–420, 485–520, 755–775 | Gated offline fallback on availability and ensured offline failure never overwrites or halts online ZIMRA errors |
+
+## [2026-10-28 13:20:00] - Fix: Correct Indentation and Block Hierarchy in Title Bar Event Filter
+
+### Problem
+In `utils/title_bar.py`, an unindented `_set_window_title_bar_color` call and misaligned `finally:` clause in `_TitleBarEventFilter.eventFilter` caused a `SyntaxError: expected 'except' or 'finally' block`.
+
+### Fix
+Properly structured the nested `try...finally` block in `utils/title_bar.py` ensuring the hook safely adds and discards window IDs during title bar color assignment.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `utils/title_bar.py` | 60–67 | Fixed try/except/finally indentation and hierarchy |
+
 ## [2026-10-28 12:18:00] - Feature: POS Rules Setting to Limit Fiscalization by Maximum Invoice Amount
 
 ### Summary

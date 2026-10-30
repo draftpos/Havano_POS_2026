@@ -359,8 +359,26 @@ class FiscalizationService:
                         print(f"Error updating fiscal_error: {_e}")
                     return False
                 else:
-                    print(f"[!] Falling back to offline mode for sale {sale_id}.")
-                    return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
+                    # Check if offline fallback is available
+                    can_offline = False
+                    try:
+                        from services.havano_zimra_offline_service import get_havano_zimra_offline_service
+                        offline_service = get_havano_zimra_offline_service()
+                        can_offline = offline_service.is_available(settings)
+                    except Exception as _oe:
+                        print(f"[!] Offline check error: {_oe}")
+
+                    if can_offline:
+                        print(f"[!] Falling back to offline mode for sale {sale_id}.")
+                        offline_ok = self._process_offline_sale(sale_id, settings, sale, fiscal_currency, record_error=False)
+                        if offline_ok:
+                            return True
+                        print(f"[!] Offline signing fallback failed for sale {sale_id}. Preserving real online ZIMRA error.")
+
+                    # Offline signing not available or failed: record the REAL online ZIMRA error
+                    # Offline failure must NEVER halt real fiscalization!
+                    self._update_sale_fiscal_error(sale_id, err_msg)
+                    return False
 
             fd = result.data
             self._update_sale_fiscal_data(
@@ -398,24 +416,26 @@ class FiscalizationService:
                     pass
                 return False
             try:
-                # Try offline fallback even on exception (e.g. timeout)
-                settings = self._settings_repo.get_settings()
-                sale = self._get_sale_by_id(sale_id)
-                fiscal_currency = sale.get("currency", "USD").upper()
-                if fiscal_currency in ("ZWD", "ZWL", "ZIG"):
-                    fiscal_currency = "ZWG"
-                return self._process_offline_sale(sale_id, settings, sale, fiscal_currency)
+                from services.havano_zimra_offline_service import get_havano_zimra_offline_service
+                offline_service = get_havano_zimra_offline_service()
+                if offline_service.is_available(settings):
+                    sale = self._get_sale_by_id(sale_id)
+                    fiscal_currency = sale.get("currency", "USD").upper()
+                    if fiscal_currency in ("ZWD", "ZWL", "ZIG"):
+                        fiscal_currency = "ZWG"
+                    if self._process_offline_sale(sale_id, settings, sale, fiscal_currency, record_error=False):
+                        return True
             except Exception as e2:
-                print(f"❌ Critical failure: {e2}")
-                log.error(f"Critical failure: Both online and offline fiscalization failed for sale {sale_id}: {e2} (Original: {error_msg})")
-                self._update_sale_fiscal_error(sale_id, f"Both online and offline modes failed: {error_msg}")
-                return False
+                print(f"[!] Offline fallback failed: {e2}")
+
+            self._update_sale_fiscal_error(sale_id, f"Fiscalization error: {error_msg}")
+            return False
 
     # =========================================================================
     # OFFLINE FISCALIZATION HELPERS
     # =========================================================================
 
-    def _process_offline_sale(self, sale_id: int, settings, sale, currency: str) -> bool:
+    def _process_offline_sale(self, sale_id: int, settings, sale, currency: str, record_error: bool = True) -> bool:
         """
         Processes a sale in offline mode using havanozimrapackage (HavanoZimraOfflineService).
         Computes the receipt hash, signs it with the local device private key,
@@ -486,13 +506,15 @@ class FiscalizationService:
                 error_msg = result.error if result else "Unknown offline signing error"
                 print(f"❌ HavanoZimra offline signing returned error for sale {sale_id}: {error_msg}")
                 log.error(f"HavanoZimra offline signing failed for sale {sale_id} (Inv: {invoice_number}): {error_msg}")
-                self._update_sale_fiscal_error(sale_id, f"Offline signing failed: {error_msg}")
+                if record_error:
+                    self._update_sale_fiscal_error(sale_id, f"Offline signing failed: {error_msg}")
                 return False
 
         except Exception as e:
             print(f"❌ Critical failure in offline fiscalization for sale {sale_id}: {e}")
             log.error(f"Critical failure in offline fiscalization for sale {sale_id}: {e}")
-            self._update_sale_fiscal_error(sale_id, f"Offline mode failure: {e}")
+            if record_error:
+                self._update_sale_fiscal_error(sale_id, f"Offline mode failure: {e}")
             return False
 
     # =========================================================================
@@ -755,7 +777,8 @@ class FiscalizationService:
                 try:
                     from services.havano_zimra_offline_service import get_havano_zimra_offline_service
                     offline_service = get_havano_zimra_offline_service()
-                    off_res = offline_service.send_invoice(
+                    if offline_service.is_available(settings):
+                        off_res = offline_service.send_invoice(
                         settings=settings,
                         invoice_number=cn_number,
                         currency=fiscal_currency,
@@ -775,7 +798,7 @@ class FiscalizationService:
                         buyer_house_no=buyer_house_no,
                         buyer_province=buyer_province,
                     )
-                    if off_res.is_success and off_res.data:
+                    if 'off_res' in locals() and off_res.is_success and off_res.data:
                         result = off_res
                 except Exception as _oe:
                     print(f"[CN] Offline fallback failed: {_oe}")

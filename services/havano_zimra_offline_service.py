@@ -43,33 +43,80 @@ class HavanoZimraOfflineService:
         Checks:
         1. Explicit config_path passed in constructor
         2. settings.base_url or settings.device_sn if pointing to a file
-        3. Root directory of application (os.getcwd())
-        4. Directory of this service file's parent
+        3. App data directory (database.db.get_app_data_dir() / "havanoconfig.ini")
+        4. Executable parent directory (os.path.dirname(sys.executable))
+        5. Directory containing sys.executable / "_internal"
+        6. Root directory of application (os.getcwd())
+        7. Parent directory of this service or PyInstaller _MEIPASS
         """
+        import sys, shutil
         if self._config_path and os.path.exists(self._config_path):
             return self._config_path
 
+        if settings:
+            base_url = str(getattr(settings, "base_url", "") or "").strip()
+            if base_url and os.path.exists(base_url):
+                return base_url
+
         try:
             from database.db import get_app_data_dir
-            candidates = [str(get_app_data_dir() / "havanoconfig.ini")]
+            app_data_cfg = get_app_data_dir() / "havanoconfig.ini"
+            if app_data_cfg.exists():
+                return str(app_data_cfg)
         except Exception:
-            candidates = []
-        
+            app_data_cfg = None
+
+        candidates = []
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(sys.executable)
+            candidates.extend([
+                os.path.join(exe_dir, "havanoconfig.ini"),
+                os.path.join(exe_dir, "app_data", "havanoconfig.ini"),
+                os.path.join(exe_dir, "_internal", "havanoconfig.ini"),
+            ])
+            if hasattr(sys, "_MEIPASS"):
+                candidates.append(os.path.join(sys._MEIPASS, "havanoconfig.ini"))
+
         candidates.extend([
             os.path.join(os.getcwd(), "havanoconfig.ini"),
             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "havanoconfig.ini"),
         ])
 
-        if settings:
-            base_url = str(getattr(settings, "base_url", "") or "").strip()
-            if base_url and os.path.exists(base_url):
-                candidates.insert(0, base_url)
-
         for path in candidates:
             if os.path.exists(path):
+                # Copy to writable app_data if app_data_cfg was missing
+                try:
+                    if app_data_cfg and not app_data_cfg.exists():
+                        app_data_cfg.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(path, app_data_cfg)
+                        cert_src = os.path.join(os.path.dirname(path), "havano_cert")
+                        cert_dst = app_data_cfg.parent / "havano_cert"
+                        if os.path.exists(cert_src) and not cert_dst.exists():
+                            shutil.copytree(cert_src, cert_dst)
+                        return str(app_data_cfg)
+                except Exception:
+                    pass
                 return path
 
-        return candidates[0]
+        return str(app_data_cfg) if app_data_cfg else candidates[0]
+
+    def is_available(self, settings=None) -> bool:
+        """
+        Returns True if havanoconfig.ini exists and havano_cert/key.key exists.
+        """
+        config_path = self.get_config_file_path(settings)
+        if not config_path or not os.path.exists(config_path):
+            return False
+        key_path = os.path.join(os.path.dirname(os.path.abspath(config_path)), "havano_cert", "key.key")
+        if os.path.exists(key_path):
+            return True
+        try:
+            from database.db import get_app_data_dir
+            if (get_app_data_dir() / "havano_cert" / "key.key").exists():
+                return True
+        except Exception:
+            pass
+        return False
 
     def _update_config_file_counters(self, config_file_path: str, global_no: int, counter: int, prev_hash: str):
         """

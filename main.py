@@ -39,7 +39,7 @@ from database.db import is_connection_valid, get_connection, _load_settings
 #  on Nextcloud. Example: "2.0.0" → "2.1.0" for next release.
 # ────────────────────────────────────────────────────────s────
 
-APP_VERSION = "2.0.8.81"
+APP_VERSION = "2.0.8.82"
 Debug = False
 
 _lock_file = None
