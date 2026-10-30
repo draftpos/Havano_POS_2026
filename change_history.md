@@ -1,5 +1,29 @@
 # Change History
 
+## [2026-10-30 13:40:00] - Fix: ZIMRA Api Service Missing Import & UOM Picker Dialog Duplicate Rows
+
+### Problem
+1. **Fiscalization exception name 'time' is not defined**: `services/zimra_api_service.py` referenced `time.time()` in `_fetch_token` for token cache TTL calculation, but `import time` was missing from module imports. This triggered a `NameError` during checkout fiscalization.
+2. **Duplicate UOM options in `UomPickerDialog` ("whats this on same uom")**: When adding a product (e.g., "Gas Lp") to cart, the POS opened `UomPickerDialog` showing three identical buttons (`Kg USD2.00`, `Kg USD2.00`, `Kg USD2.00`). Because the database stores prices per store in `item_prices` (e.g. Legends Chisipiti, Legends Machipisa, Legends Xuls), the selling price query returned multiple rows with the exact same UOM and rate. The POS failed to filter by active store and failed to deduplicate by UOM, causing it to think there were 3 choices instead of 1, unnecessarily popping up the dialog with duplicates.
+
+### Fix
+1. **Added `import time` in `services/zimra_api_service.py`**:
+   - Added `import time` at the top of `services/zimra_api_service.py` and synced to `Havano POS System/_internal/services/zimra_api_service.py`.
+2. **Store-Aware Price Resolution & UOM Deduplication (`views/main_window.py`, `views/new_d.py`, `views/admin_dashboard.py`)**:
+   - In `_get_price_rows_for_list`: Queried `uom, price, store`, prioritized rows matching the active store/warehouse (exact store > generic empty store > other stores), and deduplicated by unique `uom` so each UOM only appears once.
+   - In `_resolve_price_for_product`: Deduplicated rows by UOM before checking `len(rows) == 1`. When an item only has one unique UOM (like "Gas Lp" with "Kg"), the picker is completely bypassed and the item is added directly to cart without prompting the cashier.
+   - In `UomPickerDialog.__init__`: Added safeguard deduplication by UOM so duplicate buttons can never render even if duplicate rows are passed in.
+   - Synced updated files to `Havano POS System/_internal/`.
+
+### Changed Files
+| File | Lines | Description |
+|---|---|---|
+| `services/zimra_api_service.py` | 1–5 | Added missing `import time` |
+| `views/main_window.py` | 258–268, 10217–10260, 10338–10350, 24270–24320, 24385–24400 | Deduplicated UOM prices, prioritized active store, and bypassed picker for single-UOM products |
+| `views/new_d.py` | 394–404, 9292–9305 | Added UOM deduplication in picker and price fetcher |
+| `views/admin_dashboard.py` | 6125–6138 | Added UOM deduplication in price fetcher |
+| `Havano POS System/_internal/` | All modified | Synced updated scripts to `_internal` directory |
+
 ## [2026-10-30 11:45:00] - Fix: Merge Conflicts and Latency Optimization in ZIMRA Fiscalization API
 
 ### Problem

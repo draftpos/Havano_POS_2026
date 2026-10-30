@@ -390,6 +390,14 @@ class UomPickerDialog(QDialog):
     def __init__(self, product_name: str, uom_prices: list[dict], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Unit / Pack Size")
+        deduped = []
+        seen = set()
+        for up in (uom_prices or []):
+            u_key = str(up.get("uom", "")).strip().upper()
+            if u_key and u_key not in seen:
+                seen.add(u_key)
+                deduped.append(up)
+        uom_prices = deduped if deduped else (uom_prices or [])
         n = len(uom_prices)
         # Width 460, height: header 110 + 80px per option + 60 cancel
         self.setFixedSize(460, min(110 + n * 82 + 60, 580))
@@ -9294,7 +9302,14 @@ class POSView(QWidget):
                 (part_no,)
             )
             rows = cur.fetchall(); conn.close()
-            return [{"uom": r[0], "price": float(r[1])} for r in rows]
+            deduped = []
+            seen = set()
+            for r in rows:
+                u_key = str(r[0]).strip().upper()
+                if u_key not in seen:
+                    seen.add(u_key)
+                    deduped.append({"uom": r[0], "price": float(r[1])})
+            return deduped
         except Exception:
             return []
 

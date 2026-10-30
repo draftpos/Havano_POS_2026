@@ -255,6 +255,15 @@ class UomPickerDialog(QDialog):
     def __init__(self, product_name: str, uom_prices: list[dict], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Unit / Pack Size")
+        # Deduplicate uom_prices by UOM (case-insensitive) to prevent duplicate buttons
+        deduped = []
+        seen = set()
+        for up in (uom_prices or []):
+            u_key = str(up.get("uom", "")).strip().upper()
+            if u_key and u_key not in seen:
+                seen.add(u_key)
+                deduped.append(up)
+        uom_prices = deduped if deduped else (uom_prices or [])
         n = len(uom_prices)
         self.setFixedSize(460, min(110 + n * 82 + 60, 580))
         self.setModal(True)
@@ -10218,8 +10227,19 @@ class POSView(QWidget):
             from database.db import get_connection
             conn = get_connection()
             cur  = conn.cursor()
+            # Determine active store/warehouse for store-specific price resolution
+            active_store = ""
+            try:
+                from models.company_defaults import get_defaults
+                _defs = get_defaults() or {}
+                active_store = str(_defs.get("server_warehouse") or _defs.get("server_store_name") or _defs.get("warehouse") or "").strip().lower()
+            except Exception:
+                pass
+            if not active_store and hasattr(self, 'user') and self.user:
+                active_store = str(self.user.get("warehouse") or "").strip().lower()
+
             cur.execute("""
-                SELECT uom, price FROM item_prices
+                SELECT uom, price, store FROM item_prices
                 WHERE  part_no = ? AND LOWER(price_list) = LOWER(?) AND price_type = 'selling'
                 ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
             """, (part_no, price_list))
@@ -10227,7 +10247,7 @@ class POSView(QWidget):
 
             if not rows and str(price_list).strip().lower() != "standard selling":
                 cur.execute("""
-                    SELECT uom, price FROM item_prices
+                    SELECT uom, price, store FROM item_prices
                     WHERE  part_no = ? AND LOWER(price_list) = 'standard selling' AND price_type = 'selling'
                     ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
                 """, (part_no,))
@@ -10240,10 +10260,28 @@ class POSView(QWidget):
                 """, (part_no,))
                 p_row = cur.fetchone()
                 if p_row and p_row[1] is not None:
-                    rows = [(p_row[0] or "Nos", p_row[1])]
+                    rows = [(p_row[0] or "Nos", p_row[1], "")]
 
-            result = [{"uom": r[0], "price": float(r[1] or 0)} for r in rows]
-            seen_uoms = {r["uom"].strip().upper() for r in result}
+            # Resolve prices per UOM, prioritizing active store matches
+            uom_map = {}
+            for r in rows:
+                uom_val = str(r[0] or "Nos").strip()
+                price_val = float(r[1] or 0)
+                store_val = str(r[2] if len(r) > 2 and r[2] is not None else "").strip().lower()
+                uom_key = uom_val.upper()
+
+                if active_store and store_val == active_store:
+                    prio = 0
+                elif not store_val:
+                    prio = 1
+                else:
+                    prio = 2
+
+                if uom_key not in uom_map or prio < uom_map[uom_key]["priority"]:
+                    uom_map[uom_key] = {"uom": uom_val, "price": price_val, "priority": prio}
+
+            result = [{"uom": v["uom"], "price": v["price"]} for v in uom_map.values()]
+            seen_uoms = set(uom_map.keys())
 
             try:
                 cur.execute("""
@@ -10333,6 +10371,17 @@ class POSView(QWidget):
                     f"price list. Add a rate on the server and re-sync.",
                 )
                 return None
+
+        # Deduplicate rows by UOM so duplicate store prices never show as multiple UOMs
+        _deduped_rows = []
+        _seen_u = set()
+        for r in rows:
+            _uk = str(r.get("uom", "")).strip().upper()
+            if _uk and _uk not in _seen_u:
+                _seen_u.add(_uk)
+                _deduped_rows.append(r)
+        if _deduped_rows:
+            rows = _deduped_rows
 
         # Pre-selected barcode_uom (from scanned barcode) bypasses UOM picker
         if barcode_uom:
@@ -24275,8 +24324,19 @@ class POSView(QWidget):
             from database.db import get_connection
             conn = get_connection()
             cur  = conn.cursor()
+            # Determine active store/warehouse for store-specific price resolution
+            active_store = ""
+            try:
+                from models.company_defaults import get_defaults
+                _defs = get_defaults() or {}
+                active_store = str(_defs.get("server_warehouse") or _defs.get("server_store_name") or _defs.get("warehouse") or "").strip().lower()
+            except Exception:
+                pass
+            if not active_store and hasattr(self, 'user') and self.user:
+                active_store = str(self.user.get("warehouse") or "").strip().lower()
+
             cur.execute("""
-                SELECT uom, price FROM item_prices
+                SELECT uom, price, store FROM item_prices
                 WHERE  part_no = ? AND LOWER(price_list) = LOWER(?) AND price_type = 'selling'
                 ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
             """, (part_no, price_list))
@@ -24284,7 +24344,7 @@ class POSView(QWidget):
 
             if not rows and str(price_list).strip().lower() != "standard selling":
                 cur.execute("""
-                    SELECT uom, price FROM item_prices
+                    SELECT uom, price, store FROM item_prices
                     WHERE  part_no = ? AND LOWER(price_list) = 'standard selling' AND price_type = 'selling'
                     ORDER  BY CASE WHEN uom = 'nos' THEN 0 ELSE 1 END, price
                 """, (part_no,))
@@ -24297,10 +24357,28 @@ class POSView(QWidget):
                 """, (part_no,))
                 p_row = cur.fetchone()
                 if p_row and p_row[1] is not None:
-                    rows = [(p_row[0] or "Nos", p_row[1])]
+                    rows = [(p_row[0] or "Nos", p_row[1], "")]
 
-            result = [{"uom": r[0], "price": float(r[1] or 0)} for r in rows]
-            seen_uoms = {r["uom"].strip().upper() for r in result}
+            # Resolve prices per UOM, prioritizing active store matches
+            uom_map = {}
+            for r in rows:
+                uom_val = str(r[0] or "Nos").strip()
+                price_val = float(r[1] or 0)
+                store_val = str(r[2] if len(r) > 2 and r[2] is not None else "").strip().lower()
+                uom_key = uom_val.upper()
+
+                if active_store and store_val == active_store:
+                    prio = 0
+                elif not store_val:
+                    prio = 1
+                else:
+                    prio = 2
+
+                if uom_key not in uom_map or prio < uom_map[uom_key]["priority"]:
+                    uom_map[uom_key] = {"uom": uom_val, "price": price_val, "priority": prio}
+
+            result = [{"uom": v["uom"], "price": v["price"]} for v in uom_map.values()]
+            seen_uoms = set(uom_map.keys())
 
             # Merge alternative UOM prices from product_uom_prices
             try:
@@ -24381,6 +24459,17 @@ class POSView(QWidget):
         if not rows:
             prod_price = float(product.get("price") or 0.0)
             rows = [{"uom": base_uom, "price": prod_price}]
+
+        # Deduplicate rows by UOM so duplicate store prices never show as multiple UOMs
+        _deduped_rows = []
+        _seen_u = set()
+        for r in rows:
+            _uk = str(r.get("uom", "")).strip().upper()
+            if _uk and _uk not in _seen_u:
+                _seen_u.add(_uk)
+                _deduped_rows.append(r)
+        if _deduped_rows:
+            rows = _deduped_rows
 
         # Pre-selected barcode_uom (from scanned barcode) bypasses UOM picker
         if barcode_uom:
